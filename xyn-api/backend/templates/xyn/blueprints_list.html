@@ -1,0 +1,91 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>Xyn Blueprint Studio</h1>
+    <p><a href="/admin/">Back to admin</a></p>
+
+    <h2>Draft sessions</h2>
+    <form method="post" action="/xyn/studio/blueprints/new">
+      {% csrf_token %}
+      <input type="text" name="name" placeholder="Draft session name" />
+      <select name="blueprint_kind">
+        <option value="solution" selected>Solution blueprint</option>
+        <option value="module">Module blueprint</option>
+        <option value="bundle">Bundle blueprint</option>
+      </select>
+      {% if context_packs %}
+        <label style="display: block; margin-top: 8px;">Context packs</label>
+        <select name="context_pack_ids" multiple size="4">
+          {% for pack in context_packs %}
+            <option value="{{ pack.id }}">{{ pack.name }} ({{ pack.scope }}) v{{ pack.version }}</option>
+          {% endfor %}
+        </select>
+      {% endif %}
+      <button type="submit">New Draft Session</button>
+    </form>
+    <ul>
+      {% for session in draft_sessions %}
+        <li>
+          <a href="/xyn/studio/blueprints/draft-sessions/{{ session.id }}/">
+            {{ session.name }} ({{ session.blueprint_kind }}, {{ session.status }})
+          </a>
+        </li>
+      {% empty %}
+        <li>No draft sessions yet.</li>
+      {% endfor %}
+    </ul>
+
+    <h2>Published blueprints</h2>
+    <ul>
+      {% for blueprint in blueprints %}
+        <li>
+          <a href="/xyn/blueprints/{{ blueprint.id }}/">
+            {{ blueprint.namespace }}.{{ blueprint.name }}
+          </a>
+        </li>
+      {% empty %}
+        <li>No blueprints yet.</li>
+      {% endfor %}
+    </ul>
+
+    <h2>Module registry</h2>
+    <ul>
+      {% for module in modules %}
+        <li>
+          <a href="/xyn/modules/{{ module.id }}/">
+            {{ module.fqn }} ({{ module.current_version }})
+          </a>
+        </li>
+      {% empty %}
+        <li>No modules registered yet.</li>
+      {% endfor %}
+    </ul>
+
+    <h2>Bundle registry</h2>
+    <ul>
+      {% for bundle in bundles %}
+        <li>
+          <a href="/xyn/bundles/{{ bundle.id }}/">
+            {{ bundle.fqn }} ({{ bundle.current_version }})
+          </a>
+        </li>
+      {% empty %}
+        <li>No bundles registered yet.</li>
+      {% endfor %}
+    </ul>
+
+    <h2>Capability catalog</h2>
+    <ul>
+      {% for capability in capabilities %}
+        <li>
+          <a href="/xyn/capabilities/{{ capability.id }}/">
+            {{ capability.name }} ({{ capability.version }})
+          </a>
+        </li>
+      {% empty %}
+        <li>No capabilities registered yet.</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endblock %}

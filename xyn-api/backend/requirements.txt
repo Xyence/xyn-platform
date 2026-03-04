@@ -1,0 +1,40 @@
+Django>=5.0,<6.0
+authlib>=1.3.0
+# REST API
+djangorestframework>=3.15,<4.0
+# CORS for React frontend
+django-cors-headers>=4.4,<5.0
+# Rich-text editor
+django-ckeditor-5>=0.2.13,<0.3
+# Google OAuth
+django-allauth>=0.61,<1.0
+# Required by allauth Google provider
+requests>=2.32,<3.0
+# JSON schema validation
+jsonschema>=4.22,<5.0
+# EMS scaffold verification
+fastapi==0.110.0
+# Google Speech-to-Text
+google-cloud-speech>=2.26,<3.0
+# Redis queue
+rq>=2.0,<3.0
+redis>=5.0,<6.0
+PyYAML>=6.0,<7.0
+# AWS SDK
+boto3>=1.34,<2.0
+# Docker SDK (for local substrate container discovery)
+docker>=7.0,<8.0
+# JWT for auth providers
+PyJWT>=2.9,<3.0
+# Crypto backend used by allauth/google + JWT handling
+cryptography>=42.0,<43.0
+# OpenAI API
+openai>=1.40,<2.0
+# HTML -> Markdown conversion for migrated governed articles
+markdownify>=0.12,<1.0
+# Database driver
+psycopg[binary]>=3.1,<4.0
+# Production server
+gunicorn>=21.2,<22.0
+# Static files
+whitenoise>=6.7,<7.0

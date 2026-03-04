@@ -1,0 +1,98 @@
+{
+  "artifact": {
+    "id": "ems",
+    "name": "EMS",
+    "version": "1.1.0"
+  },
+  "capability": {
+    "visibility": "capabilities",
+    "category": "application",
+    "label": "EMS",
+    "description": "Manage EMS demo assets and operational panels.",
+    "tags": ["ems", "devices", "operations"],
+    "order": 100
+  },
+  "suggestions": [
+    {
+      "id": "ems-unregistered-devices",
+      "name": "Unregistered Devices",
+      "prompt": "Show unregistered devices",
+      "description": "List devices that still need registration.",
+      "visibility": ["capability", "landing", "palette"],
+      "group": "Devices",
+      "order": 100,
+      "ui": { "badge": "EMS" }
+    },
+    {
+      "id": "ems-registrations-24h",
+      "name": "Registrations (24h)",
+      "prompt": "Show registrations in the past 24 hours",
+      "description": "Review registration activity over the last day.",
+      "visibility": ["capability", "palette"],
+      "group": "Reports",
+      "order": 110,
+      "ui": { "badge": "EMS" }
+    },
+    {
+      "id": "ems-device-statuses",
+      "name": "Device Statuses",
+      "prompt": "Show device statuses",
+      "description": "View current status rollups by device state.",
+      "visibility": ["capability", "landing", "palette"],
+      "group": "Reports",
+      "order": 120,
+      "ui": { "badge": "EMS" }
+    }
+  ],
+  "dependencies": [
+    {
+      "artifact_id": "core.authn-jwt",
+      "optional": true,
+      "reason": "JWT validation capability for secured EMS flows"
+    }
+  ],
+  "roles": [
+    {
+      "role": "api_router",
+      "entrypoint": "xyn_orchestrator.ems_lite_entrypoint:router",
+      "mount_path": "/api/apps/ems",
+      "pythonpath": [
+        "xyn-api/backend"
+      ]
+    },
+    {
+      "role": "ui_mount",
+      "scope": "workspace",
+      "mount_path": "/apps/ems",
+      "static_dir": "xyn-api/apps/ems-artifact/ui-dist"
+    }
+  ],
+  "surfaces": {
+    "nav": [
+      {
+        "label": "EMS",
+        "path": "/apps/ems",
+        "order": 300
+      }
+    ],
+    "manage": [
+      {
+        "label": "Settings",
+        "path": "/apps/ems/manage",
+        "order": 100
+      }
+    ],
+    "docs": [
+      {
+        "label": "Docs",
+        "path": "/apps/ems/docs",
+        "order": 1000
+      },
+      {
+        "label": "Demo Script",
+        "path": "/apps/ems/docs/demo",
+        "order": 1010
+      }
+    ]
+  }
+}

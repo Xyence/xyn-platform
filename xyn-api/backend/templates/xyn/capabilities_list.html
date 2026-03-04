@@ -1,0 +1,18 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>Capability Catalog</h1>
+    <p><a href="/xyn/blueprints/">Back to blueprint studio</a></p>
+    <ul>
+      {% for capability in capabilities %}
+        <li>
+          <a href="/xyn/capabilities/{{ capability.id }}/">{{ capability.name }}</a>
+          — v{{ capability.version }}
+        </li>
+      {% empty %}
+        <li>No capabilities registered yet.</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endblock %}

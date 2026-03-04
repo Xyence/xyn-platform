@@ -1,0 +1,11 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ capability.name }}</h1>
+    <p><strong>Version:</strong> {{ capability.version }}</p>
+    <p><a href="/xyn/capabilities/">Back to capabilities</a></p>
+    <h2>CapabilitySpec</h2>
+    <pre style="white-space: pre-wrap;">{{ capability.capability_spec_json|default:"{}"|safe }}</pre>
+  </div>
+{% endblock %}

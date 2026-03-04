@@ -1,0 +1,68 @@
+{% extends "admin/index.html" %}
+
+{% block nav-sidebar %}
+  {% include "admin/nav_sidebar.html" %}
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    {% include "admin/app_list.html" with app_list=app_list show_changelinks=True %}
+
+    <div class="app-ai-studio module">
+      <table>
+        <caption>
+          <a href="/admin/ai-studio/" class="section">AI Studio</a>
+        </caption>
+        <thead class="visually-hidden">
+          <tr>
+            <th scope="col">Model name</th>
+            <th scope="col">Add link</th>
+            <th scope="col">Change or view list link</th>
+          </tr>
+        </thead>
+        <tr class="model-ai-studio">
+          <th scope="row" id="ai-studio">
+            <a href="/admin/ai-studio/">Generate draft</a>
+          </th>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr class="model-ai-studio">
+          <th scope="row" id="ai-studio-xyn-seed">
+            <a href="/admin/xyn-seed/">Manage releases (Xyn Seed)</a>
+          </th>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr class="model-ai-studio">
+          <th scope="row" id="ai-studio-blueprints">
+            <a href="/xyn/blueprints/">Blueprint Studio</a>
+          </th>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr class="model-ai-studio">
+          <th scope="row" id="ai-studio-modules">
+            <a href="/xyn/modules/">Module Registry</a>
+          </th>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr class="model-ai-studio">
+          <th scope="row" id="ai-studio-bundles">
+            <a href="/xyn/bundles/">Bundle Registry</a>
+          </th>
+          <td></td>
+          <td></td>
+        </tr>
+        <tr class="model-ai-studio">
+          <th scope="row" id="ai-studio-capabilities">
+            <a href="/xyn/capabilities/">Capability Catalog</a>
+          </th>
+          <td></td>
+          <td></td>
+        </tr>
+      </table>
+    </div>
+  </div>
+{% endblock %}

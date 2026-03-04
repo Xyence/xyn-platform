@@ -1,0 +1,12 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ bundle.fqn }}</h1>
+    <p><strong>Version:</strong> {{ bundle.current_version }}</p>
+    <p><strong>Status:</strong> {{ bundle.status }}</p>
+    <p><a href="/xyn/bundles/">Back to bundles</a></p>
+    <h2>BundleSpec</h2>
+    <pre style="white-space: pre-wrap;">{{ bundle.bundle_spec_json|default:"{}"|safe }}</pre>
+  </div>
+{% endblock %}

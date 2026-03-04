@@ -1,0 +1,2996 @@
+import json
+import os
+import sys
+import shutil
+import subprocess
+import tempfile
+import uuid
+from pathlib import Path
+from unittest import mock
+
+from django.test import TestCase, RequestFactory
+from django.contrib.auth import get_user_model
+from django.contrib.sessions.middleware import SessionMiddleware
+from django.http import JsonResponse
+from jsonschema import Draft202012Validator
+import yaml
+
+from xyn_orchestrator.blueprints import (
+    _failed_dependency_work_items,
+    _build_module_catalog,
+    _build_run_history_summary,
+    _generate_implementation_plan,
+    _release_target_payload,
+    _select_context_packs_for_dev_task,
+    _select_next_slice,
+    internal_release_resolve,
+    internal_release_upsert,
+    internal_release_target_current_release,
+    internal_release_target_check_drift,
+    internal_releases_latest,
+    internal_release_target_deploy_latest,
+    internal_release_target_rollback_last_success,
+    internal_releases_retention_report,
+    internal_releases_gc,
+    internal_artifacts_gc,
+    internal_release_target_deploy_manifest,
+    internal_release_promote,
+    internal_release_create,
+    _write_run_artifact,
+)
+from xyn_orchestrator.xyn_api import _validate_release_target_payload
+from xyn_orchestrator import xyn_api as xyn_api_module
+from xyn_orchestrator.worker_tasks import (
+    _apply_scaffold_for_work_item,
+    _build_publish_images,
+    _collect_git_diff,
+    _compute_repo_name,
+    _build_deploy_manifest,
+    _build_deploy_state_metadata,
+    _build_remote_pull_apply_commands,
+    _ecr_ensure_repo,
+    _render_compose_for_images,
+    _render_compose_for_release_components,
+    _build_ssm_service_digest_commands,
+    _parse_service_digest_lines,
+    _merge_release_env,
+    _mark_noop_codegen,
+    _redact_secrets,
+    _stage_all,
+    _normalize_sha256,
+    _normalize_digest,
+    _validate_release_manifest_pinned,
+    _route53_ensure_with_noop,
+    _slugify,
+    _public_verify,
+    _run_remote_deploy,
+    _work_item_capabilities,
+)
+from xyn_orchestrator.models import (
+    Blueprint,
+    ContextPack,
+    DevTask,
+    Environment,
+    ProvisionedInstance,
+    Release,
+    ReleaseTarget,
+    RoleBinding,
+    Run,
+    UserIdentity,
+    Tenant,
+    TenantMembership,
+    BrandProfile,
+    Device,
+    DraftAction,
+    ActionVerifierEvidence,
+    RatificationEvent,
+    ExecutionReceipt,
+)
+
+
+class OIDCAuthTests(TestCase):
+    def _make_env(self):
+        return Environment.objects.create(
+            name="Dev",
+            slug="dev",
+            metadata_json={
+                "oidc": {
+                    "issuer_url": "https://issuer.example.com",
+                    "client_id": "client-123",
+                    "client_secret_ref": {"ref": "ssm:/oidc/secret"},
+                    "redirect_uri": "https://xyence.io/auth/callback",
+                    "scopes": "openid profile email",
+                    "allowed_email_domains": ["xyence.io"],
+                }
+            },
+        )
+
+    def _mock_token_post(self, *args, **kwargs):
+        class FakeResponse:
+            status_code = 200
+
+            def json(self_inner):
+                return {"id_token": "token-abc"}
+
+        return FakeResponse()
+
+    def test_oidc_login_redirect_sets_state_nonce(self):
+        env = self._make_env()
+        with mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config:
+            get_config.return_value = {"authorization_endpoint": "https://issuer.example.com/auth"}
+            response = self.client.get(f"/auth/login?environment_id={env.id}")
+        self.assertEqual(response.status_code, 302)
+        session = self.client.session
+        self.assertIn("oidc_state", session)
+        self.assertIn("oidc_nonce", session)
+
+    def test_oidc_callback_upserts_identity_and_session(self):
+        env = self._make_env()
+        identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject="sub-123",
+        )
+        RoleBinding.objects.create(user_identity=identity, scope_kind="platform", role="platform_admin")
+        session = self.client.session
+        session["oidc_state"] = "state-123"
+        session["oidc_nonce"] = "nonce-123"
+        session["environment_id"] = str(env.id)
+        session["post_login_redirect"] = "/app/ems"
+        session.save()
+        with (
+            mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
+            mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
+            mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
+            mock.patch.object(xyn_api_module.requests, "post") as post_request,
+        ):
+            get_config.return_value = {"token_endpoint": "https://issuer.example.com/token"}
+            resolve_secret.return_value = "secret"
+            decode_token.return_value = {
+                "sub": "sub-123",
+                "email": "dev@xyence.io",
+                "name": "Dev User",
+            }
+            post_request.side_effect = self._mock_token_post
+            response = self.client.get("/auth/callback?code=abc&state=state-123")
+        self.assertEqual(response.status_code, 302)
+        session = self.client.session
+        self.assertIn("user_identity_id", session)
+        identity.refresh_from_db()
+        self.assertEqual(identity.email, "dev@xyence.io")
+
+    def test_me_endpoint_requires_auth(self):
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 401)
+
+    def test_role_required_denies_without_binding(self):
+        identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject="sub-123",
+        )
+        request = RequestFactory().get("/protected")
+        middleware = SessionMiddleware(lambda req: None)
+        middleware.process_request(request)
+        request.session["user_identity_id"] = str(identity.id)
+        request.session.save()
+
+        @xyn_api_module.require_role("platform_admin")
+        def _view(req):
+            return JsonResponse({"ok": True})
+
+        response = _view(request)
+        self.assertEqual(response.status_code, 403)
+
+    def test_first_admin_bootstrap_guarded(self):
+        env = self._make_env()
+        session = self.client.session
+        session["oidc_state"] = "state-123"
+        session["oidc_nonce"] = "nonce-123"
+        session["environment_id"] = str(env.id)
+        session.save()
+        with (
+            mock.patch.dict(os.environ, {"ALLOW_FIRST_ADMIN_BOOTSTRAP": "true"}),
+            mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
+            mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
+            mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
+            mock.patch.object(xyn_api_module.requests, "post") as post_request,
+        ):
+            get_config.return_value = {"token_endpoint": "https://issuer.example.com/token"}
+            resolve_secret.return_value = "secret"
+            decode_token.return_value = {
+                "sub": "sub-abc",
+                "email": "admin@xyence.io",
+                "name": "Admin User",
+            }
+            post_request.side_effect = self._mock_token_post
+            response = self.client.get("/auth/callback?code=abc&state=state-123")
+        self.assertEqual(response.status_code, 302)
+        identity = UserIdentity.objects.get(subject="sub-abc")
+        self.assertTrue(RoleBinding.objects.filter(user_identity=identity, role="platform_admin").exists())
+
+    def test_environment_resolution_prefers_host_mapping(self):
+        env = self._make_env()
+        env.metadata_json = {"oidc": env.metadata_json["oidc"], "hosts": ["auth.xyence.io"]}
+        env.save(update_fields=["metadata_json", "updated_at"])
+        request = RequestFactory().get("/auth/login", HTTP_X_FORWARDED_HOST="auth.xyence.io")
+        resolved = xyn_api_module._resolve_environment(request)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.id, env.id)
+
+    def test_environment_query_param_disabled_by_default(self):
+        env = self._make_env()
+        other = Environment.objects.create(name="Other", slug="other")
+        request = RequestFactory().get(f"/auth/login?environment_id={other.id}")
+        resolved = xyn_api_module._resolve_environment(request)
+        self.assertIsNotNone(resolved)
+        self.assertNotEqual(resolved.id, other.id)
+
+    def test_environment_resolution_supports_wildcards(self):
+        env = self._make_env()
+        env.metadata_json = {"oidc": env.metadata_json["oidc"], "hosts": ["*.xyence.io"]}
+        env.save(update_fields=["metadata_json", "updated_at"])
+        request = RequestFactory().get("/auth/login", HTTP_X_FORWARDED_HOST="ems.xyence.io")
+        resolved = xyn_api_module._resolve_environment(request)
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved.id, env.id)
+
+
+class PlatformAdminTests(TestCase):
+    def _set_admin_session(self):
+        identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject="sub-admin",
+            email="admin@xyence.io",
+        )
+        RoleBinding.objects.create(user_identity=identity, scope_kind="platform", role="platform_admin")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session.save()
+        return identity
+
+    def _set_tenant_session(self, tenant: Tenant, role: str = "tenant_operator") -> UserIdentity:
+        identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject=f"sub-{uuid.uuid4()}",
+        )
+        TenantMembership.objects.create(tenant=tenant, user_identity=identity, role=role)
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session["active_tenant_id"] = str(tenant.id)
+        session.save()
+        return identity
+
+    def test_tenants_crud_requires_platform_admin(self):
+        response = self.client.get("/xyn/internal/tenants")
+        self.assertEqual(response.status_code, 401)
+        self._set_admin_session()
+        response = self.client.post(
+            "/xyn/internal/tenants",
+            data=json.dumps({"name": "Acme", "slug": "acme"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        tenant_id = response.json().get("id")
+        response = self.client.get("/xyn/internal/tenants")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any(t["id"] == tenant_id for t in response.json().get("tenants", [])))
+
+    def test_contacts_crud_requires_platform_admin(self):
+        self._set_admin_session()
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        response = self.client.post(
+            f"/xyn/internal/tenants/{tenant.id}/contacts",
+            data=json.dumps({"name": "Pat", "email": "pat@acme.io"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        contact_id = response.json().get("id")
+        response = self.client.get(f"/xyn/internal/contacts/{contact_id}")
+        self.assertEqual(response.status_code, 200)
+
+    def test_my_tenants_requires_auth(self):
+        response = self.client.get("/xyn/api/tenants")
+        self.assertEqual(response.status_code, 401)
+
+    def test_non_platform_admin_cannot_access_other_tenants(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject="sub-user",
+        )
+        TenantMembership.objects.create(tenant=tenant, user_identity=identity, role="tenant_viewer")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session.save()
+        other = Tenant.objects.create(name="Other", slug="other")
+        response = self.client.get(f"/xyn/internal/tenants/{other.id}/contacts")
+        self.assertEqual(response.status_code, 403)
+
+    def test_tenant_admin_can_manage_contacts(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject="sub-user",
+        )
+        TenantMembership.objects.create(tenant=tenant, user_identity=identity, role="tenant_admin")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session.save()
+        response = self.client.post(
+            f"/xyn/internal/tenants/{tenant.id}/contacts",
+            data=json.dumps({"name": "Pat", "email": "pat@acme.io"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_tenant_viewer_cannot_modify_contacts(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject="sub-user",
+        )
+        TenantMembership.objects.create(tenant=tenant, user_identity=identity, role="tenant_viewer")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session.save()
+        response = self.client.post(
+            f"/xyn/internal/tenants/{tenant.id}/contacts",
+            data=json.dumps({"name": "Pat", "email": "pat@acme.io"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_platform_admin_bypasses_membership_checks(self):
+        self._set_admin_session()
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        response = self.client.post(
+            f"/xyn/internal/tenants/{tenant.id}/contacts",
+            data=json.dumps({"name": "Admin", "email": "admin@acme.io"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_branding_requires_membership(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        identity = UserIdentity.objects.create(provider="oidc", issuer="https://issuer.example.com", subject="sub-user")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session.save()
+        response = self.client.get(f"/xyn/api/tenants/{tenant.id}/branding")
+        self.assertEqual(response.status_code, 403)
+
+    def test_tenant_admin_can_update_branding(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        identity = UserIdentity.objects.create(provider="oidc", issuer="https://issuer.example.com", subject="sub-user")
+        TenantMembership.objects.create(tenant=tenant, user_identity=identity, role="tenant_admin")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session.save()
+        response = self.client.patch(
+            f"/xyn/internal/tenants/{tenant.id}/branding",
+            data=json.dumps({"display_name": "Acme Corp", "logo_url": "https://example.com/logo.png"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        profile = BrandProfile.objects.get(tenant=tenant)
+        self.assertEqual(profile.display_name, "Acme Corp")
+
+    def test_default_branding_fallback(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        identity = UserIdentity.objects.create(provider="oidc", issuer="https://issuer.example.com", subject="sub-user")
+        TenantMembership.objects.create(tenant=tenant, user_identity=identity, role="tenant_viewer")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session.save()
+        response = self.client.get(f"/xyn/api/tenants/{tenant.id}/branding")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIn("display_name", body)
+        self.assertIn("logo_url", body)
+
+    def test_platform_admin_can_edit_any_branding(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        self._set_admin_session()
+        response = self.client.patch(
+            f"/xyn/internal/tenants/{tenant.id}/branding",
+            data=json.dumps({"display_name": "Platform Edit"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_device_crud_requires_active_tenant(self):
+        self._set_admin_session()
+        response = self.client.get("/xyn/api/tenant/devices")
+        self.assertEqual(response.status_code, 400)
+
+    def test_viewer_cannot_modify_device(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        identity = UserIdentity.objects.create(provider="oidc", issuer="https://issuer.example.com", subject="sub-user")
+        TenantMembership.objects.create(tenant=tenant, user_identity=identity, role="tenant_viewer")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session["active_tenant_id"] = str(tenant.id)
+        session.save()
+        response = self.client.post(
+            "/xyn/api/tenant/devices",
+            data=json.dumps({"name": "dev1", "device_type": "router"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_operator_can_modify_device(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        identity = UserIdentity.objects.create(provider="oidc", issuer="https://issuer.example.com", subject="sub-user")
+        TenantMembership.objects.create(tenant=tenant, user_identity=identity, role="tenant_operator")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session["active_tenant_id"] = str(tenant.id)
+        session.save()
+        response = self.client.post(
+            "/xyn/api/tenant/devices",
+            data=json.dumps({"name": "dev1", "device_type": "router"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+    def test_platform_admin_can_access_any_device(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        device = Device.objects.create(tenant=tenant, name="dev1", device_type="router")
+        self._set_admin_session()
+        response = self.client.get(f"/xyn/api/devices/{device.id}")
+        self.assertEqual(response.status_code, 200)
+
+    def test_device_unique_name_per_tenant(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        Device.objects.create(tenant=tenant, name="dev1", device_type="router")
+        self._set_admin_session()
+        session = self.client.session
+        session["active_tenant_id"] = str(tenant.id)
+        session.save()
+        response = self.client.post(
+            "/xyn/api/tenant/devices",
+            data=json.dumps({"name": "dev1", "device_type": "router"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_ems_operator_can_request_reboot_and_confirmation_is_recorded(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        device = Device.objects.create(tenant=tenant, name="dev1", device_type="router")
+        self._set_tenant_session(tenant, "tenant_operator")
+        create_resp = self.client.post(
+            f"/xyn/api/devices/{device.id}/actions",
+            data=json.dumps({"action_type": "device.reboot", "params": {"reason": "maintenance"}}),
+            content_type="application/json",
+        )
+        self.assertEqual(create_resp.status_code, 201)
+        action_id = create_resp.json()["action"]["id"]
+        action = DraftAction.objects.get(id=action_id)
+        self.assertEqual(action.status, "pending_verification")
+        evidence = ActionVerifierEvidence.objects.get(draft_action=action, verifier_type="user_confirmation")
+        self.assertEqual(evidence.status, "required")
+
+        confirm_resp = self.client.post(
+            f"/xyn/api/actions/{action_id}/confirm",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(confirm_resp.status_code, 200)
+        action.refresh_from_db()
+        self.assertEqual(action.status, "succeeded")
+        evidence.refresh_from_db()
+        self.assertEqual(evidence.status, "satisfied")
+        self.assertTrue(ExecutionReceipt.objects.filter(draft_action=action).exists())
+
+    def test_ems_operator_cannot_execute_directly(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        device = Device.objects.create(tenant=tenant, name="dev1", device_type="router")
+        self._set_tenant_session(tenant, "tenant_operator")
+        create_resp = self.client.post(
+            f"/xyn/api/devices/{device.id}/actions",
+            data=json.dumps({"action_type": "device.reboot", "params": {}}),
+            content_type="application/json",
+        )
+        action_id = create_resp.json()["action"]["id"]
+        execute_resp = self.client.post(
+            f"/xyn/api/actions/{action_id}/execute",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(execute_resp.status_code, 403)
+
+    def test_ems_admin_can_execute_when_confirmed(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        device = Device.objects.create(tenant=tenant, name="dev1", device_type="router")
+        self._set_tenant_session(tenant, "tenant_admin")
+        create_resp = self.client.post(
+            f"/xyn/api/devices/{device.id}/actions",
+            data=json.dumps({"action_type": "device.reboot", "params": {"reason": "admin test"}}),
+            content_type="application/json",
+        )
+        action_id = create_resp.json()["action"]["id"]
+        confirm_resp = self.client.post(
+            f"/xyn/api/actions/{action_id}/confirm",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(confirm_resp.status_code, 200)
+        execute_resp = self.client.post(
+            f"/xyn/api/actions/{action_id}/execute",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        # Action may already be terminal from auto execution in confirm fast-path.
+        self.assertIn(execute_resp.status_code, {200, 400})
+
+        detail_resp = self.client.get(f"/xyn/api/actions/{action_id}")
+        self.assertEqual(detail_resp.status_code, 200)
+        self.assertEqual(detail_resp.json()["action"]["status"], "succeeded")
+
+    def test_receipt_created_on_failure(self):
+        tenant = Tenant.objects.create(name="Acme", slug="acme")
+        device = Device.objects.create(tenant=tenant, name="dev1", device_type="router")
+        self._set_tenant_session(tenant, "tenant_operator")
+        create_resp = self.client.post(
+            f"/xyn/api/devices/{device.id}/actions",
+            data=json.dumps({"action_type": "device.reboot", "params": {"simulate_failure": True}}),
+            content_type="application/json",
+        )
+        action_id = create_resp.json()["action"]["id"]
+        confirm_resp = self.client.post(
+            f"/xyn/api/actions/{action_id}/confirm",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(confirm_resp.status_code, 200)
+        action = DraftAction.objects.get(id=action_id)
+        self.assertEqual(action.status, "failed")
+        receipt = ExecutionReceipt.objects.filter(draft_action=action).order_by("-executed_at").first()
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.outcome, "failure")
+
+    def test_admin_can_ratify_when_policy_requires(self):
+        tenant = Tenant.objects.create(
+            name="Acme",
+            slug="acme",
+            metadata_json={
+                "ems_action_policies": {
+                    "device.reboot": {"requires_ratification": True}
+                }
+            },
+        )
+        device = Device.objects.create(tenant=tenant, name="dev1", device_type="router")
+        self._set_tenant_session(tenant, "tenant_admin")
+        create_resp = self.client.post(
+            f"/xyn/api/devices/{device.id}/actions",
+            data=json.dumps({"action_type": "device.reboot", "params": {"reason": "ratify"}}),
+            content_type="application/json",
+        )
+        action_id = create_resp.json()["action"]["id"]
+        confirm_resp = self.client.post(
+            f"/xyn/api/actions/{action_id}/confirm",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(confirm_resp.status_code, 200)
+        self.assertEqual(confirm_resp.json()["action"]["status"], "pending_ratification")
+        ratify_resp = self.client.post(
+            f"/xyn/api/actions/{action_id}/ratify",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(ratify_resp.status_code, 200)
+        action = DraftAction.objects.get(id=action_id)
+        self.assertEqual(action.status, "succeeded")
+        self.assertTrue(RatificationEvent.objects.filter(draft_action=action).exists())
+
+
+class AdminBridgeTests(TestCase):
+    def _make_env(self):
+        return Environment.objects.create(name="Dev", slug="dev")
+
+    def _set_admin_session(self):
+        identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject="sub-admin",
+            email="admin@xyence.io",
+        )
+        RoleBinding.objects.create(user_identity=identity, scope_kind="platform", role="platform_admin")
+        session = self.client.session
+        session["user_identity_id"] = str(identity.id)
+        session.save()
+        return identity
+
+    def _seed_session(self, client, env):
+        session = client.session
+        session["oidc_state"] = "state-123"
+        session["oidc_nonce"] = "nonce-123"
+        session["environment_id"] = str(env.id)
+        session.save()
+
+    def _mock_oidc(self, claims, roles):
+        identity, _ = UserIdentity.objects.get_or_create(
+            issuer="https://accounts.google.com",
+            subject=claims["sub"],
+            defaults={"provider": "oidc", "email": claims.get("email")},
+        )
+        RoleBinding.objects.filter(user_identity=identity).delete()
+        for role in roles:
+            RoleBinding.objects.create(user_identity=identity, scope_kind="platform", role=role)
+
+    def test_user_username_is_issuer_scoped_no_collision(self):
+        env = self._make_env()
+        self._seed_session(self.client, env)
+        claims = {"sub": "sub-1", "email": "jrestivo@xyence.io", "name": "Josh"}
+        with (
+            mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
+            mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
+            mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
+            mock.patch.object(xyn_api_module.requests, "post") as post_request,
+        ):
+            get_config.return_value = {"token_endpoint": "https://issuer.example.com/token"}
+            resolve_secret.return_value = "secret"
+            decode_token.return_value = claims
+            post_request.return_value = type("Resp", (), {"status_code": 200, "json": lambda self: {"id_token": "tok"}})()
+            self._mock_oidc(claims, ["platform_admin"])
+            response = self.client.get("/auth/callback?code=abc&state=state-123")
+        self.assertEqual(response.status_code, 302)
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        user = User.objects.get(email="jrestivo@xyence.io")
+        self.assertTrue(user.username.startswith("oidc:"))
+
+    def test_staff_flag_revoked_when_platform_admin_removed(self):
+        env = self._make_env()
+        self._seed_session(self.client, env)
+        claims = {"sub": "sub-2", "email": "user@xyence.io", "name": "User"}
+        with (
+            mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
+            mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
+            mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
+            mock.patch.object(xyn_api_module.requests, "post") as post_request,
+        ):
+            get_config.return_value = {"token_endpoint": "https://issuer.example.com/token"}
+            resolve_secret.return_value = "secret"
+            decode_token.return_value = claims
+            post_request.return_value = type("Resp", (), {"status_code": 200, "json": lambda self: {"id_token": "tok"}})()
+            self._mock_oidc(claims, ["platform_admin"])
+            self.client.get("/auth/callback?code=abc&state=state-123")
+            self._mock_oidc(claims, [])
+            self.client.get("/auth/callback?code=abc&state=state-123")
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        user = User.objects.get(email="user@xyence.io")
+        self.assertFalse(user.is_staff)
+
+    def test_admin_denied_without_platform_admin_even_if_staff_true(self):
+        from django.contrib.auth import get_user_model
+        from django.contrib import admin as django_admin
+
+        env = self._make_env()
+        identity = UserIdentity.objects.create(
+            issuer="https://accounts.google.com",
+            subject="sub-3",
+            provider="oidc",
+            email="staff@xyence.io",
+        )
+        User = get_user_model()
+        user = User.objects.create(username="staff@xyence.io", email="staff@xyence.io", is_staff=True, is_active=True)
+        request = RequestFactory().get("/admin/")
+        request.user = user
+        middleware = SessionMiddleware(lambda req: None)
+        middleware.process_request(request)
+        request.session["user_identity_id"] = str(identity.id)
+        request.session.save()
+        self.assertFalse(django_admin.site.has_permission(request))
+
+    def test_role_binding_create_delete_requires_platform_admin(self):
+        self._set_admin_session()
+        identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject="sub-user",
+        )
+        response = self.client.post(
+            "/xyn/internal/role_bindings",
+            data=json.dumps({"user_identity_id": str(identity.id), "role": "platform_operator"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        binding_id = response.json().get("id")
+        response = self.client.delete(f"/xyn/internal/role_bindings/{binding_id}")
+        self.assertEqual(response.status_code, 200)
+
+    def test_identities_list_requires_platform_admin(self):
+        UserIdentity.objects.create(provider="oidc", issuer="https://issuer.example.com", subject="sub")
+        response = self.client.get("/xyn/internal/identities")
+        self.assertEqual(response.status_code, 401)
+        self._set_admin_session()
+        response = self.client.get("/xyn/internal/identities")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("identities", response.json())
+
+
+class PipelineSchemaTests(TestCase):
+    def _load_schema(self, name: str) -> dict:
+        path = Path(__file__).resolve().parents[2] / "schemas" / name
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_implementation_plan_schema_for_ems(self):
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        plan = _generate_implementation_plan(blueprint)
+        schema = self._load_schema("implementation_plan.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(plan))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+        self.assertGreaterEqual(len(plan.get("work_items", [])), 1)
+        chassis = next((w for w in plan.get("work_items", []) if w.get("id") == "ems.platform-scaffold"), None)
+        self.assertIsNotNone(chassis)
+        verify_cmds = [entry.get("command", "") for entry in chassis.get("verify", [])]
+        self.assertTrue(any("services/app/README.md" in cmd for cmd in verify_cmds))
+        self.assertIn("plan_rationale", plan)
+        self.assertIn("module_catalog.v1.json", chassis.get("inputs", {}).get("artifacts", []))
+        self.assertIn("run_history_summary.v1.json", chassis.get("inputs", {}).get("artifacts", []))
+
+    def test_codegen_result_schema(self):
+        schema = self._load_schema("codegen_result.v1.schema.json")
+        payload = {
+            "schema_version": "codegen_result.v1",
+            "task_id": "task-1",
+            "work_item_id": "api-scaffold",
+            "blueprint_id": "bp-1",
+            "summary": {
+                "outcome": "succeeded",
+                "changes": "1 repo updated",
+                "risks": "scaffold only",
+                "next_steps": "review",
+            },
+            "repo_results": [
+                {
+                    "repo": {
+                        "name": "xyn-api",
+                        "url": "https://github.com/Xyence/xyn-api",
+                        "ref": "main",
+                        "path_root": "services/demo/api",
+                    },
+                    "files_changed": ["services/demo/api/README.md"],
+                    "patches": [{"path_hint": "services/demo/api", "diff_unified": "diff --git"}],
+                    "commands_executed": [
+                        {"command": "test -f services/demo/api/README.md", "cwd": ".", "exit_code": 0}
+                    ],
+                }
+            ],
+            "artifacts": [
+                {"key": "codegen_patch_xyn-api.diff", "content_type": "text/x-diff", "description": "diff"}
+            ],
+            "success": True,
+            "started_at": "2026-02-06T00:00:00Z",
+            "finished_at": "2026-02-06T00:00:01Z",
+            "errors": [],
+        }
+        errors = list(Draft202012Validator(schema).iter_errors(payload))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+
+    def test_context_pack_selection_respects_purpose(self):
+        ContextPack.objects.create(
+            name="any-pack",
+            purpose="any",
+            scope="global",
+            version="1",
+            content_markdown="any",
+            is_default=True,
+        )
+        ContextPack.objects.create(
+            name="planner-pack",
+            purpose="planner",
+            scope="global",
+            version="1",
+            content_markdown="planner",
+            is_default=True,
+        )
+        ContextPack.objects.create(
+            name="coder-pack",
+            purpose="coder",
+            scope="global",
+            version="1",
+            content_markdown="coder",
+            is_default=True,
+        )
+        ContextPack.objects.create(
+            name="project-pack",
+            purpose="planner",
+            scope="project",
+            project_key="core.demo.app",
+            version="1",
+            content_markdown="project",
+        )
+        coder_packs = _select_context_packs_for_dev_task("coder", "core", "core.demo.app", "codegen")
+        coder_names = {p.name for p in coder_packs}
+        self.assertIn("any-pack", coder_names)
+        self.assertIn("coder-pack", coder_names)
+        self.assertNotIn("planner-pack", coder_names)
+
+        planner_packs = _select_context_packs_for_dev_task("planner", "core", "core.demo.app", "release_plan_generate")
+        planner_names = {p.name for p in planner_packs}
+        self.assertIn("any-pack", planner_names)
+        self.assertIn("planner-pack", planner_names)
+        self.assertIn("project-pack", planner_names)
+
+    def test_module_catalog_schema(self):
+        catalog = _build_module_catalog()
+        schema = self._load_schema("module_catalog.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(catalog))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+        self.assertGreaterEqual(len(catalog.get("modules", [])), 1)
+
+    def test_run_history_summary_schema(self):
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        summary = _build_run_history_summary(blueprint)
+        schema = self._load_schema("run_history_summary.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(summary))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+
+    def test_deploy_result_schema(self):
+        payload = {
+            "schema_version": "deploy_result.v1",
+            "target_instance": {"id": "inst-1", "name": "xyn-seed-dev-1"},
+            "fqdn": "ems.xyence.io",
+            "ssm_command_id": "cmd-123",
+            "outcome": "noop",
+            "changes": "No changes (already healthy)",
+            "verification": [
+                {"name": "public_health", "ok": True, "detail": "200"},
+                {"name": "public_api_health", "ok": True, "detail": "200"},
+                {"name": "dns_record", "ok": True, "detail": "match"},
+                {"name": "ssm_preflight", "ok": True, "detail": "skipped"},
+                {"name": "ssm_local_health", "ok": True, "detail": "skipped"},
+            ],
+            "started_at": "2024-01-01T00:00:00Z",
+            "finished_at": "2024-01-01T00:00:10Z",
+            "errors": [],
+        }
+        schema = self._load_schema("deploy_result.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(payload))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+
+    def test_acme_result_schema(self):
+        payload = {
+            "schema_version": "acme_result.v1",
+            "fqdn": "ems.xyence.io",
+            "email": "admin@xyence.io",
+            "method": "http-01",
+            "outcome": "succeeded",
+            "issued_at": "2026-02-07T00:00:00Z",
+            "expiry_not_after": "2026-05-01T00:00:00Z",
+            "errors": [],
+        }
+        schema = self._load_schema("acme_result.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(payload))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+
+    def test_build_result_schema(self):
+        payload = {
+            "schema_version": "build_result.v1",
+            "release_id": "rel-1",
+            "images": [
+                {
+                    "name": "ems-api",
+                    "repository": "xyn/ems-api",
+                    "tag": "rel-1",
+                    "image_uri": "123.dkr.ecr.us-west-2.amazonaws.com/xyn/ems-api:rel-1",
+                    "digest": "sha256:abc",
+                    "pushed": True,
+                }
+            ],
+            "outcome": "succeeded",
+            "started_at": "2026-02-07T00:00:00Z",
+            "finished_at": "2026-02-07T00:00:10Z",
+            "errors": [{"code": "none", "message": "ok"}],
+        }
+        schema = self._load_schema("build_result.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(payload))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+
+    def test_release_manifest_schema(self):
+        payload = {
+            "schema_version": "release_manifest.v1",
+            "release_id": "rel-1",
+            "blueprint_id": str(uuid.uuid4()),
+            "release_target_id": str(uuid.uuid4()),
+            "images": {"ems-api": {"image_uri": "repo:tag", "digest": "sha256:abc"}},
+            "compose": {"file_path": "compose.release.yml", "content_hash": "abc"},
+            "created_at": "2026-02-07T00:00:00Z",
+        }
+        schema = self._load_schema("release_manifest.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(payload))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+
+    def test_release_target_schema_validates(self):
+        payload = {
+            "schema_version": "release_target.v1",
+            "id": str(uuid.uuid4()),
+            "blueprint_id": str(uuid.uuid4()),
+            "name": "manager-demo",
+            "environment": "manager-demo",
+            "target_instance_id": str(uuid.uuid4()),
+            "fqdn": "ems.xyence.io",
+            "dns": {"provider": "route53", "zone_name": "xyence.io", "record_type": "A", "ttl": 60},
+            "runtime": {
+                "type": "docker-compose",
+                "transport": "ssm",
+                "mode": "compose_build",
+                "remote_root": "/opt/xyn/apps/ems",
+            },
+            "tls": {"mode": "nginx+acme", "acme_email": "admin@xyence.io", "redirect_http_to_https": True},
+            "env": {"EMS_JWT_SECRET": "dev-secret"},
+            "secret_refs": [],
+            "created_at": "2026-02-07T00:00:00Z",
+            "updated_at": "2026-02-07T00:00:00Z",
+        }
+        schema = self._load_schema("release_target.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(payload))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+
+    def test_release_target_schema_requires_mode_for_docker_compose(self):
+        payload = {
+            "schema_version": "release_target.v1",
+            "id": str(uuid.uuid4()),
+            "blueprint_id": str(uuid.uuid4()),
+            "name": "manager-demo",
+            "target_instance_id": str(uuid.uuid4()),
+            "fqdn": "ems.xyence.io",
+            "dns": {"provider": "route53"},
+            "runtime": {"type": "docker-compose", "transport": "ssm"},
+            "tls": {"mode": "none"},
+            "created_at": "2026-02-07T00:00:00Z",
+            "updated_at": "2026-02-07T00:00:00Z",
+        }
+        schema = self._load_schema("release_target.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(payload))
+        self.assertTrue(errors)
+
+    def test_release_target_secret_ref_validation(self):
+        payload = {
+            "schema_version": "release_target.v1",
+            "id": str(uuid.uuid4()),
+            "blueprint_id": str(uuid.uuid4()),
+            "name": "manager-demo",
+            "target_instance_id": str(uuid.uuid4()),
+            "fqdn": "ems.xyence.io",
+            "dns": {"provider": "route53"},
+            "runtime": {"type": "docker-compose", "transport": "ssm"},
+            "tls": {"mode": "none"},
+            "secret_refs": [
+                {"name": "ems_jwt_secret", "ref": "ssm:/xyn/ems/jwt"},
+                {"name": "EMS_JWT_SECRET", "ref": "vault:/bad"},
+            ],
+            "created_at": "2026-02-07T00:00:00Z",
+            "updated_at": "2026-02-07T00:00:00Z",
+        }
+        errors = _validate_release_target_payload(payload)
+        self.assertTrue(any("secret_refs[0].name" in err for err in errors))
+        self.assertTrue(any("secret_refs[1].ref" in err for err in errors))
+
+    @mock.patch("xyn_orchestrator.worker_tasks.boto3.client")
+    def test_secret_resolution_merges_and_overrides_env(self, mock_client):
+        ssm_mock = mock.Mock()
+        ssm_mock.get_parameter.return_value = {"Parameter": {"Value": "good-secret"}}
+        mock_client.return_value = ssm_mock
+        env = {"EMS_JWT_SECRET": "bad-secret", "EMS_JWT_ISSUER": "xyn-ems"}
+        secret_refs = [{"name": "EMS_JWT_SECRET", "ref": "ssm:/xyn/ems/jwt"}]
+        merged, secret_values, secret_keys = _merge_release_env(env, secret_refs, "us-west-2")
+        self.assertEqual(merged["EMS_JWT_SECRET"], "good-secret")
+        self.assertEqual(secret_values["EMS_JWT_SECRET"], "good-secret")
+        self.assertIn("EMS_JWT_SECRET", secret_keys)
+
+    def test_redaction_removes_secret_from_logs(self):
+        text = "token=supersecret and again supersecret"
+        redacted = _redact_secrets(text, {"EMS_JWT_SECRET": "supersecret"})
+        self.assertNotIn("supersecret", redacted)
+        self.assertIn("***REDACTED***", redacted)
+
+    def test_manifest_does_not_include_secret_values(self):
+        manifest = _build_deploy_manifest(
+            "ems.xyence.io",
+            {"id": "inst-1"},
+            "/opt/xyn/apps/ems",
+            "apps/ems-stack/docker-compose.yml",
+            {"EMS_JWT_ISSUER": "xyn-ems"},
+            ["EMS_JWT_SECRET"],
+        )
+        payload = json.dumps(manifest)
+        self.assertIn("EMS_JWT_SECRET", payload)
+        self.assertNotIn("supersecret", payload)
+
+    def test_planner_generates_generic_scaffold_slice(self):
+        blueprint = Blueprint.objects.create(name="subscriber-notes", namespace="core")
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=_build_module_catalog(),
+            run_history_summary=_build_run_history_summary(blueprint),
+        )
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertIn("subscriber-notes-scaffold", ids)
+        rationale = plan.get("plan_rationale", {})
+        self.assertIn("why_next", rationale)
+
+    def test_planner_selects_route53_module_scaffold(self):
+        blueprint = Blueprint.objects.create(
+            name="ems.platform",
+            namespace="core",
+            metadata_json={"dns_provider": "route53"},
+        )
+        module_catalog = _build_module_catalog()
+        module_catalog["modules"] = [m for m in module_catalog.get("modules", []) if m.get("id") != "dns-route53"]
+        run_history = _build_run_history_summary(blueprint)
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=module_catalog,
+            run_history_summary=run_history,
+        )
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertIn("dns-route53-module", ids)
+
+    def test_non_core_plan_uses_blueprint_intent_requirements(self):
+        spec = {
+            "apiVersion": "xyn.blueprint/v1",
+            "kind": "SolutionBlueprint",
+            "metadata": {"name": "subscriber-notes", "namespace": "core"},
+            "intent": {
+                "sourceDraftSessionId": "draft-1",
+                "createdFrom": {"type": "draft", "id": "draft-1"},
+                "prompt": {"text": "Create subscriber notes", "sha256": "abc", "createdAt": "2026-02-14T00:00:00Z"},
+                "requirements": {
+                    "summary": "Build subscriber notes app",
+                    "functional": ["Implement create/list/delete endpoints", "Expose health endpoint"],
+                    "ui": ["Render Subscriber Notes - Dev Demo header"],
+                    "dataModel": ["subscriber_id", "note_text", "created_at"],
+                    "operational": ["Enable logging", "Run migrations idempotently"],
+                    "definitionOfDone": ["Service reachable at https://josh.xyence.io"],
+                },
+            },
+            "releaseSpec": {
+                "apiVersion": "xyn.seed/v1",
+                "kind": "Release",
+                "metadata": {"name": "subscriber-notes", "namespace": "core"},
+                "backend": {"type": "compose"},
+                "components": [{"name": "api", "image": "example/demo:latest"}],
+            },
+        }
+        blueprint = Blueprint.objects.create(
+            name="subscriber-notes",
+            namespace="core",
+            spec_text=json.dumps(spec),
+        )
+        plan = _generate_implementation_plan(blueprint)
+        self.assertGreaterEqual(len(plan.get("work_items", [])), 1)
+        first = plan["work_items"][0]
+        self.assertEqual(first.get("description"), "Build subscriber notes app")
+        self.assertIn("Implement create/list/delete endpoints", first.get("acceptance_criteria", []))
+        context = (first.get("inputs") or {}).get("context") or []
+        self.assertIn("blueprint.intent.requirements", context)
+
+    def test_planner_selects_image_deploy_when_enabled(self):
+        blueprint = Blueprint.objects.create(
+            name="ems.platform",
+            namespace="core",
+            spec_text=json.dumps(
+                {
+                    "releaseSpec": {
+                        "metadata": {"namespace": "core"},
+                        "repoTargets": [
+                            {
+                                "name": "xyn-api",
+                                "url": "https://github.com/Xyence/xyn-api",
+                                "ref": "main",
+                                "path_root": ".",
+                                "auth": "https_token",
+                                "allow_write": False,
+                            }
+                        ],
+                        "components": [{"name": "api", "image": "ghcr.io/example/api:latest"}],
+                    }
+                }
+            ),
+        )
+        release_target = {
+            "schema_version": "release_target.v1",
+            "id": str(uuid.uuid4()),
+            "blueprint_id": str(blueprint.id),
+            "name": "manager-demo",
+            "target_instance_id": str(uuid.uuid4()),
+            "fqdn": "ems.xyence.io",
+            "dns": {"provider": "route53"},
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "tls": {"mode": "none"},
+            "created_at": "2026-02-07T00:00:00Z",
+            "updated_at": "2026-02-07T00:00:00Z",
+        }
+        plan = _generate_implementation_plan(blueprint, release_target=release_target)
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertIn("build.publish_images.container", ids)
+        self.assertIn("deploy.apply_remote_compose.pull", ids)
+        self.assertIn("release.validate_manifest.pinned", ids)
+        build_item = next((item for item in plan.get("work_items", []) if item.get("id") == "build.publish_images.container"), None)
+        self.assertIsNotNone(build_item)
+        config = (build_item or {}).get("config") or {}
+        self.assertTrue(str(config.get("release_version", "")).startswith("v"))
+
+    def test_select_next_slice_includes_manifest_validation_when_image_deploy_present(self):
+        blueprint = Blueprint.objects.create(
+            name="ems.platform",
+            namespace="core",
+            spec_text=json.dumps(
+                {
+                    "releaseSpec": {
+                        "metadata": {"namespace": "core"},
+                        "repoTargets": [
+                            {
+                                "name": "xyn-api",
+                                "url": "https://github.com/Xyence/xyn-api",
+                                "ref": "main",
+                                "path_root": ".",
+                                "auth": "https_token",
+                                "allow_write": False,
+                            }
+                        ],
+                        "components": [{"name": "api", "image": "ghcr.io/example/api:latest"}],
+                    }
+                }
+            ),
+        )
+        release_target = {
+            "schema_version": "release_target.v1",
+            "id": str(uuid.uuid4()),
+            "blueprint_id": str(blueprint.id),
+            "name": "manager-demo",
+            "target_instance_id": str(uuid.uuid4()),
+            "fqdn": "ems.xyence.io",
+            "dns": {"provider": "route53"},
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "tls": {"mode": "none"},
+            "created_at": "2026-02-07T00:00:00Z",
+            "updated_at": "2026-02-07T00:00:00Z",
+        }
+        plan = _generate_implementation_plan(blueprint, release_target=release_target)
+        run_history = {
+            "acceptance_checks_status": [{"id": "remote_http_health", "status": "fail"}],
+            "completed_work_items": [],
+        }
+        selected, _ = _select_next_slice(blueprint, plan.get("work_items", []), run_history)
+        selected_ids = {item.get("id") for item in selected}
+        self.assertIn("release.validate_manifest.pinned", selected_ids)
+
+    def test_select_next_slice_omits_nginx_tls_for_host_ingress(self):
+        blueprint = Blueprint.objects.create(
+            name="ems.platform",
+            namespace="core",
+            spec_text=json.dumps(
+                {
+                    "releaseSpec": {
+                        "metadata": {"namespace": "core"},
+                        "repoTargets": [
+                            {
+                                "name": "xyn-api",
+                                "url": "https://github.com/Xyence/xyn-api",
+                                "ref": "main",
+                                "path_root": ".",
+                                "auth": "https_token",
+                                "allow_write": False,
+                            }
+                        ],
+                        "components": [{"name": "web", "image": "ghcr.io/example/web:latest"}],
+                    }
+                }
+            ),
+        )
+        release_target = {
+            "schema_version": "release_target.v1",
+            "id": str(uuid.uuid4()),
+            "blueprint_id": str(blueprint.id),
+            "name": "manager-demo",
+            "target_instance_id": str(uuid.uuid4()),
+            "fqdn": "bedrock.xyence.io",
+            "dns": {"provider": "route53"},
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "tls": {"mode": "host-ingress", "provider": "traefik", "acme_email": "admin@xyence.io"},
+            "created_at": "2026-02-07T00:00:00Z",
+            "updated_at": "2026-02-07T00:00:00Z",
+        }
+        plan = _generate_implementation_plan(blueprint, release_target=release_target)
+        run_history = {
+            "acceptance_checks_status": [{"id": "remote_https_health", "status": "fail"}],
+            "completed_work_items": [],
+        }
+        selected, _ = _select_next_slice(blueprint, plan.get("work_items", []), run_history, release_target)
+        selected_ids = {item.get("id") for item in selected}
+        self.assertIn("verify.public_https", selected_ids)
+        self.assertNotIn("tls.acme_http01", selected_ids)
+        self.assertNotIn("ingress.nginx_tls_configure", selected_ids)
+
+    def test_manifest_validation_fails_when_digest_missing(self):
+        manifest = {"images": {"api": {"image_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/xyn/api:v1"}}}
+        ok, errors = _validate_release_manifest_pinned(manifest)
+        self.assertFalse(ok)
+        self.assertTrue(errors)
+
+    def test_manifest_validation_requires_compose_hash(self):
+        manifest = {
+            "images": {"ems-api": {"image_uri": "repo:tag", "digest": "sha256:" + "a" * 64}},
+            "compose": {"content": "image@sha256:" + "a" * 64},
+        }
+        ok, errors = _validate_release_manifest_pinned(manifest)
+        self.assertFalse(ok)
+        self.assertTrue(any(err.get("code") == "compose_hash_missing" for err in errors))
+
+    def test_noop_digest_normalization(self):
+        digest = "SHA256:" + "A" * 64
+        self.assertEqual(_normalize_sha256(digest), "a" * 64)
+
+    def test_normalize_digest_preserves_prefix(self):
+        digest = "SHA256:" + "A" * 64
+        self.assertEqual(_normalize_digest(digest), "sha256:" + "a" * 64)
+
+    def test_manifest_override_excludes_build_step(self):
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        release_target = {
+            "schema_version": "release_target.v1",
+            "id": str(uuid.uuid4()),
+            "blueprint_id": str(blueprint.id),
+            "name": "manager-demo",
+            "target_instance_id": str(uuid.uuid4()),
+            "fqdn": "ems.xyence.io",
+            "dns": {"provider": "route53"},
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "tls": {"mode": "none"},
+            "created_at": "2026-02-07T00:00:00Z",
+            "updated_at": "2026-02-07T00:00:00Z",
+        }
+        plan = _generate_implementation_plan(blueprint, release_target=release_target, manifest_override=True)
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertNotIn("build.publish_images.container", ids)
+        self.assertIn("release.validate_manifest.pinned", ids)
+        self.assertIn("deploy.apply_remote_compose.pull", ids)
+
+    def test_planner_build_images_from_components(self):
+        spec = {
+            "apiVersion": "xyn.blueprint/v1",
+            "kind": "SolutionBlueprint",
+            "metadata": {"name": "generic-app", "namespace": "core"},
+            "releaseSpec": {
+                "apiVersion": "xyn.seed/v1",
+                "kind": "Release",
+                "metadata": {"name": "generic-app", "namespace": "core"},
+                "backend": {"type": "compose"},
+                "repoTargets": [
+                    {"name": "api-repo", "url": "https://github.com/Xyence/xyn-api", "ref": "main", "path_root": "."},
+                    {"name": "web-repo", "url": "https://github.com/Xyence/xyn-ui", "ref": "main", "path_root": "."},
+                ],
+                "components": [
+                    {
+                        "name": "api",
+                        "build": {"repoTarget": "api-repo", "context": "services/api", "dockerfile": "Dockerfile"},
+                        "ports": [{"containerPort": 8080}],
+                    },
+                    {
+                        "name": "web",
+                        "build": {"repoTarget": "web-repo", "context": "services/web", "dockerfile": "Dockerfile"},
+                        "dependsOn": ["api"],
+                        "ports": [{"containerPort": 3000}],
+                    },
+                ],
+            },
+        }
+        blueprint = Blueprint.objects.create(name="generic-app", namespace="core", spec_text=json.dumps(spec))
+        release_target = {
+            "schema_version": "release_target.v1",
+            "id": str(uuid.uuid4()),
+            "blueprint_id": str(blueprint.id),
+            "name": "generic-dev",
+            "target_instance_id": str(uuid.uuid4()),
+            "fqdn": "generic.xyence.io",
+            "dns": {"provider": "route53"},
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "tls": {"mode": "host-ingress"},
+            "ingress": {"network": "xyn-edge", "routes": [{"host": "generic.xyence.io", "service": "web", "port": 3000}]},
+            "created_at": "2026-02-07T00:00:00Z",
+            "updated_at": "2026-02-07T00:00:00Z",
+        }
+        plan = _generate_implementation_plan(blueprint, release_target=release_target)
+        build_item = next(
+            (item for item in plan.get("work_items", []) if item.get("id") == "build.publish_images.components"),
+            None,
+        )
+        self.assertIsNotNone(build_item)
+        config = (build_item or {}).get("config") or {}
+        image_services = {img.get("service") for img in config.get("images", [])}
+        repo_names = {repo.get("name") for repo in (build_item or {}).get("repo_targets", [])}
+        self.assertEqual(image_services, {"api", "web"})
+        self.assertEqual(repo_names, {"api-repo", "web-repo"})
+
+    def test_render_compose_generic_from_components(self):
+        components = [
+            {
+                "name": "api",
+                "image": "123456789012.dkr.ecr.us-west-2.amazonaws.com/xyn/api:v1",
+                "env": {"PORT": "8080"},
+                "ports": [{"containerPort": 8080}],
+            },
+            {
+                "name": "web",
+                "image": "123456789012.dkr.ecr.us-west-2.amazonaws.com/xyn/web:v1",
+                "dependsOn": ["api"],
+                "ports": [{"containerPort": 3000}],
+            },
+        ]
+        images_map = {
+            "api": {
+                "image_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/xyn/api:v1",
+                "digest": "sha256:" + "a" * 64,
+            },
+            "web": {
+                "image_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/xyn/web:v1",
+                "digest": "sha256:" + "b" * 64,
+            },
+        }
+        release_target = {
+            "tls": {"mode": "host-ingress"},
+            "ingress": {"network": "xyn-edge", "routes": [{"host": "demo.xyence.io", "service": "web", "port": 3000}]},
+        }
+        compose = _render_compose_for_release_components(components, images_map, release_target)
+        self.assertIn("services:", compose)
+        self.assertIn("  api:", compose)
+        self.assertIn("  web:", compose)
+        self.assertIn("@sha256:" + "a" * 64, compose)
+        self.assertIn("@sha256:" + "b" * 64, compose)
+        self.assertIn("depends_on:", compose)
+        self.assertIn("traefik.http.routers.demo-xyence-io.rule=Host(`demo.xyence.io`)", compose)
+
+    def test_manifest_validation_fails_if_component_digest_missing_for_ecr(self):
+        manifest = {
+            "images": {
+                "api": {"image_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/xyn/api:v1", "digest": ""},
+                "web": {"image_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/xyn/web:v1", "digest": "sha256:" + "b" * 64},
+            },
+            "compose": {"content_hash": "a" * 64},
+        }
+        compose = "services:\n  api:\n    image: x\n  web:\n    image: y\n"
+        ok, errors = _validate_release_manifest_pinned(manifest, compose)
+        self.assertFalse(ok)
+        self.assertTrue(any(error.get("code") == "digest_missing" for error in errors))
+
+    def test_manifest_validation_accepts_non_ecr_without_digest(self):
+        manifest = {
+            "images": {
+                "api": {"image_uri": "ghcr.io/example/api:1.0.0", "digest": ""},
+                "web": {"image_uri": "ghcr.io/example/web:1.0.0", "digest": ""},
+            },
+            "compose": {"content_hash": "a" * 64},
+        }
+        compose = "services:\n  api:\n    image: x\n  web:\n    image: y\n"
+        ok, errors = _validate_release_manifest_pinned(manifest, compose)
+        self.assertTrue(ok, errors)
+
+    def test_deploy_state_metadata_payload(self):
+        payload = _build_deploy_state_metadata(
+            release_target_id=str(uuid.uuid4()),
+            release_id="rel-1",
+            release_uuid=str(uuid.uuid4()),
+            release_version="v1",
+            manifest_run_id=str(uuid.uuid4()),
+            manifest_hash="abc",
+            compose_hash="def",
+            outcome="succeeded",
+        )
+        self.assertEqual(payload.get("deploy_outcome"), "succeeded")
+        self.assertEqual(payload.get("manifest", {}).get("content_hash"), "abc")
+        self.assertEqual(payload.get("compose", {}).get("content_hash"), "def")
+
+    def test_runtime_marker_commands_include_manifest_files(self):
+        commands = _build_remote_pull_apply_commands(
+            "/opt/xyn/apps/ems",
+            "services:\n  ems-api:\n    image: test\n",
+            "deadbeef",
+            "{\"schema_version\":\"release_manifest.v1\"}",
+            "bead",
+            "rel-1",
+            "rel-uuid-1",
+            "us-west-2",
+            "123456789012.dkr.ecr.us-west-2.amazonaws.com",
+            "ems.xyence.io",
+            {},
+        )
+        joined = "\n".join(commands)
+        self.assertIn("release_manifest.json", joined)
+        self.assertIn("release_manifest.sha256", joined)
+        self.assertIn("release_id", joined)
+
+    def test_runtime_marker_commands_include_traefik_ingress_for_host_mode(self):
+        commands = _build_remote_pull_apply_commands(
+            "/opt/xyn/apps/ems",
+            "services:\n  ems-api:\n    image: test\n",
+            "deadbeef",
+            "{\"schema_version\":\"release_manifest.v1\"}",
+            "bead",
+            "rel-1",
+            "rel-uuid-1",
+            "us-west-2",
+            "123456789012.dkr.ecr.us-west-2.amazonaws.com",
+            "ems.xyence.io",
+            {},
+            "host-ingress",
+            "xyn-edge",
+            "admin@xyence.io",
+        )
+        joined = "\n".join(commands)
+        self.assertIn("compose.ingress.yml", joined)
+        self.assertIn("docker network inspect xyn-edge", joined)
+        self.assertIn("ingress_port_collision", joined)
+
+    def test_render_compose_for_images_host_ingress_adds_labels_and_no_host_ports(self):
+        content = _render_compose_for_images(
+            {
+                "api": {"image_uri": "repo/api:v40"},
+                "web": {"image_uri": "repo/web:v40"},
+            },
+            {
+                "tls": {"mode": "host-ingress"},
+                "ingress": {
+                    "network": "xyn-edge",
+                    "routes": [{"host": "home.xyence.io", "service": "web", "port": 3000}],
+                },
+            },
+        )
+        self.assertNotIn("ports:", content)
+        self.assertIn("traefik.docker.network=xyn-edge", content)
+        self.assertIn("traefik.http.routers.home-xyence-io.rule=Host(`home.xyence.io`)", content)
+        self.assertIn("external: true", content)
+
+    def test_render_compose_for_images_host_ingress_skips_traefik_as_backend(self):
+        content = _render_compose_for_images(
+            {
+                "traefik": {"image_uri": "traefik:v3.1"},
+                "ems-ui": {"image_uri": "repo/ems-ui:v1"},
+                "ems-api": {"image_uri": "repo/ems-api:v1"},
+            },
+            {
+                "tls": {"mode": "host-ingress"},
+                "ingress": {
+                    "network": "xyn-edge",
+                    "routes": [{"host": "home.xyence.io", "service": "web", "port": 3000}],
+                },
+            },
+        )
+        parsed = yaml.safe_load(content) or {}
+        services = parsed.get("services") if isinstance(parsed, dict) else {}
+        self.assertIsInstance(services, dict)
+        traefik_labels = ((services.get("traefik") or {}).get("labels") or [])
+        ui_labels = ((services.get("ems-ui") or {}).get("labels") or [])
+        self.assertFalse(any("traefik.http.routers.home-xyence-io.rule" in str(label) for label in traefik_labels))
+        self.assertTrue(any("traefik.http.routers.home-xyence-io.rule" in str(label) for label in ui_labels))
+        self.assertTrue(any("traefik.http.services.home-xyence-io.loadbalancer.server.port=3000" in str(label) for label in ui_labels))
+        self.assertTrue(
+            any(
+                "traefik.http.routers.home-xyence-io-health.rule=Host(`home.xyence.io`) && (Path(`/health`) || Path(`/api/health`))"
+                in str(label)
+                for label in ui_labels
+            )
+        )
+        self.assertTrue(any("traefik.http.routers.home-xyence-io-health.service=home-xyence-io" in str(label) for label in ui_labels))
+
+    def test_public_verify_allows_root_auth_redirect_with_original_return_to(self):
+        class _Resp:
+            def __init__(self):
+                self.status_code = 200
+                self.url = "https://xyence.io/auth/login?appId=xyn-ui&returnTo=https%3A%2F%2Fems-central.xyence.io%2F"
+                self.headers = {"content-type": "text/html"}
+                self.text = "<html>login</html>"
+
+        with mock.patch("xyn_orchestrator.worker_tasks.requests.get", return_value=_Resp()):
+            ok, checks = _public_verify("ems-central.xyence.io")
+        self.assertFalse(ok)
+        root = next((check for check in checks if check.get("name") == "public_root"), {})
+        self.assertTrue(root.get("ok"))
+
+    def test_public_verify_rejects_cross_host_redirects_for_health_checks(self):
+        class _Resp:
+            def __init__(self):
+                self.status_code = 200
+                self.url = "https://xyence.io/auth/login?appId=xyn-ui"
+                self.headers = {"content-type": "text/html"}
+                self.text = "<html>login</html>"
+
+        with mock.patch("xyn_orchestrator.worker_tasks.requests.get", return_value=_Resp()):
+            ok, checks = _public_verify("ems-central.xyence.io")
+        self.assertFalse(ok)
+        self.assertTrue(checks)
+        health_checks = [check for check in checks if str(check.get("name", "")).startswith("public_") and check.get("name") != "public_root"]
+        self.assertTrue(health_checks)
+        self.assertTrue(all(check.get("ok") is False for check in health_checks))
+
+    def test_core_planner_and_renderer_do_not_hardcode_ems_services(self):
+        planner_path = Path(__file__).resolve().parents[1] / "blueprints.py"
+        worker_path = Path(__file__).resolve().parents[1] / "worker_tasks.py"
+        deployments_path = Path(__file__).resolve().parents[1] / "deployments.py"
+        planner_content = planner_path.read_text(encoding="utf-8")
+        worker_content = worker_path.read_text(encoding="utf-8")
+        deployments_content = deployments_path.read_text(encoding="utf-8")
+
+        planner_start = planner_content.index("def _generate_implementation_plan(")
+        planner_end = planner_content.index("def _prune_run_artifacts")
+        planner_slice = planner_content[planner_start:planner_end]
+
+        render_start = worker_content.index("def _render_compose_for_images(")
+        render_end = worker_content.index("def _render_traefik_ingress_compose(")
+        render_slice = worker_content[render_start:render_end]
+        deploy_start = deployments_content.index("def _adapt_compose_for_host_ingress(")
+        deploy_end = deployments_content.index("def _resolve_release_target(")
+        deploy_slice = deployments_content[deploy_start:deploy_end]
+
+        self.assertNotIn("apps/ems-", planner_slice)
+        self.assertNotIn("ems-api", render_slice)
+        self.assertNotIn("ems-web", render_slice)
+        self.assertNotIn("ems-api", deploy_slice)
+        self.assertNotIn("ems-web", deploy_slice)
+
+    def test_ssm_service_digest_commands_include_label_filter(self):
+        commands = _build_ssm_service_digest_commands(["api", "web"])
+        joined = "\n".join(commands)
+        self.assertIn("label=com.docker.compose.service=api", joined)
+        self.assertIn("label=com.docker.compose.service=web", joined)
+
+    def test_parse_service_digest_lines(self):
+        lines = ["api=sha256:" + "a" * 64, "web=SHA256:" + "B" * 64]
+        parsed = _parse_service_digest_lines(lines)
+        self.assertEqual(parsed["api"], "sha256:" + "a" * 64)
+        self.assertEqual(parsed["web"], "sha256:" + "b" * 64)
+
+    def test_release_target_host_ingress_requires_routes(self):
+        payload = {
+            "schema_version": "release_target.v1",
+            "id": str(uuid.uuid4()),
+            "blueprint_id": str(uuid.uuid4()),
+            "name": "dev-target",
+            "environment": "dev",
+            "target_instance_id": str(uuid.uuid4()),
+            "fqdn": "ems.xyence.io",
+            "dns": {"provider": "route53"},
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "tls": {"mode": "host-ingress", "provider": "traefik", "acme_email": "admin@xyence.io"},
+            "ingress": {"network": "xyn-edge", "routes": []},
+            "created_at": "2026-02-12T00:00:00Z",
+            "updated_at": "2026-02-12T00:00:00Z",
+        }
+        errors = _validate_release_target_payload(payload)
+        self.assertTrue(any("ingress.routes" in err for err in errors))
+
+    def test_release_upsert_and_resolve(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        payload = {
+            "blueprint_id": str(blueprint.id),
+            "version": "rel-1",
+            "status": "published",
+            "artifacts_json": {"release_manifest": {"url": "http://example/manifest.json"}},
+        }
+        request = factory.post(
+            "/xyn/internal/releases/upsert",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_release_upsert(request)
+        self.assertEqual(response.status_code, 200)
+        release = Release.objects.get(blueprint_id=blueprint.id, version="rel-1")
+        resolve_request = factory.post(
+            "/xyn/internal/releases/resolve",
+            data=json.dumps({"release_version": "rel-1", "blueprint_id": str(blueprint.id)}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        resolve_response = internal_release_resolve(resolve_request)
+        self.assertEqual(resolve_response.status_code, 200)
+
+    def test_release_create_uses_max_numeric_version_not_count(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        Release.objects.create(blueprint_id=blueprint.id, version="v40", status="published")
+        Release.objects.create(blueprint_id=blueprint.id, version="v2", status="draft")
+        request = factory.post(
+            "/xyn/internal/releases",
+            data=json.dumps({"blueprint_id": str(blueprint.id)}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_release_create(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload.get("version"), "v41")
+
+    def test_release_upsert_rejects_published_overwrite(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        Release.objects.create(
+            blueprint_id=blueprint.id,
+            version="rel-2",
+            status="published",
+            artifacts_json={
+                "release_manifest": {"sha256": "aaa"},
+                "compose_file": {"sha256": "bbb"},
+            },
+        )
+        payload = {
+            "blueprint_id": str(blueprint.id),
+            "version": "rel-2",
+            "status": "published",
+            "artifacts_json": {
+                "release_manifest": {"sha256": "ccc"},
+                "compose_file": {"sha256": "ddd"},
+            },
+        }
+        request = factory.post(
+            "/xyn/internal/releases/upsert",
+            data=json.dumps(payload),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_release_upsert(request)
+        self.assertEqual(response.status_code, 409)
+
+    @mock.patch("xyn_orchestrator.blueprints._ssm_fetch_runtime_marker")
+    def test_current_release_and_drift(self, mock_marker):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        instance = ProvisionedInstance.objects.create(
+            name="seed-1",
+            status="running",
+            instance_id="i-123",
+            aws_region="us-west-2",
+        )
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="demo",
+            target_instance=instance,
+            fqdn="ems.xyence.io",
+            config_json={},
+        )
+        Run.objects.create(
+            entity_type="blueprint",
+            entity_id=blueprint.id,
+            status="succeeded",
+            metadata_json={
+                "release_target_id": str(target.id),
+                "release_uuid": "rel-uuid",
+                "release_version": "rel-1",
+                "deploy_outcome": "succeeded",
+                "manifest": {"content_hash": "aaa"},
+                "compose": {"content_hash": "bbb"},
+                "deployed_at": "2026-02-07T00:00:00Z",
+            },
+        )
+        request = factory.get(
+            f"/xyn/internal/release-targets/{target.id}/current_release",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_release_target_current_release(request, str(target.id))
+        self.assertEqual(response.status_code, 200)
+        mock_marker.return_value = {"release_uuid": "rel-uuid", "manifest_sha256": "aaa", "compose_sha256": "bbb"}
+        drift_request = factory.get(
+            f"/xyn/internal/release-targets/{target.id}/check_drift",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        drift_response = internal_release_target_check_drift(drift_request, str(target.id))
+        self.assertEqual(drift_response.status_code, 200)
+
+    def test_deploy_lock_blocks_concurrent_runs(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="demo",
+            fqdn="ems.xyence.io",
+            config_json={},
+        )
+        active = Run.objects.create(
+            entity_type="blueprint",
+            entity_id=blueprint.id,
+            status="running",
+            metadata_json={"release_target_id": str(target.id)},
+        )
+        request = factory.post(
+            f"/xyn/internal/release-targets/{target.id}/deploy_manifest",
+            data=json.dumps({"manifest_run_id": str(uuid.uuid4())}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_release_target_deploy_manifest(request, str(target.id))
+        self.assertEqual(response.status_code, 409)
+
+    def test_deploy_latest_selects_newest_published_release(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="demo",
+            fqdn="ems.xyence.io",
+            config_json={},
+        )
+        Release.objects.create(blueprint_id=blueprint.id, version="v1", status="published")
+        latest = Release.objects.create(blueprint_id=blueprint.id, version="v2", status="published")
+        request = factory.get(
+            f"/xyn/internal/releases/latest?blueprint_id={blueprint.id}",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_releases_latest(request)
+        self.assertEqual(response.status_code, 200)
+        deploy_request = factory.post(
+            f"/xyn/internal/release-targets/{target.id}/deploy_latest",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        with mock.patch("xyn_orchestrator.blueprints.internal_release_target_deploy_release") as deploy_release:
+            deploy_release.return_value = JsonResponse({"run_id": "x"}, status=200)
+            internal_release_target_deploy_latest(deploy_request, str(target.id))
+            deploy_release.assert_called()
+
+    def test_rollback_last_success_selects_prior_release(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="demo",
+            fqdn="ems.xyence.io",
+            config_json={},
+        )
+        Run.objects.create(
+            entity_type="blueprint",
+            entity_id=blueprint.id,
+            status="succeeded",
+            metadata_json={
+                "release_target_id": str(target.id),
+                "release_uuid": "rel-new",
+                "release_version": "v2",
+                "deploy_outcome": "succeeded",
+            },
+        )
+        Run.objects.create(
+            entity_type="blueprint",
+            entity_id=blueprint.id,
+            status="succeeded",
+            metadata_json={
+                "release_target_id": str(target.id),
+                "release_uuid": "rel-old",
+                "release_version": "v1",
+                "deploy_outcome": "succeeded",
+            },
+        )
+        rollback_request = factory.post(
+            f"/xyn/internal/release-targets/{target.id}/rollback_last_success",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        with mock.patch("xyn_orchestrator.blueprints.internal_release_target_deploy_release") as deploy_release:
+            deploy_release.return_value = JsonResponse({"run_id": "x"}, status=200)
+            internal_release_target_rollback_last_success(rollback_request, str(target.id))
+            deploy_release.assert_called()
+
+    def test_releases_retention_report(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        r1 = Release.objects.create(blueprint_id=blueprint.id, version="v1", status="published")
+        r2 = Release.objects.create(blueprint_id=blueprint.id, version="v2", status="published")
+        request = factory.get(
+            f"/xyn/internal/releases/retention_report?blueprint_id={blueprint.id}&keep=1",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_releases_retention_report(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload["totals"]["retained"], 1)
+
+    def test_gc_requires_confirm(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        Release.objects.create(blueprint_id=blueprint.id, version="v1", status="published")
+        request = factory.post(
+            "/xyn/internal/releases/gc",
+            data=json.dumps({"blueprint_id": str(blueprint.id), "keep": 0, "dry_run": False}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_releases_gc(request)
+        self.assertEqual(response.status_code, 400)
+
+    def test_gc_dry_run_does_not_modify_releases(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        rel = Release.objects.create(blueprint_id=blueprint.id, version="v1", status="published")
+        request = factory.post(
+            "/xyn/internal/releases/gc",
+            data=json.dumps({"blueprint_id": str(blueprint.id), "keep": 0, "dry_run": True}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_releases_gc(request)
+        self.assertEqual(response.status_code, 200)
+        rel.refresh_from_db()
+        self.assertEqual(rel.status, "published")
+
+    def test_gc_marks_deprecated(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        rel = Release.objects.create(blueprint_id=blueprint.id, version="v1", status="published")
+        request = factory.post(
+            "/xyn/internal/releases/gc",
+            data=json.dumps({"blueprint_id": str(blueprint.id), "keep": 0, "dry_run": False, "confirm": True}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_releases_gc(request)
+        self.assertEqual(response.status_code, 200)
+        rel.refresh_from_db()
+        self.assertEqual(rel.status, "deprecated")
+
+    def test_release_promote_returns_existing_release(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        source = Release.objects.create(
+            blueprint_id=blueprint.id,
+            version="v1",
+            status="published",
+            artifacts_json={"release_manifest": {"sha256": "aaa"}},
+        )
+        request = factory.post(
+            "/xyn/internal/releases/promote",
+            data=json.dumps({"release_uuid": str(source.id)}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_release_promote(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload.get("id"), str(source.id))
+
+    def test_release_promote_conflict(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        source = Release.objects.create(
+            blueprint_id=blueprint.id,
+            version="v1",
+            status="published",
+            artifacts_json={"release_manifest": {"sha256": "aaa"}},
+        )
+        Release.objects.create(
+            blueprint_id=blueprint.id,
+            version="v1",
+            status="published",
+            artifacts_json={"release_manifest": {"sha256": "aaa"}},
+        )
+        request = factory.post(
+            "/xyn/internal/releases/promote",
+            data=json.dumps({"release_uuid": str(source.id)}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        response = internal_release_promote(request)
+        self.assertEqual(response.status_code, 409)
+
+    def test_planner_selects_remote_deploy_slice(self):
+        blueprint = Blueprint.objects.create(
+            name="ems.platform",
+            namespace="core",
+            metadata_json={
+                "dns_provider": "route53",
+                "deploy": {"target_instance_id": str(uuid.uuid4()), "primary_fqdn": "ems.xyence.io"},
+            },
+        )
+        module_catalog = _build_module_catalog()
+        run_history = _build_run_history_summary(blueprint)
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=module_catalog,
+            run_history_summary=run_history,
+        )
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertIn("dns.ensure_record.route53", ids)
+        self.assertIn("deploy.apply_remote_compose.ssm", ids)
+        self.assertIn("verify.public_http", ids)
+        module_ids = {
+            ref.get("id")
+            for item in plan.get("work_items", [])
+            for ref in item.get("module_refs", [])
+            if isinstance(ref, dict)
+        }
+        self.assertIn("dns-route53", module_ids)
+        self.assertIn("deploy-ssm-compose", module_ids)
+
+    def test_planner_selects_tls_slice_when_tls_enabled(self):
+        blueprint = Blueprint.objects.create(
+            name="ems.platform",
+            namespace="core",
+            metadata_json={
+                "dns_provider": "route53",
+                "deploy": {"target_instance_id": str(uuid.uuid4()), "primary_fqdn": "ems.xyence.io"},
+                "tls": {"mode": "nginx+acme", "acme_email": "admin@xyence.io"},
+            },
+        )
+        module_catalog = _build_module_catalog()
+        run_history = _build_run_history_summary(blueprint)
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=module_catalog,
+            run_history_summary=run_history,
+        )
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertIn("tls.acme_http01", ids)
+        self.assertIn("ingress.nginx_tls_configure", ids)
+        self.assertIn("verify.public_https", ids)
+        module_ids = {
+            ref.get("id")
+            for item in plan.get("work_items", [])
+            for ref in item.get("module_refs", [])
+            if isinstance(ref, dict)
+        }
+        self.assertIn("ingress-nginx-acme", module_ids)
+
+    def test_planner_selects_traefik_module_for_host_ingress(self):
+        blueprint = Blueprint.objects.create(
+            name="ems.platform",
+            namespace="core",
+            metadata_json={
+                "dns_provider": "route53",
+                "deploy": {"target_instance_id": str(uuid.uuid4()), "primary_fqdn": "bedrock.xyence.io"},
+                "tls": {"mode": "host-ingress", "provider": "traefik", "acme_email": "admin@xyence.io"},
+            },
+        )
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=_build_module_catalog(),
+            run_history_summary=_build_run_history_summary(blueprint),
+        )
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertIn("verify.public_https", ids)
+        self.assertNotIn("tls.acme_http01", ids)
+        self.assertNotIn("ingress.nginx_tls_configure", ids)
+        module_ids = {
+            ref.get("id")
+            for item in plan.get("work_items", [])
+            for ref in item.get("module_refs", [])
+            if isinstance(ref, dict)
+        }
+        self.assertIn("ingress-traefik-acme", module_ids)
+        self.assertNotIn("ingress-nginx-acme", module_ids)
+
+    def test_host_ingress_plan_omits_nginx_tasks_even_when_no_gaps(self):
+        blueprint = Blueprint.objects.create(
+            name="ems.platform",
+            namespace="core",
+            metadata_json={
+                "dns_provider": "route53",
+                "deploy": {"target_instance_id": str(uuid.uuid4()), "primary_fqdn": "bedrock.xyence.io"},
+                "tls": {"mode": "host-ingress", "provider": "traefik", "acme_email": "admin@xyence.io"},
+            },
+        )
+        run_history = {
+            "acceptance_checks_status": [{"id": "remote_https_health", "status": "pass"}],
+            "completed_work_items": [],
+        }
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=_build_module_catalog(),
+            run_history_summary=run_history,
+        )
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertNotIn("tls.acme_http01", ids)
+        self.assertNotIn("ingress.nginx_tls_configure", ids)
+
+    def test_planner_uses_release_target_for_remote_slices(self):
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core", metadata_json={})
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="manager-demo",
+            environment="manager-demo",
+            target_instance_ref=str(uuid.uuid4()),
+            fqdn="ems.xyence.io",
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            runtime_json={"type": "docker-compose", "transport": "ssm"},
+            tls_json={"mode": "nginx+acme", "acme_email": "admin@xyence.io"},
+            env_json={},
+            secret_refs_json=[],
+        )
+        release_payload = _release_target_payload(target)
+        module_catalog = _build_module_catalog()
+        run_history = _build_run_history_summary(blueprint, release_payload)
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=module_catalog,
+            run_history_summary=run_history,
+            release_target=release_payload,
+        )
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertIn("dns.ensure_record.route53", ids)
+        self.assertIn("deploy.apply_remote_compose.ssm", ids)
+        self.assertIn("tls.acme_http01", ids)
+        self.assertIn("ingress.nginx_tls_configure", ids)
+        self.assertIn("verify.public_https", ids)
+        self.assertEqual(plan.get("release_target_id"), str(target.id))
+        self.assertEqual(plan.get("release_target_name"), target.name)
+        build_publish = next(
+            (
+                item
+                for item in plan.get("work_items", [])
+                if item.get("id") in {"build.publish_images.container", "build.publish_images.components"}
+            ),
+            None,
+        )
+        if build_publish is not None:
+            self.assertIn("config", build_publish)
+        schema = self._load_schema("implementation_plan.v1.schema.json")
+        errors = list(Draft202012Validator(schema).iter_errors(plan))
+        self.assertEqual(errors, [], f"Schema errors: {errors}")
+
+    def test_planner_build_images_from_components(self):
+        blueprint = Blueprint.objects.create(
+            name="subscriber-notes",
+            namespace="xyence.demo",
+            spec_text=json.dumps(
+                {
+                    "releaseSpec": {
+                        "metadata": {"namespace": "xyence.demo"},
+                        "repoTargets": [
+                            {
+                                "name": "xyn-ui",
+                                "url": "https://github.com/Xyence/xyn-ui",
+                                "ref": "main",
+                                "path_root": ".",
+                            },
+                            {
+                                "name": "xyn-api",
+                                "url": "https://github.com/Xyence/xyn-api",
+                                "ref": "main",
+                                "path_root": ".",
+                            },
+                        ],
+                        "components": [
+                            {
+                                "name": "web",
+                                "build": {
+                                    "repoTarget": "xyn-ui",
+                                    "context": "apps/notes-ui",
+                                    "dockerfile": "apps/notes-ui/Dockerfile",
+                                },
+                            },
+                            {
+                                "name": "api",
+                                "build": {
+                                    "repoTarget": "xyn-api",
+                                    "context": "apps/notes-api",
+                                    "dockerfile": "apps/notes-api/Dockerfile",
+                                },
+                            },
+                        ],
+                    }
+                }
+            ),
+        )
+        release_target = {
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "dns": {"provider": "route53"},
+            "tls": {"mode": "host-ingress"},
+            "fqdn": "subscriber-notes.xyence.io",
+            "target_instance_id": str(uuid.uuid4()),
+        }
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=_build_module_catalog(),
+            run_history_summary=_build_run_history_summary(blueprint, release_target),
+            release_target=release_target,
+        )
+        build_item = next(
+            item for item in plan.get("work_items", []) if item.get("id") == "build.publish_images.components"
+        )
+        self.assertEqual(len(build_item.get("repo_targets", [])), 2)
+        build_images = build_item.get("config", {}).get("images", [])
+        self.assertEqual({entry.get("service") for entry in build_images}, {"web", "api"})
+        self.assertEqual(build_item.get("config", {}).get("blueprint_namespace"), "xyence.demo")
+        self.assertEqual(build_item.get("config", {}).get("blueprint_repo_slug"), blueprint.repo_slug)
+
+    def test_planner_requires_full_repo_targets_for_build_components(self):
+        blueprint = Blueprint.objects.create(
+            name="home-ems",
+            namespace="core",
+            spec_text=json.dumps(
+                {
+                    "releaseSpec": {
+                        "metadata": {"namespace": "core"},
+                        "repoTargets": [{"name": "xyn-ui"}, {"name": "xyn-api"}],
+                        "components": [
+                            {
+                                "name": "web",
+                                "build": {"repoTarget": "xyn-ui", "context": "services/web", "dockerfile": "Dockerfile"},
+                            },
+                            {
+                                "name": "api",
+                                "build": {"repoTarget": "xyn-api", "context": "services/api", "dockerfile": "Dockerfile"},
+                            },
+                        ],
+                    }
+                }
+            ),
+        )
+        release_target = {
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "dns": {"provider": "route53"},
+            "tls": {"mode": "host-ingress"},
+            "fqdn": "home-ems.xyence.io",
+            "target_instance_id": str(uuid.uuid4()),
+        }
+        with self.assertRaisesRegex(RuntimeError, "missing required fields"):
+            _generate_implementation_plan(
+                blueprint,
+                module_catalog=_build_module_catalog(),
+                run_history_summary=_build_run_history_summary(blueprint, release_target),
+                release_target=release_target,
+            )
+
+    def test_planner_infers_component_repo_target_mapping_from_name_and_context(self):
+        blueprint = Blueprint.objects.create(
+            name="home-ems",
+            namespace="core",
+            spec_text=json.dumps(
+                {
+                    "releaseSpec": {
+                        "metadata": {"namespace": "core"},
+                        "repoTargets": [
+                            {"name": "app-api", "url": "https://github.com/Xyence/xyn-api", "ref": "main", "path_root": "."},
+                            {"name": "app-web", "url": "https://github.com/Xyence/xyn-ui", "ref": "main", "path_root": "."},
+                        ],
+                        "components": [
+                            {
+                                "name": "app-api",
+                                "build": {"context": "services/demo/api", "dockerfile": "Dockerfile"},
+                            },
+                            {
+                                "name": "app-web",
+                                "build": {"context": "services/demo/web", "dockerfile": "Dockerfile"},
+                            },
+                        ],
+                    }
+                }
+            ),
+        )
+        release_target = {
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "dns": {"provider": "route53"},
+            "tls": {"mode": "host-ingress"},
+            "fqdn": "home-ems.xyence.io",
+            "target_instance_id": str(uuid.uuid4()),
+        }
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=_build_module_catalog(),
+            run_history_summary=_build_run_history_summary(blueprint, release_target),
+            release_target=release_target,
+        )
+        build_item = next(
+            item for item in plan.get("work_items", []) if item.get("id") == "build.publish_images.components"
+        )
+        build_images = build_item.get("config", {}).get("images", [])
+        repo_by_service = {entry.get("service"): entry.get("repo") for entry in build_images}
+        self.assertEqual(repo_by_service.get("app-api"), "app-api")
+        self.assertEqual(repo_by_service.get("app-web"), "app-web")
+
+    def test_planner_fails_when_runtime_mode_compose_images_without_components(self):
+        blueprint = Blueprint.objects.create(
+            name="home-ems",
+            namespace="core",
+            spec_text=json.dumps(
+                {
+                    "releaseSpec": {
+                        "metadata": {"namespace": "core"},
+                        "components": [],
+                    }
+                }
+            ),
+        )
+        release_target = {
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "dns": {"provider": "route53"},
+            "tls": {"mode": "host-ingress"},
+            "fqdn": "home-ems.xyence.io",
+            "target_instance_id": str(uuid.uuid4()),
+        }
+        with self.assertRaisesRegex(RuntimeError, "requires releaseSpec.components"):
+            _generate_implementation_plan(
+                blueprint,
+                module_catalog=_build_module_catalog(),
+                run_history_summary=_build_run_history_summary(blueprint, release_target),
+                release_target=release_target,
+            )
+
+    def test_planner_defaults_repo_targets_when_omitted_and_build_config_present(self):
+        blueprint = Blueprint.objects.create(
+            name="auto-repo-target",
+            namespace="core",
+            spec_text=json.dumps(
+                {
+                    "releaseSpec": {
+                        "metadata": {"namespace": "core"},
+                        "components": [
+                            {
+                                "name": "web",
+                                "build": {"context": "services/web", "dockerfile": "Dockerfile"},
+                            },
+                            {
+                                "name": "api",
+                                "build": {"context": "services/api", "dockerfile": "Dockerfile"},
+                            },
+                        ],
+                    }
+                }
+            ),
+        )
+        release_target = {
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "dns": {"provider": "route53"},
+            "tls": {"mode": "host-ingress"},
+            "fqdn": "auto-repo-target.xyence.io",
+            "target_instance_id": str(uuid.uuid4()),
+        }
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=_build_module_catalog(),
+            run_history_summary=_build_run_history_summary(blueprint, release_target),
+            release_target=release_target,
+        )
+        build_item = next(
+            item for item in plan.get("work_items", []) if item.get("id") == "build.publish_images.components"
+        )
+        build_images = build_item.get("config", {}).get("images", [])
+        repo_by_service = {entry.get("service"): entry.get("repo") for entry in build_images}
+        self.assertEqual(repo_by_service.get("web"), "xyn-ui")
+        self.assertEqual(repo_by_service.get("api"), "xyn-api")
+
+    def test_planner_defaults_repo_targets_when_omitted_and_image_config_present(self):
+        blueprint = Blueprint.objects.create(
+            name="auto-repo-target-image-only",
+            namespace="core",
+            spec_text=json.dumps(
+                {
+                    "releaseSpec": {
+                        "metadata": {"namespace": "core"},
+                        "components": [
+                            {
+                                "name": "api",
+                                "image": "ghcr.io/example/api:1.2.3",
+                            }
+                        ],
+                    }
+                }
+            ),
+        )
+        release_target = {
+            "runtime": {"type": "docker-compose", "transport": "ssm", "mode": "compose_images"},
+            "dns": {"provider": "route53"},
+            "tls": {"mode": "host-ingress"},
+            "fqdn": "auto-repo-target-image-only.xyence.io",
+            "target_instance_id": str(uuid.uuid4()),
+        }
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=_build_module_catalog(),
+            run_history_summary=_build_run_history_summary(blueprint, release_target),
+            release_target=release_target,
+        )
+        build_item = next(
+            item for item in plan.get("work_items", []) if item.get("id") == "build.publish_images.container"
+        )
+        self.assertTrue(build_item.get("repo_targets"))
+
+    def test_failed_dependency_work_items_detects_failed_prerequisite(self):
+        source_run = Run.objects.create(
+            entity_type="blueprint",
+            entity_id=uuid.uuid4(),
+            status="running",
+            summary="source run",
+        )
+        _write_run_artifact(
+            source_run,
+            "implementation_plan.json",
+            {
+                "work_items": [
+                    {"id": "build.publish_images.container", "depends_on": []},
+                    {"id": "deploy.apply_remote_compose.pull", "depends_on": ["build.publish_images.container"]},
+                ]
+            },
+            "implementation_plan",
+        )
+        DevTask.objects.create(
+            title="build",
+            task_type="codegen",
+            status="failed",
+            source_entity_type="blueprint",
+            source_entity_id=uuid.uuid4(),
+            source_run=source_run,
+            work_item_id="build.publish_images.container",
+        )
+        blocked = DevTask.objects.create(
+            title="deploy",
+            task_type="codegen",
+            status="queued",
+            source_entity_type="blueprint",
+            source_entity_id=uuid.uuid4(),
+            source_run=source_run,
+            work_item_id="deploy.apply_remote_compose.pull",
+        )
+        self.assertEqual(_failed_dependency_work_items(blocked), ["build.publish_images.container"])
+
+    def test_planner_does_not_require_blueprint_metadata_deploy(self):
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core", metadata_json={})
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="manager-demo",
+            target_instance_ref=str(uuid.uuid4()),
+            fqdn="ems.xyence.io",
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            runtime_json={"type": "docker-compose", "transport": "ssm"},
+            tls_json={"mode": "none"},
+        )
+        release_payload = _release_target_payload(target)
+        plan = _generate_implementation_plan(
+            blueprint,
+            module_catalog=_build_module_catalog(),
+            run_history_summary=_build_run_history_summary(blueprint, release_payload),
+            release_target=release_payload,
+        )
+        ids = {item.get("id") for item in plan.get("work_items", [])}
+        self.assertIn("dns.ensure_record.route53", ids)
+        self.assertIn("deploy.apply_remote_compose.ssm", ids)
+        self.assertIn("verify.public_http", ids)
+
+    def test_dns_noop_when_record_matches(self):
+        with mock.patch("xyn_orchestrator.worker_tasks._ensure_route53_record") as ensure_record:
+            with mock.patch("xyn_orchestrator.worker_tasks._verify_route53_record", return_value=True):
+                result = _route53_ensure_with_noop("ems.xyence.io", "Z123", "1.2.3.4")
+        self.assertEqual(result.get("outcome"), "noop")
+        ensure_record.assert_not_called()
+
+    def test_remote_deploy_noop_when_public_verify_passes(self):
+        target_instance = {"id": "inst-1", "name": "xyn-seed-dev-1", "instance_id": "i-123", "aws_region": "us-west-2"}
+        with mock.patch("xyn_orchestrator.worker_tasks._public_verify", return_value=(True, [])):
+            with mock.patch("xyn_orchestrator.worker_tasks._run_ssm_commands") as run_ssm:
+                payload = _run_remote_deploy("run-1", "ems.xyence.io", target_instance, "secret", None)
+        self.assertEqual(payload.get("deploy_result", {}).get("outcome"), "noop")
+        self.assertFalse(payload.get("ssm_invoked"))
+        run_ssm.assert_not_called()
+
+    def test_dns_route53_module_spec_fields(self):
+        spec_path = Path(__file__).resolve().parents[2] / "registry" / "modules" / "dns-route53.json"
+        data = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("kind"), "Module")
+        metadata = data.get("metadata", {})
+        self.assertEqual(metadata.get("name"), "dns-route53")
+        self.assertEqual(metadata.get("namespace"), "core")
+        module_spec = data.get("module", {})
+        self.assertIn("dns.route53.records", module_spec.get("capabilitiesProvided", []))
+
+    def test_runtime_web_static_module_spec_fields(self):
+        spec_path = (
+            Path(__file__).resolve().parents[2] / "registry" / "modules" / "runtime-web-static-nginx.json"
+        )
+        data = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("kind"), "Module")
+        metadata = data.get("metadata", {})
+        self.assertEqual(metadata.get("name"), "runtime-web-static-nginx")
+        self.assertEqual(metadata.get("namespace"), "core")
+        module_spec = data.get("module", {})
+        self.assertIn("runtime.web.static", module_spec.get("capabilitiesProvided", []))
+        self.assertIn("runtime.reverse_proxy.http", module_spec.get("capabilitiesProvided", []))
+
+    def test_deploy_ssm_compose_module_spec_fields(self):
+        spec_path = (
+            Path(__file__).resolve().parents[2] / "registry" / "modules" / "deploy-ssm-compose.json"
+        )
+        data = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("kind"), "Module")
+        metadata = data.get("metadata", {})
+        self.assertEqual(metadata.get("name"), "deploy-ssm-compose")
+        self.assertEqual(metadata.get("namespace"), "core")
+        module_spec = data.get("module", {})
+        self.assertIn("runtime.compose.apply_remote", module_spec.get("capabilitiesProvided", []))
+
+    def test_compute_repo_name_slugify(self):
+        self.assertEqual(_slugify("  XYENCE.Demo  "), "xyence-demo")
+        repo_name = _compute_repo_name("XYN", "xyence.demo", "Subscriber Notes", "Web/API")
+        self.assertEqual(repo_name, "xyn/xyence-demo/subscriber-notes/web-api")
+
+    def test_ecr_ensure_repo_creates_when_missing(self):
+        class _MissingRepo(Exception):
+            pass
+
+        fake_client = mock.Mock()
+        fake_client.exceptions = type("Exceptions", (), {"RepositoryNotFoundException": _MissingRepo})
+        fake_client.describe_repositories.side_effect = _MissingRepo()
+
+        _ecr_ensure_repo(
+            fake_client,
+            "xyn/core/subscriber-notes/web",
+            tags={"xyn:managed": "true", "xyn:component": "web"},
+            scan_on_push=True,
+        )
+
+        fake_client.create_repository.assert_called_once()
+        create_kwargs = fake_client.create_repository.call_args.kwargs
+        self.assertEqual(create_kwargs.get("repositoryName"), "xyn/core/subscriber-notes/web")
+        self.assertEqual(create_kwargs.get("imageScanningConfiguration"), {"scanOnPush": True})
+        self.assertIn({"Key": "xyn:managed", "Value": "true"}, create_kwargs.get("tags", []))
+
+    @mock.patch("xyn_orchestrator.worker_tasks.subprocess.run")
+    @mock.patch("xyn_orchestrator.worker_tasks._docker_login_source_registry_if_needed")
+    @mock.patch("xyn_orchestrator.worker_tasks._docker_login_ecr")
+    @mock.patch("xyn_orchestrator.worker_tasks.boto3.client")
+    def test_build_publish_uses_deterministic_repo_name(
+        self,
+        boto_client,
+        docker_login_ecr,
+        source_registry_login,
+        subprocess_run,
+    ):
+        class _RepoMissing(Exception):
+            pass
+
+        class _FakeEcr:
+            def __init__(self):
+                self.exceptions = type("Exceptions", (), {"RepositoryNotFoundException": _RepoMissing})
+                self.created = []
+                self.described_images = []
+
+            def describe_repositories(self, repositoryNames):
+                repo_name = repositoryNames[0]
+                if repo_name not in self.created:
+                    raise _RepoMissing()
+                return {"repositories": [{"repositoryName": repo_name}]}
+
+            def create_repository(self, **kwargs):
+                self.created.append(kwargs["repositoryName"])
+                return {"repository": {"repositoryName": kwargs["repositoryName"]}}
+
+            def describe_images(self, repositoryName, imageIds):
+                self.described_images.append((repositoryName, imageIds))
+                return {"imageDetails": [{"imageDigest": "sha256:abc123"}]}
+
+        fake_sts = mock.Mock()
+        fake_sts.get_caller_identity.return_value = {"Account": "123456789012"}
+        fake_ecr = _FakeEcr()
+        boto_client.side_effect = lambda service, region_name=None: fake_sts if service == "sts" else fake_ecr
+        docker_login_ecr.return_value = "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+        source_registry_login.return_value = None
+        subprocess_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+
+        build_result, _manifest, _images_map = _build_publish_images(
+            release_id="v101",
+            images=[{"name": "web", "service": "web", "image_uri": "public.ecr.aws/nginx/nginx:latest"}],
+            registry_cfg={"provider": "ecr", "region": "us-east-1", "repository_prefix": "xyn"},
+            repo_sources={},
+            blueprint_id="bp-123",
+            blueprint_namespace="xyence.demo",
+            blueprint_repo_slug="subscriber-notes",
+        )
+
+        expected_repo = "xyn/xyence-demo/subscriber-notes/web"
+        self.assertTrue(any(repo == expected_repo for repo, _ in fake_ecr.described_images))
+        image_entry = build_result.get("images", [])[0]
+        self.assertEqual(image_entry.get("repository"), expected_repo)
+        self.assertIn(expected_repo, image_entry.get("image_uri", ""))
+
+    @mock.patch("xyn_orchestrator.worker_tasks.subprocess.run")
+    @mock.patch("xyn_orchestrator.worker_tasks._docker_login_source_registry_if_needed")
+    @mock.patch("xyn_orchestrator.worker_tasks._docker_login_ecr")
+    @mock.patch("xyn_orchestrator.worker_tasks.boto3.client")
+    def test_build_publish_ghcr_source_pull_failure_falls_back_to_placeholder(
+        self,
+        boto_client,
+        docker_login_ecr,
+        source_registry_login,
+        subprocess_run,
+    ):
+        class _RepoMissing(Exception):
+            pass
+
+        class _FakeEcr:
+            def __init__(self):
+                self.exceptions = type("Exceptions", (), {"RepositoryNotFoundException": _RepoMissing})
+                self.created = []
+                self.described_images = []
+
+            def describe_repositories(self, repositoryNames):
+                repo_name = repositoryNames[0]
+                if repo_name not in self.created:
+                    raise _RepoMissing()
+                return {"repositories": [{"repositoryName": repo_name}]}
+
+            def create_repository(self, **kwargs):
+                self.created.append(kwargs["repositoryName"])
+                return {"repository": {"repositoryName": kwargs["repositoryName"]}}
+
+            def describe_images(self, repositoryName, imageIds):
+                self.described_images.append((repositoryName, imageIds))
+                return {"imageDetails": [{"imageDigest": "sha256:def456"}]}
+
+        fake_sts = mock.Mock()
+        fake_sts.get_caller_identity.return_value = {"Account": "123456789012"}
+        fake_ecr = _FakeEcr()
+        boto_client.side_effect = lambda service, region_name=None: fake_sts if service == "sts" else fake_ecr
+        docker_login_ecr.return_value = "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+        source_registry_login.return_value = None
+
+        pull_fail = mock.Mock(returncode=1, stdout="", stderr="pull denied")
+        build_ok = mock.Mock(returncode=0, stdout="", stderr="")
+        push_ok = mock.Mock(returncode=0, stdout="", stderr="")
+        subprocess_run.side_effect = [pull_fail, build_ok, push_ok]
+
+        build_result, _manifest, _images_map = _build_publish_images(
+            release_id="v102",
+            images=[{"name": "api", "service": "api", "image_uri": "ghcr.io/xyence/ems-api:0.1.0"}],
+            registry_cfg={"provider": "ecr", "region": "us-east-1", "repository_prefix": "xyn"},
+            repo_sources={},
+            blueprint_id="bp-123",
+            blueprint_namespace="xyence.demo",
+            blueprint_repo_slug="subscriber-notes",
+        )
+
+        self.assertEqual(build_result.get("outcome"), "succeeded")
+        image_entry = build_result.get("images", [])[0]
+        self.assertTrue(image_entry.get("pushed"))
+        self.assertEqual(image_entry.get("source"), "placeholder")
+
+    def test_repo_slug_stable_on_blueprint_rename(self):
+        blueprint = Blueprint.objects.create(name="Subscriber Notes", namespace="xyence.demo")
+        original_slug = blueprint.repo_slug
+        blueprint.name = "Subscriber Notes Renamed"
+        blueprint.save(update_fields=["name", "updated_at"])
+        blueprint.refresh_from_db()
+        self.assertEqual(blueprint.repo_slug, original_slug)
+
+    def test_ingress_nginx_acme_module_spec_fields(self):
+        spec_path = (
+            Path(__file__).resolve().parents[2] / "registry" / "modules" / "ingress-nginx-acme.json"
+        )
+        data = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("kind"), "Module")
+        metadata = data.get("metadata", {})
+        self.assertEqual(metadata.get("name"), "ingress-nginx-acme")
+        self.assertEqual(metadata.get("namespace"), "core")
+        module_spec = data.get("module", {})
+        self.assertIn("ingress.tls.acme_http01", module_spec.get("capabilitiesProvided", []))
+        self.assertIn("ingress.nginx.reverse_proxy", module_spec.get("capabilitiesProvided", []))
+
+    def test_ingress_traefik_acme_module_spec_fields(self):
+        spec_path = (
+            Path(__file__).resolve().parents[2] / "registry" / "modules" / "ingress-traefik-acme.json"
+        )
+        data = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("kind"), "Module")
+        metadata = data.get("metadata", {})
+        self.assertEqual(metadata.get("name"), "ingress-traefik-acme")
+        self.assertEqual(metadata.get("namespace"), "core")
+        module_spec = data.get("module", {})
+        self.assertIn("ingress.tls.acme_http01", module_spec.get("capabilitiesProvided", []))
+        self.assertIn("ingress.traefik.reverse_proxy", module_spec.get("capabilitiesProvided", []))
+
+    def test_prod_web_scaffold_outputs(self):
+        work_item = {
+            "id": "compose-stack-scaffold",
+            "repo_targets": [
+                {
+                    "name": "xyn-api",
+                    "url": "https://example.com/xyn-api",
+                    "ref": "main",
+                    "path_root": "services/demo-stack",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "outputs": {"paths": ["deploy/docker-compose.yml", "deploy/README.md"]},
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            _apply_scaffold_for_work_item(work_item, repo_dir)
+            compose = Path(repo_dir, "services/demo-stack/deploy/docker-compose.yml")
+            readme = Path(repo_dir, "services/demo-stack/deploy/README.md")
+            self.assertTrue(compose.exists())
+            self.assertTrue(readme.exists())
+
+    def test_ui_dockerfile_builds_static_assets(self):
+        work_item = {
+            "id": "web-scaffold",
+            "repo_targets": [
+                {
+                    "name": "xyn-ui",
+                    "url": "https://example.com/xyn-ui",
+                    "ref": "main",
+                    "path_root": "services/demo/web",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "scaffold": {
+                "files": [
+                    {"path": "Dockerfile", "content": "FROM nginx:alpine\nCOPY dist /usr/share/nginx/html\n"},
+                    {"path": "nginx.conf", "content": "server { listen 8080; }\n"},
+                ]
+            },
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            _apply_scaffold_for_work_item(work_item, repo_dir)
+            dockerfile = Path(repo_dir, "services/demo/web/Dockerfile").read_text(encoding="utf-8")
+            self.assertIn("FROM nginx:alpine", dockerfile)
+            nginx_conf = Path(repo_dir, "services/demo/web/nginx.conf").read_text(encoding="utf-8")
+            self.assertIn("listen 8080", nginx_conf)
+
+    def test_codegen_patch_can_apply_to_clean_repo(self):
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        work_item = {
+            "id": "api-scaffold",
+            "repo_targets": [
+                {
+                    "name": "xyn-api",
+                    "url": "https://example.com/xyn-api",
+                    "ref": "main",
+                    "path_root": "services/demo/api",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "outputs": {"paths": ["app/main.py"]},
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_dir, check=True)
+            Path(repo_dir, ".gitignore").write_text("# test\n", encoding="utf-8")
+            subprocess.run(["git", "add", ".gitignore"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+            _apply_scaffold_for_work_item(work_item, repo_dir)
+            diff = _collect_git_diff(repo_dir)
+            self.assertIn("services/demo/api/app/main.py", diff)
+
+            subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "apply", "-"], input=diff, text=True, cwd=repo_dir, check=True)
+            self.assertTrue(Path(repo_dir, "services/demo/api/app/main.py").exists())
+
+    def test_scaffold_verify_commands(self):
+        scaffold = {
+            "id": "api-scaffold",
+            "repo_targets": [
+                {
+                    "name": "xyn-api",
+                    "url": "https://example.com/xyn-api",
+                    "ref": "main",
+                    "path_root": "services/demo/api",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "outputs": {"paths": ["app/main.py", "README.md"]},
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            _apply_scaffold_for_work_item(scaffold, repo_dir)
+            app_root = Path(repo_dir, "services/demo/api")
+            self.assertTrue((app_root / "app/main.py").exists())
+            self.assertTrue((app_root / "README.md").exists())
+
+    def test_codegen_no_changes_marks_failure(self):
+        errors = []
+        success, noop = _mark_noop_codegen(False, "noop-item", errors, verify_ok=False)
+        self.assertFalse(success)
+        self.assertFalse(noop)
+        self.assertEqual(errors[0]["code"], "no_changes")
+
+    def test_ui_scaffold_writes_imports(self):
+        work_item = {
+            "id": "web-scaffold",
+            "repo_targets": [
+                {
+                    "name": "xyn-ui",
+                    "url": "https://example.com/xyn-ui",
+                    "ref": "main",
+                    "path_root": "services/demo/web",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "scaffold": {
+                "files": [
+                    {"path": "src/App.tsx", "content": "export default function App(){return null}\n"},
+                    {"path": "src/main.tsx", "content": "import App from './App'\n"},
+                    {"path": "src/routes.tsx", "content": "export const routes = []\n"},
+                ]
+            },
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            _apply_scaffold_for_work_item(work_item, repo_dir)
+            app_root = Path(repo_dir, "services/demo/web/src")
+            expected = [
+                "App.tsx",
+                "main.tsx",
+                "routes.tsx",
+            ]
+            for rel in expected:
+                self.assertTrue((app_root / rel).exists(), rel)
+
+    def test_compose_chassis_outputs(self):
+        work_item = {
+            "id": "compose-chassis",
+            "repo_targets": [
+                {
+                    "name": "xyn-api",
+                    "url": "https://example.com/xyn-api",
+                    "ref": "main",
+                    "path_root": "services/demo/stack",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "scaffold": {
+                "files": [
+                    {"path": "docker-compose.yml", "content": "services:\n  api:\n    image: example/api:latest\n"},
+                    {"path": "nginx/nginx.conf", "content": "events {}\nhttp {}\n"},
+                    {"path": "scripts/verify.sh", "content": "#!/usr/bin/env bash\nexit 0\n", "executable": True},
+                ]
+            },
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            _apply_scaffold_for_work_item(work_item, repo_dir)
+            root = Path(repo_dir, "services/demo/stack")
+            compose_path = root / "docker-compose.yml"
+            nginx_path = root / "nginx/nginx.conf"
+            verify_path = root / "scripts/verify.sh"
+            self.assertTrue(compose_path.exists())
+            self.assertTrue(nginx_path.exists())
+            self.assertTrue(verify_path.exists())
+            data = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+            self.assertIn("services", data)
+            self.assertIn("api", data["services"])
+            self.assertTrue(os.access(verify_path, os.X_OK))
+
+    def test_ui_login_uses_api_health(self):
+        work_item = {
+            "id": "web-login",
+            "repo_targets": [
+                {
+                    "name": "xyn-ui",
+                    "url": "https://example.com/xyn-ui",
+                    "ref": "main",
+                    "path_root": "services/demo/web",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "scaffold": {
+                "files": [
+                    {"path": "src/auth/Login.tsx", "content": "fetch('/api/health'); fetch('/api/me');\n"},
+                ]
+            },
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            _apply_scaffold_for_work_item(work_item, repo_dir)
+            login_path = Path(repo_dir, "services/demo/web/src/auth/Login.tsx")
+            self.assertTrue(login_path.exists())
+            self.assertIn("/api/health", login_path.read_text(encoding="utf-8"))
+            self.assertIn("/api/me", login_path.read_text(encoding="utf-8"))
+
+    def test_stage_all_stages_untracked_files(self):
+        with tempfile.TemporaryDirectory() as repo_dir:
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo_dir, check=True)
+            Path(repo_dir, "new-file.txt").write_text("hello", encoding="utf-8")
+            self.assertEqual(_stage_all(repo_dir), 0)
+            subprocess.run(["git", "commit", "-m", "test"], cwd=repo_dir, check=True)
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo_dir,
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip()
+            self.assertEqual(status, "")
+
+    def test_generic_api_scaffold_file_creation(self):
+        work_item = {
+            "id": "api-authn",
+            "repo_targets": [
+                {
+                    "name": "xyn-api",
+                    "url": "https://example.com/xyn-api",
+                    "ref": "main",
+                    "path_root": "services/demo/api",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "scaffold": {"files": [{"path": "app/auth.py", "content": "def decode_token(token):\n    return {'sub': token}\n"}]},
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            _apply_scaffold_for_work_item(work_item, repo_dir)
+            app_root = Path(repo_dir, "services/demo/api")
+            self.assertTrue((app_root / "app/auth.py").exists())
+
+    def test_devices_sqlite_persistence(self):
+        scaffold = {
+            "id": "api-scaffold",
+            "repo_targets": [
+                {
+                    "name": "xyn-api",
+                    "url": "https://example.com/xyn-api",
+                    "ref": "main",
+                    "path_root": "services/demo/api",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "outputs": {"paths": ["models.py"]},
+        }
+        db_foundation = {
+            "id": "api-db-foundation",
+            "repo_targets": [
+                {
+                    "name": "xyn-api",
+                    "url": "https://example.com/xyn-api",
+                    "ref": "main",
+                    "path_root": "services/demo/api",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "outputs": {"paths": ["db.py"]},
+        }
+        devices_postgres = {
+            "id": "api-devices-postgres",
+            "repo_targets": [
+                {
+                    "name": "xyn-api",
+                    "url": "https://example.com/xyn-api",
+                    "ref": "main",
+                    "path_root": "services/demo/api",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "outputs": {"paths": ["routes/devices.py"]},
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            _apply_scaffold_for_work_item(scaffold, repo_dir)
+            _apply_scaffold_for_work_item(db_foundation, repo_dir)
+            _apply_scaffold_for_work_item(devices_postgres, repo_dir)
+            api_root = Path(repo_dir, "services/demo/api")
+            self.assertTrue((api_root / "models.py").exists())
+            self.assertTrue((api_root / "db.py").exists())
+            self.assertTrue((api_root / "routes/devices.py").exists())
+
+    def test_api_scaffold_writes_dockerfile(self):
+        work_item = {
+            "id": "api-build",
+            "repo_targets": [
+                {
+                    "name": "xyn-api",
+                    "url": "https://example.com/xyn-api",
+                    "ref": "main",
+                    "path_root": "services/demo/api",
+                    "auth": "local",
+                    "allow_write": True,
+                }
+            ],
+            "scaffold": {"files": [{"path": "Dockerfile", "content": "FROM python:3.12-slim\n"}]},
+        }
+        with tempfile.TemporaryDirectory() as repo_dir:
+            _apply_scaffold_for_work_item(work_item, repo_dir)
+            dockerfile = Path(repo_dir, "services/demo/api/Dockerfile")
+            self.assertTrue(dockerfile.exists())
+
+    def test_legacy_work_item_capabilities_fallback(self):
+        work_item = {"id": "remote-deploy-compose-ssm"}
+        caps = _work_item_capabilities(work_item, "remote-deploy-compose-ssm")
+        self.assertIn("runtime.compose.apply_remote", caps)
+        self.assertIn("deploy.ssm.run_shell", caps)
+
+
+class BlueprintLifecycleApiTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(
+            username=f"staff-{uuid.uuid4().hex[:8]}",
+            email=f"staff-{uuid.uuid4().hex[:8]}@example.com",
+            password="pass",
+            is_staff=True,
+        )
+        self.client.force_login(self.user)
+        self.blueprint = Blueprint.objects.create(name="notes", namespace="core", created_by=self.user, updated_by=self.user)
+        self.instance = ProvisionedInstance.objects.create(name="seed-dev", aws_region="us-east-1", instance_id="i-123")
+        self.target = ReleaseTarget.objects.create(
+            blueprint=self.blueprint,
+            name="notes-dev-default",
+            environment="Dev",
+            target_instance=self.instance,
+            target_instance_ref=str(self.instance.id),
+            fqdn="notes.xyence.io",
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            runtime_json={"remote_root": "/opt/xyn/apps/core-notes", "compose_file_path": "compose.release.yml"},
+            config_json={"xyn_dns_managed": True},
+            created_by=self.user,
+            updated_by=self.user,
+        )
+
+    def test_archive_blueprint_endpoint_sets_status(self):
+        response = self.client.post(f"/xyn/api/blueprints/{self.blueprint.id}/archive")
+        self.assertEqual(response.status_code, 200)
+        self.blueprint.refresh_from_db()
+        self.assertEqual(self.blueprint.status, "archived")
+        self.assertIsNotNone(self.blueprint.archived_at)
+
+    def test_deprovision_requires_type_to_confirm(self):
+        response = self.client.post(
+            f"/xyn/api/blueprints/{self.blueprint.id}/deprovision",
+            data=json.dumps({"confirm_text": "wrong", "mode": "safe"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("confirm_text mismatch", response.content.decode("utf-8"))
+
+    def test_deprovision_creates_run_and_tasks(self):
+        identifier = f"{self.blueprint.namespace}.{self.blueprint.name}"
+        response = self.client.post(
+            f"/xyn/api/blueprints/{self.blueprint.id}/deprovision",
+            data=json.dumps(
+                {
+                    "confirm_text": identifier,
+                    "mode": "stop_services",
+                    "delete_dns": False,
+                    "remove_runtime_markers": True,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        run_id = payload.get("run_id")
+        self.assertTrue(run_id)
+        run = Run.objects.get(id=run_id)
+        self.assertEqual(run.metadata_json.get("operation"), "blueprint_deprovision")
+        self.assertTrue(DevTask.objects.filter(source_run=run).exists())
+        self.blueprint.refresh_from_db()
+        self.assertEqual(self.blueprint.status, "deprovisioning")
+
+    def test_deprovision_plan_warns_when_dns_ownership_unproven(self):
+        self.target.config_json = {}
+        self.target.save(update_fields=["config_json", "updated_at"])
+        response = self.client.get(f"/xyn/api/blueprints/{self.blueprint.id}/deprovision_plan")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["flags"]["can_execute"])
+        self.assertTrue(payload["warnings"])

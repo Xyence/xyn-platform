@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hello App Artifact</title>
+    <style>
+      :root {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 32px;
+        background: #f7f7fb;
+        color: #18202a;
+      }
+      .card {
+        max-width: 720px;
+        background: #fff;
+        border: 1px solid #d6dce5;
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 0 4px 16px rgba(20, 30, 45, 0.06);
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+      p {
+        margin: 8px 0;
+      }
+      pre {
+        margin-top: 16px;
+        background: #0f1722;
+        color: #d9e1ec;
+        border-radius: 8px;
+        padding: 12px;
+        overflow-x: auto;
+      }
+      .ok {
+        color: #0c7a36;
+        font-weight: 700;
+      }
+      .fail {
+        color: #9e1e1e;
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>Hello App Artifact</h1>
+      <p>UI mount: <code>/apps/hello</code></p>
+      <p>API endpoint: <code>/api/apps/hello/ping</code></p>
+      <p id="status">Checking API...</p>
+      <pre id="payload"></pre>
+    </main>
+    <script>
+      (async function () {
+        const statusNode = document.getElementById("status");
+        const payloadNode = document.getElementById("payload");
+        try {
+          const response = await fetch("/api/apps/hello/ping", { credentials: "include" });
+          const payload = await response.json();
+          payloadNode.textContent = JSON.stringify(payload, null, 2);
+          statusNode.className = response.ok ? "ok" : "fail";
+          statusNode.textContent = response.ok ? "API reachable." : "API returned an error.";
+        } catch (error) {
+          statusNode.className = "fail";
+          statusNode.textContent = "API request failed.";
+          payloadNode.textContent = String(error);
+        }
+      })();
+    </script>
+  </body>
+</html>
+

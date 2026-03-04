@@ -1,0 +1,34 @@
+{
+  "artifact": {
+    "id": "core.public-site",
+    "name": "core.public-site",
+    "version": "0.1.0"
+  },
+  "capability": {
+    "visibility": "hidden"
+  },
+  "roles": [
+    {
+      "role": "ui_mount",
+      "scope": "global",
+      "mount_path": "/",
+      "static_dir": "xyn-ui/dist"
+    }
+  ],
+  "surfaces": {
+    "nav": [
+      {
+        "label": "Home",
+        "path": "/",
+        "order": 10
+      }
+    ],
+    "docs": [
+      {
+        "label": "Public Site",
+        "path": "/",
+        "order": 1000
+      }
+    ]
+  }
+}

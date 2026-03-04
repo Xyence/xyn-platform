@@ -1,0 +1,34 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>Blueprint: {{ blueprint.namespace }}.{{ blueprint.name }}</h1>
+    <p>{{ blueprint.description }}</p>
+    <p><a href="/xyn/blueprints/">Back to list</a></p>
+
+    <h2>Revisions</h2>
+    <ul>
+      {% for revision in revisions %}
+        <li>v{{ revision.revision }} — {{ revision.created_at }}</li>
+      {% empty %}
+        <li>No revisions yet.</li>
+      {% endfor %}
+    </ul>
+
+    <h2>Instances</h2>
+    <form method="post" action="/xyn/api/blueprints/{{ blueprint.id }}/instantiate">
+      {% csrf_token %}
+      <div class="submit-row">
+        <button type="submit" name="mode" value="plan">Plan only</button>
+        <button type="submit" name="mode" value="apply">Plan + Apply</button>
+      </div>
+    </form>
+    <ul>
+      {% for instance in instances %}
+        <li>{{ instance.release_id }} — {{ instance.status }} ({{ instance.created_at }})</li>
+      {% empty %}
+        <li>No instances yet.</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endblock %}

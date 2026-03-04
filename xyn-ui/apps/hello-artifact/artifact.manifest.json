@@ -1,0 +1,36 @@
+{
+  "artifact": {
+    "id": "hello-app",
+    "name": "Hello App",
+    "version": "phase1c"
+  },
+  "capability": {
+    "visibility": "hidden"
+  },
+  "surfaces": {
+    "nav": [
+      {
+        "label": "Hello",
+        "path": "/apps/hello",
+        "order": 900,
+        "icon": "Sparkles",
+        "group": "build"
+      }
+    ]
+  },
+  "roles": [
+    {
+      "role": "api_router",
+      "mount_path": "/api/apps/hello",
+      "entrypoint": "xyn_orchestrator.hello_artifact_entrypoint:router",
+      "pythonpath": [
+        "xyn-api/backend"
+      ]
+    },
+    {
+      "role": "ui_mount",
+      "mount_path": "/apps/hello",
+      "static_dir": "xyn-ui/apps/hello-artifact/static"
+    }
+  ]
+}

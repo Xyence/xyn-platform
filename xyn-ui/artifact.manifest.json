@@ -1,0 +1,65 @@
+{
+  "artifact": {
+    "id": "xyn-ui",
+    "name": "xyn-ui",
+    "version": "phase2"
+  },
+  "capability": {
+    "visibility": "hidden"
+  },
+  "roles": [
+    {
+      "role": "ui_mount",
+      "mount_path": "/",
+      "static_dir": "xyn-ui/dist",
+      "dev_proxy_url": "http://localhost:5173"
+    }
+  ],
+  "surfaces": {
+    "manage": [
+      {
+        "label": "Workbench",
+        "path": "/apps/workbench",
+        "order": 100
+      }
+    ],
+    "docs": [
+      {
+        "label": "UI Runtime Contract",
+        "path": "/w/:workspaceId/workbench",
+        "order": 1000
+      }
+    ]
+  },
+  "payload": {
+    "deploy": {
+      "mode": "container",
+      "service": "xyn-ui",
+      "images": {
+        "xyn_ui": {
+          "image": "ghcr.io/xyence/xyn-ui",
+          "tag": "latest"
+        }
+      },
+      "manifests": {
+        "type": "compose",
+        "ref": "backend/registry/modules/runtime-web-static-nginx.json"
+      }
+    },
+    "configSchema": {
+      "fqdn": {
+        "type": "string",
+        "required": true
+      },
+      "workspaceId": {
+        "type": "string",
+        "required": true
+      },
+      "target_environment": {
+        "type": "string",
+        "enum": ["local", "k8s"],
+        "default": "local"
+      }
+    }
+  }
+}

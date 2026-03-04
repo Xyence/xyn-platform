@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ems}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ems}
+      POSTGRES_DB: ${POSTGRES_DB:-ems}
+    volumes:
+      - ems_pgdata:/var/lib/postgresql/data
+
+  ems-api:
+    build:
+      context: ../../apps/ems-api
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-ems}:${POSTGRES_PASSWORD:-ems}@postgres:5432/${POSTGRES_DB:-ems}
+      EMS_JWT_SECRET: ${EMS_JWT_SECRET:-dev-secret-change-me}
+      EMS_JWT_ISSUER: ${EMS_JWT_ISSUER:-xyn-ems}
+      EMS_JWT_AUDIENCE: ${EMS_JWT_AUDIENCE:-ems}
+      EMS_OIDC_ENABLED: ${EMS_OIDC_ENABLED:-true}
+      EMS_OIDC_APP_ID: ${EMS_OIDC_APP_ID:-ems.platform}
+      EMS_PLATFORM_API_BASE: ${EMS_PLATFORM_API_BASE:-https://xyence.io}
+    depends_on:
+      - postgres
+    expose:
+      - "8000"
+
+  ems-web:
+    build:
+      context: ${XYN_UI_PATH:-../../xyn-ui/apps/ems-ui}
+      dockerfile: Dockerfile
+    ports:
+      - "${EMS_PUBLIC_PORT:-80}:8080"
+      - "${EMS_PUBLIC_TLS_PORT:-443}:8443"
+    volumes:
+      - ${EMS_ACME_WEBROOT_PATH:-./acme-webroot}:/var/www/acme
+      - ${EMS_CERTS_PATH:-./certs}:/etc/nginx/certs/current:ro
+    depends_on:
+      - ems-api
+
+volumes:
+  ems_pgdata: {}

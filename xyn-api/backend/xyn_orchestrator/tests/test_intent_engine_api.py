@@ -1,0 +1,807 @@
+import json
+import os
+from unittest.mock import patch
+
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+
+from xyn_orchestrator.intent_engine.contracts import DraftIntakeContractRegistry
+from xyn_orchestrator.intent_engine.engine import IntentResolutionEngine, ResolutionContext
+from xyn_orchestrator.intent_engine.proposal_provider import IntentContextPackMissingError
+from xyn_orchestrator.artifact_links import ensure_context_pack_artifact
+from xyn_orchestrator.models import (
+    Artifact,
+    ArtifactType,
+    ArticleCategory,
+    ContextPack,
+    LedgerEvent,
+    RoleBinding,
+    UserIdentity,
+    Workspace,
+    WorkspaceAppInstance,
+    WorkspaceArtifactBinding,
+)
+
+
+class _FakeProvider:
+    def __init__(self, proposal):
+        self.proposal = proposal
+
+    def propose(self, **_kwargs):
+        return dict(self.proposal)
+
+
+class IntentEngineApiTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(username="intent-admin", password="pass", is_staff=True)
+        self.client.force_login(self.user)
+        self.identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer",
+            subject="intent-admin",
+            email="intent-admin@example.com",
+        )
+        RoleBinding.objects.create(user_identity=self.identity, scope_kind="platform", role="platform_admin")
+        self.workspace, _ = Workspace.objects.get_or_create(slug="platform-builder", defaults={"name": "Platform Builder"})
+        session = self.client.session
+        session["user_identity_id"] = str(self.identity.id)
+        session.save()
+        os.environ["XYN_INTENT_ENGINE_V1"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("XYN_INTENT_ENGINE_V1", None)
+
+    def test_contract_no_longer_requires_intent_for_explainer_video(self):
+        registry = DraftIntakeContractRegistry(category_options_provider=lambda: [{"slug": "web", "name": "Web"}])
+        contract = registry.get("ArticleDraft")
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        merged = contract.merge_defaults({"title": "x", "category": "web", "format": "explainer_video"})
+        self.assertNotIn("intent", contract.missing_fields(merged))
+
+    def test_contract_infers_explicit_fields_from_message(self):
+        registry = DraftIntakeContractRegistry(category_options_provider=lambda: [{"slug": "demo", "name": "Demo"}])
+        contract = registry.get("ArticleDraft")
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        inferred = contract.infer_fields(
+            message='Intent: Create an explainer video about Xyn governance ledger for telecom engineers. title: "What I Did On My Summer Vacation". category: demo',
+            inferred_fields={},
+        )
+        self.assertEqual(inferred.get("format"), "explainer_video")
+        self.assertEqual(inferred.get("title"), "What I Did On My Summer Vacation")
+        self.assertEqual(inferred.get("category"), "demo")
+        self.assertTrue(str(inferred.get("intent") or "").lower().startswith("create an explainer video"))
+
+    def test_contract_infers_category_from_natural_phrase(self):
+        registry = DraftIntakeContractRegistry(category_options_provider=lambda: [{"slug": "demo", "name": "Demo"}])
+        contract = registry.get("ArticleDraft")
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        inferred = contract.infer_fields(
+            message='Create an explainer video about Xyn governance ledger for telecom engineers. The title is "What I Did On My Summer Vacation". Create it in the demo category.',
+            inferred_fields={},
+        )
+        self.assertEqual(inferred.get("category"), "demo")
+
+    def test_contract_infers_title_from_title_it_phrase(self):
+        registry = DraftIntakeContractRegistry(category_options_provider=lambda: [{"slug": "demo", "name": "Demo"}])
+        contract = registry.get("ArticleDraft")
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        inferred = contract.infer_fields(
+            message=(
+                "Create an explainer video about turtles. Make it scientific. "
+                "Title it 'Adult Non-mutant Tai-Chi Turtles' and put it in the demo category."
+            ),
+            inferred_fields={},
+        )
+        self.assertEqual(inferred.get("title"), "Adult Non-mutant Tai-Chi Turtles")
+
+    def test_context_pack_contract_defaults(self):
+        registry = DraftIntakeContractRegistry(category_options_provider=lambda: [{"slug": "demo", "name": "Demo"}])
+        contract = registry.get("ContextPack")
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        merged = contract.merge_defaults({"title": "Pack", "content": "{}"})
+        self.assertEqual(merged.get("format"), "json")
+        self.assertEqual(contract.missing_fields(merged), [])
+
+    def test_engine_rejects_unknown_action_type(self):
+        registry = DraftIntakeContractRegistry(category_options_provider=lambda: [{"slug": "web", "name": "Web"}])
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(
+                {
+                    "action_type": "DoSomethingElse",
+                    "artifact_type": "ArticleDraft",
+                    "inferred_fields": {},
+                    "confidence": 0.9,
+                }
+            ),
+            contracts=registry,
+        )
+        result, _ = engine.resolve(message="hello", context=ResolutionContext(artifact=None))
+        self.assertEqual(result["status"], "UnsupportedIntent")
+
+    def test_resolve_create_returns_missing_fields_when_incomplete(self):
+        with patch(
+            "xyn_orchestrator.intent_engine.proposal_provider.LlmIntentProposalProvider.propose",
+            return_value={
+                "action_type": "CreateDraft",
+                "artifact_type": "ArticleDraft",
+                "inferred_fields": {"title": "Draft title"},
+                "confidence": 0.93,
+                "_model": "fake",
+                "_context_pack_slug": "xyn-console-default",
+                "_context_pack_version": "1.0.0",
+                "_context_pack_hash": "abc123",
+            },
+        ):
+            response = self.client.post(
+                "/xyn/api/xyn/intent/resolve",
+                data=json.dumps({"message": "create draft"}),
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload["status"], "MissingFields")
+        self.assertTrue(any(item["field"] == "category" for item in payload.get("missing_fields", [])))
+        self.assertEqual((payload.get("audit") or {}).get("context_pack_slug"), "xyn-console-default")
+
+    def test_resolve_heuristic_create_fallback_for_low_confidence(self):
+        with patch(
+            "xyn_orchestrator.intent_engine.proposal_provider.LlmIntentProposalProvider.propose",
+            return_value={
+                "action_type": "ValidateDraft",
+                "artifact_type": "ArticleDraft",
+                "inferred_fields": {},
+                "confidence": 0.01,
+                "_model": "fake",
+            },
+        ):
+            response = self.client.post(
+                "/xyn/api/xyn/intent/resolve",
+                data=json.dumps({"message": "Create an explainer video about governance ledger for telecom engineers."}),
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload["status"], "MissingFields")
+        self.assertEqual(payload["action_type"], "CreateDraft")
+        self.assertEqual(payload["artifact_type"], "ArticleDraft")
+        self.assertNotEqual(payload["summary"], "Intent is ambiguous; provide clearer draft instructions.")
+
+    def test_resolve_low_confidence_with_explicit_fields_returns_draft_ready(self):
+        with patch(
+            "xyn_orchestrator.intent_engine.proposal_provider.LlmIntentProposalProvider.propose",
+            return_value={
+                "action_type": "ValidateDraft",
+                "artifact_type": "ArticleDraft",
+                "inferred_fields": {},
+                "confidence": 0.1,
+                "_model": "fake",
+            },
+        ):
+            response = self.client.post(
+                "/xyn/api/xyn/intent/resolve",
+                data=json.dumps(
+                    {
+                        "message": 'Intent: Create an explainer video about Xyn governance ledger for telecom engineers. title: "What I Did On My Summer Vacation". category: demo'
+                    }
+                ),
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual((payload.get("draft_payload") or {}).get("category"), "demo")
+        self.assertEqual((payload.get("draft_payload") or {}).get("title"), "What I Did On My Summer Vacation")
+
+    def test_resolve_returns_explicit_error_when_console_context_pack_missing(self):
+        with patch(
+            "xyn_orchestrator.intent_engine.proposal_provider.LlmIntentProposalProvider.propose",
+            side_effect=IntentContextPackMissingError("xyn-console-default"),
+        ):
+            response = self.client.post(
+                "/xyn/api/xyn/intent/resolve",
+                data=json.dumps({"message": "create an explainer video"}),
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "UnsupportedIntent")
+        self.assertIn("context pack missing", str(payload.get("summary") or "").lower())
+
+    def test_apply_patch_rejects_unauthorized_fields(self):
+        create_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "ArticleDraft",
+                    "payload": {
+                        "title": "Patch Target",
+                        "category": "web",
+                        "format": "article",
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(create_response.status_code, 200, create_response.content.decode())
+        artifact_id = create_response.json().get("artifact_id")
+
+        patch_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "ApplyPatch",
+                    "artifact_type": "ArticleDraft",
+                    "artifact_id": artifact_id,
+                    "payload": {"evil_field": "value"},
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(patch_response.status_code, 400)
+        self.assertEqual(patch_response.json().get("status"), "ValidationError")
+
+    def test_context_pack_apply_patch_validates_and_writes_ledger(self):
+        pack = ContextPack.objects.create(
+            name="xyn-console-default",
+            purpose="any",
+            scope="global",
+            version="1.0.0",
+            is_active=True,
+            content_markdown='{"hello":"world"}',
+            applies_to_json={"content_format": "json"},
+        )
+        artifact = ensure_context_pack_artifact(pack, owner_user=self.user)
+        bad = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "ApplyPatch",
+                    "artifact_type": "ContextPack",
+                    "artifact_id": str(artifact.id),
+                    "payload": {"content": "{invalid json}", "format": "json"},
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(bad.status_code, 400, bad.content.decode())
+        self.assertEqual(bad.json().get("status"), "ValidationError")
+
+        ok = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "ApplyPatch",
+                    "artifact_type": "ContextPack",
+                    "artifact_id": str(artifact.id),
+                    "payload": {"title": "xyn-console-default", "content": '{"hello":"xyn"}', "format": "json"},
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(ok.status_code, 200, ok.content.decode())
+        artifact.refresh_from_db()
+        pack.refresh_from_db()
+        self.assertEqual(pack.content_markdown, '{"hello":"xyn"}')
+        self.assertTrue(LedgerEvent.objects.filter(artifact=artifact, action="contextpack.patched").exists())
+
+    def test_resolve_context_pack_with_context(self):
+        pack = ContextPack.objects.create(
+            name="xyn-console-default",
+            purpose="any",
+            scope="global",
+            version="1.0.0",
+            is_active=True,
+            content_markdown='{"hello":"world"}',
+            applies_to_json={"content_format": "json"},
+        )
+        artifact = ensure_context_pack_artifact(pack, owner_user=self.user)
+        with patch(
+            "xyn_orchestrator.intent_engine.proposal_provider.LlmIntentProposalProvider.propose",
+            return_value={
+                "action_type": "ProposePatch",
+                "artifact_type": "ContextPack",
+                "inferred_fields": {"content": '{"hello":"patched"}', "format": "json"},
+                "confidence": 0.95,
+                "_model": "fake",
+            },
+        ):
+            response = self.client.post(
+                "/xyn/api/xyn/intent/resolve",
+                data=json.dumps(
+                    {
+                        "message": "Update context pack content",
+                        "context": {"artifact_id": str(artifact.id), "artifact_type": "ContextPack"},
+                    }
+                ),
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "ProposedPatch")
+        self.assertEqual(payload.get("artifact_type"), "ContextPack")
+
+    def test_show_options_returns_categories_and_formats(self):
+        options = self.client.get("/xyn/api/xyn/intent/options?artifact_type=ArticleDraft&field=format")
+        self.assertEqual(options.status_code, 200)
+        self.assertIn("explainer_video", options.json().get("options", []))
+
+        categories = self.client.get("/xyn/api/xyn/intent/options?artifact_type=ArticleDraft&field=category")
+        self.assertEqual(categories.status_code, 200)
+        self.assertTrue(categories.json().get("options"))
+
+    def test_create_and_patch_write_ledger_events(self):
+        create_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "ArticleDraft",
+                    "payload": {
+                        "title": "Ledger Draft",
+                        "category": "web",
+                        "format": "article",
+                        "summary": "initial",
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(create_response.status_code, 200, create_response.content.decode())
+        artifact_id = create_response.json().get("artifact_id")
+        artifact = Artifact.objects.get(id=artifact_id)
+
+        self.assertTrue(LedgerEvent.objects.filter(artifact=artifact, action="draft.created").exists())
+
+        patch_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "ApplyPatch",
+                    "artifact_type": "ArticleDraft",
+                    "artifact_id": artifact_id,
+                    "payload": {"summary": "updated summary"},
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(patch_response.status_code, 200, patch_response.content.decode())
+        self.assertTrue(LedgerEvent.objects.filter(artifact=artifact, action="draft.patched").exists())
+
+    def test_resolve_and_apply_integration(self):
+        with patch(
+            "xyn_orchestrator.intent_engine.proposal_provider.LlmIntentProposalProvider.propose",
+            return_value={
+                "action_type": "CreateDraft",
+                "artifact_type": "ArticleDraft",
+                "inferred_fields": {
+                    "title": "Intent Generated Draft",
+                    "category": "web",
+                    "format": "explainer_video",
+                    "intent": "Explain Xyn governance quickly",
+                    "duration": "5m",
+                },
+                "confidence": 0.95,
+                "_model": "fake",
+            },
+        ):
+            resolve_response = self.client.post(
+                "/xyn/api/xyn/intent/resolve",
+                data=json.dumps({"message": "Create an explainer video draft"}),
+                content_type="application/json",
+            )
+        self.assertEqual(resolve_response.status_code, 200, resolve_response.content.decode())
+        resolve_payload = resolve_response.json()
+        self.assertEqual(resolve_payload.get("status"), "DraftReady")
+        self.assertTrue(resolve_payload.get("draft_payload"))
+
+        apply_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "ArticleDraft",
+                    "payload": resolve_payload.get("draft_payload") or {},
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(apply_response.status_code, 200, apply_response.content.decode())
+        created = Artifact.objects.get(id=apply_response.json().get("artifact_id"))
+        self.assertEqual(created.format, "video_explainer")
+        self.assertEqual((created.video_spec_json or {}).get("intent"), "Explain Xyn governance quickly")
+        scenes = (created.video_spec_json or {}).get("scenes") if isinstance(created.video_spec_json, dict) else []
+        self.assertTrue(isinstance(scenes, list) and len(scenes) >= 3)
+        latest = created.revisions.order_by("-revision_number").first()
+        content = latest.content_json if latest and isinstance(latest.content_json, dict) else {}
+        self.assertTrue(str(content.get("summary") or "").strip())
+        self.assertTrue(str(content.get("body_markdown") or "").strip())
+        serialized_scenes = json.dumps(scenes).lower()
+        self.assertNotIn("/app/artifacts", serialized_scenes)
+        self.assertNotIn("validation", serialized_scenes)
+        self.assertNotIn("content_hash", serialized_scenes)
+
+    def test_create_explainer_uses_structured_topic_and_auto_binds_default_pack(self):
+        ArticleCategory.objects.get_or_create(slug="demo", defaults={"name": "Demo", "enabled": True})
+        default_pack, _ = ContextPack.objects.get_or_create(
+            name="explainer-video-default",
+            purpose="video_explainer",
+            scope="global",
+            version="1.0.0",
+            namespace="",
+            project_key="",
+            defaults={
+                "is_active": True,
+                "is_default": False,
+                "content_markdown": "Ground scenes in factual biology.",
+            },
+        )
+        if not default_pack.is_active:
+            default_pack.is_active = True
+            default_pack.save(update_fields=["is_active", "updated_at"])
+        response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "ArticleDraft",
+                    "payload": {
+                        "title": "The Intrigue of Salamanders",
+                        "category": "demo",
+                        "format": "explainer_video",
+                        "intent": (
+                            "Create an explainer video about salamanders. Ground it in actual biology. "
+                            "The title is 'The Intrigue of Salamanders'. Create it in the demo category."
+                        ),
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        artifact = Artifact.objects.get(id=response.json().get("artifact_id"))
+        self.assertEqual(str(artifact.video_context_pack_id), str(default_pack.id))
+        latest = artifact.revisions.order_by("-revision_number").first()
+        content = latest.content_json if latest and isinstance(latest.content_json, dict) else {}
+        summary = str(content.get("summary") or "").lower()
+        body = str(content.get("body_markdown") or "").lower()
+        self.assertIn("salamander", summary)
+        self.assertIn("salamander", body)
+        self.assertNotIn("create an explainer video", summary)
+        self.assertNotIn("create an explainer video", body)
+        scenes = (artifact.video_spec_json or {}).get("scenes") if isinstance(artifact.video_spec_json, dict) else []
+        self.assertTrue(isinstance(scenes, list) and len(scenes) >= 3)
+        scene_blob = json.dumps(scenes).lower()
+        self.assertIn("regener", scene_blob)
+        self.assertIn("amphib", scene_blob)
+        self.assertNotIn("hook / premise", scene_blob)
+        self.assertNotIn("setup / context", scene_blob)
+
+    def test_deploy_ems_for_customer_creates_child_workspace_and_binding(self):
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        ems_artifact, _ = Artifact.objects.get_or_create(
+            workspace=self.workspace,
+            slug="ems",
+            defaults={
+                "type": module_type,
+                "title": "EMS",
+                "status": "published",
+                "visibility": "team",
+            },
+        )
+        resolve_response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps(
+                {
+                    "message": "deploy EMS for customer Acme Grid",
+                    "context": {"workspace_id": str(self.workspace.id)},
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resolve_response.status_code, 200, resolve_response.content.decode())
+        resolve_payload = resolve_response.json()
+        self.assertEqual(resolve_payload.get("status"), "DraftReady")
+        self.assertEqual(resolve_payload.get("artifact_type"), "Workspace")
+        draft_payload = resolve_payload.get("draft_payload") or {}
+        self.assertEqual(draft_payload.get("__operation"), "deploy_ems_customer")
+
+        apply_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": draft_payload,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(apply_response.status_code, 200, apply_response.content.decode())
+        apply_payload = apply_response.json()
+        self.assertEqual(apply_payload.get("status"), "DraftReady")
+        open_ems = next((item for item in apply_payload.get("next_actions", []) if item.get("action") == "OpenPath"), None)
+        self.assertIsNotNone(open_ems)
+        open_path = str((open_ems or {}).get("path") or "")
+        self.assertIn("/apps/ems", open_path)
+        child_workspace = Workspace.objects.exclude(id=self.workspace.id).order_by("-created_at").first()
+        self.assertIsNotNone(child_workspace)
+        assert child_workspace is not None
+        self.assertEqual(child_workspace.parent_workspace_id, self.workspace.id)
+        self.assertEqual(child_workspace.lifecycle_stage, "prospect")
+        self.assertEqual(child_workspace.kind, "customer")
+        self.assertTrue(WorkspaceArtifactBinding.objects.filter(workspace=child_workspace, artifact=ems_artifact).exists())
+
+    def test_create_ems_instance_command_is_idempotent(self):
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        ems_artifact, _ = Artifact.objects.get_or_create(
+            workspace=self.workspace,
+            slug="ems",
+            defaults={
+                "type": module_type,
+                "title": "EMS",
+                "status": "published",
+                "visibility": "team",
+            },
+        )
+        message = "Create a new instance of EMS for customer ACME Co. FQDN should be ems.xyence.io"
+
+        resolve_response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": message, "context": {"workspace_id": str(self.workspace.id)}}),
+            content_type="application/json",
+        )
+        self.assertEqual(resolve_response.status_code, 200, resolve_response.content.decode())
+        draft_payload = resolve_response.json().get("draft_payload") or {}
+        self.assertEqual(draft_payload.get("__operation"), "create_ems_instance")
+        self.assertEqual(draft_payload.get("fqdn"), "ems.xyence.io")
+
+        first_apply = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": draft_payload,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(first_apply.status_code, 200, first_apply.content.decode())
+        first_payload = first_apply.json()
+        self.assertEqual(first_payload.get("status"), "DraftReady")
+        result = first_payload.get("result") or {}
+        workspace_id = str((result.get("workspace") or {}).get("id") or "")
+        instance_id = str((result.get("instance") or {}).get("id") or "")
+        self.assertTrue(workspace_id)
+        self.assertTrue(instance_id)
+        self.assertEqual((result.get("instance") or {}).get("deployment_target"), "local")
+        self.assertEqual((result.get("instance") or {}).get("fqdn"), "ems.xyence.io")
+        self.assertIn(f"/w/{workspace_id}/apps/ems", str(result.get("app_url") or ""))
+
+        second_apply = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": draft_payload,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(second_apply.status_code, 200, second_apply.content.decode())
+        second_payload = second_apply.json()
+        second_result = second_payload.get("result") or {}
+        self.assertEqual(str((second_result.get("workspace") or {}).get("id") or ""), workspace_id)
+        self.assertEqual(str((second_result.get("instance") or {}).get("id") or ""), instance_id)
+        self.assertEqual(
+            WorkspaceAppInstance.objects.filter(workspace_id=workspace_id, app_slug="ems", fqdn="ems.xyence.io").count(),
+            1,
+        )
+        self.assertEqual(WorkspaceArtifactBinding.objects.filter(workspace_id=workspace_id, artifact=ems_artifact).count(), 1)
+
+    def test_install_xyn_instance_command_creates_runtime_run_and_is_idempotent(self):
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        Artifact.objects.get_or_create(
+            workspace=self.workspace,
+            slug="xyn-api",
+            defaults={
+                "type": module_type,
+                "title": "xyn-api",
+                "status": "published",
+                "visibility": "team",
+            },
+        )
+        Artifact.objects.get_or_create(
+            workspace=self.workspace,
+            slug="xyn-ui",
+            defaults={
+                "type": module_type,
+                "title": "xyn-ui",
+                "status": "published",
+                "visibility": "team",
+            },
+        )
+        message = "install xyn instance for ACME Co fqdn ems.xyence.io"
+        resolve_response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": message, "context": {"workspace_id": str(self.workspace.id)}}),
+            content_type="application/json",
+        )
+        self.assertEqual(resolve_response.status_code, 200, resolve_response.content.decode())
+        draft_payload = resolve_response.json().get("draft_payload") or {}
+        self.assertEqual(draft_payload.get("__operation"), "deploy_release_spec")
+        self.assertEqual(draft_payload.get("fqdn"), "ems.xyence.io")
+        draft_payload["dry_run"] = True
+
+        first_apply = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": draft_payload,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(first_apply.status_code, 200, first_apply.content.decode())
+        first_payload = first_apply.json()
+        self.assertEqual(first_payload.get("status"), "DraftReady")
+        first_result = first_payload.get("result") or {}
+        workspace_id = str((first_result.get("workspace") or {}).get("id") or "")
+        instance_id = str((first_result.get("instance") or {}).get("id") or "")
+        run_id = str((first_result.get("run") or {}).get("id") or "")
+        self.assertTrue(workspace_id)
+        self.assertTrue(instance_id)
+        self.assertTrue(run_id)
+        self.assertIn("https://ems.xyence.io", str(first_result.get("ui_url") or ""))
+
+        panel_actions = [item for item in first_payload.get("next_actions", []) if item.get("action") == "OpenPanel"]
+        self.assertTrue(panel_actions)
+        self.assertTrue(any(str(item.get("panel_key") or "") in {"run_detail", "artifact_detail"} for item in panel_actions))
+
+        second_apply = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": draft_payload,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(second_apply.status_code, 200, second_apply.content.decode())
+        second_result = second_apply.json().get("result") or {}
+        self.assertEqual(str((second_result.get("workspace") or {}).get("id") or ""), workspace_id)
+        self.assertEqual(str((second_result.get("instance") or {}).get("id") or ""), instance_id)
+        self.assertEqual(
+            WorkspaceAppInstance.objects.filter(workspace_id=workspace_id, app_slug="xyn-runtime", fqdn="ems.xyence.io").count(),
+            1,
+        )
+
+    def test_open_ems_panel_command_returns_panel_action(self):
+        resolve_response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps(
+                {
+                    "message": "Show registrations in the past 24 hours",
+                    "context": {"workspace_id": str(self.workspace.id)},
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(resolve_response.status_code, 200, resolve_response.content.decode())
+        draft_payload = resolve_response.json().get("draft_payload") or {}
+        self.assertEqual(draft_payload.get("__operation"), "open_ems_panel")
+        self.assertEqual(draft_payload.get("panel_key"), "ems_registrations_time")
+        self.assertEqual((draft_payload.get("params") or {}).get("hours"), 24)
+
+        apply_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": draft_payload,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(apply_response.status_code, 200, apply_response.content.decode())
+        payload = apply_response.json()
+        self.assertEqual(payload.get("status"), "DraftReady")
+        panel_action = next((row for row in payload.get("next_actions", []) if row.get("action") == "OpenPanel"), None)
+        self.assertIsNotNone(panel_action)
+        self.assertEqual((panel_action or {}).get("panel_key"), "ems_registrations_time")
+
+    def test_artifact_panel_commands_return_open_panel_actions(self):
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        Artifact.objects.get_or_create(
+            workspace=self.workspace,
+            type=module_type,
+            slug="core.authn-jwt",
+            defaults={
+                "title": "core.authn-jwt",
+                "status": "published",
+                "visibility": "team",
+            },
+        )
+
+        resolve_response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": "list core artifacts"}),
+            content_type="application/json",
+        )
+        self.assertEqual(resolve_response.status_code, 200, resolve_response.content.decode())
+        draft_payload = resolve_response.json().get("draft_payload") or {}
+        self.assertEqual(draft_payload.get("__operation"), "open_artifact_panel")
+        self.assertEqual(draft_payload.get("panel_key"), "artifact_list")
+        self.assertEqual((draft_payload.get("params") or {}).get("namespace"), "core")
+
+        apply_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": draft_payload,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(apply_response.status_code, 200, apply_response.content.decode())
+        panel_action = next((row for row in apply_response.json().get("next_actions", []) if row.get("action") == "OpenPanel"), None)
+        self.assertIsNotNone(panel_action)
+        self.assertEqual((panel_action or {}).get("panel_key"), "artifact_list")
+
+        raw_resolve = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": "edit artifact core.authn-jwt raw"}),
+            content_type="application/json",
+        )
+        self.assertEqual(raw_resolve.status_code, 200, raw_resolve.content.decode())
+        raw_payload = raw_resolve.json().get("draft_payload") or {}
+        self.assertEqual(raw_payload.get("panel_key"), "artifact_raw_json")
+        self.assertEqual((raw_payload.get("params") or {}).get("slug"), "core.authn-jwt")
+
+    def test_artifact_slug_endpoints_return_full_raw_json_and_files(self):
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        artifact, _ = Artifact.objects.get_or_create(
+            workspace=self.workspace,
+            type=module_type,
+            slug="core.authn-jwt",
+            defaults={
+                "title": "core.authn-jwt",
+                "status": "published",
+                "visibility": "team",
+                "scope_json": {"manifest_ref": "registry/modules/authn-jwt.artifact.manifest.json"},
+            },
+        )
+
+        detail = self.client.get("/xyn/api/artifacts/slug/core.authn-jwt")
+        self.assertEqual(detail.status_code, 200, detail.content.decode())
+        body = detail.json()
+        self.assertEqual((body.get("artifact") or {}).get("id"), str(artifact.id))
+        self.assertIn("manifest_summary", body)
+        self.assertIn("raw_artifact_json", body)
+        self.assertIn("files", body)
+        self.assertTrue(isinstance(body.get("files"), list))
+        self.assertGreaterEqual(len(body.get("files") or []), 1)
+
+        files = self.client.get("/xyn/api/artifacts/slug/core.authn-jwt/files")
+        self.assertEqual(files.status_code, 200, files.content.decode())
+        files_payload = files.json()
+        self.assertEqual(((files_payload.get("artifact") or {}).get("slug")), "core.authn-jwt")
+        first = (files_payload.get("files") or [{}])[0]
+        self.assertIn("path", first)
+        self.assertIn("size_bytes", first)
+        self.assertIn("sha256", first)

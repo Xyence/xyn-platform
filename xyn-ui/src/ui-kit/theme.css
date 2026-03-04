@@ -1,0 +1,146 @@
+:root {
+  --xyn-color-primary: #0f4c81;
+  --xyn-color-text: #10203a;
+  --xyn-color-muted: #475569;
+  --xyn-color-bg: #f5f7fb;
+  --xyn-color-surface: #ffffff;
+  --xyn-color-border: #dbe3ef;
+  --xyn-radius-button: 12px;
+  --xyn-radius-card: 16px;
+  --xyn-font-ui: Space Grotesk, Source Sans 3, sans-serif;
+  --xyn-spacing-page-max: 1120px;
+  --xyn-spacing-gutter: 24px;
+  --xyn-shadow-card: 0 10px 28px rgba(2, 6, 23, 0.08);
+}
+
+.xui-shell {
+  min-height: 100vh;
+  background: var(--xyn-bg-gradient, var(--xyn-color-bg));
+  color: var(--xyn-color-text);
+  font-family: var(--xyn-font-ui);
+}
+
+.xui-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px var(--xyn-spacing-gutter);
+  border-bottom: 1px solid var(--xyn-color-border);
+  background: color-mix(in srgb, var(--xyn-color-surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.xui-header-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.xui-header-brand img {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
+.xui-header-brand strong {
+  font-size: 1rem;
+  line-height: 1.2;
+}
+
+.xui-footer {
+  margin-top: 36px;
+  padding: 20px var(--xyn-spacing-gutter);
+  border-top: 1px solid var(--xyn-color-border);
+  color: var(--xyn-color-muted);
+  font-size: 0.9rem;
+}
+
+.xui-page {
+  width: min(100%, var(--xyn-spacing-page-max));
+  margin: 0 auto;
+  padding: 24px var(--xyn-spacing-gutter) 36px;
+  box-sizing: border-box;
+}
+
+.xui-card {
+  background: var(--xyn-color-surface);
+  border: 1px solid var(--xyn-color-border);
+  border-radius: var(--xyn-radius-card);
+  box-shadow: var(--xyn-shadow-card);
+  padding: 18px;
+}
+
+.xui-btn {
+  border: 1px solid transparent;
+  border-radius: var(--xyn-radius-button);
+  padding: 9px 14px;
+  font-weight: 600;
+  font-family: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.xui-btn:focus-visible,
+.xui-input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--xyn-color-primary) 55%, white);
+  outline-offset: 2px;
+}
+
+.xui-btn-primary {
+  background: var(--xyn-color-primary);
+  color: #fff;
+}
+
+.xui-btn-secondary {
+  background: var(--xyn-color-surface);
+  border-color: var(--xyn-color-border);
+  color: var(--xyn-color-text);
+}
+
+.xui-btn-ghost {
+  background: transparent;
+  border-color: var(--xyn-color-border);
+  color: var(--xyn-color-text);
+}
+
+.xui-input {
+  width: 100%;
+  border: 1px solid var(--xyn-color-border);
+  border-radius: calc(var(--xyn-radius-button) - 2px);
+  padding: 9px 11px;
+  background: var(--xyn-color-surface);
+  color: var(--xyn-color-text);
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.xui-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--xyn-color-border);
+  border-radius: calc(var(--xyn-radius-card) - 4px);
+  background: var(--xyn-color-surface);
+}
+
+.xui-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.xui-table-wrap th,
+.xui-table-wrap td {
+  border-bottom: 1px solid var(--xyn-color-border);
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.xui-table-wrap th {
+  font-size: 0.88rem;
+  color: var(--xyn-color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}

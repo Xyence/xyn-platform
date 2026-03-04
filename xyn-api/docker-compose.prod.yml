@@ -1,0 +1,180 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-xyence}
+      POSTGRES_USER: ${POSTGRES_USER:-xyence}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xyence}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ./backend
+    image: xyn-api-backend
+    restart: unless-stopped
+    env_file: []
+    environment:
+      XYN_ENV: ${XYN_ENV:-prod}
+      XYN_BASE_DOMAIN: ${XYN_BASE_DOMAIN:-}
+      XYN_AUTH_MODE: ${XYN_AUTH_MODE:-simple}
+      POSTGRES_HOST: db
+      XYNSEED_BASE_URL: ${XYNSEED_BASE_URL:-http://host.docker.internal:8001/api/v1}
+      XYNSEED_API_TOKEN: ${XYNSEED_API_TOKEN:-}
+      XYNSEED_CONTRACTS_ROOT: /xyn-contracts
+      XYN_KERNEL_MANIFEST_ROOTS: ${XYN_KERNEL_MANIFEST_ROOTS:-/home/ubuntu/src}
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/gcp-speech.json
+      XYN_ASYNC_JOBS_MODE: ${XYN_ASYNC_JOBS_MODE:-redis}
+      XYN_JOBS_REDIS_URL: ${XYN_JOBS_REDIS_URL:-redis://redis:6379/0}
+      XYN_INTERNAL_TOKEN: ${XYN_INTERNAL_TOKEN:-change-me}
+      XYN_RUNTIME_SUBSTRATE: ${XYN_RUNTIME_SUBSTRATE:-auto}
+      XYN_LOCAL_INSTANCE_NAME: ${XYN_LOCAL_INSTANCE_NAME:-}
+      XYN_LOCAL_INSTANCE_ID: ${XYN_LOCAL_INSTANCE_ID:-}
+      XYN_LOCAL_AWS_REGION: ${XYN_LOCAL_AWS_REGION:-}
+      XYN_LOCAL_INSTANCE_TYPE: ${XYN_LOCAL_INSTANCE_TYPE:-}
+      XYN_LOCAL_AMI_ID: ${XYN_LOCAL_AMI_ID:-}
+      XYN_LOCAL_STATUS: ${XYN_LOCAL_STATUS:-running}
+      XYN_LOCAL_ENVIRONMENT_ID: ${XYN_LOCAL_ENVIRONMENT_ID:-}
+      XYENCE_ASYNC_JOBS_MODE: ${XYENCE_ASYNC_JOBS_MODE:-redis}
+      XYENCE_JOBS_REDIS_URL: ${XYENCE_JOBS_REDIS_URL:-redis://redis:6379/0}
+      XYENCE_INTERNAL_TOKEN: ${XYENCE_INTERNAL_TOKEN:-change-me}
+      XYENCE_RUNTIME_SUBSTRATE: ${XYENCE_RUNTIME_SUBSTRATE:-auto}
+      XYENCE_LOCAL_INSTANCE_NAME: ${XYENCE_LOCAL_INSTANCE_NAME:-}
+      XYENCE_LOCAL_INSTANCE_ID: ${XYENCE_LOCAL_INSTANCE_ID:-}
+      XYENCE_LOCAL_AWS_REGION: ${XYENCE_LOCAL_AWS_REGION:-}
+      XYENCE_LOCAL_INSTANCE_TYPE: ${XYENCE_LOCAL_INSTANCE_TYPE:-}
+      XYENCE_LOCAL_AMI_ID: ${XYENCE_LOCAL_AMI_ID:-}
+      XYENCE_LOCAL_STATUS: ${XYENCE_LOCAL_STATUS:-running}
+      XYENCE_LOCAL_ENVIRONMENT_ID: ${XYENCE_LOCAL_ENVIRONMENT_ID:-}
+      XYN_AI_PROVIDER: ${XYN_AI_PROVIDER:-openai}
+      XYN_AI_MODEL: ${XYN_AI_MODEL:-gpt-5-mini}
+      GUNICORN_CMD_ARGS: ${GUNICORN_CMD_ARGS:---workers 3 --timeout 1200}
+      XYN_DEPLOYMENT_STALE_SECONDS: ${XYN_DEPLOYMENT_STALE_SECONDS:-900}
+      XYENCE_DEPLOYMENT_STALE_SECONDS: ${XYENCE_DEPLOYMENT_STALE_SECONDS:-900}
+      XYN_ENABLE_BLUEPRINTS_LEGACY: ${XYN_ENABLE_BLUEPRINTS_LEGACY:-false}
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - backend_media:/app/media
+      - backend_static:/app/staticfiles
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/ubuntu/src/xyn-contracts:/xyn-contracts:ro
+      - /home/ubuntu/src/xyn-seed:/xyn-seed:ro
+      - /home/ubuntu/src/xyn-ui:/home/ubuntu/src/xyn-ui:ro
+      - /home/ubuntu/src/artifacts:/home/ubuntu/src/artifacts:ro
+      - /home/ubuntu/central-xyence-io-9d049e62e994.json:/secrets/gcp-speech.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  worker:
+    build:
+      context: ./backend
+    image: xyn-api-worker
+    restart: unless-stopped
+    env_file: []
+    environment:
+      XYN_ENV: ${XYN_ENV:-prod}
+      XYN_BASE_DOMAIN: ${XYN_BASE_DOMAIN:-}
+      XYN_AUTH_MODE: ${XYN_AUTH_MODE:-simple}
+      XYNSEED_CONTRACTS_ROOT: /xyn-contracts
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/gcp-speech.json
+      XYN_JOBS_REDIS_URL: ${XYN_JOBS_REDIS_URL:-redis://redis:6379/0}
+      XYENCE_JOBS_REDIS_URL: ${XYENCE_JOBS_REDIS_URL:-redis://redis:6379/0}
+      XYN_INTERNAL_BASE_URL: http://backend:8000
+      XYN_INTERNAL_TOKEN: ${XYN_INTERNAL_TOKEN:-change-me}
+      XYENCE_INTERNAL_TOKEN: ${XYENCE_INTERNAL_TOKEN:-change-me}
+      XYN_MEDIA_ROOT: /app/media
+      XYN_DEPLOYMENT_REQUEST_TIMEOUT_SECONDS: ${XYN_DEPLOYMENT_REQUEST_TIMEOUT_SECONDS:-1200}
+      XYN_DEPLOYMENT_POLL_MAX_SECONDS: ${XYN_DEPLOYMENT_POLL_MAX_SECONDS:-1200}
+      XYN_DEPLOYMENT_POLL_INTERVAL_SECONDS: ${XYN_DEPLOYMENT_POLL_INTERVAL_SECONDS:-2}
+      XYENCE_DEPLOYMENT_REQUEST_TIMEOUT_SECONDS: ${XYENCE_DEPLOYMENT_REQUEST_TIMEOUT_SECONDS:-1200}
+      XYENCE_DEPLOYMENT_POLL_MAX_SECONDS: ${XYENCE_DEPLOYMENT_POLL_MAX_SECONDS:-1200}
+      XYENCE_DEPLOYMENT_POLL_INTERVAL_SECONDS: ${XYENCE_DEPLOYMENT_POLL_INTERVAL_SECONDS:-2}
+    depends_on:
+      - redis
+      - backend
+    command: python -m xyn_orchestrator.worker
+    volumes:
+      - /home/ubuntu/src/xyn-contracts:/xyn-contracts:ro
+      - /home/ubuntu/central-xyence-io-9d049e62e994.json:/secrets/gcp-speech.json:ro
+      - backend_media:/app/media
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - xyn-ui
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/templates:ro
+      - certbot_www:/var/www/certbot
+      - certbot_certs:/etc/letsencrypt
+      - backend_static:/var/www/static:ro
+      - backend_media:/var/www/media:ro
+
+  certbot:
+    image: certbot/certbot:latest
+    restart: "no"
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_certs:/etc/letsencrypt
+    entrypoint: >
+      /bin/sh -c "trap exit TERM; while :; do sleep 12h & wait $${!}; certbot renew; done"
+
+  xyn-ui:
+    build:
+      context: ../xyn-ui
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-}
+        VITE_API_TOKEN: ${VITE_API_TOKEN:-}
+        VITE_AUTH_MODE: ${VITE_AUTH_MODE:-session}
+        VITE_OIDC_ISSUER: ${VITE_OIDC_ISSUER:-}
+        VITE_OIDC_CLIENT_ID: ${VITE_OIDC_CLIENT_ID:-}
+        VITE_OIDC_REDIRECT_URI: ${VITE_OIDC_REDIRECT_URI:-}
+        VITE_XYN_UI_ENABLE_LEGACY_CONTROL_PLANE: ${VITE_XYN_UI_ENABLE_LEGACY_CONTROL_PLANE:-false}
+        VITE_XYN_UI_ENABLE_LEGACY_GUIDES: ${VITE_XYN_UI_ENABLE_LEGACY_GUIDES:-false}
+        VITE_XYN_UI_ENABLE_LEGACY_DEV_TASKS_PAGE: ${VITE_XYN_UI_ENABLE_LEGACY_DEV_TASKS_PAGE:-false}
+        VITE_XYN_UI_ENABLE_LEGACY_BLUEPRINTS: ${VITE_XYN_UI_ENABLE_LEGACY_BLUEPRINTS:-false}
+    image: xyn-ui
+    restart: unless-stopped
+
+  nginx-reload:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - nginx
+    volumes:
+      - certbot_certs:/etc/letsencrypt:ro
+    entrypoint: >
+      /bin/sh -c "trap exit TERM; while :; do sleep 12h & wait $${!}; nginx -s reload; done"
+
+volumes:
+  postgres_data:
+    name: xyence-web_postgres_data
+    external: true
+  certbot_www:
+    name: xyence-web_certbot_www
+    external: true
+  certbot_certs:
+    name: xyence-web_certbot_certs
+    external: true
+  backend_media:
+    name: xyence-web_backend_media
+    external: true
+  backend_static:
+    name: xyence-web_backend_static
+    external: true

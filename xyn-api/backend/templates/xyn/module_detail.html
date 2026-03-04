@@ -1,0 +1,13 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ module.fqn }}</h1>
+    <p><strong>Type:</strong> {{ module.type }}</p>
+    <p><strong>Version:</strong> {{ module.current_version }}</p>
+    <p><strong>Status:</strong> {{ module.status }}</p>
+    <p><a href="/xyn/modules/">Back to modules</a></p>
+    <h2>ModuleSpec</h2>
+    <pre style="white-space: pre-wrap;">{{ module.latest_module_spec_json|default:"{}"|safe }}</pre>
+  </div>
+{% endblock %}

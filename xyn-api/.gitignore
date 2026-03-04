@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+.env
+
+# Django
+staticfiles/
+media/
+
+# Node
+node_modules/
+dist/
+
+# OS
+.DS_Store
+
+# Workspace
+WORKSPACE.md
+
+# Local cert material (never commit private keys)
+apps/ems-stack/certs/

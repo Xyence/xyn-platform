@@ -1,0 +1,275 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>Blueprint Draft Studio</h1>
+    <p><strong>Session:</strong> {{ session.name }} (<span id="session-status">{{ session.status }}</span>)</p>
+    <p><strong>Kind:</strong> {{ session.blueprint_kind }}</p>
+    <p><strong>Job ID:</strong> <span id="session-job-id">{{ session.job_id }}</span></p>
+    <p><a href="/xyn/blueprints/">Back to list</a></p>
+    <h2>Context</h2>
+    <p><strong>Effective context hash:</strong> <span id="context-hash">{{ session.effective_context_hash }}</span></p>
+    <ul id="context-pack-list">
+      {% for ref in session.context_pack_refs_json %}
+        <li>{{ ref.name }} ({{ ref.scope }}) v{{ ref.version }}</li>
+      {% empty %}
+        <li>No context packs resolved yet.</li>
+      {% endfor %}
+    </ul>
+    <pre id="context-preview" style="white-space: pre-wrap;">{{ session.effective_context_preview }}</pre>
+
+    <h2>Voice notes</h2>
+    <form method="post" action="/xyn/api/voice-notes" enctype="multipart/form-data">
+      {% csrf_token %}
+      <input type="hidden" name="session_id" value="{{ session.id }}" />
+      <div class="form-row" id="recording-controls">
+        <label>Record audio (browser)</label>
+        <div id="recording-alert" style="margin-bottom: 6px; color: #b45309;"></div>
+        <div>
+          <button type="button" id="record-start">Start recording</button>
+          <button type="button" id="record-stop" disabled>Stop recording</button>
+          <span id="recording-status" style="margin-left: 8px;">Idle</span>
+        </div>
+        <div style="margin-top: 8px;">
+          <audio id="recording-preview" controls style="width: 100%; display: none;"></audio>
+        </div>
+        <div style="margin-top: 8px;">
+          <button type="button" id="recording-attach" disabled>Use recording</button>
+          <span id="recording-hint" style="margin-left: 8px; color: #6b7280;"></span>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>Upload audio</label>
+        <input type="file" name="file" id="voice-note-file" accept="audio/*" capture="microphone" />
+      </div>
+      <div class="form-row">
+        <label>Title</label>
+        <input type="text" name="title" />
+      </div>
+      <div class="submit-row">
+        <input type="submit" value="Upload voice note" />
+      </div>
+    </form>
+    <ul id="voice-note-list">
+      {% for note in voice_notes %}
+        <li>
+          <span>{{ note.title }}</span> —
+          <span data-voice-note-status="{{ note.id }}">{{ note.status }}</span>
+          <span data-voice-note-job="{{ note.id }}">{{ note.job_id }}</span>
+          <form method="post" action="/xyn/api/voice-notes/{{ note.id }}/enqueue-transcription" style="display:inline;">
+            {% csrf_token %}
+            <button type="submit">Transcribe</button>
+          </form>
+        </li>
+      {% empty %}
+        <li>No voice notes yet.</li>
+      {% endfor %}
+    </ul>
+
+    <h2>Draft JSON</h2>
+    <form method="post" action="/xyn/api/draft-sessions/{{ session.id }}/enqueue-draft-generation">
+      {% csrf_token %}
+      <div class="submit-row">
+        <input type="submit" value="Generate Draft" />
+      </div>
+    </form>
+    <form method="post" action="/xyn/api/draft-sessions/{{ session.id }}/enqueue-draft-revision" style="margin-top: 8px;">
+      {% csrf_token %}
+      <div class="form-row">
+        <label>Revision instruction</label>
+        <textarea name="instruction" rows="4" style="width: 100%;"></textarea>
+      </div>
+      <div class="submit-row">
+        <input type="submit" value="Revise Draft" />
+      </div>
+    </form>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="save_draft" />
+      <textarea name="draft_json" rows="18" style="width: 100%;">{{ draft_json }}</textarea>
+      <div class="submit-row">
+        <input type="submit" value="Save Draft" class="default" />
+      </div>
+    </form>
+    <h2>Diff summary</h2>
+    <pre id="diff-summary" style="white-space: pre-wrap;">{{ session.diff_summary }}</pre>
+    <h2>Validation errors</h2>
+    <ul id="validation-errors">
+      {% for err in session.validation_errors_json %}
+        <li>{{ err }}</li>
+      {% empty %}
+        <li>No validation errors.</li>
+      {% endfor %}
+    </ul>
+    <h2>Last error</h2>
+    <pre id="last-error" style="white-space: pre-wrap;">{{ session.last_error }}</pre>
+
+    <h2>Publish</h2>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="publish" />
+      <div class="submit-row">
+        <input type="submit" value="Publish Revision" />
+      </div>
+    </form>
+  </div>
+  <script>
+    (function() {
+      const sessionId = "{{ session.id }}";
+      const voiceNoteIds = [{% for note in voice_notes %}"{{ note.id }}"{% if not forloop.last %}, {% endif %}{% endfor %}];
+      let lastStatus = "{{ session.status }}";
+      const recordStart = document.getElementById("record-start");
+      const recordStop = document.getElementById("record-stop");
+      const recordingStatus = document.getElementById("recording-status");
+      const recordingPreview = document.getElementById("recording-preview");
+      const recordingAttach = document.getElementById("recording-attach");
+      const recordingHint = document.getElementById("recording-hint");
+      const recordingAlert = document.getElementById("recording-alert");
+      const voiceNoteFile = document.getElementById("voice-note-file");
+      let recorder = null;
+      let chunks = [];
+      let recordingBlob = null;
+
+      function setRecordingHint(text) {
+        if (recordingHint) {
+          recordingHint.textContent = text || "";
+        }
+      }
+
+      function updateRecordingState(state) {
+        if (recordingStatus) {
+          recordingStatus.textContent = state;
+        }
+      }
+
+      function setRecordingAlert(message) {
+        if (recordingAlert) {
+          recordingAlert.textContent = message || "";
+        }
+      }
+
+      if (!navigator.mediaDevices || !window.MediaRecorder) {
+        updateRecordingState("Recording not supported in this browser.");
+        if (recordStart) recordStart.disabled = true;
+        if (recordStop) recordStop.disabled = true;
+        if (recordingAttach) recordingAttach.disabled = true;
+        setRecordingHint("Use the Upload audio control (it can open the system recorder on mobile).");
+        setRecordingAlert("In-browser recording is not supported here. Use Upload audio to record.");
+      } else {
+        recordStart?.addEventListener("click", async () => {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            recorder = new MediaRecorder(stream);
+            chunks = [];
+            recordingBlob = null;
+            recorder.addEventListener("dataavailable", (event) => {
+              if (event.data && event.data.size > 0) {
+                chunks.push(event.data);
+              }
+            });
+            recorder.addEventListener("stop", () => {
+              recordingBlob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+              const url = URL.createObjectURL(recordingBlob);
+              if (recordingPreview) {
+                recordingPreview.src = url;
+                recordingPreview.style.display = "block";
+              }
+              if (recordingAttach) recordingAttach.disabled = false;
+              updateRecordingState("Recorded");
+              setRecordingHint("Click “Use recording” to attach the audio before uploading.");
+              stream.getTracks().forEach((track) => track.stop());
+            });
+            recorder.start();
+            updateRecordingState("Recording...");
+            setRecordingHint("Recording stored locally until you attach/upload.");
+            setRecordingAlert("");
+            if (recordStart) recordStart.disabled = true;
+            if (recordStop) recordStop.disabled = false;
+          } catch (err) {
+            updateRecordingState("Microphone permission denied.");
+            setRecordingHint("Check browser permissions for microphone access.");
+            setRecordingAlert("Microphone access denied. Enable mic permissions or use Upload audio.");
+          }
+        });
+        recordStop?.addEventListener("click", () => {
+          if (recorder && recorder.state !== "inactive") {
+            recorder.stop();
+          }
+          if (recordStart) recordStart.disabled = false;
+          if (recordStop) recordStop.disabled = true;
+        });
+        recordingAttach?.addEventListener("click", () => {
+          if (!recordingBlob || !voiceNoteFile) return;
+          const filename = `recording-${new Date().toISOString().replace(/[:.]/g, \"-\")}.webm`;
+          const file = new File([recordingBlob], filename, { type: recordingBlob.type || "audio/webm" });
+          const dataTransfer = new DataTransfer();
+          dataTransfer.items.add(file);
+          voiceNoteFile.files = dataTransfer.files;
+          updateRecordingState("Attached");
+          setRecordingHint("Recording attached. Submit the form to upload.");
+        });
+      }
+      function poll() {
+        fetch(`/xyn/api/draft-sessions/${sessionId}`)
+          .then((resp) => resp.json())
+          .then((data) => {
+            if (data.status && data.status !== lastStatus) {
+              lastStatus = data.status;
+            }
+            document.getElementById("session-status").textContent = data.status || "";
+            document.getElementById("session-job-id").textContent = data.job_id || "";
+            document.getElementById("diff-summary").textContent = data.diff_summary || "";
+            document.getElementById("last-error").textContent = data.last_error || "";
+            document.getElementById("context-hash").textContent = data.effective_context_hash || "";
+            const contextPreview = document.getElementById("context-preview");
+            if (contextPreview) contextPreview.textContent = data.effective_context_preview || "";
+            const packList = document.getElementById("context-pack-list");
+            if (packList && Array.isArray(data.context_pack_refs)) {
+              packList.innerHTML = "";
+              if (data.context_pack_refs.length === 0) {
+                const li = document.createElement("li");
+                li.textContent = "No context packs resolved yet.";
+                packList.appendChild(li);
+              } else {
+                data.context_pack_refs.forEach((ref) => {
+                  const li = document.createElement("li");
+                  li.textContent = `${ref.name} (${ref.scope}) v${ref.version}`;
+                  packList.appendChild(li);
+                });
+              }
+            }
+            const errorsEl = document.getElementById("validation-errors");
+            if (errorsEl && Array.isArray(data.validation_errors)) {
+              errorsEl.innerHTML = "";
+              if (data.validation_errors.length === 0) {
+                const li = document.createElement("li");
+                li.textContent = "No validation errors.";
+                errorsEl.appendChild(li);
+              } else {
+                data.validation_errors.forEach((err) => {
+                  const li = document.createElement("li");
+                  li.textContent = err;
+                  errorsEl.appendChild(li);
+                });
+              }
+            }
+            return Promise.all(
+              voiceNoteIds.map((id) => fetch(`/xyn/api/voice-notes/${id}`).then((r) => r.json()))
+            );
+          })
+          .then((notes) => {
+            if (!notes) return;
+            notes.forEach((note) => {
+              const statusEl = document.querySelector(`[data-voice-note-status="${note.id}"]`);
+              const jobEl = document.querySelector(`[data-voice-note-job="${note.id}"]`);
+              if (statusEl) statusEl.textContent = note.status || "";
+              if (jobEl) jobEl.textContent = note.job_id || "";
+            });
+            setTimeout(poll, 5000);
+          })
+          .catch(() => setTimeout(poll, 5000));
+      }
+      setTimeout(poll, 5000);
+    })();
+  </script>
+{% endblock %}

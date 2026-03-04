@@ -1,0 +1,230 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block bodyclass %}{{ block.super }} dashboard{% endblock %}
+
+{% block nav-sidebar %}
+  {% include "admin/nav_sidebar.html" %}
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <p>Plan/apply releases and manage long-running services via Xyn Seed.</p>
+
+    <fieldset class="module aligned" style="max-width: 920px;">
+      <h2>Release list</h2>
+      {% if releases %}
+        <table class="listing" style="width: 100%;">
+          <thead>
+            <tr>
+              <th>Release ID</th>
+              <th>Backend</th>
+              <th>Revision</th>
+              <th>Updated</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in releases %}
+              <tr>
+                <td>{{ item.releaseId }}</td>
+                <td>{{ item.backend }}</td>
+                <td>{{ item.desiredRevision }}</td>
+                <td>{{ item.updatedAt }}</td>
+                <td><a href="?release_id={{ item.releaseId }}">View</a></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>No releases found.</p>
+      {% endif %}
+    </fieldset>
+
+    <form method="post" style="max-width: 920px; margin-top: 24px;">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="plan" />
+      <fieldset class="module aligned">
+        <h2>Update release (plan)</h2>
+        <div class="form-row">
+          {{ plan_form.release_spec.label_tag }}
+          {{ plan_form.release_spec }}
+          <p class="help">{{ plan_form.release_spec.help_text }}</p>
+        </div>
+      </fieldset>
+      <div class="submit-row">
+        <input type="submit" value="Generate plan" class="default" />
+      </div>
+    </form>
+
+    {% if plan %}
+      <fieldset class="module aligned" style="max-width: 920px; margin-top: 24px;">
+        <h2>Plan summary</h2>
+        <p><strong>Release:</strong> {{ plan.releaseId }}</p>
+        <p><strong>Revision:</strong> {{ plan.revisionFrom }} → {{ plan.revisionTo }}</p>
+        <p><strong>Summary:</strong> {{ plan.summary }}</p>
+        {% if plan.actionKind %}
+          <p><strong>Action:</strong> {{ plan.actionKind }}</p>
+        {% endif %}
+        <h3>Actions</h3>
+        <ul>
+          {% for action in plan.actions %}
+            <li>{{ action.op }} {{ action.targetType }} {{ action.targetName }}</li>
+          {% empty %}
+            <li>No changes detected.</li>
+          {% endfor %}
+        </ul>
+
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="apply" />
+          {{ apply_form.release_id }}
+          {{ apply_form.plan_id }}
+          <div class="submit-row">
+            <input type="submit" value="Apply plan" class="default" />
+          </div>
+        </form>
+      </fieldset>
+    {% endif %}
+
+    <form method="post" style="max-width: 480px; margin-top: 24px;">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="status" />
+      <fieldset class="module aligned">
+        <h2>Check status</h2>
+        <div class="form-row">
+          {{ status_form.release_id.label_tag }}
+          {{ status_form.release_id }}
+          <p class="help">{{ status_form.release_id.help_text }}</p>
+        </div>
+      </fieldset>
+      <div class="submit-row">
+        <input type="submit" value="Check status" />
+      </div>
+    </form>
+
+    {% if operation %}
+      <fieldset class="module aligned" style="max-width: 920px; margin-top: 24px;">
+        <h2>Latest operation</h2>
+        <p><strong>ID:</strong> {{ operation.operationId }}</p>
+        <p><strong>Status:</strong> {{ operation.status }}</p>
+        <p><strong>Message:</strong> {{ operation.message }}</p>
+      </fieldset>
+    {% endif %}
+
+    {% if release_details %}
+      <fieldset class="module aligned" style="max-width: 920px; margin-top: 24px;">
+        <h2>Release details</h2>
+        <p><strong>Release:</strong> {{ release_details.releaseId }}</p>
+        <p><strong>Revision:</strong> {{ release_details.revision }}</p>
+        <p><strong>Backend:</strong> {{ release_details.backend }}</p>
+        <p><strong>Updated:</strong> {{ release_details.updatedAt }}</p>
+        <h3>Artifacts</h3>
+        <ul>
+          <li><a href="/admin/xyn-seed/artifacts/{{ release_details.releaseId }}/releaseSpec/">ReleaseSpec</a></li>
+          <li><a href="/admin/xyn-seed/artifacts/{{ release_details.releaseId }}/runtimeSpec/">RuntimeSpec</a></li>
+          {% if release_details.artifacts.composeYamlPath %}
+            <li><a href="/admin/xyn-seed/artifacts/{{ release_details.releaseId }}/composeYaml/">Compose YAML</a></li>
+          {% endif %}
+        </ul>
+        <h3>ReleaseSpec</h3>
+        <pre style="white-space: pre-wrap;">{{ release_spec_json }}</pre>
+      </fieldset>
+    {% endif %}
+
+    {% if status %}
+      <fieldset class="module aligned" style="max-width: 920px; margin-top: 24px;">
+        <h2>Release status</h2>
+        <p><strong>Release:</strong> {{ status.releaseId }}</p>
+        <p><strong>Desired revision:</strong> {{ status.desiredRevision }}</p>
+        <p><strong>Observed:</strong> {{ status.observed.timestamp }} ({{ status.observed.backend }})</p>
+        {% if status.observed.message %}
+          <p><strong>Message:</strong> {{ status.observed.message }}</p>
+        {% endif %}
+        <h3>Services</h3>
+        <ul>
+          {% for service in status.services %}
+            <li>{{ service.name }} — {{ service.state }} ({{ service.health }})</li>
+          {% empty %}
+            <li>No services reported.</li>
+          {% endfor %}
+        </ul>
+      </fieldset>
+    {% endif %}
+
+    {% if selected_release_id %}
+      <fieldset class="module aligned" style="max-width: 920px; margin-top: 24px;">
+        <h2>Management actions</h2>
+        <form method="post" style="margin-bottom: 16px;">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="plan_stop" />
+          {{ stop_form.release_id }}
+          <label for="id_confirm_stop">Confirm stop</label>
+          {{ stop_form.confirm_stop }}
+          <div class="submit-row">
+            <input type="submit" value="Plan stop" />
+          </div>
+        </form>
+
+        <form method="post" style="margin-bottom: 16px;">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="plan_restart" />
+          {{ restart_form.release_id }}
+          <label for="id_service_name">Service to restart</label>
+          <input type="text" name="service_name" id="id_service_name" list="service-options" />
+          <datalist id="service-options">
+            {% if status %}
+              {% for service in status.services %}
+                <option value="{{ service.name }}"></option>
+              {% endfor %}
+            {% endif %}
+          </datalist>
+          <div class="submit-row">
+            <input type="submit" value="Plan restart" />
+          </div>
+        </form>
+
+        <form method="post">
+          {% csrf_token %}
+          <input type="hidden" name="action" value="plan_destroy" />
+          {{ destroy_form.release_id }}
+          <label for="id_remove_volumes">Remove volumes</label>
+          {{ destroy_form.remove_volumes }}
+          <div class="form-row" style="margin-top: 8px;">
+            <label for="id_confirm_destroy">Confirm destroy</label>
+            {{ destroy_form.confirm_destroy }}
+          </div>
+          <div class="form-row">
+            <label for="id_confirm_text">Type release ID to confirm</label>
+            {{ destroy_form.confirm_text }}
+          </div>
+          <div class="submit-row">
+            <input type="submit" value="Plan destroy" />
+          </div>
+        </form>
+      </fieldset>
+    {% endif %}
+
+    {% if operations %}
+      <fieldset class="module aligned" style="max-width: 920px; margin-top: 24px;">
+        <h2>Operations timeline</h2>
+        <ul>
+          {% for op in operations %}
+            <li>
+              {{ op.createdAt }} — {{ op.type }} — {{ op.status }}
+              (<a href="?release_id={{ selected_release_id }}&op_id={{ op.operationId }}">logs</a>)
+            </li>
+          {% endfor %}
+        </ul>
+      </fieldset>
+    {% endif %}
+
+    {% if logs %}
+      <fieldset class="module aligned" style="max-width: 920px; margin-top: 24px;">
+        <h2>Operation logs</h2>
+        <p><strong>Operation:</strong> {{ logs_operation_id }}</p>
+        <pre style="white-space: pre-wrap;">{{ logs }}</pre>
+      </fieldset>
+    {% endif %}
+  </div>
+{% endblock %}

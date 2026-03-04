@@ -1,0 +1,70 @@
+{
+  "artifact": {
+    "id": "xyn-api",
+    "name": "xyn-api",
+    "version": "phase2"
+  },
+  "capability": {
+    "visibility": "platform",
+    "category": "platform",
+    "label": "Xyn API",
+    "order": 50
+  },
+  "roles": [
+    {
+      "role": "api_router",
+      "mount_path": "/xyn/api",
+      "entrypoint": "xyn_orchestrator.xyn_seed_entrypoint:router",
+      "pythonpath": [
+        "xyn-api/backend"
+      ]
+    }
+  ],
+  "surfaces": {
+    "manage": [
+      {
+        "label": "API Health",
+        "path": "/xyn/api/health",
+        "order": 100
+      }
+    ],
+    "docs": [
+      {
+        "label": "API Runtime Contract",
+        "path": "/xyn/api/docs",
+        "order": 1000
+      }
+    ]
+  },
+  "payload": {
+    "deploy": {
+      "mode": "container",
+      "service": "xyn-api",
+      "images": {
+        "xyn_api": {
+          "image": "ghcr.io/xyence/xyn-api",
+          "tag": "latest"
+        }
+      },
+      "manifests": {
+        "type": "compose",
+        "ref": "backend/registry/modules/runtime-compose-pull-apply.json"
+      }
+    },
+    "configSchema": {
+      "fqdn": {
+        "type": "string",
+        "required": true
+      },
+      "workspaceId": {
+        "type": "string",
+        "required": true
+      },
+      "target_environment": {
+        "type": "string",
+        "enum": ["local", "k8s"],
+        "default": "local"
+      }
+    }
+  }
+}
