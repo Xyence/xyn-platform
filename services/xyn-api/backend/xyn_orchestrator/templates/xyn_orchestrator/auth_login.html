@@ -103,13 +103,19 @@
         <strong>{{ branding.display_name }}</strong>
       </div>
       <h1>{{ login_title }}</h1>
+      {% if auth_mode == "dev" %}
+      <p>Development mode is enabled. Continue with a local admin identity.</p>
+      {% elif auth_mode == "token" %}
+      <p>Token mode is enabled. Paste a bootstrap token to continue.</p>
+      {% else %}
       <p>Continue with your organization identity provider.</p>
+      {% endif %}
 
       {% if login_error %}
       <div class="error">Sign-in failed: {{ login_error|escape }}.</div>
       {% endif %}
 
-      {% if providers %}
+      {% if auth_mode == "oidc" and providers %}
       <div class="provider-list">
         {% for provider in providers %}
         <a
@@ -120,8 +126,27 @@
         </a>
         {% endfor %}
       </div>
-      {% else %}
+      {% elif auth_mode == "oidc" %}
       <div class="error">No enabled identity providers are configured for {{ app_id }}.</div>
+      {% endif %}
+
+      {% if auth_mode == "dev" %}
+      <form class="local-form" method="post" action="/auth/dev-login">
+        {% csrf_token %}
+        <input type="hidden" name="appId" value="{{ app_id }}" />
+        <input type="hidden" name="returnTo" value="{{ return_to }}" />
+        <button class="provider-button" type="submit">Continue as Admin</button>
+      </form>
+      {% endif %}
+
+      {% if auth_mode == "token" and token_login_enabled %}
+      <form class="local-form" method="post" action="/auth/token-login">
+        {% csrf_token %}
+        <input type="hidden" name="appId" value="{{ app_id }}" />
+        <input type="hidden" name="returnTo" value="{{ return_to }}" />
+        <input type="password" name="token" placeholder="Bootstrap token" required />
+        <button class="provider-button" type="submit">Continue with Token</button>
+      </form>
       {% endif %}
 
       {% if local_login_enabled %}

@@ -81,7 +81,17 @@ def bootstrap_runtime_env() -> None:
 
     _apply_alias("XYN_ENV", "ENV", default="local")
     _apply_alias("XYN_BASE_DOMAIN", "DOMAIN")
-    _apply_alias("XYN_AUTH_MODE", "AUTH_MODE", default="simple")
+    _apply_alias("XYN_AUTH_MODE", "AUTH_MODE", default="dev")
+    if str(os.getenv("XYN_AUTH_MODE", "")).strip().lower() in {"simple", "local"}:
+        os.environ["XYN_AUTH_MODE"] = "dev"
+    _apply_alias("XYN_PUBLIC_BASE_URL", "XYENCE_PUBLIC_BASE_URL", default="http://localhost")
+    _apply_alias("XYN_TRUST_PROXY", "XYENCE_TRUST_PROXY", default="true")
+    _apply_alias(
+        "XYN_TRUSTED_PROXY_CIDRS",
+        "XYENCE_TRUSTED_PROXY_CIDRS",
+        default="127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+    )
+    _apply_alias("XYN_DEBUG_AUTH", "XYENCE_DEBUG_AUTH", default="false")
     _apply_alias("XYN_INTERNAL_TOKEN", "XYENCE_INTERNAL_TOKEN")
     _apply_alias("XYN_JOBS_REDIS_URL", "XYENCE_JOBS_REDIS_URL", default="redis://redis:6379/0")
     _apply_alias("XYN_ASYNC_JOBS_MODE", "XYENCE_ASYNC_JOBS_MODE", default="redis")
@@ -137,7 +147,7 @@ def bootstrap_runtime_env() -> None:
     logger.info(
         "runtime env resolved env=%s auth=%s ai_provider=%s model=%s",
         os.getenv("XYN_ENV", "local"),
-        os.getenv("XYN_AUTH_MODE", "simple"),
+        os.getenv("XYN_AUTH_MODE", "dev"),
         os.getenv("XYN_AI_PROVIDER", "openai"),
         os.getenv("XYN_AI_MODEL", "gpt-5-mini"),
     )

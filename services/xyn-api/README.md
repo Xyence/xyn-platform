@@ -140,11 +140,29 @@ Overrides (optional):
 - Branding is DB-managed:
   - `Platform -> Branding`
 - Return URL safety:
-  - Relative paths are allowed.
-  - Absolute URLs must match `XYENCE_ALLOWED_RETURN_HOSTS` or app-configured redirect hosts.
+  - `returnTo` must be a relative path (same-origin only).
 - ENV fallback behavior:
   - If no OIDC app client is configured, backend falls back to env-based OIDC and logs:
     - `Using ENV OIDC fallback (no app client configured)`
+
+## Auth Bootstrap Modes
+
+- `XYN_AUTH_MODE=dev` (default)
+  - no external IdP required
+  - `/auth/login` shows `Continue as Admin`
+- `XYN_AUTH_MODE=token`
+  - `/auth/login` shows token form
+  - token is validated against `XYN_UI_BEARER_TOKEN`
+- `XYN_AUTH_MODE=oidc`
+  - enables OIDC authorize/callback flow
+  - `redirect_uri` is always `${XYN_PUBLIC_BASE_URL}/auth/callback`
+
+Recommended local env:
+
+- `XYN_PUBLIC_BASE_URL=http://localhost`
+- `XYN_TRUST_PROXY=true`
+- `XYN_TRUSTED_PROXY_CIDRS=127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`
+- `XYN_DEBUG_AUTH=true` (optional for troubleshooting)
 
 ## Xyn Manages Xyn (MVP)
 - Deployments now track post-deploy verification and rollback metadata.

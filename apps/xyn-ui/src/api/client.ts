@@ -25,8 +25,23 @@ export function resolveSeedBaseUrl() {
   return "http://localhost:8001";
 }
 
-export const authMode =
-  (import.meta.env.VITE_AUTH_MODE as string | undefined) || "token";
+let runtimeAuthMode =
+  ((import.meta.env.VITE_AUTH_MODE as string | undefined) || "dev").trim().toLowerCase();
+
+if (!["dev", "token", "oidc"].includes(runtimeAuthMode)) {
+  runtimeAuthMode = "dev";
+}
+
+export function setRuntimeAuthMode(mode: string) {
+  const token = String(mode || "").trim().toLowerCase();
+  if (!token) return;
+  if (!["dev", "token", "oidc"].includes(token)) return;
+  runtimeAuthMode = token;
+}
+
+export function getRuntimeAuthMode(): string {
+  return runtimeAuthMode;
+}
 
 const ID_TOKEN_KEY = "xyn_id_token";
 
@@ -57,7 +72,7 @@ export function clearStoredIdToken() {
 }
 
 export function authHeaders(): Record<string, string> {
-  if (authMode !== "token") {
+  if (getRuntimeAuthMode() !== "token") {
     return {};
   }
   const runtimeToken = getStoredIdToken();

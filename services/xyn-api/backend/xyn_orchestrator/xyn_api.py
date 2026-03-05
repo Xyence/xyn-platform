@@ -1,5 +1,6 @@
 import base64
 import datetime as dt
+import ipaddress
 import json
 import logging
 import os
@@ -5585,10 +5586,7 @@ def oidc_authorize(request: HttpRequest, provider_id: str) -> HttpResponse:
     discovery = get_discovery_doc(provider)
     if not discovery or not discovery.get("authorization_endpoint"):
         return JsonResponse({"error": "provider discovery unavailable"}, status=502)
-    redirect_uris = client.redirect_uris_json or []
-    if not redirect_uris:
-        return JsonResponse({"error": "redirect_uris missing"}, status=400)
-    redirect_uri = redirect_uris[0]
+    redirect_uri = _public_url(request, "/auth/callback")
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
     code_verifier, code_challenge = generate_pkce_pair()
@@ -5604,6 +5602,7 @@ def oidc_authorize(request: HttpRequest, provider_id: str) -> HttpResponse:
         "app_id": app_id,
         "provider_id": provider_id,
         "return_to": post_login_redirect,
+        "initiated_base_url": _effective_public_base_url(request),
     }
     scopes = provider.scopes_json or ["openid", "profile", "email"]
     params = {
@@ -5621,6 +5620,14 @@ def oidc_authorize(request: HttpRequest, provider_id: str) -> HttpResponse:
     domain_rules = provider.domain_rules_json or {}
     if domain_rules.get("allowedHostedDomain"):
         params["hd"] = domain_rules.get("allowedHostedDomain")
+    if _auth_debug_enabled():
+        logger.info(
+            "oidc authorize app=%s provider=%s redirect_uri=%s return_to=%s",
+            app_id,
+            provider_id,
+            redirect_uri,
+            post_login_redirect,
+        )
     url = f"{discovery['authorization_endpoint']}?{urlencode(params)}"
     return redirect(url)
 
@@ -5654,15 +5661,15 @@ def oidc_callback(request: HttpRequest, provider_id: str) -> HttpResponse:
     if not app_id:
         return JsonResponse({"error": "appId required"}, status=400)
     if flow_provider_id and flow_provider_id != provider_id:
-        return JsonResponse({"error": "invalid state"}, status=400)
+        return _auth_state_error(request, reason="provider mismatch in state payload")
     expected_state = request.session.get(f"oidc_state:{app_id}:{provider_id}")
     if state != expected_state:
         if not expected_state and flow_app_id == app_id and flow_provider_id in {"", provider_id}:
             expected_state = state
         else:
-            return JsonResponse({"error": "invalid state"}, status=400)
+            return _auth_state_error(request, reason="missing or mismatched state")
     if state != expected_state:
-        return JsonResponse({"error": "invalid state"}, status=400)
+        return _auth_state_error(request, reason="state mismatch")
     client = _resolve_app_config(app_id)
     if not client:
         return JsonResponse({"error": "app not configured"}, status=404)
@@ -5673,10 +5680,16 @@ def oidc_callback(request: HttpRequest, provider_id: str) -> HttpResponse:
     discovery = get_discovery_doc(provider)
     if not discovery or not discovery.get("token_endpoint"):
         return JsonResponse({"error": "provider discovery unavailable"}, status=502)
-    redirect_uris = client.redirect_uris_json or []
-    if not redirect_uris:
-        return JsonResponse({"error": "redirect_uris missing"}, status=400)
-    redirect_uri = redirect_uris[0]
+    initiated_base_url = str(flow.get("initiated_base_url") or "").strip()
+    callback_base_url = _effective_public_base_url(request)
+    if initiated_base_url and callback_base_url and initiated_base_url != callback_base_url:
+        return _auth_state_error(
+            request,
+            reason="callback origin mismatch",
+            expected_origin=initiated_base_url,
+            callback_origin=callback_base_url,
+        )
+    redirect_uri = _public_url(request, "/auth/callback")
     code_verifier = request.session.get(f"oidc_verifier:{app_id}:{provider_id}") or ""
     token_payload = {
         "grant_type": "authorization_code",
@@ -5684,6 +5697,15 @@ def oidc_callback(request: HttpRequest, provider_id: str) -> HttpResponse:
         "client_id": provider.client_id,
         "redirect_uri": redirect_uri,
     }
+    if _auth_debug_enabled():
+        logger.info(
+            "oidc callback app=%s provider=%s redirect_uri=%s initiated=%s callback=%s",
+            app_id,
+            provider_id,
+            redirect_uri,
+            initiated_base_url,
+            callback_base_url,
+        )
     if code_verifier:
         token_payload["code_verifier"] = code_verifier
     try:
@@ -5870,9 +5892,10 @@ def _start_env_fallback_login(request: HttpRequest, app_id: str, return_to: str)
     nonce = secrets.token_urlsafe(32)
     request.session["oidc_state"] = state
     request.session["oidc_nonce"] = nonce
+    request.session["oidc_initiated_base_url"] = _effective_public_base_url(request)
     request.session["environment_id"] = str(env.id)
     request.session["post_login_redirect"] = return_to
-    redirect_uri = config.get("redirect_uri") or request.build_absolute_uri("/auth/callback")
+    redirect_uri = _public_url(request, "/auth/callback")
     params = {
         "response_type": "code",
         "client_id": client_id,
@@ -5881,6 +5904,8 @@ def _start_env_fallback_login(request: HttpRequest, app_id: str, return_to: str)
         "state": state,
         "nonce": nonce,
     }
+    if _auth_debug_enabled():
+        logger.info("oidc env-fallback authorize app=%s redirect_uri=%s return_to=%s", app_id, redirect_uri, return_to)
     url = f"{oidc_config['authorization_endpoint']}?{urlencode(params)}"
     return redirect(url)
 
@@ -5890,10 +5915,13 @@ def auth_login(request: HttpRequest) -> HttpResponse:
     app_id = request.GET.get("appId") or "xyn-ui"
     client = _resolve_app_config(app_id)
     return_to = _sanitize_return_to(request.GET.get("returnTo") or request.GET.get("next") or "", request, client, app_id)
-    local_login_enabled = os.environ.get("XYN_ENABLE_LOCAL_USERS", "true").strip().lower() != "false"
+    request.session["post_login_redirect"] = return_to
+    mode = _auth_mode()
+    local_login_enabled = mode == "dev" and os.environ.get("XYN_ENABLE_LOCAL_USERS", "true").strip().lower() != "false"
+    token_login_enabled = mode == "token"
     login_error = str(request.GET.get("error") or "").strip()
     login_email = str(request.GET.get("email") or "").strip()
-    if client:
+    if mode == "oidc" and client:
         config = _build_oidc_config_payload(client)
         providers = config.get("providers") or []
         if not providers and config.get("allowed_providers"):
@@ -5913,7 +5941,9 @@ def auth_login(request: HttpRequest) -> HttpResponse:
             "default_provider_id": config.get("defaultProviderId"),
             "branding": branding,
             "login_title": f"Sign in to {branding.get('display_name') or app_id}",
+            "auth_mode": mode,
             "local_login_enabled": local_login_enabled,
+            "token_login_enabled": token_login_enabled,
             "login_error": login_error,
             "login_email": login_email,
         }
@@ -5922,14 +5952,92 @@ def auth_login(request: HttpRequest) -> HttpResponse:
         response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response["Pragma"] = "no-cache"
         return response
-    request.session["post_login_redirect"] = return_to
-    return _start_env_fallback_login(request, app_id=app_id, return_to=return_to)
+    if mode == "oidc":
+        return _start_env_fallback_login(request, app_id=app_id, return_to=return_to)
+    branding = _merge_branding_for_app(app_id)
+    context = {
+        "app_id": app_id,
+        "return_to": return_to,
+        "providers": [],
+        "default_provider_id": "",
+        "branding": branding,
+        "login_title": f"Sign in to {branding.get('display_name') or app_id}",
+        "auth_mode": mode,
+        "local_login_enabled": local_login_enabled,
+        "token_login_enabled": token_login_enabled,
+        "login_error": login_error,
+        "login_email": login_email,
+    }
+    response = render(request, "xyn_orchestrator/auth_login.html", context)
+    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response["Pragma"] = "no-cache"
+    return response
+
+
+def _complete_local_login(request: HttpRequest, *, email: str, return_to: str, role: str = "platform_admin") -> HttpResponse:
+    identity = UserIdentity.objects.filter(email__iexact=email).order_by("-last_login_at", "-updated_at").first()
+    if not identity:
+        identity = _ensure_local_identity(email)
+    identity.last_login_at = timezone.now()
+    if not identity.display_name:
+        identity.display_name = email.split("@", 1)[0] if "@" in email else email
+    identity.provider = "local"
+    identity.provider_id = "local"
+    identity.save(update_fields=["provider", "provider_id", "display_name", "last_login_at", "updated_at"])
+
+    RoleBinding.objects.get_or_create(
+        user_identity=identity,
+        scope_kind="platform",
+        scope_id=None,
+        role=role,
+    )
+    user = _ensure_local_user(email)
+    roles = _get_roles(identity)
+    user.email = email
+    user.is_staff = bool(set(roles).intersection({"platform_owner", "platform_admin", "platform_architect"}))
+    user.is_superuser = False
+    user.is_active = True
+    user.save()
+    login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+    request.session["user_identity_id"] = str(identity.id)
+    return redirect(return_to or "/app")
+
+
+@csrf_exempt
+def auth_dev_login(request: HttpRequest) -> HttpResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if _auth_mode() != "dev":
+        return JsonResponse({"error": "dev auth disabled"}, status=403)
+    app_id = str(request.POST.get("appId") or "xyn-ui").strip() or "xyn-ui"
+    client = _resolve_app_config(app_id)
+    return_to = _sanitize_return_to(str(request.POST.get("returnTo") or ""), request, client, app_id)
+    return _complete_local_login(request, email="admin@local", return_to=return_to, role="platform_admin")
+
+
+@csrf_exempt
+def auth_token_login(request: HttpRequest) -> HttpResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if _auth_mode() != "token":
+        return JsonResponse({"error": "token auth disabled"}, status=403)
+    app_id = str(request.POST.get("appId") or "xyn-ui").strip() or "xyn-ui"
+    client = _resolve_app_config(app_id)
+    return_to = _sanitize_return_to(str(request.POST.get("returnTo") or ""), request, client, app_id)
+    expected = str(os.environ.get("XYN_UI_BEARER_TOKEN") or "").strip()
+    supplied = str(request.POST.get("token") or "").strip()
+    if not expected or not supplied or supplied != expected:
+        login_url = f"/auth/login?appId={quote(app_id, safe='')}&returnTo={quote(return_to, safe='')}&error=invalid_token"
+        return redirect(login_url)
+    return _complete_local_login(request, email="admin@local", return_to=return_to, role="platform_admin")
 
 
 @csrf_exempt
 def auth_local_login(request: HttpRequest) -> HttpResponse:
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
+    if _auth_mode() != "dev":
+        return JsonResponse({"error": "local auth is only available in dev mode"}, status=403)
     if os.environ.get("XYN_ENABLE_LOCAL_USERS", "true").strip().lower() == "false":
         return JsonResponse({"error": "local auth disabled"}, status=403)
     app_id = str(request.POST.get("appId") or "xyn-ui").strip() or "xyn-ui"
@@ -5951,25 +6059,7 @@ def auth_local_login(request: HttpRequest) -> HttpResponse:
         login_url = f"/auth/login?appId={quote(app_id, safe='')}&returnTo={quote(return_to, safe='')}&error=invalid_credentials&email={quote(email, safe='')}"
         return redirect(login_url)
 
-    identity = UserIdentity.objects.filter(email__iexact=email).order_by("-last_login_at", "-updated_at").first()
-    if not identity:
-        identity = _ensure_local_identity(email)
-    identity.last_login_at = timezone.now()
-    if not identity.display_name:
-        identity.display_name = email.split("@", 1)[0] if "@" in email else email
-        identity.save(update_fields=["display_name", "last_login_at", "updated_at"])
-    else:
-        identity.save(update_fields=["last_login_at", "updated_at"])
-    roles = _get_roles(identity)
-    authenticated.email = email
-    authenticated.is_staff = bool(set(roles).intersection({"platform_owner", "platform_admin", "platform_architect"}))
-    authenticated.is_superuser = False
-    authenticated.is_active = True
-    authenticated.save()
-
-    login(request, authenticated, backend="django.contrib.auth.backends.ModelBackend")
-    request.session["user_identity_id"] = str(identity.id)
-    return redirect(return_to or "/app")
+    return _complete_local_login(request, email=email, return_to=return_to, role="platform_admin")
 
 
 def _oidc_token_kid(token: str) -> str:
@@ -6039,7 +6129,12 @@ def workspace_auth_login(request: HttpRequest, workspace_id: str) -> HttpRespons
     workspace = Workspace.objects.filter(id=workspace_id).first()
     if not workspace:
         return JsonResponse({"error": "workspace not found"}, status=404)
-    return_to = str(request.GET.get("returnTo") or f"/w/{workspace_id}/build/artifacts").strip() or f"/w/{workspace_id}/build/artifacts"
+    return_to = _sanitize_return_to(
+        str(request.GET.get("returnTo") or f"/w/{workspace_id}/build/artifacts").strip(),
+        request,
+        _resolve_app_config("xyn-ui"),
+        "xyn-ui",
+    )
 
     if _workspace_allows_oidc_auth(workspace):
         issuer_url = str(workspace.oidc_issuer_url or "").strip()
@@ -6063,7 +6158,8 @@ def workspace_auth_login(request: HttpRequest, workspace_id: str) -> HttpRespons
         request.session[f"{WORKSPACE_OIDC_VERIFIER_PREFIX}{workspace_id}"] = verifier
         request.session[f"{WORKSPACE_OIDC_NONCE_PREFIX}{workspace_id}"] = nonce
         request.session[f"workspace_oidc_return_to:{workspace_id}"] = return_to
-        callback_uri = request.build_absolute_uri(f"/xyn/api/workspaces/{workspace_id}/auth/callback")
+        request.session[f"workspace_oidc_base:{workspace_id}"] = _effective_public_base_url(request)
+        callback_uri = _public_url(request, f"/xyn/api/workspaces/{workspace_id}/auth/callback")
         params = {
             "response_type": "code",
             "client_id": client_id,
@@ -6098,7 +6194,16 @@ def workspace_auth_callback(request: HttpRequest, workspace_id: str) -> HttpResp
     verifier = str(request.session.get(f"{WORKSPACE_OIDC_VERIFIER_PREFIX}{workspace_id}") or "")
     nonce = str(request.session.get(f"{WORKSPACE_OIDC_NONCE_PREFIX}{workspace_id}") or "")
     if not state or not code or not expected_state or state != expected_state:
-        return JsonResponse({"error": "invalid state"}, status=400)
+        return _auth_state_error(request, reason="workspace state mismatch")
+    initiated_base_url = str(request.session.get(f"workspace_oidc_base:{workspace_id}") or "").strip()
+    callback_base_url = _effective_public_base_url(request)
+    if initiated_base_url and callback_base_url and initiated_base_url != callback_base_url:
+        return _auth_state_error(
+            request,
+            reason="workspace callback origin mismatch",
+            expected_origin=initiated_base_url,
+            callback_origin=callback_base_url,
+        )
     issuer_url = str(workspace.oidc_issuer_url or "").strip()
     client_id = str(workspace.oidc_client_id or "").strip()
     discovery_url = f"{issuer_url.rstrip('/')}/.well-known/openid-configuration"
@@ -6113,7 +6218,7 @@ def workspace_auth_callback(request: HttpRequest, workspace_id: str) -> HttpResp
     if not token_endpoint or not jwks_uri:
         return JsonResponse({"error": "oidc discovery missing token/jwks endpoints"}, status=400)
 
-    callback_uri = request.build_absolute_uri(f"/xyn/api/workspaces/{workspace_id}/auth/callback")
+    callback_uri = _public_url(request, f"/xyn/api/workspaces/{workspace_id}/auth/callback")
     form_data = {
         "grant_type": "authorization_code",
         "code": code,
@@ -6204,6 +6309,7 @@ def workspace_auth_callback(request: HttpRequest, workspace_id: str) -> HttpResp
     request.session.pop(f"{WORKSPACE_OIDC_STATE_PREFIX}{workspace_id}", None)
     request.session.pop(f"{WORKSPACE_OIDC_VERIFIER_PREFIX}{workspace_id}", None)
     request.session.pop(f"{WORKSPACE_OIDC_NONCE_PREFIX}{workspace_id}", None)
+    request.session.pop(f"workspace_oidc_base:{workspace_id}", None)
     request.session.pop(f"workspace_oidc_return_to:{workspace_id}", None)
     return redirect(return_to)
 
@@ -6220,6 +6326,8 @@ def workspace_auth_callback_api(request: HttpRequest, workspace_id: str) -> Http
 
 @csrf_exempt
 def auth_callback(request: HttpRequest) -> HttpResponse:
+    if _auth_mode() != "oidc":
+        return _auth_state_error(request, reason="oidc callback requested while XYN_AUTH_MODE is not oidc")
     provider_id = request.session.get("oidc_provider_id")
     state = request.POST.get("state") if request.method == "POST" else request.GET.get("state")
     if not provider_id:
@@ -6243,7 +6351,16 @@ def auth_callback(request: HttpRequest) -> HttpResponse:
     if not code or not state:
         return JsonResponse({"error": "missing code/state"}, status=400)
     if state != request.session.get("oidc_state"):
-        return JsonResponse({"error": "invalid state"}, status=400)
+        return _auth_state_error(request, reason="state mismatch")
+    initiated_base_url = str(request.session.get("oidc_initiated_base_url") or "").strip()
+    callback_base_url = _effective_public_base_url(request)
+    if initiated_base_url and callback_base_url and initiated_base_url != callback_base_url:
+        return _auth_state_error(
+            request,
+            reason="callback origin mismatch",
+            expected_origin=initiated_base_url,
+            callback_origin=callback_base_url,
+        )
     env = _resolve_environment(request)
     if not env:
         return JsonResponse({"error": "environment not found"}, status=404)
@@ -6259,7 +6376,14 @@ def auth_callback(request: HttpRequest) -> HttpResponse:
     oidc_config = _get_oidc_config(issuer)
     if not oidc_config or not oidc_config.get("token_endpoint"):
         return JsonResponse({"error": "OIDC configuration unavailable"}, status=502)
-    redirect_uri = config.get("redirect_uri") or request.build_absolute_uri("/auth/callback")
+    redirect_uri = _public_url(request, "/auth/callback")
+    if _auth_debug_enabled():
+        logger.info(
+            "oidc callback(env-fallback) redirect_uri=%s initiated=%s callback=%s",
+            redirect_uri,
+            initiated_base_url,
+            callback_base_url,
+        )
     token_response = requests.post(
         oidc_config["token_endpoint"],
         data={
@@ -6362,10 +6486,6 @@ def auth_logout(request: HttpRequest) -> JsonResponse:
 def auth_session_check(request: HttpRequest) -> HttpResponse:
     app_id = (request.GET.get("appId") or "xyn-ui").strip() or "xyn-ui"
     client = _resolve_app_config(app_id)
-    forwarded_proto = (request.META.get("HTTP_X_FORWARDED_PROTO") or "https").split(",")[0].strip() or "https"
-    forwarded_host = (
-        (request.META.get("HTTP_X_FORWARDED_HOST") or request.get_host() or "").split(",")[0].strip()
-    )
     forwarded_uri = (
         (request.META.get("HTTP_X_FORWARDED_URI") or request.get_full_path() or "/").split(",")[0].strip()
     )
@@ -6373,9 +6493,9 @@ def auth_session_check(request: HttpRequest) -> HttpResponse:
         forwarded_uri = f"/{forwarded_uri}"
     if app_id == "ems.platform":
         callback_uri = "/auth/callback"
-        return_to_candidate = f"{forwarded_proto}://{forwarded_host}{callback_uri}" if forwarded_host else callback_uri
+        return_to_candidate = callback_uri
     else:
-        return_to_candidate = f"{forwarded_proto}://{forwarded_host}{forwarded_uri}" if forwarded_host else forwarded_uri
+        return_to_candidate = forwarded_uri
     return_to = _sanitize_return_to(return_to_candidate, request, client, app_id)
 
     if request.user.is_authenticated and request.session.get("user_identity_id"):
@@ -6607,6 +6727,18 @@ def seed_apply(request: HttpRequest) -> JsonResponse:
     return JsonResponse(result)
 
 
+def auth_mode(request: HttpRequest) -> JsonResponse:
+    return JsonResponse(
+        {
+            "auth_mode": _auth_mode(),
+            "public_base_url": str(os.environ.get("XYN_PUBLIC_BASE_URL", "")).strip() or _effective_public_base_url(request),
+            "oidc_enabled": _auth_mode() == "oidc",
+            "token_enabled": _auth_mode() == "token",
+            "dev_enabled": _auth_mode() == "dev",
+        }
+    )
+
+
 def api_me(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
     if not identity:
@@ -6624,6 +6756,7 @@ def api_me(request: HttpRequest) -> JsonResponse:
             "roles": roles,
             "actor_roles": list(getattr(request, "actor_roles", []) or roles),
             "preview": _serialize_preview_status(identity, request),
+            "auth_mode": _auth_mode(),
             "workspaces": [
                 {
                     "id": str(m.workspace_id),
@@ -6921,45 +7054,130 @@ def _default_post_login_redirect(client: Optional[AppOIDCClient], app_id: str) -
     return "/"
 
 
+def _auth_mode() -> str:
+    mode = str(os.environ.get("XYN_AUTH_MODE", "dev") or "dev").strip().lower()
+    if mode in {"simple", "local"}:
+        return "dev"
+    if mode in {"dev", "token", "oidc"}:
+        return mode
+    return "dev"
+
+
+def _auth_debug_enabled() -> bool:
+    return str(os.environ.get("XYN_DEBUG_AUTH", "false")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _trusted_proxy_cidrs() -> List[ipaddress._BaseNetwork]:
+    raw = str(
+        os.environ.get(
+            "XYN_TRUSTED_PROXY_CIDRS",
+            "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+        )
+        or ""
+    ).strip()
+    networks: List[ipaddress._BaseNetwork] = []
+    for token in raw.split(","):
+        cidr = token.strip()
+        if not cidr:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(cidr, strict=False))
+        except Exception:
+            continue
+    return networks
+
+
+def _is_trusted_proxy_request(request: HttpRequest) -> bool:
+    if str(os.environ.get("XYN_TRUST_PROXY", "true")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    remote_addr = str(request.META.get("REMOTE_ADDR") or "").strip()
+    if not remote_addr:
+        return False
+    try:
+        remote_ip = ipaddress.ip_address(remote_addr)
+    except Exception:
+        return False
+    for net in _trusted_proxy_cidrs():
+        if remote_ip in net:
+            return True
+    return False
+
+
+def _effective_public_base_url(request: HttpRequest) -> str:
+    explicit = str(os.environ.get("XYN_PUBLIC_BASE_URL", "") or "").strip()
+    if explicit:
+        base = explicit.rstrip("/")
+        if _auth_debug_enabled():
+            logger.info("auth base-url explicit=%s", base)
+        return base
+
+    proto = str(request.scheme or "http").strip() or "http"
+    host = str(request.get_host() or "").strip()
+    if _is_trusted_proxy_request(request):
+        f_proto = str(request.META.get("HTTP_X_FORWARDED_PROTO") or "").split(",")[0].strip()
+        f_host = str(request.META.get("HTTP_X_FORWARDED_HOST") or "").split(",")[0].strip()
+        f_port = str(request.META.get("HTTP_X_FORWARDED_PORT") or "").split(",")[0].strip()
+        if f_proto:
+            proto = f_proto
+        if f_host:
+            host = f_host
+        elif host and f_port and ":" not in host:
+            if (proto == "https" and f_port != "443") or (proto == "http" and f_port != "80"):
+                host = f"{host}:{f_port}"
+    base = f"{proto}://{host}".rstrip("/")
+    if _auth_debug_enabled():
+        logger.info(
+            "auth base-url derived=%s trusted_proxy=%s remote=%s xfp=%s xfh=%s xfpn=%s",
+            base,
+            _is_trusted_proxy_request(request),
+            request.META.get("REMOTE_ADDR"),
+            request.META.get("HTTP_X_FORWARDED_PROTO"),
+            request.META.get("HTTP_X_FORWARDED_HOST"),
+            request.META.get("HTTP_X_FORWARDED_PORT"),
+        )
+    return base
+
+
+def _public_url(request: HttpRequest, path: str) -> str:
+    token = str(path or "").strip() or "/"
+    if not token.startswith("/"):
+        token = f"/{token}"
+    return f"{_effective_public_base_url(request)}{token}"
+
+
+def _auth_state_error(
+    request: HttpRequest,
+    *,
+    reason: str = "invalid state",
+    expected_origin: str = "",
+    callback_origin: str = "",
+) -> JsonResponse:
+    payload = {
+        "error": "invalid state",
+        "reason": reason,
+        "hint": (
+            "Invalid state often means login started on one origin and callback returned to another. "
+            "Set XYN_PUBLIC_BASE_URL to your exact external origin."
+        ),
+    }
+    if expected_origin:
+        payload["expected_origin"] = expected_origin
+    if callback_origin:
+        payload["callback_origin"] = callback_origin
+    if _auth_debug_enabled():
+        logger.warning("auth invalid-state reason=%s payload=%s", reason, payload)
+    return JsonResponse(payload, status=400)
+
+
 def _sanitize_return_to(raw_value: str, request: HttpRequest, client: Optional[AppOIDCClient], app_id: str) -> str:
     fallback = _default_post_login_redirect(client, app_id)
     value = (raw_value or "").strip()
     if not value:
         return fallback
     split = urlsplit(value)
-    if split.scheme and split.scheme not in {"http", "https"}:
+    if split.scheme or split.netloc:
         return fallback
-    if split.scheme == "":
-        if not value.startswith("/") or value.startswith("//"):
-            return fallback
-        return value
-    env_hosts = {
-        host.strip().lower()
-        for host in os.environ.get("XYENCE_ALLOWED_RETURN_HOSTS", "").split(",")
-        if host.strip()
-    }
-    allowed_host_suffixes = {
-        suffix.strip().lower().lstrip(".")
-        for suffix in os.environ.get("XYENCE_ALLOWED_RETURN_HOST_SUFFIXES", "xyence.io").split(",")
-        if suffix.strip()
-    }
-    allowed_hosts = {request.get_host().lower(), *env_hosts}
-    if client:
-        for uri in (client.redirect_uris_json or []) + (client.post_logout_redirect_uris_json or []):
-            try:
-                netloc = urlsplit(uri).netloc.lower()
-            except Exception:
-                netloc = ""
-            if netloc:
-                allowed_hosts.add(netloc)
-    target_netloc = split.netloc.lower()
-    target_host = (split.hostname or "").lower()
-    exact_allowed = target_netloc in allowed_hosts or target_host in allowed_hosts
-    suffix_allowed = any(
-        target_host == suffix or target_host.endswith(f".{suffix}")
-        for suffix in allowed_host_suffixes
-    )
-    if not exact_allowed and not suffix_allowed:
+    if not value.startswith("/") or value.startswith("//"):
         return fallback
     return urlunsplit(split)
 

@@ -1,0 +1,110 @@
+name: Publish Artifacts
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: public.ecr.aws/i0h0h0n4/xyn/artifacts
+  UI_IMAGE: public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui
+  API_IMAGE: public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ECR Public
+        run: aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+
+      - name: Compute tags
+        id: vars
+        shell: bash
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push xyn-ui (dev + sha)
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/xyn-ui
+          file: apps/xyn-ui/Dockerfile
+          push: true
+          tags: |
+            ${{ env.UI_IMAGE }}:dev
+            ${{ env.UI_IMAGE }}:${{ steps.vars.outputs.sha_tag }}
+
+      - name: Build and push xyn-api (dev + sha)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/xyn-api
+          file: services/xyn-api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.API_IMAGE }}:dev
+            ${{ env.API_IMAGE }}:${{ steps.vars.outputs.sha_tag }}
+
+      - name: Build and push xyn-ui (version + stable)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/xyn-ui
+          file: apps/xyn-ui/Dockerfile
+          push: true
+          tags: |
+            ${{ env.UI_IMAGE }}:${{ steps.vars.outputs.version_tag }}
+            ${{ env.UI_IMAGE }}:stable
+
+      - name: Build and push xyn-api (version + stable)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: services/xyn-api
+          file: services/xyn-api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.API_IMAGE }}:${{ steps.vars.outputs.version_tag }}
+            ${{ env.API_IMAGE }}:stable
+
+      - name: Generate release bridge manifest
+        shell: bash
+        run: |
+          mkdir -p releases
+          cat > releases/dev.json <<JSON
+          {
+            "channel": "dev",
+            "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "images": {
+              "xyn-ui": "${UI_IMAGE}:${{ steps.vars.outputs.sha_tag }}",
+              "xyn-api": "${API_IMAGE}:${{ steps.vars.outputs.sha_tag }}"
+            }
+          }
+          JSON
+
+      - name: Upload release bridge manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: releases-dev
+          path: releases/dev.json

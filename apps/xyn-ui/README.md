@@ -15,14 +15,17 @@ npm run dev
 
 ## Environment
 - `VITE_API_BASE_URL` (default: current origin)
-- `VITE_AUTH_MODE` (dev|oidc) default dev
 - `VITE_XYN_UI_ENABLE_LEGACY_CONTROL_PLANE` default `false`
 - `VITE_XYN_UI_ENABLE_LEGACY_GUIDES` default `false`
 - `VITE_XYN_UI_ENABLE_LEGACY_DEV_TASKS_PAGE` default `false`
 - `VITE_XYN_UI_ENABLE_LEGACY_BLUEPRINTS` default `false`
 
 ## Notes
-This UI relies on existing xyn-api staff session cookies in dev mode.
+Auth mode is read from backend runtime (`/xyn/api/auth/mode`), not build-time env.
+Modes supported by backend:
+- `dev`: login page offers "Continue as Admin"
+- `token`: login page accepts bootstrap token
+- `oidc`: login page shows configured OIDC providers
 
 ## Shared Login
 - Apps should redirect users to the platform login route:

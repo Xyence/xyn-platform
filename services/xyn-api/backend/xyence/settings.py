@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .runtime_env import bootstrap_runtime_env
 
@@ -16,7 +17,7 @@ if "*" not in ALLOWED_HOSTS and "backend" not in ALLOWED_HOSTS:
 if "*" not in ALLOWED_HOSTS and ".xyence.io" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(".xyence.io")
 
-# Respect proxy headers from nginx so OAuth redirects use https.
+# Respect proxy headers from ingress/proxy.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = True
 
@@ -96,7 +97,10 @@ SITE_ID = int(os.environ.get("DJANGO_SITE_ID", "1"))
 ACCOUNT_EMAIL_REQUIRED = True
 ACCOUNT_USERNAME_REQUIRED = False
 ACCOUNT_EMAIL_VERIFICATION = "optional"
-ACCOUNT_DEFAULT_HTTP_PROTOCOL = "https"
+_public_base_url = str(os.environ.get("XYN_PUBLIC_BASE_URL", "http://localhost")).strip() or "http://localhost"
+_public_scheme = (urlsplit(_public_base_url).scheme or "http").lower()
+_is_localhost_public = (urlsplit(_public_base_url).hostname or "").lower() in {"localhost", "127.0.0.1"}
+ACCOUNT_DEFAULT_HTTP_PROTOCOL = "https" if _public_scheme == "https" else "http"
 ACCOUNT_ALLOWED_EMAIL_DOMAINS = [
     domain.strip()
     for domain in os.environ.get("ALLOWED_LOGIN_DOMAINS", "xyence.io").split(",")
@@ -121,15 +125,40 @@ TIME_ZONE = os.environ.get("DJANGO_TIME_ZONE", "UTC")
 USE_I18N = True
 USE_TZ = True
 
-# Ensure OIDC redirects preserve session across cross-site redirect.
-SESSION_COOKIE_SECURE = True
-SESSION_COOKIE_SAMESITE = "None"
-CSRF_COOKIE_SECURE = True
-CSRF_COOKIE_SAMESITE = "None"
+# Localhost OIDC must avoid Secure cookies on plain HTTP and must not set cookie domains.
+_cookie_secure_default = _public_scheme == "https" and not _is_localhost_public
+SESSION_COOKIE_SECURE = os.environ.get("SESSION_COOKIE_SECURE", "true" if _cookie_secure_default else "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+CSRF_COOKIE_SECURE = os.environ.get("CSRF_COOKIE_SECURE", "true" if _cookie_secure_default else "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_default_samesite = "None" if SESSION_COOKIE_SECURE else "Lax"
+SESSION_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", _default_samesite).strip() or _default_samesite
+CSRF_COOKIE_SAMESITE = os.environ.get("CSRF_COOKIE_SAMESITE", _default_samesite).strip() or _default_samesite
 _base_domain = os.environ.get("XYN_BASE_DOMAIN", "").strip()
-_default_cookie_domain = f".{_base_domain}" if _base_domain else ".xyence.io"
+_default_cookie_domain = ""
+if _base_domain and _base_domain not in {"localhost", "127.0.0.1"}:
+    _default_cookie_domain = f".{_base_domain}"
 SESSION_COOKIE_DOMAIN = os.environ.get("SESSION_COOKIE_DOMAIN", _default_cookie_domain).strip() or None
 CSRF_COOKIE_DOMAIN = os.environ.get("CSRF_COOKIE_DOMAIN", SESSION_COOKIE_DOMAIN or "").strip() or None
+
+_redis_session_url = str(os.environ.get("REDIS_URL", "redis://redis:6379/0")).strip()
+if _redis_session_url:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": _redis_session_url,
+        }
+    }
+    SESSION_ENGINE = "django.contrib.sessions.backends.cache"
+    SESSION_CACHE_ALIAS = "default"
 
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"

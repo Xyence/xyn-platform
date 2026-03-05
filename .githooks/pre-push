@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+if [[ "${SKIP_XYN_PUBLISH:-0}" == "1" ]]; then
+  echo "[pre-push] SKIP_XYN_PUBLISH=1 set, skipping artifact publish."
+  exit 0
+fi
+
+echo "[pre-push] Publishing xyn-platform artifacts before push..."
+make publish-dev
+
+echo "[pre-push] Artifact publish completed; continuing push."

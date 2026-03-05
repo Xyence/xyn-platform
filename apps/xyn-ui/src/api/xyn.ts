@@ -234,6 +234,14 @@ export async function getWhoAmI(): Promise<{ authenticated: boolean; username?: 
   return handle<{ authenticated: boolean; username?: string; email?: string }>(response);
 }
 
+export async function getAuthMode(): Promise<{ auth_mode: "dev" | "token" | "oidc"; public_base_url?: string }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/auth/mode`, {
+    credentials: "include",
+  });
+  return handle<{ auth_mode: "dev" | "token" | "oidc"; public_base_url?: string }>(response);
+}
+
 export async function getAiBootstrapStatus(): Promise<AiBootstrapStatusResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/ai/bootstrap-status`, {
@@ -529,6 +537,7 @@ export async function getRecentArtifacts(limit = 6): Promise<RecentArtifactListR
 
 export async function getMe(): Promise<{
   user: Record<string, string | null>;
+  auth_mode?: "dev" | "token" | "oidc";
   roles: string[];
   permissions?: string[];
   actor_roles?: string[];
@@ -547,6 +556,7 @@ export async function getMe(): Promise<{
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/me`, { credentials: "include" });
   return handle<{
     user: Record<string, string | null>;
+    auth_mode?: "dev" | "token" | "oidc";
     roles: string[];
     permissions?: string[];
     actor_roles?: string[];

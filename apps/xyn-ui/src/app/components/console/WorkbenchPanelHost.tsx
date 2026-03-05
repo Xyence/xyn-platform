@@ -16,7 +16,7 @@ import {
   queryEmsDevicesCanvasTable,
   queryEmsRegistrationsCanvasTable,
 } from "../../../api/xyn";
-import { resolveApiBaseUrl } from "../../../api/client";
+import { getRuntimeAuthMode, resolveApiBaseUrl } from "../../../api/client";
 import type {
   AiBootstrapStatus,
   ArtifactCanvasTableResponse,
@@ -662,7 +662,7 @@ function PlatformSettingsPanel({ workspaceId }: { workspaceId: string }) {
               app_origin: typeof window !== "undefined" ? window.location.origin : "",
               path: typeof window !== "undefined" ? window.location.pathname : "",
               time_utc: new Date().toISOString(),
-              auth_mode: import.meta.env.VITE_AUTH_MODE || "unknown",
+              auth_mode: getRuntimeAuthMode(),
             },
             null,
             2

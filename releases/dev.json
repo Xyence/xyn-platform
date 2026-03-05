@@ -1,0 +1,8 @@
+{
+  "channel": "dev",
+  "published_at": "2026-03-04T22:39:22Z",
+  "images": {
+    "xyn-ui": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:sha-e3e253c",
+    "xyn-api": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:sha-e3e253c"
+  }
+}

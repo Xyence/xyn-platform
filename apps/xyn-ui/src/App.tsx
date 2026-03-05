@@ -8,17 +8,15 @@ import PageRoute from "./public/pages/PageRoute";
 import ArticlesIndex from "./public/pages/ArticlesIndex";
 import ArticleDetail from "./public/pages/ArticleDetail";
 import HomePage from "./public/pages/HomePage";
-import { resolveApiBaseUrl } from "./api/client";
 
 function WorkspaceAuthLoginBridge() {
   const params = useParams();
   const workspaceId = String(params.workspaceId || "").trim();
   useEffect(() => {
     if (!workspaceId) return;
-    const apiBase = resolveApiBaseUrl();
     const returnTo = `${window.location.origin}/w/${workspaceId}/build/artifacts`;
     window.location.replace(
-      `${apiBase}/xyn/api/workspaces/${workspaceId}/auth/login?returnTo=${encodeURIComponent(returnTo)}`
+      `/xyn/api/workspaces/${workspaceId}/auth/login?returnTo=${encodeURIComponent(returnTo)}`
     );
   }, [workspaceId]);
   return <div style={{ padding: 24 }}>Starting workspace sign-in…</div>;
@@ -29,9 +27,8 @@ function WorkspaceAuthCallbackBridge() {
   const workspaceId = String(params.workspaceId || "").trim();
   useEffect(() => {
     if (!workspaceId) return;
-    const apiBase = resolveApiBaseUrl();
     const query = window.location.search || "";
-    window.location.replace(`${apiBase}/xyn/api/workspaces/${workspaceId}/auth/callback${query}`);
+    window.location.replace(`/xyn/api/workspaces/${workspaceId}/auth/callback${query}`);
   }, [workspaceId]);
   return <div style={{ padding: 24 }}>Completing workspace sign-in…</div>;
 }

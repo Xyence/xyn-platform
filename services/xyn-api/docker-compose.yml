@@ -18,7 +18,7 @@ services:
   backend:
     build:
       context: ./backend
-    image: xyn-api-backend
+    image: xyn-api
     restart: unless-stopped
     env_file:
       - ./backend/.env

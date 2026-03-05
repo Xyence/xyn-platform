@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Bot } from "lucide-react";
-import { getMe, getMyProfile, getTenantBranding, listArtifactNavSurfaces, listWorkspaces } from "../api/xyn";
+import { getAuthMode, getMe, getMyProfile, getTenantBranding, listArtifactNavSurfaces, listWorkspaces } from "../api/xyn";
+import { setRuntimeAuthMode } from "../api/client";
 import type { ArtifactSurface } from "../api/types";
 import { CREATE_ACTIONS, NAV_GROUPS, NAV_MOVE_TOAST_STORAGE_KEY, NavGroup, NavItem, NavUserContext } from "./nav/nav.config";
 import { getBreadcrumbs, visibleNav } from "./nav/nav.utils";
@@ -214,8 +215,17 @@ export default function AppShell() {
     let mounted = true;
     (async () => {
       try {
+        try {
+          const modePayload = await getAuthMode();
+          setRuntimeAuthMode(modePayload?.auth_mode || "dev");
+        } catch {
+          // Fallback to bootstrap response if auth mode endpoint is unavailable.
+        }
         const me = await getMe();
         if (!mounted) return;
+        if (me?.auth_mode) {
+          setRuntimeAuthMode(String(me.auth_mode));
+        }
         setAuthed(Boolean(me?.user));
         setAuthUser((me?.user as Record<string, unknown>) || null);
         setRoles(me?.roles ?? []);
