@@ -8,13 +8,14 @@ import { CREATE_ACTIONS, NAV_GROUPS, NAV_MOVE_TOAST_STORAGE_KEY, NavGroup, NavIt
 import { getBreadcrumbs, visibleNav } from "./nav/nav.utils";
 import Sidebar from "./components/nav/Sidebar";
 import BlueprintsPage from "./pages/BlueprintsPage";
-import DraftSessionsPage from "./pages/DraftSessionsPage";
 import InstancesPage from "./pages/InstancesPage";
 import SecretConfigurationPage from "./pages/SecretConfigurationPage";
 import AIConfigPage from "./pages/AIConfigPage";
 import IdentityConfigurationPage from "./pages/IdentityConfigurationPage";
 import AccessControlPage from "./pages/AccessControlPage";
 import RunsPage from "./pages/RunsPage";
+import JobsListPage from "./pages/JobsListPage";
+import JobDetailPage from "./pages/JobDetailPage";
 import ActivityPage from "./pages/ActivityPage";
 import DevTasksPage from "./pages/DevTasksPage";
 import PlatformBrandingPage from "./pages/PlatformBrandingPage";
@@ -34,6 +35,9 @@ import ArticleSurfaceEditorRedirectPage from "./pages/ArticleSurfaceEditorRedire
 import ArticleSurfaceDocsPage from "./pages/ArticleSurfaceDocsPage";
 import WorkbenchPage from "./pages/WorkbenchPage";
 import WorkspaceSettingsPage from "./pages/WorkspaceSettingsPage";
+import DraftsListPage from "./pages/DraftsListPage";
+import DraftCreatePage from "./pages/DraftCreatePage";
+import DraftDetailPage from "./pages/DraftDetailPage";
 import { useGlobalHotkeys } from "./hooks/useGlobalHotkeys";
 import ReportOverlay from "./components/ReportOverlay";
 import UserMenu from "./components/common/UserMenu";
@@ -752,13 +756,7 @@ export default function AppShell() {
             />
             <Route
               path="build/drafts"
-              element={
-                ENABLE_LEGACY_BLUEPRINTS ? (
-                  <RedirectWithNotice to={workspaceScopedTarget("build/blueprints/drafts")} notice="Draft Sessions moved to Build / Blueprints / Drafts." />
-                ) : (
-                  <Navigate to={workspaceScopedTarget("build/artifacts")} replace />
-                )
-              }
+              element={<Navigate to={workspaceScopedTarget("drafts")} replace />}
             />
             <Route
               path="build/draft-sessions"
@@ -772,7 +770,7 @@ export default function AppShell() {
             />
             <Route
               path="build/drafts/:draftId"
-              element={ENABLE_LEGACY_BLUEPRINTS ? <DraftSessionsPage /> : <Navigate to={workspaceScopedTarget("build/artifacts")} replace />}
+              element={<DraftDetailPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />}
             />
             <Route
               path="build/context-packs"
@@ -783,9 +781,34 @@ export default function AppShell() {
             <Route path="package/releases" element={<Navigate to={settingsDeployPath} replace />} />
             <Route path="run/instances" element={<InstancesPage />} />
             <Route path="run/runs" element={<RunsPage />} />
+            <Route
+              path="run/jobs"
+              element={<JobsListPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />}
+            />
             <Route path="run/dev-tasks" element={<Navigate to={runsDevTasksPath} replace />} />
             <Route path="govern/activity" element={<ActivityPage workspaceId={activeWorkspace?.id || ""} />} />
             <Route path="govern/contributions" element={<ActivityPage workspaceId={activeWorkspace?.id || ""} defaultTab="contributions" />} />
+
+            <Route
+              path="drafts"
+              element={<DraftsListPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />}
+            />
+            <Route
+              path="drafts/new"
+              element={<DraftCreatePage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />}
+            />
+            <Route
+              path="drafts/:draftId"
+              element={<DraftDetailPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />}
+            />
+            <Route
+              path="jobs"
+              element={<JobsListPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />}
+            />
+            <Route
+              path="jobs/:jobId"
+              element={<JobDetailPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />}
+            />
 
             <Route path="artifacts" element={<Navigate to={workspaceScopedTarget("build/artifacts")} replace />} />
             <Route
@@ -856,14 +879,9 @@ export default function AppShell() {
             <Route path="blueprints/versions" element={<Navigate to={workspaceScopedTarget("build/artifacts")} replace />} />
             <Route path="blueprints/:blueprintId" element={<Navigate to={workspaceScopedTarget("build/artifacts")} replace />} />
             <Route
-              path="drafts"
-              element={<Navigate to={workspaceScopedTarget("build/drafts")} replace />}
-            />
-            <Route
               path="draft-sessions"
-              element={<Navigate to={workspaceScopedTarget("build/drafts")} replace />}
+              element={<Navigate to={workspaceScopedTarget("drafts")} replace />}
             />
-            <Route path="drafts/:draftId" element={<Navigate to={workspaceScopedTarget("build/drafts")} replace />} />
             <Route path="modules" element={<Navigate to={workspaceScopedTarget("build/artifacts")} replace />} />
             <Route path="release-plans" element={<Navigate to={settingsDeployPath} replace />} />
             <Route path="releases" element={<Navigate to={settingsDeployPath} replace />} />

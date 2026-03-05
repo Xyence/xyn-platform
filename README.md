@@ -81,7 +81,7 @@ Triggers:
 - push to `main`
 - push tags matching `v*`
 
-Required repository secrets:
+Required repository secrets (choose one auth mode):
 
-- `AWS_ACCESS_KEY_ID`
-- `AWS_SECRET_ACCESS_KEY`
+- OIDC (recommended): `AWS_ROLE_TO_ASSUME`
+- Access keys: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`

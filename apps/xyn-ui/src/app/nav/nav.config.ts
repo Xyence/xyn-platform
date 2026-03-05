@@ -58,6 +58,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: "installed", label: "Installed", path: "/app/artifacts/all", icon: "Layers" },
       { id: "catalog", label: "Catalog", path: "/app/catalog", icon: "Package" },
+      { id: "drafts", label: "Drafts", path: "/app/drafts", icon: "FilePenLine", keywords: ["intent", "spec", "prompt"] },
     ],
     subgroups: [],
   },
@@ -73,6 +74,7 @@ export const NAV_GROUPS: NavGroup[] = [
     icon: "Rocket",
     items: [
       { id: "runs", label: "Runs", path: "/app/runs", icon: "PlayCircle", keywords: ["logs", "executions"] },
+      { id: "jobs", label: "Jobs", path: "/app/jobs", icon: "ListChecks", keywords: ["queue", "status", "worker"] },
     ],
   },
   {

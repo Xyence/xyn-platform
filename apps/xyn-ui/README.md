@@ -32,6 +32,15 @@ Modes supported by backend:
   - `/auth/login?appId=<appId>&returnTo=<url>`
 - Do not implement app-specific provider pickers in individual apps.
 
+## Drafts + Jobs (Workspace Scoped)
+- Routes:
+  - `/drafts`
+  - `/drafts/new`
+  - `/drafts/:id`
+  - `/jobs`
+  - `/jobs/:id`
+- UI sends `workspace_id` with Draft/Job API requests to `/api/v1/*`.
+
 ## Bug / Feature Report Overlay
 - Open with `Ctrl+Shift+B` (or `Cmd+Shift+B` on macOS).
 - Supports:

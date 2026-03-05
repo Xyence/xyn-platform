@@ -2750,3 +2750,53 @@ export type RecentArtifactItem = {
 export type RecentArtifactListResponse = {
   items: RecentArtifactItem[];
 };
+
+export type AppIntentDraft = {
+  id: string;
+  workspace_id: string;
+  type: string;
+  title: string;
+  content_json: Record<string, unknown>;
+  status: "draft" | "ready" | "submitted" | "archived" | string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AppIntentDraftCreatePayload = {
+  type: string;
+  title: string;
+  content_json: Record<string, unknown>;
+  status?: "draft" | "ready" | "submitted" | "archived";
+  created_by?: string;
+};
+
+export type AppIntentDraftPatchPayload = {
+  title?: string;
+  content_json?: Record<string, unknown>;
+  status?: "draft" | "ready" | "submitted" | "archived";
+};
+
+export type AppDraftSubmitResponse = {
+  draft: AppIntentDraft;
+  job_id: string;
+  job_status: "queued" | "running" | "succeeded" | "failed" | string;
+};
+
+export type AppJob = {
+  id: string;
+  workspace_id: string;
+  type: string;
+  status: "queued" | "running" | "succeeded" | "failed" | string;
+  input_json: Record<string, unknown>;
+  output_json?: Record<string, unknown> | null;
+  logs_text?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AppJobPatchPayload = {
+  status?: "queued" | "running" | "succeeded" | "failed";
+  output_json?: Record<string, unknown>;
+  logs_text?: string;
+};
