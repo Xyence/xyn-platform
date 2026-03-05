@@ -62,7 +62,8 @@ docker push "${API_REPO}:dev"
 docker push "${API_REPO}:${SHA_TAG}"
 
 mkdir -p releases
-cat > releases/dev.json <<JSON
+if [[ "${SKIP_RELEASE_MANIFEST_WRITE:-0}" != "1" ]]; then
+  cat > releases/dev.json <<JSON
 {
   "channel": "dev",
   "published_at": "${PUBLISHED_AT}",
@@ -72,6 +73,7 @@ cat > releases/dev.json <<JSON
   }
 }
 JSON
+fi
 
 echo
 printf 'Published image refs:\n'
@@ -79,4 +81,8 @@ printf '  %s (digest: %s)\n' "${UI_REPO}:dev" "$(get_digest "${UI_REPO}:dev")"
 printf '  %s (digest: %s)\n' "${UI_REPO}:${SHA_TAG}" "$(get_digest "${UI_REPO}:${SHA_TAG}")"
 printf '  %s (digest: %s)\n' "${API_REPO}:dev" "$(get_digest "${API_REPO}:dev")"
 printf '  %s (digest: %s)\n' "${API_REPO}:${SHA_TAG}" "$(get_digest "${API_REPO}:${SHA_TAG}")"
-printf '\nWrote bridge manifest: releases/dev.json\n'
+if [[ "${SKIP_RELEASE_MANIFEST_WRITE:-0}" == "1" ]]; then
+  printf '\nSkipped bridge manifest write (SKIP_RELEASE_MANIFEST_WRITE=1).\n'
+else
+  printf '\nWrote bridge manifest: releases/dev.json\n'
+fi
