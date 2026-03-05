@@ -8,6 +8,7 @@ import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 
 type DraftDetailTab = "editor" | "meta";
+type DraftStatusValue = "draft" | "ready" | "submitted" | "archived";
 
 function prettyJson(value: unknown): string {
   try {
@@ -37,7 +38,7 @@ export default function DraftDetailPage({
   const draftId = String(params.draftId || "").trim();
   const [draft, setDraft] = useState<AppIntentDraft | null>(null);
   const [title, setTitle] = useState("");
-  const [status, setStatus] = useState("draft");
+  const [status, setStatus] = useState<DraftStatusValue>("draft");
   const [jsonText, setJsonText] = useState("{}");
   const [saving, setSaving] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -56,7 +57,8 @@ export default function DraftDetailPage({
       const payload = await getAppIntentDraft(draftId, workspaceId);
       setDraft(payload);
       setTitle(payload.title || "");
-      setStatus(payload.status || "draft");
+      const nextStatus = String(payload.status || "draft").toLowerCase();
+      setStatus(nextStatus === "ready" || nextStatus === "submitted" || nextStatus === "archived" ? nextStatus : "draft");
       setJsonText(prettyJson(payload.content_json || {}));
     } catch (err) {
       setError((err as Error).message);
@@ -97,7 +99,7 @@ export default function DraftDetailPage({
       setMessage(null);
       const payload = await submitAppIntentDraft(draftId, workspaceId);
       setDraft(payload.draft);
-      setStatus(payload.draft.status || "submitted");
+      setStatus("submitted");
       setMessage(`Draft submitted. Job queued: ${payload.job_id}`);
       navigate(toWorkspacePath(workspaceId, `jobs/${payload.job_id}`));
     } catch (err) {
@@ -130,7 +132,7 @@ export default function DraftDetailPage({
           </button>
         </div>
       </div>
-      {message && <InlineMessage tone="success" title="Draft" body={message} />}
+      {message && <InlineMessage tone="info" title="Draft" body={message} />}
       {error && <InlineMessage tone="error" title="Request failed" body={error} />}
 
       <section className="card">
@@ -155,7 +157,7 @@ export default function DraftDetailPage({
             </label>
             <label>
               Status
-              <select className="input" value={status} onChange={(event) => setStatus(event.target.value)}>
+              <select className="input" value={status} onChange={(event) => setStatus(event.target.value as DraftStatusValue)}>
                 <option value="draft">draft</option>
                 <option value="ready">ready</option>
                 <option value="submitted">submitted</option>

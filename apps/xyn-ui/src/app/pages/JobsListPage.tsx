@@ -49,7 +49,7 @@ export default function JobsListPage({
     void load();
   }, [load]);
 
-  const columns = useMemo<ColumnDef<AppJob>[]>(() => {
+  const columns = useMemo(() => {
     const helper = createColumnHelper<AppJob>();
     return [
       helper.accessor("type", {
@@ -68,7 +68,7 @@ export default function JobsListPage({
         header: () => "Updated",
         cell: (ctx) => formatDate(ctx.getValue()),
       }),
-    ];
+    ] as ColumnDef<AppJob>[];
   }, []);
 
   const table = useReactTable({

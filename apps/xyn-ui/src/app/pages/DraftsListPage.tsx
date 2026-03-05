@@ -49,7 +49,7 @@ export default function DraftsListPage({
     void load();
   }, [load]);
 
-  const columns = useMemo<ColumnDef<AppIntentDraft>[]>(() => {
+  const columns = useMemo(() => {
     const helper = createColumnHelper<AppIntentDraft>();
     return [
       helper.accessor("title", {
@@ -72,7 +72,7 @@ export default function DraftsListPage({
         header: () => "Updated",
         cell: (ctx) => formatDate(ctx.getValue()),
       }),
-    ];
+    ] as ColumnDef<AppIntentDraft>[];
   }, []);
 
   const table = useReactTable({
