@@ -49,6 +49,18 @@ class PlatformBootstrapTests(TestCase):
         self.assertEqual(membership.role, "admin")
         self.assertTrue(membership.termination_authority)
 
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_dev_me_prefers_development_when_system_workspaces_exist(self):
+        Workspace.objects.create(slug="platform-builder", name="Platform Builder", metadata_json={"xyn_system_workspace": True})
+        Workspace.objects.create(slug="civic-lab", name="Civic Lab", metadata_json={"xyn_system_workspace": True})
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        workspaces = payload.get("workspaces") or []
+        self.assertEqual(len(workspaces), 1)
+        self.assertEqual(workspaces[0]["slug"], "development")
+        self.assertEqual(payload.get("preferred_workspace_id"), workspaces[0]["id"])
+
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
     def test_non_dev_requires_setup_then_initializes(self):
         status_response = self.client.get("/xyn/api/platform/initialization/status")
@@ -71,4 +83,3 @@ class PlatformBootstrapTests(TestCase):
         self.assertIsNotNone(membership)
         self.assertEqual(membership.role, "admin")
         self.assertTrue(membership.termination_authority)
-

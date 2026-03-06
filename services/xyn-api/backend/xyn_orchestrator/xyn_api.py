@@ -6740,7 +6740,7 @@ def auth_mode(request: HttpRequest) -> JsonResponse:
 
 
 def _platform_initialization_state(identity: UserIdentity) -> Dict[str, Any]:
-    workspace_count = Workspace.objects.count()
+    workspace_count = _user_visible_workspace_qs().count()
     initialized = workspace_count > 0
     requires_setup = bool(_auth_mode() != "dev" and _is_platform_admin(identity) and not initialized)
     return {
@@ -6751,38 +6751,50 @@ def _platform_initialization_state(identity: UserIdentity) -> Dict[str, Any]:
     }
 
 
+def _is_system_workspace(workspace: Workspace) -> bool:
+    slug = str(getattr(workspace, "slug", "") or "").strip().lower()
+    if slug in {"platform-builder", "civic-lab"}:
+        return True
+    metadata = getattr(workspace, "metadata_json", None)
+    if isinstance(metadata, dict) and metadata.get("xyn_system_workspace") is True:
+        return True
+    return False
+
+
+def _user_visible_workspace_qs():
+    return Workspace.objects.exclude(slug__in=["platform-builder", "civic-lab"])
+
+
+def _workspace_is_visible(workspace: Workspace, *, include_system: bool = False) -> bool:
+    if include_system:
+        return True
+    return not _is_system_workspace(workspace)
+
+
 def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspace]:
     if _auth_mode() != "dev":
         return None
     if not _is_platform_admin(identity):
         return None
-    has_membership = WorkspaceMembership.objects.filter(user_identity=identity).exists()
-    if has_membership:
-        membership = (
-            WorkspaceMembership.objects.filter(user_identity=identity)
-            .select_related("workspace")
-            .order_by("workspace__name")
-            .first()
-        )
-        return membership.workspace if membership else None
-
-    workspace = Workspace.objects.filter(slug="development").first()
-    if not workspace and not Workspace.objects.exists():
-        workspace = Workspace.objects.create(
-            slug="development",
-            name="Development",
-            org_name="Development",
-            description="Default development workspace for local bootstrap.",
-            status="active",
-            kind="internal",
-            lifecycle_stage="internal",
-            auth_mode="local",
-            metadata_json={"bootstrap": "dev_default"},
-        )
-    if not workspace:
-        workspace = Workspace.objects.order_by("name", "created_at").first()
-    if not workspace:
-        return None
+    workspace, _ = Workspace.objects.get_or_create(
+        slug="development",
+        defaults={
+            "name": "Development",
+            "org_name": "Development",
+            "description": "Default development workspace for local bootstrap.",
+            "status": "active",
+            "kind": "internal",
+            "lifecycle_stage": "internal",
+            "auth_mode": "local",
+            "metadata_json": {"bootstrap": "dev_default"},
+        },
+    )
+    metadata = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
+    if metadata.get("xyn_system_workspace") is True:
+        metadata = dict(metadata)
+        metadata.pop("xyn_system_workspace", None)
+        workspace.metadata_json = metadata
+        workspace.save(update_fields=["metadata_json", "updated_at"])
     WorkspaceMembership.objects.update_or_create(
         workspace=workspace,
         user_identity=identity,
@@ -6810,7 +6822,7 @@ def platform_initialization_complete(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "forbidden"}, status=403)
     if _auth_mode() == "dev":
         return JsonResponse({"error": "platform initialization wizard is not used in dev mode"}, status=409)
-    if Workspace.objects.exists():
+    if _user_visible_workspace_qs().exists():
         return JsonResponse(
             {"error": "platform already initialized", "platform_initialization": _platform_initialization_state(identity)},
             status=409,
@@ -6869,10 +6881,13 @@ def api_me(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
+    include_system = str(request.GET.get("include_system") or "").strip().lower() in {"1", "true", "yes"}
     roles = _get_roles(identity)
     bootstrap_workspace = _ensure_dev_bootstrap_workspace(identity)
     if _is_platform_admin(identity):
         rows = Workspace.objects.all().order_by("name")
+        if not include_system:
+            rows = [row for row in rows if _workspace_is_visible(row, include_system=False)]
         workspace_payload = [
             _serialize_workspace_summary(
                 row,
@@ -6890,6 +6905,7 @@ def api_me(request: HttpRequest) -> JsonResponse:
                 termination_authority=bool(membership.termination_authority),
             )
             for membership in memberships
+            if _workspace_is_visible(membership.workspace, include_system=include_system)
         ]
 
     preferred_workspace_id = ""
@@ -9801,8 +9817,11 @@ def workspaces_collection(request: HttpRequest) -> JsonResponse:
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     if request.method == "GET":
+        include_system = str(request.GET.get("include_system") or "").strip().lower() in {"1", "true", "yes"}
         if _is_platform_admin(identity):
             rows = Workspace.objects.all().order_by("name")
+            if not include_system:
+                rows = [row for row in rows if _workspace_is_visible(row, include_system=False)]
             return JsonResponse(
                 {
                     "workspaces": [
@@ -9816,6 +9835,8 @@ def workspaces_collection(request: HttpRequest) -> JsonResponse:
                 }
             )
         memberships = WorkspaceMembership.objects.filter(user_identity=identity).select_related("workspace").order_by("workspace__name")
+        if not include_system:
+            memberships = [m for m in memberships if _workspace_is_visible(m.workspace, include_system=False)]
         return JsonResponse(
             {
                 "workspaces": [

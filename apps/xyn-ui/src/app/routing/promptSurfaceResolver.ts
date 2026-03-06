@@ -34,7 +34,6 @@ const CORE_PROMPT_SURFACES: CorePromptSurface[] = [
       "open security settings",
       "open integrations settings",
     ],
-    requiredRoles: ["platform_owner", "platform_admin", "platform_architect", "platform_operator"],
   },
   {
     key: "access_control",

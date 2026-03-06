@@ -54,6 +54,18 @@ describe("resolvePromptSurfaceTarget", () => {
     expect(result).toBeNull();
   });
 
+  it("resolves platform settings hub even without admin roles", () => {
+    const result = resolvePromptSurfaceTarget("open platform settings", {
+      user: { roles: ["app_user"], permissions: [] },
+    });
+    expect(result).toEqual({
+      key: "platform_settings",
+      route: "/app/platform/hub",
+      scope: "global",
+      source: "core_surface",
+    });
+  });
+
   it("selects exact global artifact surface when prompt matches a surfaced label", () => {
     const result = resolvePromptSurfaceTarget("open tenant map", {
       globalSurfaces: [
