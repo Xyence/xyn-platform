@@ -3,9 +3,11 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, CircleHelp, Wrench } from "lucide-react";
 import { getRecentArtifacts } from "../../../api/xyn";
 import { provisionLocalXynInstance } from "../../../api/xyn";
+import { listArtifactNavSurfaces } from "../../../api/xyn";
 import type { RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
+import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import RecentArtifactsMiniTable from "./RecentArtifactsMiniTable";
 import ConsolePromptCard from "./ConsolePromptCard";
@@ -1151,7 +1153,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
 
   const canSubmit = Boolean(inputText.trim()) && !processing;
 
-  const submitPrompt = () => {
+  const submitPrompt = async () => {
     const prompt = String(inputText || "").trim();
     if (!prompt) return;
     if (/^(suggest|show suggestions?)$/i.test(prompt)) {
@@ -1203,6 +1205,29 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       })();
       return;
     }
+    const workspaceMatch = String(location.pathname || "").match(/^\/w\/([^/]+)(?:\/|$)/);
+    const workspaceIdFromPath = workspaceMatch?.[1] ? decodeURIComponent(workspaceMatch[1]) : "";
+
+    try {
+      const [globalResponse, workspaceResponse] = await Promise.all([
+        listArtifactNavSurfaces(),
+        workspaceIdFromPath ? listArtifactNavSurfaces(workspaceIdFromPath) : Promise.resolve({ surfaces: [] }),
+      ]);
+      const surfacedTarget = resolvePromptSurfaceTarget(prompt, {
+        workspaceId: workspaceIdFromPath,
+        globalSurfaces: globalResponse.surfaces || [],
+        workspaceSurfaces: workspaceResponse.surfaces || [],
+      });
+      if (surfacedTarget?.route) {
+        navigate(surfacedTarget.route);
+        clearSessionResolution();
+        if (isOverlay) setOpen(false);
+        return;
+      }
+    } catch {
+      // Fall through to deterministic local parsing/intent resolution.
+    }
+
     const envelope = buildUiActionFromPrompt(prompt, (canvasContext as ConsoleCanvasContext | null) || null);
     const activeContextPanelId = String(canvasContext?.ui?.active_panel_id || canvasContext?.ui?.panel_id || "").trim();
     const returnTarget = activeContextPanelId || undefined;
@@ -1222,8 +1247,8 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       }
       if (action.name === "canvas.open_detail") {
         if (String(action.params.entity_type || "") === "platform_settings") {
-          // Route through the canonical app path so AppShell can resolve/fallback to a valid workspace.
-          navigate("/app/platform/settings");
+          // Legacy fallback route; AppShell may still redirect to canonical surfaced target when available.
+          navigate("/app/platform/settings?legacy=1");
           clearSessionResolution();
           if (isOverlay) setOpen(false);
           return;
@@ -1372,13 +1397,13 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     if (submitByHotkey) {
       event.preventDefault();
       if (!canSubmit) return;
-      submitPrompt();
+      void submitPrompt();
     }
   };
 
   useEffect(() => {
     if (!submitToken) return;
-    submitPrompt();
+    void submitPrompt();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [submitToken]);
 
@@ -1424,7 +1449,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       inputText={inputText}
       onInputChange={setInputText}
       onInputKeyDown={handleInputKeyDown}
-      onSubmit={submitPrompt}
+      onSubmit={() => void submitPrompt()}
       onClear={() => {
         if (session.lastResolution || session.pendingProposal || session.pendingMissingFields.length) {
           clearSessionResolution();

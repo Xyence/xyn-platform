@@ -66,6 +66,7 @@ import {
   toWorkspaceScopedPath,
   withWorkspaceInNavPath,
 } from "./routing/workspaceRouting";
+import { canonicalLegacyRouteForPlatformSettings } from "./routing/promptSurfaceResolver";
 
 function readFlag(value: unknown): boolean {
   return String(value || "").trim().toLowerCase() === "true";
@@ -188,6 +189,30 @@ function LegacyStatePanel({
       </div>
     </section>
   );
+}
+
+function PlatformSettingsLegacyRoute({ workspaceId }: { workspaceId: string }) {
+  const location = useLocation();
+  const incomingParams = new URLSearchParams(location.search);
+  if (incomingParams.get("legacy") === "1") {
+    return <PlatformSettingsPage />;
+  }
+  const canonical = canonicalLegacyRouteForPlatformSettings(workspaceId);
+  if (!canonical) {
+    return <PlatformSettingsPage />;
+  }
+  const canonicalUrl = new URL(canonical, "http://xyn.local");
+  const merged = new URLSearchParams(canonicalUrl.search);
+  for (const [key, value] of incomingParams.entries()) {
+    if (key === "legacy") continue;
+    if (!merged.has(key)) merged.set(key, value);
+  }
+  const nextTarget = `${canonicalUrl.pathname}${merged.toString() ? `?${merged.toString()}` : ""}`;
+  const currentTarget = `${location.pathname}${location.search || ""}`;
+  if (nextTarget === currentTarget) {
+    return <PlatformSettingsPage />;
+  }
+  return <Navigate to={nextTarget} replace />;
 }
 
 export default function AppShell() {
@@ -1046,7 +1071,7 @@ export default function AppShell() {
             <Route path="platform/users" element={<RedirectLegacyAccessControlRoute tab="users" />} />
             <Route path="platform/roles" element={<RedirectLegacyAccessControlRoute tab="roles" />} />
             <Route path="platform/branding" element={<PlatformBrandingPage />} />
-            <Route path="platform/settings" element={<PlatformSettingsPage />} />
+            <Route path="platform/settings" element={<PlatformSettingsLegacyRoute workspaceId={activeWorkspace?.id || ""} />} />
             <Route path="platform/video-adapter-configs/:artifactId" element={<VideoAdapterConfigPage />} />
             <Route path="platform/seeds" element={<SeedPacksPage />} />
             <Route path="platform/identity-configuration" element={<IdentityConfigurationPage />} />

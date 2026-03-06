@@ -205,11 +205,32 @@ describe("AppShell nav surfaces", () => {
     );
   });
 
-  it("keeps /app/platform/settings as a global route", async () => {
+  it("redirects /app/platform/settings to canonical prompt-driven surface", async () => {
     apiMocks.listArtifactNavSurfaces.mockResolvedValueOnce({ surfaces: [] });
     renderGlobalApp("/app/platform/settings?tab=workspaces&wsTab=profile");
     await waitFor(() =>
-      expect(screen.getByTestId("location-probe").textContent).toContain("/app/platform/settings?tab=workspaces&wsTab=profile")
+      expect(screen.getByTestId("location-probe").textContent).toContain(
+        "/w/ws-1/workbench?panel=platform_settings&tab=workspaces&wsTab=profile"
+      )
     );
+    expect(apiMocks.listArtifactNavSurfaces).toHaveBeenCalledWith(undefined);
+  });
+
+  it("renders legacy /app/platform/settings view when forced via legacy=1", async () => {
+    apiMocks.listArtifactNavSurfaces.mockResolvedValueOnce({ surfaces: [] });
+    renderGlobalApp("/app/platform/settings?legacy=1&tab=workspaces");
+    await waitFor(() =>
+      expect(screen.getByTestId("location-probe").textContent).toContain("/app/platform/settings?legacy=1&tab=workspaces")
+    );
+  });
+
+  it("rewrites stale workspace routes before nav surface calls and avoids stale workspace fetch loops", async () => {
+    apiMocks.listArtifactNavSurfaces.mockResolvedValue({ surfaces: [] });
+    renderWorkspaceApp("/w/ws-stale/workbench");
+    await waitFor(() =>
+      expect(screen.getByTestId("location-probe").textContent).toContain("/w/ws-1/workbench")
+    );
+    expect(apiMocks.listArtifactNavSurfaces).toHaveBeenCalledWith("ws-1");
+    expect(apiMocks.listArtifactNavSurfaces).not.toHaveBeenCalledWith("ws-stale");
   });
 });
