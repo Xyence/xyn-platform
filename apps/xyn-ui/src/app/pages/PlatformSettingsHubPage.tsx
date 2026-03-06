@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import Tabs from "../components/ui/Tabs";
 
 type HubSection = "general" | "security" | "integrations" | "deploy" | "workspaces";
 
@@ -102,24 +103,16 @@ export default function PlatformSettingsHubPage({ sectionOverride }: { sectionOv
       </div>
 
       <div className="page-tabs">
-        <div className="tabs" role="tablist" aria-label="Platform Settings sections">
-          {SECTIONS.map((section) => (
-            <button
-              key={section.value}
-              type="button"
-              role="tab"
-              aria-selected={activeSection === section.value}
-              className={`tabs-tab ${activeSection === section.value ? "active" : ""}`}
-              onClick={() => {
-                const next = new URLSearchParams(searchParams);
-                next.set("section", section.value);
-                setSearchParams(next, { replace: true });
-              }}
-            >
-              {section.label}
-            </button>
-          ))}
-        </div>
+        <Tabs
+          ariaLabel="Platform Settings sections"
+          value={activeSection}
+          options={SECTIONS.map((section) => ({ value: section.value, label: section.label }))}
+          onChange={(nextSection) => {
+            const next = new URLSearchParams(searchParams);
+            next.set("section", nextSection);
+            setSearchParams(next, { replace: true });
+          }}
+        />
       </div>
 
       <section className="card" style={{ marginBottom: 12 }}>
