@@ -3539,7 +3539,22 @@ button.sm {
 }
 
 .workbench-panel-actions {
-  margin-top: 20px;
+  position: fixed;
+  top: calc(var(--xyn-header-top-offset) + var(--xyn-header-height) + var(--xyn-console-safe-top));
+  right: calc(var(--xyn-console-safe-right) + 108px);
+  margin-top: 0;
+  z-index: calc(var(--xyn-z-console) - 1);
+}
+
+.workbench-clear-panel-button {
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  border-radius: 999px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .app-breadcrumbs {
@@ -4446,6 +4461,11 @@ button.sm {
     right: 12px;
     left: auto;
     bottom: auto;
+  }
+
+  .workbench-panel-actions {
+    top: calc(var(--xyn-header-top-offset) + 10px);
+    right: 64px;
   }
 
   .xyn-console-node {

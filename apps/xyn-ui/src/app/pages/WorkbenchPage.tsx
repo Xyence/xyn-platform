@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useParams } from "react-router-dom";
+import { X } from "lucide-react";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
 import { useCapabilitySuggestions } from "../components/console/capabilitySuggestions";
 import { useXynConsole } from "../state/xynConsoleStore";
@@ -73,12 +74,14 @@ export default function WorkbenchPage() {
           <div className="inline-actions workbench-panel-actions" style={{ justifyContent: "flex-end" }}>
             <button
               type="button"
-              className="ghost"
+              className="ghost workbench-clear-panel-button"
+              aria-label="Clear panel"
+              title="Clear panel"
               onClick={() => {
                 if (activePanel?.panel_id) closePanel(activePanel.panel_id);
               }}
             >
-              Clear panel
+              <X size={14} aria-hidden="true" />
             </button>
           </div>
         ) : null}
