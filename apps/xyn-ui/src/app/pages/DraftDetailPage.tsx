@@ -28,14 +28,22 @@ export default function DraftDetailPage({
   workspaceId,
   workspaceName,
   workspaceColor,
+  draftId: explicitDraftId,
+  onBack,
+  onOpenJob,
+  linkedJobId,
 }: {
   workspaceId: string;
   workspaceName: string;
   workspaceColor?: string;
+  draftId?: string;
+  onBack?: () => void;
+  onOpenJob?: (jobId: string) => void;
+  linkedJobId?: string | null;
 }) {
   const params = useParams();
   const navigate = useNavigate();
-  const draftId = String(params.draftId || "").trim();
+  const draftId = String(explicitDraftId || params.draftId || "").trim();
   const [draft, setDraft] = useState<AppIntentDraft | null>(null);
   const [title, setTitle] = useState("");
   const [status, setStatus] = useState<DraftStatusValue>("draft");
@@ -45,6 +53,7 @@ export default function DraftDetailPage({
   const [activeTab, setActiveTab] = useState<DraftDetailTab>("editor");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [latestJobId, setLatestJobId] = useState<string>(String(linkedJobId || "").trim());
   const rawPrompt = useMemo(() => {
     if (!draft?.content_json || typeof draft.content_json !== "object") return "";
     return String((draft.content_json as Record<string, unknown>).raw_prompt || "");
@@ -68,6 +77,10 @@ export default function DraftDetailPage({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    setLatestJobId(String(linkedJobId || "").trim());
+  }, [linkedJobId]);
 
   const save = async () => {
     if (!workspaceId || !draftId) return;
@@ -100,8 +113,11 @@ export default function DraftDetailPage({
       const payload = await submitAppIntentDraft(draftId, workspaceId);
       setDraft(payload.draft);
       setStatus("submitted");
+      setLatestJobId(String(payload.job_id || ""));
       setMessage(`Draft submitted. Job queued: ${payload.job_id}`);
-      navigate(toWorkspacePath(workspaceId, `jobs/${payload.job_id}`));
+      if (!onOpenJob) {
+        navigate(toWorkspacePath(workspaceId, `jobs/${payload.job_id}`));
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -118,9 +134,14 @@ export default function DraftDetailPage({
           <p className="muted">Review, edit, and submit the app intent draft.</p>
         </div>
         <div className="inline-actions">
-          <button className="ghost" onClick={() => navigate(toWorkspacePath(workspaceId, "drafts"))}>
-            Back to Drafts
+          <button className="ghost" onClick={() => (onBack ? onBack() : navigate(toWorkspacePath(workspaceId, "drafts")))}>
+            {onBack ? "Back" : "Back to Drafts"}
           </button>
+          {latestJobId ? (
+            <button className="ghost" onClick={() => (onOpenJob ? onOpenJob(latestJobId) : navigate(toWorkspacePath(workspaceId, `jobs/${latestJobId}`)))}>
+              View Pipeline Job
+            </button>
+          ) : null}
           <button className="ghost" onClick={() => setMessage("Regenerate is not implemented yet.")}>
             Regenerate
           </button>

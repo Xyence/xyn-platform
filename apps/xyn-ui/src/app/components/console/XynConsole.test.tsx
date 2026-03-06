@@ -251,6 +251,40 @@ describe("XynConsole", () => {
 
     await screen.findByText("Will create and submit an app intent draft.");
     expect(screen.getByRole("button", { name: "Create draft" })).toBeInTheDocument();
+    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+  });
+
+  it("clears the prompt input after a draft is created and submitted", async () => {
+    apiMocks.resolveXynIntent.mockResolvedValue({
+      status: "DraftReady",
+      action_type: "CreateDraft",
+      artifact_type: "Workspace",
+      artifact_id: null,
+      summary: "Will create and submit an app intent draft.",
+      draft_payload: {
+        __operation: "create_app_intent_draft",
+        workspace_id: "ws-1",
+        title: "Network Inventory App",
+      },
+    });
+    apiMocks.applyXynIntent.mockResolvedValue({
+      status: "DraftReady",
+      action_type: "CreateDraft",
+      artifact_type: "Workspace",
+      artifact_id: null,
+      summary: "App intent draft created and submitted for processing.",
+    });
+
+    renderConsoleAt("/w/ws-1/workbench");
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const input = (await screen.findByPlaceholderText("Describe what you want to create or change...")) as HTMLTextAreaElement;
+    await userEvent.type(input, "build a new app");
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+    await screen.findByRole("button", { name: "Create draft" });
+    await userEvent.click(screen.getByRole("button", { name: "Create draft" }));
+
+    await screen.findByText("App intent draft created and submitted for processing.");
+    await waitFor(() => expect(input.value).toBe(""));
   });
 
   it("shows options and injects selected value", async () => {

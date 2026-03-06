@@ -18,10 +18,12 @@ export default function JobsListPage({
   workspaceId,
   workspaceName,
   workspaceColor,
+  onSelectJob,
 }: {
   workspaceId: string;
   workspaceName: string;
   workspaceColor?: string;
+  onSelectJob?: (jobId: string) => void;
 }) {
   const navigate = useNavigate();
   const [jobs, setJobs] = useState<AppJob[]>([]);
@@ -107,7 +109,12 @@ export default function JobsListPage({
             </thead>
             <tbody>
               {table.getRowModel().rows.map((row) => (
-                <tr key={row.id} onClick={() => navigate(toWorkspacePath(workspaceId, `jobs/${row.original.id}`))}>
+                <tr
+                  key={row.id}
+                  onClick={() =>
+                    onSelectJob ? onSelectJob(row.original.id) : navigate(toWorkspacePath(workspaceId, `jobs/${row.original.id}`))
+                  }
+                >
                   {row.getVisibleCells().map((cell) => (
                     <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
                   ))}

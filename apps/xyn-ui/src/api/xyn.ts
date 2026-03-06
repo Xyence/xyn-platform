@@ -792,13 +792,13 @@ function withWorkspaceId(pathname: string, workspaceId: string): URL {
 }
 
 export async function listAppIntentDrafts(workspaceId: string): Promise<AppIntentDraft[]> {
-  const url = withWorkspaceId("/api/v1/drafts", workspaceId);
+  const url = withWorkspaceId("/xyn/api/app-builder/drafts", workspaceId);
   const response = await apiFetch(url.toString(), { credentials: "include" });
   return handle<AppIntentDraft[]>(response);
 }
 
 export async function createAppIntentDraft(workspaceId: string, payload: AppIntentDraftCreatePayload): Promise<AppIntentDraft> {
-  const url = withWorkspaceId("/api/v1/drafts", workspaceId);
+  const url = withWorkspaceId("/xyn/api/app-builder/drafts", workspaceId);
   const response = await apiFetch(url.toString(), {
     method: "POST",
     headers: buildHeaders(),
@@ -809,7 +809,7 @@ export async function createAppIntentDraft(workspaceId: string, payload: AppInte
 }
 
 export async function getAppIntentDraft(draftId: string, workspaceId: string): Promise<AppIntentDraft> {
-  const url = withWorkspaceId(`/api/v1/drafts/${draftId}`, workspaceId);
+  const url = withWorkspaceId(`/xyn/api/app-builder/drafts/${draftId}`, workspaceId);
   const response = await apiFetch(url.toString(), { credentials: "include" });
   return handle<AppIntentDraft>(response);
 }
@@ -819,7 +819,7 @@ export async function updateAppIntentDraft(
   workspaceId: string,
   payload: AppIntentDraftPatchPayload,
 ): Promise<AppIntentDraft> {
-  const url = withWorkspaceId(`/api/v1/drafts/${draftId}`, workspaceId);
+  const url = withWorkspaceId(`/xyn/api/app-builder/drafts/${draftId}`, workspaceId);
   const response = await apiFetch(url.toString(), {
     method: "PATCH",
     headers: buildHeaders(),
@@ -830,7 +830,7 @@ export async function updateAppIntentDraft(
 }
 
 export async function submitAppIntentDraft(draftId: string, workspaceId: string): Promise<AppDraftSubmitResponse> {
-  const url = withWorkspaceId(`/api/v1/drafts/${draftId}/submit`, workspaceId);
+  const url = withWorkspaceId(`/xyn/api/app-builder/drafts/${draftId}/submit`, workspaceId);
   const response = await apiFetch(url.toString(), {
     method: "POST",
     credentials: "include",
@@ -839,19 +839,19 @@ export async function submitAppIntentDraft(draftId: string, workspaceId: string)
 }
 
 export async function listAppJobs(workspaceId: string): Promise<AppJob[]> {
-  const url = withWorkspaceId("/api/v1/jobs", workspaceId);
+  const url = withWorkspaceId("/xyn/api/app-builder/jobs", workspaceId);
   const response = await apiFetch(url.toString(), { credentials: "include" });
   return handle<AppJob[]>(response);
 }
 
 export async function getAppJob(jobId: string, workspaceId: string): Promise<AppJob> {
-  const url = withWorkspaceId(`/api/v1/jobs/${jobId}`, workspaceId);
+  const url = withWorkspaceId(`/xyn/api/app-builder/jobs/${jobId}`, workspaceId);
   const response = await apiFetch(url.toString(), { credentials: "include" });
   return handle<AppJob>(response);
 }
 
 export async function updateAppJob(jobId: string, workspaceId: string, payload: AppJobPatchPayload): Promise<AppJob> {
-  const url = withWorkspaceId(`/api/v1/jobs/${jobId}`, workspaceId);
+  const url = withWorkspaceId(`/xyn/api/app-builder/jobs/${jobId}`, workspaceId);
   const response = await apiFetch(url.toString(), {
     method: "PATCH",
     headers: buildHeaders(),

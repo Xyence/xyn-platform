@@ -21,14 +21,18 @@ export default function JobDetailPage({
   workspaceId,
   workspaceName,
   workspaceColor,
+  jobId: explicitJobId,
+  onBack,
 }: {
   workspaceId: string;
   workspaceName: string;
   workspaceColor?: string;
+  jobId?: string;
+  onBack?: () => void;
 }) {
   const params = useParams();
   const navigate = useNavigate();
-  const jobId = String(params.jobId || "").trim();
+  const jobId = String(explicitJobId || params.jobId || "").trim();
   const [job, setJob] = useState<AppJob | null>(null);
   const [tab, setTab] = useState<JobDetailTab>("logs");
   const [loading, setLoading] = useState(false);
@@ -72,8 +76,8 @@ export default function JobDetailPage({
           <p className="muted">Status and logs for job execution.</p>
         </div>
         <div className="inline-actions">
-          <button className="ghost" onClick={() => navigate(toWorkspacePath(workspaceId, "jobs"))}>
-            Back to Jobs
+          <button className="ghost" onClick={() => (onBack ? onBack() : navigate(toWorkspacePath(workspaceId, "jobs")))}>
+            {onBack ? "Back" : "Back to Jobs"}
           </button>
           <button className="ghost" onClick={() => void load()} disabled={loading || !workspaceId}>
             Refresh

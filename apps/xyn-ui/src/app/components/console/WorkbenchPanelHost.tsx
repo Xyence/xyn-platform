@@ -27,12 +27,20 @@ import type {
 } from "../../../api/types";
 import CanvasRenderer from "../../../components/canvas/CanvasRenderer";
 import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityRegistry";
+import DraftDetailPage from "../../pages/DraftDetailPage";
+import DraftsListPage from "../../pages/DraftsListPage";
+import JobDetailPage from "../../pages/JobDetailPage";
+import JobsListPage from "../../pages/JobsListPage";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 
 export type ConsolePanelKey =
   | "platform_settings"
   | "workspaces"
   | "runs"
+  | "drafts_list"
+  | "draft_detail"
+  | "jobs_list"
+  | "job_detail"
   | "run_detail"
   | "artifact_list"
   | "artifact_detail"
@@ -1038,6 +1046,10 @@ const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   platform_settings: "Platform Settings",
   workspaces: "Workspaces",
   runs: "Runs",
+  drafts_list: "Drafts",
+  draft_detail: "Build Draft",
+  jobs_list: "Jobs",
+  job_detail: "Pipeline Job",
   run_detail: "Run Detail",
   artifact_list: "Artifact List",
   artifact_detail: "Artifact Detail",
@@ -1153,6 +1165,58 @@ export default function WorkbenchPanelHost({
               return;
             }
             openPanel("record_detail", { ...target, row }, { open_in: "new_panel", return_to_panel_id: panel.panel_id });
+          }}
+        />
+      );
+    }
+
+    if (panel.key === "drafts_list") {
+      return (
+        <DraftsListPage
+          workspaceId={workspaceId}
+          workspaceName="Current Workspace"
+          onSelectDraft={(draftId) => openPanel("draft_detail", { draft_id: draftId }, { open_in: "new_panel", return_to_panel_id: panel.panel_id })}
+        />
+      );
+    }
+
+    if (panel.key === "jobs_list") {
+      return (
+        <JobsListPage
+          workspaceId={workspaceId}
+          workspaceName="Current Workspace"
+          onSelectJob={(jobId) => openPanel("job_detail", { job_id: jobId }, { open_in: "new_panel", return_to_panel_id: panel.panel_id })}
+        />
+      );
+    }
+
+    if (panel.key === "draft_detail") {
+      return (
+        <DraftDetailPage
+          workspaceId={workspaceId}
+          workspaceName="Current Workspace"
+          draftId={String(panel.params?.draft_id || "")}
+          linkedJobId={String(panel.params?.job_id || "")}
+          onBack={() => {
+            if (panel.return_to_panel_id) {
+              onClosePanel?.();
+            }
+          }}
+          onOpenJob={(jobId) => openPanel("job_detail", { job_id: jobId }, { open_in: "new_panel", return_to_panel_id: panel.panel_id })}
+        />
+      );
+    }
+
+    if (panel.key === "job_detail") {
+      return (
+        <JobDetailPage
+          workspaceId={workspaceId}
+          workspaceName="Current Workspace"
+          jobId={String(panel.params?.job_id || "")}
+          onBack={() => {
+            if (panel.return_to_panel_id) {
+              onClosePanel?.();
+            }
           }}
         />
       );

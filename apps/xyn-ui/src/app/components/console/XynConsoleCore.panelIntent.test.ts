@@ -55,6 +55,14 @@ describe("resolvePanelCommand", () => {
       panelKey: "run_detail",
       params: { run_id: "123e4567-e89b-12d3-a456-426614174000" },
     });
+    expect(resolvePanelCommand("show drafts")).toEqual({
+      panelKey: "drafts_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("open jobs")).toEqual({
+      panelKey: "jobs_list",
+      params: {},
+    });
 
     expect(resolvePanelCommand("list core artifacts")).toEqual({
       panelKey: "artifact_list",

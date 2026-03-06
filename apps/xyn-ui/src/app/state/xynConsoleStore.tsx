@@ -384,6 +384,12 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       });
       setProcessingStep("validating");
       storeResolution(result, message);
+      if (result.status === "DraftReady" && result.action_type === "CreateDraft") {
+        updateSession((current) => ({
+          ...current,
+          inputText: "",
+        }));
+      }
       setOpen(true);
     } catch (error) {
       const failure: XynIntentResolutionResult = {
@@ -400,7 +406,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       setProcessingStep(null);
       setProcessing(false);
     }
-  }, [session.inputText, processing, context.artifact_id, context.artifact_type, storeResolution, activeEditorBridge]);
+  }, [session.inputText, processing, context.artifact_id, context.artifact_type, storeResolution, activeEditorBridge, updateSession]);
 
   const applyPendingProposalToForm = useCallback(() => {
     if (!session.pendingProposal || !activeEditorBridge) return;
@@ -493,6 +499,12 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
         payload,
       });
       storeResolution(result, session.lastMessage || "");
+      updateSession((current) => ({
+        ...current,
+        inputText: "",
+        lastMessage: "",
+        localMessage: "Draft submitted for processing.",
+      }));
       setPendingCloseBlock(false);
     } catch (error) {
       const failure: XynIntentResolutionResult = {

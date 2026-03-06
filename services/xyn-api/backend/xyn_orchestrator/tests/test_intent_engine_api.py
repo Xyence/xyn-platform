@@ -316,6 +316,9 @@ class IntentEngineApiTests(TestCase):
         self.assertEqual(payload.get("status"), "DraftReady")
         self.assertEqual((payload.get("result") or {}).get("draft_id"), draft_id)
         self.assertEqual((payload.get("result") or {}).get("job_id"), job_id)
+        next_actions = payload.get("next_actions") or []
+        self.assertEqual((next_actions[0] or {}).get("label"), "Track build")
+        self.assertEqual((next_actions[0] or {}).get("panel_key"), "draft_detail")
         self.assertEqual(request_mock.call_count, 3)
         second_call = request_mock.call_args_list[1]
         self.assertEqual(second_call.kwargs.get("method"), "POST")

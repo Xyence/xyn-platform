@@ -18,10 +18,12 @@ export default function DraftsListPage({
   workspaceId,
   workspaceName,
   workspaceColor,
+  onSelectDraft,
 }: {
   workspaceId: string;
   workspaceName: string;
   workspaceColor?: string;
+  onSelectDraft?: (draftId: string) => void;
 }) {
   const navigate = useNavigate();
   const [drafts, setDrafts] = useState<AppIntentDraft[]>([]);
@@ -117,7 +119,12 @@ export default function DraftsListPage({
             </thead>
             <tbody>
               {table.getRowModel().rows.map((row) => (
-                <tr key={row.id} onClick={() => navigate(toWorkspacePath(workspaceId, `drafts/${row.original.id}`))}>
+                <tr
+                  key={row.id}
+                  onClick={() =>
+                    onSelectDraft ? onSelectDraft(row.original.id) : navigate(toWorkspacePath(workspaceId, `drafts/${row.original.id}`))
+                  }
+                >
                   {row.getVisibleCells().map((cell) => (
                     <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
                   ))}

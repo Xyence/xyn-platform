@@ -74,7 +74,6 @@ export const NAV_GROUPS: NavGroup[] = [
     icon: "Rocket",
     items: [
       { id: "runs", label: "Runs", path: "/app/runs", icon: "PlayCircle", keywords: ["logs", "executions"] },
-      { id: "jobs", label: "Jobs", path: "/app/jobs", icon: "ListChecks", keywords: ["queue", "status", "worker"] },
     ],
   },
   {

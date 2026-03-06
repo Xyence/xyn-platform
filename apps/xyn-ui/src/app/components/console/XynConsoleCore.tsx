@@ -35,6 +35,8 @@ type ResolvedPanelCommand =
   | { panelKey: "artifact_list"; params: { namespace?: string; query?: ArtifactStructuredQuery; query_error?: string } }
   | { panelKey: "workspaces"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "runs"; params: { query?: Record<string, unknown>; query_error?: string } }
+  | { panelKey: "drafts_list"; params: Record<string, never> }
+  | { panelKey: "jobs_list"; params: Record<string, never> }
   | { panelKey: "run_detail"; params: { run_id: string } }
   | { panelKey: "artifact_detail"; params: { slug: string } }
   | { panelKey: "artifact_raw_json"; params: { slug: string } }
@@ -126,6 +128,12 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
         },
       },
     };
+  }
+  if (/^(show|list|open)\s+drafts$/.test(normalized)) {
+    return { panelKey: "drafts_list", params: {} };
+  }
+  if (/^(show|list|open)\s+jobs$/.test(normalized)) {
+    return { panelKey: "jobs_list", params: {} };
   }
   if (/^show\s+runs$/.test(normalized)) {
     return {
@@ -373,6 +381,8 @@ function inferSearchField(context: ConsoleCanvasContext): string {
 function panelKeyForDataset(dataset: string): ResolvedPanelCommand["panelKey"] {
   if (dataset === "workspaces") return "workspaces";
   if (dataset === "runs") return "runs";
+  if (dataset === "drafts") return "drafts_list";
+  if (dataset === "jobs") return "jobs_list";
   if (dataset === "artifacts") return "artifact_list";
   if (dataset === "ems_devices") return "ems_devices";
   if (dataset === "ems_registrations") return "ems_registrations";
@@ -402,6 +412,12 @@ function defaultQueryForDataset(dataset: string): Record<string, unknown> {
   }
   if (dataset === "runs") {
     return { entity: "runs", filters: [], sort: [{ field: "created_at", dir: "desc" }], limit: 50, offset: 0 };
+  }
+  if (dataset === "drafts") {
+    return { entity: "drafts", filters: [], sort: [{ field: "updated_at", dir: "desc" }], limit: 50, offset: 0 };
+  }
+  if (dataset === "jobs") {
+    return { entity: "jobs", filters: [], sort: [{ field: "created_at", dir: "desc" }], limit: 50, offset: 0 };
   }
   if (dataset === "ems_devices") {
     return { entity: "ems_devices", filters: [], sort: [{ field: "updated_at", dir: "desc" }], limit: 50, offset: 0 };
@@ -437,23 +453,26 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
 
   const directPanel = resolvePanelCommand(prompt);
   if (directPanel) {
-      const dataset =
+    const dataset =
       directPanel.panelKey === "workspaces"
         ? "workspaces"
         : directPanel.panelKey === "runs"
           ? "runs"
-          :
-      directPanel.panelKey === "artifact_list"
-        ? "artifacts"
-        : directPanel.panelKey === "ems_devices"
-          ? "ems_devices"
-          : directPanel.panelKey === "ems_registrations"
-            ? "ems_registrations"
-            : directPanel.panelKey === "ems_device_status_rollup"
-              ? "ems_device_status_rollup"
-              : directPanel.panelKey === "ems_registrations_timeseries"
-                ? "ems_registrations_timeseries"
-                : "";
+          : directPanel.panelKey === "drafts_list"
+            ? "drafts"
+            : directPanel.panelKey === "jobs_list"
+              ? "jobs"
+              : directPanel.panelKey === "artifact_list"
+                ? "artifacts"
+                : directPanel.panelKey === "ems_devices"
+                  ? "ems_devices"
+                  : directPanel.panelKey === "ems_registrations"
+                    ? "ems_registrations"
+                    : directPanel.panelKey === "ems_device_status_rollup"
+                      ? "ems_device_status_rollup"
+                      : directPanel.panelKey === "ems_registrations_timeseries"
+                        ? "ems_registrations_timeseries"
+                        : "";
     if (dataset) {
       const paramsWithQuery =
         directPanel.params && typeof directPanel.params === "object" && "query" in directPanel.params

@@ -6015,12 +6015,23 @@ def _complete_local_login(request: HttpRequest, *, email: str, return_to: str, r
     identity.provider_id = "local"
     identity.save(update_fields=["provider", "provider_id", "display_name", "last_login_at", "updated_at"])
 
-    RoleBinding.objects.get_or_create(
-        user_identity=identity,
-        scope_kind="platform",
-        scope_id=None,
-        role=role,
+    existing_bindings = list(
+        RoleBinding.objects.filter(
+            user_identity=identity,
+            scope_kind="platform",
+            scope_id=None,
+            role=role,
+        ).order_by("created_at", "id")
     )
+    if not existing_bindings:
+        RoleBinding.objects.create(
+            user_identity=identity,
+            scope_kind="platform",
+            scope_id=None,
+            role=role,
+        )
+    elif len(existing_bindings) > 1:
+        RoleBinding.objects.filter(id__in=[binding.id for binding in existing_bindings[1:]]).delete()
     user = _ensure_local_user(email)
     roles = _get_roles(identity)
     user.email = email
@@ -14934,7 +14945,16 @@ def _intent_apply_create_app_intent_draft(
             "initial_intent": merged_intent,
         },
         "next_actions": [
-            {"label": "Open jobs", "action": "OpenPanel", "panel_key": "jobs_list", "params": {"workspace_id": str(workspace.id)}},
+            {
+                "label": "Track build",
+                "action": "OpenPanel",
+                "panel_key": "draft_detail",
+                "params": {
+                    "workspace_id": str(workspace.id),
+                    "draft_id": draft_id,
+                    "job_id": job_id,
+                },
+            },
         ],
         "audit": {
             "request_id": request_id,
@@ -14961,6 +14981,42 @@ def _intent_apply_create_app_intent_draft(
         summary="App intent draft submitted.",
     )
     return JsonResponse(payload_response)
+
+
+def app_builder_drafts_collection(request: HttpRequest) -> JsonResponse:
+    if request.method == "GET":
+        return _proxy_seed_workspace_request(request, path="/api/v1/drafts", method="GET")
+    if request.method == "POST":
+        return _proxy_seed_workspace_request(request, path="/api/v1/drafts", method="POST", payload=_parse_json(request))
+    return JsonResponse({"error": "method not allowed"}, status=405)
+
+
+def app_builder_draft_detail(request: HttpRequest, draft_id: str) -> JsonResponse:
+    if request.method == "GET":
+        return _proxy_seed_workspace_request(request, path=f"/api/v1/drafts/{draft_id}", method="GET")
+    if request.method in {"PATCH", "PUT"}:
+        return _proxy_seed_workspace_request(request, path=f"/api/v1/drafts/{draft_id}", method="PATCH", payload=_parse_json(request))
+    return JsonResponse({"error": "method not allowed"}, status=405)
+
+
+def app_builder_draft_submit(request: HttpRequest, draft_id: str) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return _proxy_seed_workspace_request(request, path=f"/api/v1/drafts/{draft_id}/submit", method="POST", payload=_parse_json(request))
+
+
+def app_builder_jobs_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return _proxy_seed_workspace_request(request, path="/api/v1/jobs", method="GET")
+
+
+def app_builder_job_detail(request: HttpRequest, job_id: str) -> JsonResponse:
+    if request.method == "GET":
+        return _proxy_seed_workspace_request(request, path=f"/api/v1/jobs/{job_id}", method="GET")
+    if request.method in {"PATCH", "PUT"}:
+        return _proxy_seed_workspace_request(request, path=f"/api/v1/jobs/{job_id}", method="PATCH", payload=_parse_json(request))
+    return JsonResponse({"error": "method not allowed"}, status=405)
 
 
 def _intent_apply_patch(
@@ -15351,6 +15407,55 @@ def _seed_api_request(
         json=payload,
         timeout=timeout,
     )
+
+
+def _proxy_seed_workspace_request(
+    request: HttpRequest,
+    *,
+    workspace_hint: str = "",
+    path: str,
+    method: str,
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: int = 20,
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_ref = str(
+        workspace_hint
+        or request.GET.get("workspace_id")
+        or request.GET.get("workspace")
+        or request.GET.get("operator_workspace_id")
+        or request.headers.get("X-Workspace-Id")
+        or ""
+    ).strip()
+    workspace = _resolve_workspace_for_identity(identity, workspace_ref)
+    if not workspace:
+        return JsonResponse({"error": "workspace context is required"}, status=400)
+    try:
+        response = _seed_api_request(
+            method=method,
+            path=path,
+            workspace_slug=str(workspace.slug or ""),
+            payload=payload,
+            timeout=timeout,
+        )
+    except requests.RequestException as exc:
+        return JsonResponse({"error": "failed to reach xyn-core", "details": exc.__class__.__name__}, status=502)
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return JsonResponse(
+            {"error": "unexpected xyn-core response", "status_code": response.status_code, "response_text": response.text[:800]},
+            status=502,
+        )
+    try:
+        payload_json = response.json() if response.content else {}
+    except ValueError:
+        return JsonResponse({"error": "invalid xyn-core json response"}, status=502)
+    if response.status_code >= 400:
+        status_code = response.status_code if 400 <= response.status_code <= 599 else 502
+        return JsonResponse(payload_json if isinstance(payload_json, dict) else {"error": "xyn-core request failed"}, status=status_code, safe=isinstance(payload_json, dict))
+    return JsonResponse(payload_json, safe=not isinstance(payload_json, list), status=response.status_code)
 
 
 def _build_workspace_slug_from_name(name: str) -> str:
