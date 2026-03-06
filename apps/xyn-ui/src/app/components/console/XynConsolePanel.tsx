@@ -31,7 +31,11 @@ export default function XynConsolePanel() {
     const onMouseDown = (event: MouseEvent) => {
       if (!open) return;
       if (pendingCloseBlock) return;
-      if (panelRef.current && !panelRef.current.contains(event.target as Node)) {
+      const target = event.target as Node | null;
+      if (target instanceof Element && target.closest(".xyn-console-anchor")) {
+        return;
+      }
+      if (panelRef.current && !panelRef.current.contains(target)) {
         setOpen(false);
       }
     };
