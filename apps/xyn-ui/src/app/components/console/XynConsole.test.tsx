@@ -30,6 +30,16 @@ function renderConsole() {
   );
 }
 
+function renderConsoleAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <XynConsoleProvider>
+        <XynConsoleNode />
+      </XynConsoleProvider>
+    </MemoryRouter>
+  );
+}
+
 function ConsoleBridgeHarness({
   artifactId,
   artifactType = "ArticleDraft",
@@ -217,6 +227,30 @@ describe("XynConsole", () => {
 
     await screen.findByText("Patch applied successfully.");
     expect(apiMocks.applyXynIntent).toHaveBeenCalled();
+  });
+
+  it("keeps draft-ready create resolution visible on workbench routes", async () => {
+    apiMocks.resolveXynIntent.mockResolvedValue({
+      status: "DraftReady",
+      action_type: "CreateDraft",
+      artifact_type: "Workspace",
+      artifact_id: null,
+      summary: "Will create and submit an app intent draft.",
+      draft_payload: {
+        __operation: "create_app_intent_draft",
+        workspace_id: "ws-1",
+        title: "Network Inventory App",
+      },
+    });
+
+    renderConsoleAt("/w/ws-1/workbench");
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await userEvent.type(input, "build a new app");
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    await screen.findByText("Will create and submit an app intent draft.");
+    expect(screen.getByRole("button", { name: "Create draft" })).toBeInTheDocument();
   });
 
   it("shows options and injects selected value", async () => {

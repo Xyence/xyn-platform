@@ -1080,12 +1080,6 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     }
   }, [context.artifact_id, context.artifact_type]);
 
-  useEffect(() => {
-    if (!isOverlay || !isSurfaceVisible || !isWorkbenchPath) return;
-    if (session.lastResolution?.status !== "DraftReady") return;
-    clearSessionResolution();
-  }, [clearSessionResolution, isOverlay, isSurfaceVisible, isWorkbenchPath, session.lastResolution]);
-
   const statusLine = useMemo(() => {
     if (!processingStep) return "";
     if (processingStep === "resolving") return "Resolving command...";
@@ -1424,7 +1418,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
   const resolutionStack = (
     <>
       {pendingCloseBlock ? <div className="xyn-console-warning">You have a pending proposal. Apply or cancel.</div> : null}
-      {session.lastResolution && !(isWorkbenchPath && session.lastResolution.status === "DraftReady") ? (
+      {session.lastResolution ? (
         <>
           <ResolutionCard resolution={session.lastResolution} onRevise={handleRevise} onOpenPanel={onOpenPanel} />
           {isGlobalContext ? (
