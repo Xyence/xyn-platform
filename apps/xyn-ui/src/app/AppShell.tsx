@@ -368,10 +368,11 @@ export default function AppShell() {
       setSurfaceNavItems([]);
       return;
     }
+    const navWorkspaceId = inWorkspaceScope ? activeWorkspaceId || undefined : undefined;
     let mounted = true;
     (async () => {
       try {
-        const payload = await listArtifactNavSurfaces(activeWorkspaceId || undefined);
+        const payload = await listArtifactNavSurfaces(navWorkspaceId);
         if (!mounted) return;
         lastForbiddenRedirectRef.current = "";
         setSurfaceNavItems(payload.surfaces || []);
@@ -379,8 +380,8 @@ export default function AppShell() {
         if (!mounted) return;
         const message = error instanceof Error ? error.message : String(error || "");
         const normalized = message.toLowerCase();
-        if ((normalized.includes("forbidden") || normalized.includes("403")) && activeWorkspaceId) {
-          recoverFromForbiddenWorkspace(activeWorkspaceId);
+        if ((normalized.includes("forbidden") || normalized.includes("403")) && navWorkspaceId) {
+          recoverFromForbiddenWorkspace(navWorkspaceId);
         }
         setSurfaceNavItems([]);
       }
@@ -388,7 +389,7 @@ export default function AppShell() {
     return () => {
       mounted = false;
     };
-  }, [authed, activeWorkspaceId, navRefreshToken, recoverFromForbiddenWorkspace]);
+  }, [authed, activeWorkspaceId, inWorkspaceScope, navRefreshToken, recoverFromForbiddenWorkspace]);
 
   useEffect(() => {
     const onWorkspaceForbidden = (event: Event) => {
@@ -572,6 +573,7 @@ export default function AppShell() {
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) || workspaces[0] || null,
     [workspaces, activeWorkspaceId]
   );
+  const workspaceScopedContextId = inWorkspaceScope ? activeWorkspace?.id || "" : "";
   const isWorkbenchRoute = useMemo(
     () => /\/w\/[^/]+\/workbench\/?$/.test(location.pathname),
     [location.pathname]
@@ -1109,7 +1111,7 @@ export default function AppShell() {
         artifactId={artifactRouteId || undefined}
       />
       {!hideFloatingConsoleNode ? <XynConsoleNode /> : null}
-      <SuggestionSwitcher workspaceId={activeWorkspace?.id || ""} />
+      <SuggestionSwitcher workspaceId={workspaceScopedContextId} />
       <ToastHost />
     </div>
   );
