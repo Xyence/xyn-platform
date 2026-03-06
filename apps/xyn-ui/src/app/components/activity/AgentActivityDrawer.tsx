@@ -108,12 +108,18 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
               </span>
               <div className="notification-text">
                 <strong>{item.summary || item.event_type}</strong>
+                {item.prompt ? <span className="muted small">{item.prompt}</span> : null}
                 <span className="muted small">
-                  {item.provider} · {item.model_name} · {item.agent_slug}
+                  {item.request_type || item.provider || item.model_name || item.agent_slug
+                    ? [item.request_type, item.provider, item.model_name, item.agent_slug].filter(Boolean).join(" · ")
+                    : "activity"}
                 </span>
                 <span className="muted small">
                   {item.artifact_type || "artifact"} {item.artifact_id || "—"} · {item.status} · {relativeTime(item.created_at)}
+                  {item.draft_id ? ` · draft ${item.draft_id}` : ""}
+                  {item.job_id ? ` · job ${item.job_id}` : ""}
                 </span>
+                {item.error ? <span className="muted small">{item.error}</span> : null}
               </div>
             </article>
           ))}

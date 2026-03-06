@@ -374,6 +374,36 @@ def _audit_intent_event(
     )
 
 
+def _log_prompt_activity(
+    *,
+    request_id: str,
+    identity: Optional[UserIdentity],
+    status: str,
+    prompt: str,
+    request_type: str = "intent.resolve",
+    workspace_id: str = "",
+    draft_id: str = "",
+    job_id: str = "",
+    summary: str = "",
+    error: str = "",
+) -> None:
+    AuditLog.objects.create(
+        message="prompt_submission",
+        metadata_json={
+            "request_id": request_id,
+            "actor_identity_id": str(identity.id) if identity else None,
+            "request_type": request_type,
+            "status": str(status or "").strip().lower() or "queued",
+            "prompt": str(prompt or ""),
+            "workspace_id": str(workspace_id or ""),
+            "draft_id": str(draft_id or ""),
+            "job_id": str(job_id or ""),
+            "summary": str(summary or ""),
+            "error": str(error or ""),
+        },
+    )
+
+
 def _utc_now_ts() -> int:
     return int(time.time())
 
@@ -14750,6 +14780,189 @@ def _intent_apply_create_draft(
     return JsonResponse(payload_response)
 
 
+def _intent_apply_create_app_intent_draft(
+    *,
+    identity: UserIdentity,
+    payload: Dict[str, Any],
+    request_id: str,
+) -> JsonResponse:
+    workspace = _resolve_workspace_for_identity(identity, str(payload.get("workspace_id") or payload.get("operator_workspace_id") or ""))
+    if not workspace:
+        return JsonResponse({"error": "workspace context is required for app builder flow"}, status=400)
+
+    raw_prompt = str(payload.get("raw_prompt") or "").strip()
+    if not raw_prompt:
+        return JsonResponse({"error": "raw_prompt is required"}, status=400)
+    extracted = _extract_app_intent_fields(raw_prompt)
+    initial_intent = payload.get("initial_intent") if isinstance(payload.get("initial_intent"), dict) else {}
+    merged_intent = {
+        "app_kind": str(initial_intent.get("app_kind") or extracted.get("app_kind") or "custom_app"),
+        "requested_entities": list(initial_intent.get("requested_entities") or extracted.get("requested_entities") or []),
+        "phase_1_scope": list(initial_intent.get("phase_1_scope") or extracted.get("phase_1_scope") or []),
+        "requested_visuals": list(initial_intent.get("requested_visuals") or extracted.get("requested_visuals") or []),
+        "workspace_scoped": bool(initial_intent.get("workspace_scoped", extracted.get("workspace_scoped", True))),
+    }
+    draft_title = str(payload.get("title") or extracted.get("title") or "New App").strip() or "New App"
+    draft_status = "ready" if merged_intent.get("requested_entities") else "draft"
+    draft_content = {
+        "raw_prompt": raw_prompt,
+        "initial_intent": merged_intent,
+    }
+
+    created_by = str(identity.email or identity.subject or "xyn-ui").strip() or "xyn-ui"
+    try:
+        workspaces_response = _seed_api_request(method="GET", path="/api/v1/workspaces", timeout=20)
+        if workspaces_response.status_code < 300:
+            workspaces_payload = workspaces_response.json() if workspaces_response.content else []
+            workspace_rows = workspaces_payload if isinstance(workspaces_payload, list) else []
+            slug_exists = any(str(item.get("slug") or "").strip().lower() == str(workspace.slug or "").strip().lower() for item in workspace_rows if isinstance(item, dict))
+            if not slug_exists:
+                _seed_api_request(
+                    method="POST",
+                    path="/api/v1/workspaces",
+                    payload={"slug": str(workspace.slug or "development"), "title": str(workspace.name or workspace.slug or "Development")},
+                    timeout=20,
+                )
+    except requests.RequestException:
+        # Draft creation below will return explicit failure details if core is unreachable.
+        pass
+    try:
+        draft_response = _seed_api_request(
+            method="POST",
+            path="/api/v1/drafts",
+            workspace_slug=str(workspace.slug or ""),
+            payload={
+                "type": "app_intent",
+                "title": draft_title,
+                "status": draft_status,
+                "created_by": created_by,
+                "content_json": draft_content,
+            },
+        )
+    except requests.RequestException as exc:
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="failed",
+            prompt=raw_prompt,
+            request_type="intent.apply",
+            workspace_id=str(workspace.id),
+            summary="Failed to reach xyn-core draft endpoint.",
+            error=exc.__class__.__name__,
+        )
+        return JsonResponse({"error": "failed to create app draft", "details": exc.__class__.__name__}, status=502)
+
+    if draft_response.status_code >= 300:
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="failed",
+            prompt=raw_prompt,
+            request_type="intent.apply",
+            workspace_id=str(workspace.id),
+            summary="xyn-core draft creation failed.",
+            error=f"status={draft_response.status_code}",
+        )
+        return JsonResponse(
+            {
+                "error": "failed to create app draft",
+                "status_code": draft_response.status_code,
+                "response_text": draft_response.text[:800],
+            },
+            status=502,
+        )
+    draft_payload = draft_response.json() if draft_response.content else {}
+    draft_id = str(draft_payload.get("id") or "")
+    if not draft_id:
+        return JsonResponse({"error": "xyn-core draft response missing id"}, status=502)
+
+    try:
+        submit_response = _seed_api_request(
+            method="POST",
+            path=f"/api/v1/drafts/{draft_id}/submit",
+            workspace_slug=str(workspace.slug or ""),
+            payload={},
+        )
+    except requests.RequestException as exc:
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="failed",
+            prompt=raw_prompt,
+            request_type="intent.apply",
+            workspace_id=str(workspace.id),
+            draft_id=draft_id,
+            summary="Failed to submit app draft to xyn-core.",
+            error=exc.__class__.__name__,
+        )
+        return JsonResponse({"error": "draft created but submit failed", "draft_id": draft_id, "details": exc.__class__.__name__}, status=502)
+    if submit_response.status_code >= 300:
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="failed",
+            prompt=raw_prompt,
+            request_type="intent.apply",
+            workspace_id=str(workspace.id),
+            draft_id=draft_id,
+            summary="xyn-core draft submit failed.",
+            error=f"status={submit_response.status_code}",
+        )
+        return JsonResponse(
+            {
+                "error": "draft created but submit failed",
+                "draft_id": draft_id,
+                "status_code": submit_response.status_code,
+                "response_text": submit_response.text[:800],
+            },
+            status=502,
+        )
+    submit_payload = submit_response.json() if submit_response.content else {}
+    job_id = str(submit_payload.get("job_id") or "")
+
+    payload_response = {
+        "status": "DraftReady",
+        "action_type": "CreateDraft",
+        "artifact_type": "Workspace",
+        "artifact_id": None,
+        "summary": "App intent draft created and submitted for processing.",
+        "result": {
+            "workspace_id": str(workspace.id),
+            "draft_id": draft_id,
+            "job_id": job_id,
+            "seed_api_base_url": _seed_api_base_url(),
+            "initial_intent": merged_intent,
+        },
+        "next_actions": [
+            {"label": "Open jobs", "action": "OpenPanel", "panel_key": "jobs_list", "params": {"workspace_id": str(workspace.id)}},
+        ],
+        "audit": {
+            "request_id": request_id,
+            "timestamp": timezone.now().isoformat(),
+        },
+    }
+    _audit_intent_event(
+        message="intent.apply",
+        identity=identity,
+        request_id=request_id,
+        artifact_id=None,
+        proposal={"operation": "create_app_intent_draft"},
+        resolution=payload_response,
+    )
+    _log_prompt_activity(
+        request_id=request_id,
+        identity=identity,
+        status="completed",
+        prompt=raw_prompt,
+        request_type="intent.apply",
+        workspace_id=str(workspace.id),
+        draft_id=draft_id,
+        job_id=job_id,
+        summary="App intent draft submitted.",
+    )
+    return JsonResponse(payload_response)
+
+
 def _intent_apply_patch(
     *,
     identity: UserIdentity,
@@ -15025,6 +15238,76 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
     return None
 
 
+def _extract_app_intent_fields(message: str) -> Dict[str, Any]:
+    text = str(message or "")
+    lower = text.lower()
+    requested_entities: List[str] = []
+    if "devices" in lower:
+        requested_entities.append("devices")
+    if "interfaces" in lower:
+        requested_entities.append("interfaces")
+    if "ip addresses" in lower or "ip_address" in lower or "ip address" in lower:
+        requested_entities.append("ip_addresses")
+    if "locations" in lower or "location" in lower:
+        requested_entities.append("locations")
+
+    phase_1_scope: List[str] = []
+    if re.search(r"start\s+with\s+devices?\s+and\s+locations?", lower):
+        phase_1_scope = ["devices", "locations"]
+    elif "devices" in lower and ("locations" in lower or "location" in lower):
+        phase_1_scope = ["devices", "locations"]
+
+    requested_visuals: List[str] = []
+    if re.search(r"devices?\s+by\s+status", lower):
+        requested_visuals.append("devices_by_status_chart")
+
+    app_kind = "network_inventory" if ("network inventory" in lower or "devices" in lower) else "custom_app"
+    workspace_scoped = "workspace" in lower
+    title = "Network Inventory App" if app_kind == "network_inventory" else "New App"
+    return {
+        "title": title,
+        "app_kind": app_kind,
+        "requested_entities": requested_entities,
+        "phase_1_scope": phase_1_scope,
+        "requested_visuals": requested_visuals,
+        "workspace_scoped": workspace_scoped,
+        "raw_prompt": text,
+    }
+
+
+def _match_app_builder_command(message: str) -> Optional[Dict[str, Any]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    lower = text.lower()
+    starts_like_app_build = bool(
+        re.match(
+            r"^\s*(build|create|generate)\s+(?:a|an|the)?\s*(?:new\s+)?(app|application)\b",
+            lower,
+            flags=re.IGNORECASE,
+        )
+    )
+    has_network_inventory_signals = (
+        ("network inventory" in lower)
+        or ("devices" in lower and ("workspace" in lower or "locations" in lower or "location" in lower))
+    )
+    if not starts_like_app_build and not has_network_inventory_signals:
+        return None
+    fields = _extract_app_intent_fields(text)
+    return {
+        "operation": "create_app_intent_draft",
+        "title": fields.get("title") or "New App",
+        "initial_intent": {
+            "app_kind": fields.get("app_kind") or "custom_app",
+            "requested_entities": fields.get("requested_entities") or [],
+            "phase_1_scope": fields.get("phase_1_scope") or [],
+            "requested_visuals": fields.get("requested_visuals") or [],
+            "workspace_scoped": bool(fields.get("workspace_scoped")),
+        },
+        "raw_prompt": fields.get("raw_prompt") or text,
+    }
+
+
 def _resolve_workspace_for_identity(identity: UserIdentity, workspace_id: str) -> Optional[Workspace]:
     requested = str(workspace_id or "").strip()
     if requested:
@@ -15039,6 +15322,35 @@ def _resolve_workspace_for_identity(identity: UserIdentity, workspace_id: str) -
         return None
     fallback = WorkspaceMembership.objects.select_related("workspace").filter(user_identity=identity).order_by("workspace__name").first()
     return fallback.workspace if fallback else None
+
+
+def _seed_api_base_url() -> str:
+    return str(os.environ.get("XYN_CORE_BASE_URL") or "http://xyn-core:8000").strip().rstrip("/")
+
+
+def _seed_api_request(
+    *,
+    method: str,
+    path: str,
+    workspace_id: str = "",
+    workspace_slug: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: int = 20,
+) -> requests.Response:
+    base_url = _seed_api_base_url()
+    url = f"{base_url}{path}"
+    params: Dict[str, str] = {}
+    if workspace_id:
+        params["workspace_id"] = workspace_id
+    if workspace_slug:
+        params["workspace_slug"] = workspace_slug
+    return requests.request(
+        method=method.upper(),
+        url=url,
+        params=params or None,
+        json=payload,
+        timeout=timeout,
+    )
 
 
 def _build_workspace_slug_from_name(name: str) -> str:
@@ -15888,6 +16200,59 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     context_workspace_id = str(context_payload.get("workspace_id") or "").strip()
     context_artifact_id = str(context_payload.get("artifact_id") or "").strip()
     context_artifact_type = str(context_payload.get("artifact_type") or "").strip()
+    request_id = str(uuid.uuid4())
+    _log_prompt_activity(
+        request_id=request_id,
+        identity=identity,
+        status="queued",
+        prompt=message,
+        request_type="intent.resolve",
+        workspace_id=context_workspace_id,
+        summary="Prompt accepted for intent resolution.",
+    )
+
+    app_builder_request = _match_app_builder_command(message)
+    if app_builder_request:
+        operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
+        if not operator_workspace:
+            return JsonResponse({"error": "workspace context is required for app builder flow"}, status=400)
+        response_payload = {
+            "status": "DraftReady",
+            "action_type": "CreateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": "Will create and submit an app intent draft.",
+            "draft_payload": {
+                "__operation": str(app_builder_request.get("operation") or "create_app_intent_draft"),
+                "workspace_id": str(operator_workspace.id),
+                "title": str(app_builder_request.get("title") or "New App"),
+                "raw_prompt": str(app_builder_request.get("raw_prompt") or message),
+                "initial_intent": app_builder_request.get("initial_intent") if isinstance(app_builder_request.get("initial_intent"), dict) else {},
+            },
+            "next_actions": [{"label": "Create app intent draft", "action": "CreateDraft"}],
+            "audit": {
+                "request_id": request_id,
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        _audit_intent_event(
+            message="intent.resolve",
+            identity=identity,
+            request_id=request_id,
+            artifact_id=None,
+            proposal={"action_type": "CreateDraft", "artifact_type": "Workspace", "operation": "create_app_intent_draft", "prompt": message},
+            resolution=response_payload,
+        )
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="completed",
+            prompt=message,
+            request_type="intent.resolve",
+            workspace_id=str(operator_workspace.id),
+            summary=response_payload["summary"],
+        )
+        return JsonResponse(response_payload)
 
     remote_provision_request = _match_provision_xyn_remote_command(message)
     if remote_provision_request:
@@ -16096,7 +16461,9 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     if context_artifact is not None:
         result["artifact_id"] = str(context_artifact.id)
 
-    request_id = str((result.get("audit") or {}).get("request_id") or uuid.uuid4())
+    request_id = str((result.get("audit") or {}).get("request_id") or request_id)
+    if isinstance(proposal, dict):
+        proposal["_prompt"] = message
     intent_telemetry_increment(
         {
             "DraftReady": "resolve_success",
@@ -16111,6 +16478,16 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         artifact_id=str(context_artifact.id) if context_artifact else None,
         proposal=proposal,
         resolution=result,
+    )
+    _log_prompt_activity(
+        request_id=request_id,
+        identity=identity,
+        status="failed" if str(result.get("status") or "") in {"UnsupportedIntent", "ValidationError"} else "completed",
+        prompt=message,
+        request_type="intent.resolve",
+        workspace_id=context_workspace_id,
+        summary=str(result.get("summary") or ""),
+        error=str((result.get("validation_errors") or [""])[0] or "") if str(result.get("status") or "") in {"UnsupportedIntent", "ValidationError"} else "",
     )
     return JsonResponse(result)
 
@@ -16130,6 +16507,15 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
     artifact_type = str(payload.get("artifact_type") or "").strip()
     body_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
     request_id = str(uuid.uuid4())
+    _log_prompt_activity(
+        request_id=request_id,
+        identity=identity,
+        status="running",
+        prompt=str(body_payload.get("raw_prompt") or payload.get("message") or ""),
+        request_type="intent.apply",
+        workspace_id=str(body_payload.get("workspace_id") or body_payload.get("operator_workspace_id") or ""),
+        summary=f"Applying intent action {action_type or 'unknown'}.",
+    )
 
     if action_type not in {"CreateDraft", "ApplyPatch"}:
         return JsonResponse({"error": "action_type must be CreateDraft or ApplyPatch"}, status=400)
@@ -16155,6 +16541,8 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                 return _intent_apply_open_ems_panel(identity=identity, payload=body_payload, request_id=request_id)
             if operation == "open_artifact_panel":
                 return _intent_apply_open_artifact_panel(identity=identity, payload=body_payload, request_id=request_id)
+            if operation == "create_app_intent_draft":
+                return _intent_apply_create_app_intent_draft(identity=identity, payload=body_payload, request_id=request_id)
             return JsonResponse({"error": "CreateDraft currently supports ArticleDraft only"}, status=400)
         return _intent_apply_create_draft(identity=identity, payload=body_payload, request_id=request_id)
 
@@ -16266,22 +16654,69 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
         artifact_lookup = {str(item.id): item for item in artifact_qs.select_related("type")}
 
     items: List[Dict[str, Any]] = []
-    audit_qs = AuditLog.objects.filter(message="ai_invocation").order_by("-created_at")[:600]
+    audit_qs = AuditLog.objects.filter(message__in=["ai_invocation", "prompt_submission"]).order_by("-created_at")[:1200]
     for entry in audit_qs:
         meta = entry.metadata_json if isinstance(entry.metadata_json, dict) else {}
         actor_identity_id = str(meta.get("actor_identity_id") or "")
         if not is_manager and not workspace_id and actor_identity_id and actor_identity_id != str(identity.id):
             continue
         payload_meta = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
-        event_artifact_id = str(payload_meta.get("artifact_id") or "")
+        is_prompt_event = entry.message == "prompt_submission"
+        prompt_workspace_id = str(meta.get("workspace_id") or "")
+        event_artifact_id = str((meta.get("artifact_id") if is_prompt_event else payload_meta.get("artifact_id")) or "")
         if artifact_id and event_artifact_id != artifact_id:
+            continue
+        if workspace_id:
+            candidate_workspace_id = prompt_workspace_id if is_prompt_event else str(payload_meta.get("workspace_id") or "")
+            if candidate_workspace_id != workspace_id:
+                if event_artifact_id and event_artifact_id in artifact_lookup:
+                    pass
+                else:
+                    continue
+        artifact = artifact_lookup.get(event_artifact_id) if event_artifact_id else None
+        if is_prompt_event:
+            raw_status = str(meta.get("status") or "queued").strip().lower()
+            if raw_status in {"completed", "succeeded", "success"}:
+                status = "succeeded"
+            elif raw_status == "failed":
+                status = "failed"
+            else:
+                status = "running"
+            prompt_text = str(meta.get("prompt") or "").strip()
+            draft_id = str(meta.get("draft_id") or "").strip() or None
+            job_id = str(meta.get("job_id") or "").strip() or None
+            summary = str(meta.get("summary") or "Prompt submitted")
+            items.append(
+                {
+                    "id": str(entry.id),
+                    "event_type": "prompt_submission",
+                    "status": status,
+                    "summary": summary,
+                    "created_at": entry.created_at,
+                    "actor_id": actor_identity_id or None,
+                    "agent_slug": "xyn-intent-router",
+                    "provider": "",
+                    "model_name": "",
+                    "artifact_id": event_artifact_id or None,
+                    "artifact_type": (artifact.type.slug if artifact and artifact.type_id else "") or "",
+                    "artifact_title": artifact.title if artifact else "",
+                    "request_type": str(meta.get("request_type") or "intent.resolve"),
+                    "prompt": prompt_text,
+                    "workspace_id": prompt_workspace_id or None,
+                    "draft_id": draft_id,
+                    "job_id": job_id,
+                    "error": str(meta.get("error") or ""),
+                    "source": "audit_log",
+                }
+            )
+            if len(items) >= limit:
+                break
             continue
         if workspace_id and str(payload_meta.get("workspace_id") or "") != workspace_id:
             if event_artifact_id and event_artifact_id in artifact_lookup:
                 pass
             else:
                 continue
-        artifact = artifact_lookup.get(event_artifact_id) if event_artifact_id else None
         items.append(
             {
                 "id": str(entry.id),
@@ -16296,6 +16731,12 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
                 "artifact_id": event_artifact_id or None,
                 "artifact_type": (artifact.type.slug if artifact and artifact.type_id else "") or "article",
                 "artifact_title": artifact.title if artifact else "",
+                "request_type": "ai.invoke",
+                "prompt": "",
+                "workspace_id": str(payload_meta.get("workspace_id") or "") or None,
+                "draft_id": None,
+                "job_id": None,
+                "error": "",
                 "source": "audit_log",
             }
         )

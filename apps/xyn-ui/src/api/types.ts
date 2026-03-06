@@ -1924,6 +1924,12 @@ export type AiActivityEntry = {
   summary?: string;
   created_at?: string;
   actor_id?: string | null;
+  request_type?: string;
+  prompt?: string;
+  workspace_id?: string | null;
+  draft_id?: string | null;
+  job_id?: string | null;
+  error?: string;
   agent_slug?: string;
   provider?: "openai" | "anthropic" | "google" | string;
   model_name?: string;

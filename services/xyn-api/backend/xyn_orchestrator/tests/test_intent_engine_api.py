@@ -10,6 +10,7 @@ from xyn_orchestrator.intent_engine.engine import IntentResolutionEngine, Resolu
 from xyn_orchestrator.intent_engine.proposal_provider import IntentContextPackMissingError
 from xyn_orchestrator.artifact_links import ensure_context_pack_artifact
 from xyn_orchestrator.models import (
+    AuditLog,
     Artifact,
     ArtifactType,
     ArticleCategory,
@@ -212,6 +213,130 @@ class IntentEngineApiTests(TestCase):
         payload = response.json()
         self.assertEqual(payload.get("status"), "UnsupportedIntent")
         self.assertIn("context pack missing", str(payload.get("summary") or "").lower())
+
+    def test_resolve_build_new_app_prompt_routes_to_app_intent_draft(self):
+        prompt = (
+            "Build a new app. It is a network inventory application for managing devices, interfaces, "
+            "IP addresses, and locations per workspace. Start with devices and locations only. "
+            "Add one chart that shows devices by status."
+        )
+        response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": prompt, "context": {"workspace_id": str(self.workspace.id)}}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "DraftReady")
+        self.assertEqual(payload.get("action_type"), "CreateDraft")
+        self.assertEqual(payload.get("artifact_type"), "Workspace")
+        draft_payload = payload.get("draft_payload") or {}
+        self.assertEqual(draft_payload.get("__operation"), "create_app_intent_draft")
+        initial_intent = draft_payload.get("initial_intent") or {}
+        self.assertEqual(initial_intent.get("app_kind"), "network_inventory")
+        self.assertIn("devices", initial_intent.get("requested_entities") or [])
+        self.assertIn("locations", initial_intent.get("requested_entities") or [])
+        self.assertEqual(initial_intent.get("phase_1_scope"), ["devices", "locations"])
+        self.assertIn("devices_by_status_chart", initial_intent.get("requested_visuals") or [])
+        self.assertTrue(initial_intent.get("workspace_scoped"))
+        self.assertNotEqual(payload.get("summary"), "Intent is ambiguous; provide clearer draft instructions.")
+
+    @patch("xyn_orchestrator.xyn_api.requests.request")
+    def test_apply_create_app_intent_draft_submits_to_seed_and_returns_ids(self, request_mock):
+        class _FakeResponse:
+            def __init__(self, status_code: int, payload: dict):
+                self.status_code = status_code
+                self._payload = payload
+                self.content = json.dumps(payload).encode("utf-8")
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self._payload
+
+        draft_id = "49d67e63-28d1-4d7e-a4c4-ec18f0563767"
+        job_id = "d2369c24-bd2d-43ee-a0a6-ec5cf8ecbdf1"
+        request_mock.side_effect = [
+            _FakeResponse(
+                200,
+                [
+                    {
+                        "id": "a50816b5-16d9-45f0-a4d4-31483bbdb307",
+                        "slug": str(self.workspace.slug),
+                        "title": str(self.workspace.name),
+                    }
+                ],
+            ),
+            _FakeResponse(
+                201,
+                {
+                    "id": draft_id,
+                    "workspace_id": str(self.workspace.id),
+                    "type": "app_intent",
+                    "title": "Network Inventory App",
+                    "content_json": {},
+                    "status": "ready",
+                    "created_by": "intent-admin@example.com",
+                },
+            ),
+            _FakeResponse(
+                200,
+                {
+                    "draft": {"id": draft_id},
+                    "job_id": job_id,
+                    "job_status": "queued",
+                },
+            ),
+        ]
+
+        response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": {
+                        "__operation": "create_app_intent_draft",
+                        "workspace_id": str(self.workspace.id),
+                        "title": "Network Inventory App",
+                        "raw_prompt": "Build a new app for devices and locations by workspace.",
+                        "initial_intent": {
+                            "app_kind": "network_inventory",
+                            "requested_entities": ["devices", "locations"],
+                            "phase_1_scope": ["devices", "locations"],
+                            "requested_visuals": ["devices_by_status_chart"],
+                            "workspace_scoped": True,
+                        },
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "DraftReady")
+        self.assertEqual((payload.get("result") or {}).get("draft_id"), draft_id)
+        self.assertEqual((payload.get("result") or {}).get("job_id"), job_id)
+        self.assertEqual(request_mock.call_count, 3)
+        second_call = request_mock.call_args_list[1]
+        self.assertEqual(second_call.kwargs.get("method"), "POST")
+        self.assertIn("/api/v1/drafts", str(second_call.kwargs.get("url") or ""))
+
+    def test_prompt_submission_activity_is_visible(self):
+        prompt = "Build a new app for network inventory with devices and locations."
+        response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": prompt, "context": {"workspace_id": str(self.workspace.id)}}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        self.assertTrue(AuditLog.objects.filter(message="prompt_submission").exists())
+
+        activity = self.client.get(f"/xyn/api/ai/activity?workspace_id={self.workspace.id}")
+        self.assertEqual(activity.status_code, 200, activity.content.decode())
+        items = activity.json().get("items") or []
+        prompt_item = next((item for item in items if item.get("event_type") == "prompt_submission"), None)
+        self.assertIsNotNone(prompt_item)
+        self.assertIn("Build a new app", str((prompt_item or {}).get("prompt") or ""))
 
     def test_apply_patch_rejects_unauthorized_fields(self):
         create_response = self.client.post(

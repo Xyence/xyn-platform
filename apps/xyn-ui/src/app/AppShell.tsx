@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Bot } from "lucide-react";
 import { getAuthMode, getMe, getMyProfile, getTenantBranding, listArtifactNavSurfaces, listWorkspaces } from "../api/xyn";
 import { setRuntimeAuthMode } from "../api/client";
@@ -705,13 +705,13 @@ export default function AppShell() {
     return (
       <div className="app-shell">
         <header className="app-header">
-          <div className="brand">
+          <Link className="brand brand-link" to="/">
             <img className="brand-logo" src="/xyence-logo.png" alt="Xyence logo" />
             <div>
               <h1>Xyn</h1>
               <p>Loading session...</p>
             </div>
-          </div>
+          </Link>
         </header>
       </div>
     );
@@ -721,13 +721,13 @@ export default function AppShell() {
     return (
       <div className="app-shell">
         <header className="app-header">
-          <div className="brand">
+          <Link className="brand brand-link" to="/">
             <img className="brand-logo" src="/xyence-logo.png" alt="Xyence logo" />
             <div>
               <h1>Xyn</h1>
               <p>Redirecting to sign in...</p>
             </div>
-          </div>
+          </Link>
         </header>
       </div>
     );
@@ -736,12 +736,12 @@ export default function AppShell() {
   return (
     <div className="app-shell">
       <header className="app-header" ref={headerRef}>
-        <div className="brand">
+        <Link className="brand brand-link" to="/">
           <img className="brand-logo" src={brandLogo} alt="Xyence logo" />
           <div>
             <h1>Xyn</h1>
           </div>
-        </div>
+        </Link>
         <div className="header-meta">
           {authed ? (
             <>
