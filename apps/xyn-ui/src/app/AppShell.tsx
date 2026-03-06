@@ -1085,7 +1085,17 @@ export default function AppShell() {
             <Route path="platform/settings/security" element={<PlatformSettingsHubPage sectionOverride="security" />} />
             <Route path="platform/settings/integrations" element={<PlatformSettingsHubPage sectionOverride="integrations" />} />
             <Route path="platform/settings/deploy" element={<PlatformDeploySettingsPage />} />
-            <Route path="platform/settings/workspaces" element={<WorkspacesPage />} />
+            <Route
+              path="platform/settings/workspaces"
+              element={
+                <WorkspacesPage
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
             <Route path="platform/access-control" element={<AccessControlPage />} />
             <Route path="platform/access-explorer" element={<RedirectLegacyAccessControlRoute tab="explorer" />} />
             <Route path="platform/users" element={<RedirectLegacyAccessControlRoute tab="users" />} />
@@ -1096,7 +1106,17 @@ export default function AppShell() {
             <Route path="platform/video-adapter-configs/:artifactId" element={<VideoAdapterConfigPage />} />
             <Route path="platform/rendering-settings" element={<PlatformRenderingSettingsPage />} />
             <Route path="platform/deploy" element={<PlatformDeploySettingsPage />} />
-            <Route path="platform/workspaces" element={<WorkspacesPage />} />
+            <Route
+              path="platform/workspaces"
+              element={
+                <WorkspacesPage
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
             <Route path="platform/activity" element={<ActivityPage workspaceId="" />} />
             <Route path="platform/seeds" element={<SeedPacksPage />} />
             <Route path="platform/identity-configuration" element={<IdentityConfigurationPage />} />
