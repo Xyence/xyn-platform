@@ -225,15 +225,35 @@ export default function AppShell() {
 
   useEffect(() => {
     let mounted = true;
+    const debugEnabled = navDebugEnabled(typeof window !== "undefined" ? window.location.search : location.search);
+    const authBootstrapTimeout = window.setTimeout(() => {
+      if (!mounted) return;
+      if (debugEnabled) {
+        console.debug("[xyn-auth] bootstrap timeout; forcing authLoaded=true");
+      }
+      setAuthLoaded(true);
+    }, 12000);
     (async () => {
       try {
+        if (debugEnabled) {
+          console.debug("[xyn-auth] bootstrap start", { path: location.pathname });
+        }
         try {
           const modePayload = await getAuthMode();
           setRuntimeAuthMode(modePayload?.auth_mode || "dev");
+          if (debugEnabled) {
+            console.debug("[xyn-auth] mode loaded", modePayload);
+          }
         } catch {
           // Fallback to bootstrap response if auth mode endpoint is unavailable.
         }
         const me = await getMe();
+        if (debugEnabled) {
+          console.debug("[xyn-auth] me loaded", {
+            user: me?.user?.email || me?.user?.subject || null,
+            workspace_count: Array.isArray(me?.workspaces) ? me.workspaces.length : 0,
+          });
+        }
         if (!mounted) return;
         if (me?.auth_mode) {
           setRuntimeAuthMode(String(me.auth_mode));
@@ -257,6 +277,11 @@ export default function AppShell() {
             if (!mounted) return;
             setWorkspaces(ws.workspaces || []);
             setPreferredWorkspaceId((current) => current || ws.workspaces?.[0]?.id || "");
+            if (debugEnabled) {
+              console.debug("[xyn-auth] loaded workspaces via /xyn/api/workspaces", {
+                workspace_count: Array.isArray(ws.workspaces) ? ws.workspaces.length : 0,
+              });
+            }
           } catch {
             // Keep empty workspaces in bootstrap errors.
           }
@@ -281,6 +306,9 @@ export default function AppShell() {
         }
       } catch {
         if (!mounted) return;
+        if (debugEnabled) {
+          console.debug("[xyn-auth] bootstrap failed; marking unauthenticated");
+        }
         setAuthed(false);
         setAuthUser(null);
         setRoles([]);
@@ -288,12 +316,14 @@ export default function AppShell() {
         setActorRoles([]);
       } finally {
         if (mounted) {
+          window.clearTimeout(authBootstrapTimeout);
           setAuthLoaded(true);
         }
       }
     })();
     return () => {
       mounted = false;
+      window.clearTimeout(authBootstrapTimeout);
     };
   }, []);
 
