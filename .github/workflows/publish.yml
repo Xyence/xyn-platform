@@ -11,6 +11,7 @@ env:
   REGISTRY: public.ecr.aws/i0h0h0n4/xyn/artifacts
   UI_IMAGE: public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui
   API_IMAGE: public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api
+  NET_INVENTORY_IMAGE: public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api
   AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -95,6 +96,16 @@ jobs:
             ${{ env.API_IMAGE }}:dev
             ${{ env.API_IMAGE }}:${{ steps.vars.outputs.sha_tag }}
 
+      - name: Build and push net-inventory-api (dev + sha)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/net-inventory-api
+          file: services/net-inventory-api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.NET_INVENTORY_IMAGE }}:dev
+            ${{ env.NET_INVENTORY_IMAGE }}:${{ steps.vars.outputs.sha_tag }}
+
       - name: Build and push xyn-ui (version + stable)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/build-push-action@v6
@@ -117,6 +128,17 @@ jobs:
             ${{ env.API_IMAGE }}:${{ steps.vars.outputs.version_tag }}
             ${{ env.API_IMAGE }}:stable
 
+      - name: Build and push net-inventory-api (version + stable)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: services/net-inventory-api
+          file: services/net-inventory-api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.NET_INVENTORY_IMAGE }}:${{ steps.vars.outputs.version_tag }}
+            ${{ env.NET_INVENTORY_IMAGE }}:stable
+
       - name: Generate release bridge manifest
         shell: bash
         run: |
@@ -127,7 +149,8 @@ jobs:
             "published_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "images": {
               "xyn-ui": "${UI_IMAGE}:${{ steps.vars.outputs.sha_tag }}",
-              "xyn-api": "${API_IMAGE}:${{ steps.vars.outputs.sha_tag }}"
+              "xyn-api": "${API_IMAGE}:${{ steps.vars.outputs.sha_tag }}",
+              "net-inventory-api": "${NET_INVENTORY_IMAGE}:${{ steps.vars.outputs.sha_tag }}"
             }
           }
           JSON

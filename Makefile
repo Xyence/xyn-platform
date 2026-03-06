@@ -7,6 +7,7 @@ SHA_TAG := sha-$(SHORT_SHA)
 build:
 	docker build -f apps/xyn-ui/Dockerfile -t $(REGISTRY)/xyn-ui:$(SHA_TAG) apps/xyn-ui
 	docker build -f services/xyn-api/Dockerfile -t $(REGISTRY)/xyn-api:$(SHA_TAG) services/xyn-api
+	docker build -f services/net-inventory-api/Dockerfile -t $(REGISTRY)/net-inventory-api:$(SHA_TAG) services/net-inventory-api
 
 publish-dev:
 	./scripts/publish_dev.sh

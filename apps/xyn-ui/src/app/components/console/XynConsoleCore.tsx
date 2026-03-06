@@ -1222,11 +1222,8 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       }
       if (action.name === "canvas.open_detail") {
         if (String(action.params.entity_type || "") === "platform_settings") {
-          openPanel({
-            key: "platform_settings",
-            params: { workspace_id: String(location.pathname.match(/^\/w\/([^/]+)(?:\/|$)/)?.[1] || "") },
-            open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "current_panel",
-          });
+          const workspaceFromPath = String(location.pathname.match(/^\/w\/([^/]+)(?:\/|$)/)?.[1] || "").trim();
+          navigate(workspaceFromPath ? toWorkspacePath(workspaceFromPath, "platform/settings") : "/app/platform/settings");
           clearSessionResolution();
           if (isOverlay) setOpen(false);
           return;

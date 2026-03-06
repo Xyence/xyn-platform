@@ -6,6 +6,7 @@ Single source-of-truth monorepo for publishing Xyn platform artifacts consumed b
 
 - `apps/xyn-ui/` - UI source and Docker build context
 - `services/xyn-api/` - API source and Docker build context (publishes `xyn-api`)
+- `services/net-inventory-api/` - Network inventory app API source and Docker build context
 - `scripts/` - helper scripts for publishing
 - `.github/workflows/` - CI publish workflow
 - `releases/` - release bridge manifest (`dev.json`)
@@ -16,6 +17,7 @@ All images are published to:
 
 - `public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:<tag>`
 - `public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:<tag>`
+- `public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:<tag>`
 
 Tagging policy:
 
@@ -32,6 +34,7 @@ This builds:
 
 - `public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:sha-<shortsha>`
 - `public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:sha-<shortsha>`
+- `public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:sha-<shortsha>`
 
 ## Publish dev artifacts
 
@@ -49,6 +52,8 @@ The publish script builds and pushes:
 - `public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:sha-<shortsha>`
 - `public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:dev`
 - `public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:sha-<shortsha>`
+- `public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:dev`
+- `public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:sha-<shortsha>`
 
 It also writes `releases/dev.json` for seed bridge consumption.
 

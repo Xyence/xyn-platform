@@ -70,7 +70,7 @@ export default function WorkbenchPage() {
 
       <section className="workbench-canvas">
         {panel ? (
-          <div className="inline-actions" style={{ justifyContent: "flex-end" }}>
+          <div className="inline-actions workbench-panel-actions" style={{ justifyContent: "flex-end" }}>
             <button
               type="button"
               className="ghost"

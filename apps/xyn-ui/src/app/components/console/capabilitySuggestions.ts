@@ -126,11 +126,29 @@ export function useCapabilitySuggestions(workspaceId: string): CapabilitySuggest
       try {
         setLoading(true);
         setError(null);
-        const [artifactsResponse, me] = await Promise.all([listWorkspaceArtifacts(workspaceId), getMe()]);
+        const [artifactsResult, meResult] = await Promise.allSettled([listWorkspaceArtifacts(workspaceId), getMe()]);
         if (!active) return;
-        setRows(artifactsResponse.artifacts || []);
-        setRoles((me.roles || []).map((entry) => String(entry)));
-        setPermissions((me.permissions || []).map((entry) => String(entry)));
+        if (meResult.status === "fulfilled") {
+          const me = meResult.value;
+          setRoles((me.roles || []).map((entry) => String(entry)));
+          setPermissions((me.permissions || []).map((entry) => String(entry)));
+        }
+        if (artifactsResult.status === "fulfilled") {
+          setRows(artifactsResult.value.artifacts || []);
+        } else {
+          const message = artifactsResult.reason instanceof Error ? artifactsResult.reason.message : String(artifactsResult.reason || "");
+          const normalized = message.toLowerCase();
+          if (
+            normalized.includes("forbidden") ||
+            normalized.includes("403") ||
+            normalized.includes("not found") ||
+            normalized.includes("404")
+          ) {
+            setRows([]);
+          } else {
+            throw artifactsResult.reason;
+          }
+        }
       } catch (err) {
         if (!active) return;
         setError(err instanceof Error ? err.message : "Failed to load capability suggestions");

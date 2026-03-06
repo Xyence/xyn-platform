@@ -3538,6 +3538,10 @@ button.sm {
   gap: 10px;
 }
 
+.workbench-panel-actions {
+  margin-top: 44px;
+}
+
 .app-breadcrumbs {
   display: inline-flex;
   align-items: center;

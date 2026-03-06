@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 REGISTRY="public.ecr.aws/i0h0h0n4/xyn/artifacts"
 UI_REPO="$REGISTRY/xyn-ui"
 API_REPO="$REGISTRY/xyn-api"
+NET_INVENTORY_REPO="$REGISTRY/net-inventory-api"
 SHORT_SHA="$(git rev-parse --short=7 HEAD)"
 SHA_TAG="sha-${SHORT_SHA}"
 PUBLISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -53,6 +54,13 @@ docker build \
   -t "${API_REPO}:${SHA_TAG}" \
   services/xyn-api
 
+echo "Building net-inventory-api image..."
+docker build \
+  -f services/net-inventory-api/Dockerfile \
+  -t "${NET_INVENTORY_REPO}:dev" \
+  -t "${NET_INVENTORY_REPO}:${SHA_TAG}" \
+  services/net-inventory-api
+
 echo "Pushing xyn-ui tags..."
 docker push "${UI_REPO}:dev"
 docker push "${UI_REPO}:${SHA_TAG}"
@@ -60,6 +68,10 @@ docker push "${UI_REPO}:${SHA_TAG}"
 echo "Pushing xyn-api tags..."
 docker push "${API_REPO}:dev"
 docker push "${API_REPO}:${SHA_TAG}"
+
+echo "Pushing net-inventory-api tags..."
+docker push "${NET_INVENTORY_REPO}:dev"
+docker push "${NET_INVENTORY_REPO}:${SHA_TAG}"
 
 mkdir -p releases
 if [[ "${SKIP_RELEASE_MANIFEST_WRITE:-0}" != "1" ]]; then
@@ -69,7 +81,8 @@ if [[ "${SKIP_RELEASE_MANIFEST_WRITE:-0}" != "1" ]]; then
   "published_at": "${PUBLISHED_AT}",
   "images": {
     "xyn-ui": "${UI_REPO}:${SHA_TAG}",
-    "xyn-api": "${API_REPO}:${SHA_TAG}"
+    "xyn-api": "${API_REPO}:${SHA_TAG}",
+    "net-inventory-api": "${NET_INVENTORY_REPO}:${SHA_TAG}"
   }
 }
 JSON
@@ -81,6 +94,8 @@ printf '  %s (digest: %s)\n' "${UI_REPO}:dev" "$(get_digest "${UI_REPO}:dev")"
 printf '  %s (digest: %s)\n' "${UI_REPO}:${SHA_TAG}" "$(get_digest "${UI_REPO}:${SHA_TAG}")"
 printf '  %s (digest: %s)\n' "${API_REPO}:dev" "$(get_digest "${API_REPO}:dev")"
 printf '  %s (digest: %s)\n' "${API_REPO}:${SHA_TAG}" "$(get_digest "${API_REPO}:${SHA_TAG}")"
+printf '  %s (digest: %s)\n' "${NET_INVENTORY_REPO}:dev" "$(get_digest "${NET_INVENTORY_REPO}:dev")"
+printf '  %s (digest: %s)\n' "${NET_INVENTORY_REPO}:${SHA_TAG}" "$(get_digest "${NET_INVENTORY_REPO}:${SHA_TAG}")"
 if [[ "${SKIP_RELEASE_MANIFEST_WRITE:-0}" == "1" ]]; then
   printf '\nSkipped bridge manifest write (SKIP_RELEASE_MANIFEST_WRITE=1).\n'
 else

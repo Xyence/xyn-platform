@@ -617,11 +617,6 @@ export default function AppShell() {
             <>
               {isWorkbenchRoute ? <CapabilitiesIndicator workspaceId={activeWorkspace?.id || ""} /> : null}
               <NotificationBell />
-              <HeaderPreviewControl
-                actorRoles={actorRoles}
-                actorLabel={String(authUser?.email || authUser?.display_name || authUser?.subject || "current user")}
-                onMessage={({ level, title, message }) => push({ level, title, message })}
-              />
               <button
                 type="button"
                 className={`ghost notification-bell agent-indicator ${runningAiCount > 0 ? "thinking" : ""}`}
@@ -634,6 +629,11 @@ export default function AppShell() {
                   {runningAiCount > 0 ? "AI operation in progress" : "No AI operations in progress"}
                 </span>
               </button>
+              <HeaderPreviewControl
+                actorRoles={actorRoles}
+                actorLabel={String(authUser?.email || authUser?.display_name || authUser?.subject || "current user")}
+                onMessage={({ level, title, message }) => push({ level, title, message })}
+              />
               <UserMenu
                 user={authUser || {}}
                 onReport={() => setReportOpen(true)}
