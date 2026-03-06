@@ -51,7 +51,8 @@ export function toWorkspaceScopedPath(pathname: string, workspaceId: string): st
   if (normalized === "/" || normalized === "/workspaces") return toWorkspacePath(workspaceId, DEFAULT_WORKSPACE_SUBPATH);
 
   if (normalized === "/app" || normalized === "/app/" || normalized.startsWith("/app/")) {
-    return toWorkspacePath(workspaceId, DEFAULT_WORKSPACE_SUBPATH);
+    const rest = normalized.replace(/^\/app\/?/, "");
+    return toWorkspacePath(workspaceId, mapLegacyAppRestToWorkspaceSubpath(rest));
   }
 
   return null;
