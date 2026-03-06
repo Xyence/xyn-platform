@@ -77,10 +77,10 @@ const SURFACES: SurfaceCard[] = [
     section: "workspaces",
   },
   {
-    id: "legacy-general",
-    title: "General",
-    description: "General platform defaults and storage/notification configuration.",
-    route: "/app/platform/settings/legacy?tab=general",
+    id: "platform-branding",
+    title: "Branding",
+    description: "Manage global branding defaults and application overrides.",
+    route: "/app/platform/branding",
     section: "general",
   },
 ];

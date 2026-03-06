@@ -82,7 +82,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Admin",
     icon: "Settings",
     items: [
-      { id: "platform-settings", label: "Platform Settings", path: "/app/platform/settings", icon: "SlidersHorizontal" },
+      { id: "platform-settings", label: "Platform Settings", path: "/app/platform/hub", icon: "SlidersHorizontal" },
     ],
   },
 ];

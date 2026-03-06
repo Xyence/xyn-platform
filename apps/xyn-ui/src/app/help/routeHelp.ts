@@ -47,7 +47,7 @@ const HELP_BY_ROUTE: Record<string, RouteHelp> = {
     atlasNode: "observe",
     nextSteps: [
       { label: "Articles", to: "/app/artifacts/articles" },
-      { label: "Workspaces", to: "/app/platform/settings?tab=workspaces&wsTab=profile" },
+      { label: "Workspaces", to: "/app/platform/workspaces" },
     ],
   },
   "app.workspaces": {
@@ -66,7 +66,7 @@ const HELP_BY_ROUTE: Record<string, RouteHelp> = {
     whatYouDo: ["Adjust workspace behavior", "Confirm ownership and governance defaults", "Review operational configuration"],
     atlasNode: "run",
     nextSteps: [
-      { label: "Workspaces", to: "/app/platform/settings?tab=workspaces&wsTab=profile" },
+      { label: "Workspaces", to: "/app/platform/workspaces" },
       { label: "Guides", to: "/app/guides" },
     ],
   },

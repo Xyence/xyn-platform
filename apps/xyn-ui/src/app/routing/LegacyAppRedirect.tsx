@@ -1,17 +1,13 @@
-import { Navigate, Outlet, useLocation } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import AppShell from "../AppShell";
-import { DEFAULT_WORKSPACE_SUBPATH, isGlobalAppPath, toWorkspacePath } from "./workspaceRouting";
+import RootRedirect from "./RootRedirect";
+import { isGlobalAppPath } from "./workspaceRouting";
 
 function readFlag(value: unknown): boolean {
   return String(value || "").trim().toLowerCase() === "true";
 }
 
 const ENABLE_LEGACY_UI = readFlag(import.meta.env.VITE_ENABLE_LEGACY_UI);
-
-function preferredWorkspaceId(): string {
-  if (typeof window === "undefined") return "";
-  return String(window.localStorage.getItem("xyn.activeWorkspaceId") || "").trim();
-}
 
 export default function LegacyAppRedirect() {
   const location = useLocation();
@@ -23,18 +19,7 @@ export default function LegacyAppRedirect() {
   if (isGlobalAppPath(location.pathname)) {
     return <AppShell />;
   }
-
-  const workspaceId = preferredWorkspaceId();
-  const target = workspaceId ? toWorkspacePath(workspaceId, DEFAULT_WORKSPACE_SUBPATH) : "/";
-
-  if (import.meta.env.DEV) {
-    // eslint-disable-next-line no-console
-    console.info(
-      `[legacy-ui] redirect ${location.pathname}${location.search || ""}${location.hash || ""} -> ${target}`
-    );
-  }
-
-  return <Navigate to={target} replace />;
+  return <RootRedirect />;
 }
 
 export function LegacyAppOutlet() {

@@ -224,7 +224,7 @@ export default function VideoAdapterConfigPage() {
           <p className="muted">Governed renderer adapter configuration.</p>
         </div>
         <div className="inline-actions">
-          <button className="ghost" onClick={() => navigate("/app/platform/settings")}>
+          <button className="ghost" onClick={() => navigate("/app/platform/hub")}>
             Back to settings
           </button>
           <button className="ghost" onClick={load} disabled={loading}>

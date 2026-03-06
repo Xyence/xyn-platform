@@ -17,8 +17,8 @@ export default function PlatformRenderingSettingsPage() {
           </div>
           <p className="muted">Manage canonical adapter config artifacts and rendering endpoints.</p>
           <div className="form-actions">
-            <button type="button" className="ghost" onClick={() => navigate("/app/platform/settings/legacy?tab=integrations")}>
-              Open Adapter Settings
+            <button type="button" className="ghost" onClick={() => navigate("/app/platform/hub?section=integrations")}>
+              Open Hub
             </button>
           </div>
         </section>
@@ -37,4 +37,3 @@ export default function PlatformRenderingSettingsPage() {
     </>
   );
 }
-

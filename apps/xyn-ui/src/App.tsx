@@ -34,11 +34,7 @@ function WorkspaceAuthCallbackBridge() {
 }
 
 function WorkspacesEntry() {
-  const workspaceId = String(window.localStorage.getItem("xyn.activeWorkspaceId") || "").trim();
-  if (workspaceId) {
-    return <RootRedirect />;
-  }
-  return <AppShell />;
+  return <RootRedirect />;
 }
 
 function OpenConsoleBridge() {

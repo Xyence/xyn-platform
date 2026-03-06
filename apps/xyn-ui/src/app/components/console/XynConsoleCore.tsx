@@ -1236,8 +1236,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       }
       if (action.name === "canvas.open_detail") {
         if (String(action.params.entity_type || "") === "platform_settings") {
-          // Legacy fallback route; AppShell may still redirect to canonical surfaced target when available.
-          navigate("/app/platform/settings?legacy=1");
+          navigate("/app/platform/hub");
           clearSessionResolution();
           if (isOverlay) setOpen(false);
           return;

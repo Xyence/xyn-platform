@@ -24,12 +24,12 @@ export default function PlatformDeploySettingsPage() {
         </section>
         <section className="card" style={{ marginBottom: 0 }}>
           <div className="card-header">
-            <h3>Legacy Deploy Controls</h3>
+            <h3>Platform Settings Hub</h3>
           </div>
-          <p className="muted">Temporary fallback until deploy controls are fully migrated out of legacy settings.</p>
+          <p className="muted">Return to the global settings hub for additional deploy and governance options.</p>
           <div className="form-actions">
-            <button type="button" className="ghost" onClick={() => navigate("/app/platform/settings/legacy?tab=deploy")}>
-              Open Legacy Deploy Tab
+            <button type="button" className="ghost" onClick={() => navigate("/app/platform/hub?section=deploy")}>
+              Open Hub
             </button>
           </div>
         </section>
@@ -37,4 +37,3 @@ export default function PlatformDeploySettingsPage() {
     </>
   );
 }
-

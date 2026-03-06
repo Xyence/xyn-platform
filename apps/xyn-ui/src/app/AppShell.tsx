@@ -42,6 +42,7 @@ import DraftsListPage from "./pages/DraftsListPage";
 import DraftCreatePage from "./pages/DraftCreatePage";
 import DraftDetailPage from "./pages/DraftDetailPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
+import PlatformInitializationPage from "./pages/PlatformInitializationPage";
 import { useGlobalHotkeys } from "./hooks/useGlobalHotkeys";
 import ReportOverlay from "./components/ReportOverlay";
 import UserMenu from "./components/common/UserMenu";
@@ -68,6 +69,7 @@ import {
   toWorkspacePath,
   withWorkspaceInNavPath,
 } from "./routing/workspaceRouting";
+import { requiresPlatformInitialization, resolveDefaultWorkspaceForUser, resolvePostLoginDestination } from "./routing/bootstrapResolver";
 import { canonicalLegacyRouteForPlatformSettings } from "./routing/promptSurfaceResolver";
 
 function readFlag(value: unknown): boolean {
@@ -249,6 +251,8 @@ export default function AppShell() {
   const [tourSlug, setTourSlug] = useState<string | null>(null);
   const [tourLaunchToken, setTourLaunchToken] = useState(0);
   const [agentActivityOpen, setAgentActivityOpen] = useState(false);
+  const [platformInitRequired, setPlatformInitRequired] = useState(false);
+  const invalidWorkspaceRecoveryRef = useRef<string>("");
   const { push } = useNotifications();
   const { runningAiCount } = useOperations();
   const { preview, disablePreviewMode } = usePreview();
@@ -302,6 +306,7 @@ export default function AppShell() {
         setRoles(me?.roles ?? []);
         setPermissions(me?.permissions ?? []);
         setActorRoles(me?.actor_roles ?? me?.roles ?? []);
+        setPlatformInitRequired(requiresPlatformInitialization(me));
         setUserContext({
           id: (me?.user?.subject as string | null) || (me?.user?.sub as string | null) || "",
           email: (me?.user?.email as string | null) || "",
@@ -309,13 +314,24 @@ export default function AppShell() {
         const meWorkspaces = me?.workspaces || [];
         if (Array.isArray(meWorkspaces) && meWorkspaces.length > 0) {
           setWorkspaces(meWorkspaces);
-          setPreferredWorkspaceId((current) => current || meWorkspaces[0].id);
+          const persisted = String(window.localStorage.getItem("xyn.activeWorkspaceId") || "").trim();
+          const resolved = resolveDefaultWorkspaceForUser(me, persisted);
+          if (persisted && persisted !== resolved) {
+            window.localStorage.removeItem("xyn.activeWorkspaceId");
+          }
+          setPreferredWorkspaceId(resolved || "");
         } else {
           try {
             const ws = await listWorkspaces();
             if (!mounted) return;
             setWorkspaces(ws.workspaces || []);
-            setPreferredWorkspaceId((current) => current || ws.workspaces?.[0]?.id || "");
+            const fallbackMe = { ...me, workspaces: ws.workspaces || [] };
+            const persisted = String(window.localStorage.getItem("xyn.activeWorkspaceId") || "").trim();
+            const resolved = resolveDefaultWorkspaceForUser(fallbackMe, persisted);
+            if (persisted && persisted !== resolved) {
+              window.localStorage.removeItem("xyn.activeWorkspaceId");
+            }
+            setPreferredWorkspaceId(resolved || "");
             if (debugEnabled) {
               console.debug("[xyn-auth] loaded workspaces via /xyn/api/workspaces", {
                 workspace_count: Array.isArray(ws.workspaces) ? ws.workspaces.length : 0,
@@ -353,6 +369,7 @@ export default function AppShell() {
         setRoles([]);
         setPermissions([]);
         setActorRoles([]);
+        setPlatformInitRequired(false);
       } finally {
         if (mounted) {
           window.clearTimeout(authBootstrapTimeout);
@@ -404,7 +421,11 @@ export default function AppShell() {
   }, []);
 
   useEffect(() => {
-    if (activeWorkspaceId) localStorage.setItem("xyn.activeWorkspaceId", activeWorkspaceId);
+    if (activeWorkspaceId) {
+      localStorage.setItem("xyn.activeWorkspaceId", activeWorkspaceId);
+      return;
+    }
+    localStorage.removeItem("xyn.activeWorkspaceId");
   }, [activeWorkspaceId]);
 
   useEffect(() => {
@@ -412,6 +433,53 @@ export default function AppShell() {
       setPreferredWorkspaceId(workspaceIdFromRoute);
     }
   }, [workspaceIdFromRoute]);
+
+  useEffect(() => {
+    if (!authLoaded || !authed || !platformInitRequired) return;
+    if (location.pathname === "/app/setup/initialize") return;
+    navigate("/app/setup/initialize", { replace: true });
+  }, [authLoaded, authed, location.pathname, navigate, platformInitRequired]);
+
+  useEffect(() => {
+    if (!authLoaded || !authed) return;
+    if (!inWorkspaceScope || !workspaceIdFromRoute || routeWorkspaceIsValid) return;
+    const recoveryTarget = resolvePostLoginDestination(
+      {
+        workspaces: workspaces.map((workspace) => ({ id: workspace.id, slug: workspace.slug, name: workspace.name, role: workspace.role })),
+        preferred_workspace_id: preferredWorkspaceId || undefined,
+        platform_initialization: {
+          initialized: !platformInitRequired,
+          requires_setup: platformInitRequired,
+          workspace_count: workspaces.length,
+          auth_mode: "unknown",
+        },
+      },
+      preferredWorkspaceId
+    );
+    const dedupeKey = `${location.pathname}${location.search}->${recoveryTarget}`;
+    if (invalidWorkspaceRecoveryRef.current === dedupeKey) return;
+    invalidWorkspaceRecoveryRef.current = dedupeKey;
+    window.localStorage.removeItem("xyn.activeWorkspaceId");
+    push({
+      level: "warning",
+      title: "Workspace unavailable",
+      message: `Recovered from stale workspace ${workspaceIdFromRoute}.`,
+    });
+    navigate(recoveryTarget, { replace: true });
+  }, [
+    authLoaded,
+    authed,
+    inWorkspaceScope,
+    location.pathname,
+    location.search,
+    navigate,
+    platformInitRequired,
+    preferredWorkspaceId,
+    push,
+    routeWorkspaceIsValid,
+    workspaces,
+    workspaceIdFromRoute,
+  ]);
 
   const startLogin = () => {
     const returnTo = window.location.pathname || "/";
@@ -984,6 +1052,7 @@ export default function AppShell() {
             <Route path="platform/tenants/:tenantId" element={<RedirectLegacyWorkspacesRoute />} />
             <Route path="platform/tenant-contacts" element={<RedirectLegacyWorkspacesRoute />} />
             <Route path="platform/tenant-contacts/:tenantId" element={<RedirectLegacyTenantContactsDetailRoute />} />
+            <Route path="setup/initialize" element={<PlatformInitializationPage />} />
             <Route path="platform/hub" element={<PlatformSettingsHubPage />} />
             <Route path="platform/settings/general" element={<PlatformSettingsHubPage sectionOverride="general" />} />
             <Route path="platform/settings/security" element={<PlatformSettingsHubPage sectionOverride="security" />} />

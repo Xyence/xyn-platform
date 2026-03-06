@@ -14,6 +14,7 @@ const GLOBAL_APP_PATH_PREFIXES = [
   "/app/platform/branding",
   "/app/platform/seeds",
   "/app/platform/video-adapter-configs",
+  "/app/setup/initialize",
 ];
 
 export function isGlobalAppPath(pathname: string): boolean {

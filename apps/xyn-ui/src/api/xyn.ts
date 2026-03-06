@@ -557,6 +557,13 @@ export async function getMe(): Promise<{
     effective_roles?: string[];
   };
   workspaces?: Array<{ id: string; slug: string; name: string; role: string; termination_authority?: boolean }>;
+  preferred_workspace_id?: string;
+  platform_initialization?: {
+    initialized: boolean;
+    requires_setup: boolean;
+    workspace_count: number;
+    auth_mode: "dev" | "token" | "oidc" | string;
+  };
 }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/me`, { credentials: "include" });
@@ -576,7 +583,51 @@ export async function getMe(): Promise<{
       effective_roles?: string[];
     };
     workspaces?: Array<{ id: string; slug: string; name: string; role: string; termination_authority?: boolean }>;
+    preferred_workspace_id?: string;
+    platform_initialization?: {
+      initialized: boolean;
+      requires_setup: boolean;
+      workspace_count: number;
+      auth_mode: "dev" | "token" | "oidc" | string;
+    };
   }>(response);
+}
+
+export async function getPlatformInitializationStatus(): Promise<{
+  platform_initialization: {
+    initialized: boolean;
+    requires_setup: boolean;
+    workspace_count: number;
+    auth_mode: "dev" | "token" | "oidc" | string;
+  };
+}> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/initialization/status`, { credentials: "include" });
+  return handle(response);
+}
+
+export async function completePlatformInitialization(payload: {
+  workspace_name: string;
+  workspace_slug?: string;
+  org_name?: string;
+  description?: string;
+}): Promise<{
+  workspace: WorkspaceSummary;
+  platform_initialization: {
+    initialized: boolean;
+    requires_setup: boolean;
+    workspace_count: number;
+    auth_mode: "dev" | "token" | "oidc" | string;
+  };
+}> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/initialization/complete`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle(response);
 }
 
 export type PreviewStatus = {
