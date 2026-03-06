@@ -59,6 +59,7 @@ import { useXynConsole } from "./state/xynConsoleStore";
 import useWorkspaceFromRoute from "./hooks/useWorkspaceFromRoute";
 import {
   DEFAULT_WORKSPACE_SUBPATH,
+  isGlobalAppPath,
   isWorkspaceScopedPath,
   swapWorkspaceInPath,
   toWorkspacePath,
@@ -223,15 +224,29 @@ export default function AppShell() {
   const preferredWorkspaceIsValid = Boolean(preferredWorkspaceId && workspaces.some((workspace) => workspace.id === preferredWorkspaceId));
   const activeWorkspaceId = routeWorkspaceIsValid ? workspaceIdFromRoute : preferredWorkspaceIsValid ? preferredWorkspaceId : "";
   const inWorkspaceScope = isWorkspaceScopedPath(location.pathname);
+  const inGlobalAppScope = isGlobalAppPath(location.pathname);
   const recoverFromForbiddenWorkspace = useCallback(
     (forbiddenWorkspaceId: string) => {
       const forbidden = String(forbiddenWorkspaceId || "").trim();
       if (!forbidden) return;
       const fallbackWorkspaceId = workspaces.find((workspace) => workspace.id !== forbidden)?.id || workspaces[0]?.id || "";
       if (!fallbackWorkspaceId) return;
+      if (inGlobalAppScope) {
+        push({
+          level: "warning",
+          title: "Workspace access denied",
+          message: `Current workspace is not accessible (${forbidden}). Staying on global view.`,
+        });
+        return;
+      }
       if (lastForbiddenRedirectRef.current === `${forbidden}->${fallbackWorkspaceId}`) return;
       lastForbiddenRedirectRef.current = `${forbidden}->${fallbackWorkspaceId}`;
       const nextPath = inWorkspaceScope ? swapWorkspaceInPath(location.pathname, fallbackWorkspaceId) : toWorkspacePath(fallbackWorkspaceId, DEFAULT_WORKSPACE_SUBPATH);
+      push({
+        level: "info",
+        title: "Workspace switched",
+        message: `Switched to an accessible workspace after access was denied for ${forbidden}.`,
+      });
       navigate(
         {
           pathname: nextPath,
@@ -241,7 +256,7 @@ export default function AppShell() {
         { replace: true }
       );
     },
-    [inWorkspaceScope, location.hash, location.pathname, location.search, navigate, workspaces]
+    [inGlobalAppScope, inWorkspaceScope, location.hash, location.pathname, location.search, navigate, push, workspaces]
   );
 
   useEffect(() => {

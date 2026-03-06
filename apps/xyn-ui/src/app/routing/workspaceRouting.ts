@@ -1,5 +1,21 @@
 export const DEFAULT_WORKSPACE_SUBPATH = "workbench";
 
+const GLOBAL_APP_PATH_PREFIXES = [
+  "/app/platform/settings",
+  "/app/platform/access-control",
+  "/app/platform/identity-configuration",
+  "/app/platform/secrets",
+  "/app/platform/ai-agents",
+  "/app/platform/branding",
+  "/app/platform/seeds",
+  "/app/platform/video-adapter-configs",
+];
+
+export function isGlobalAppPath(pathname: string): boolean {
+  const normalized = String(pathname || "").trim();
+  return GLOBAL_APP_PATH_PREFIXES.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`));
+}
+
 export function toWorkspacePath(workspaceId: string, subpath: string): string {
   const token = String(workspaceId || "").trim();
   const rest = String(subpath || "").replace(/^\/+/, "");
@@ -46,6 +62,7 @@ function mapLegacyAppRestToWorkspaceSubpath(rest: string): string {
 export function toWorkspaceScopedPath(pathname: string, workspaceId: string): string | null {
   const normalized = String(pathname || "").trim() || "/";
   if (!workspaceId) return null;
+  if (isGlobalAppPath(normalized)) return null;
 
   if (isWorkspaceScopedPath(normalized)) return normalized;
   if (normalized === "/" || normalized === "/workspaces") return toWorkspacePath(workspaceId, DEFAULT_WORKSPACE_SUBPATH);

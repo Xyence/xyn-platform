@@ -1,6 +1,6 @@
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 import AppShell from "../AppShell";
-import { DEFAULT_WORKSPACE_SUBPATH, toWorkspacePath } from "./workspaceRouting";
+import { DEFAULT_WORKSPACE_SUBPATH, isGlobalAppPath, toWorkspacePath } from "./workspaceRouting";
 
 function readFlag(value: unknown): boolean {
   return String(value || "").trim().toLowerCase() === "true";
@@ -17,6 +17,10 @@ export default function LegacyAppRedirect() {
   const location = useLocation();
 
   if (ENABLE_LEGACY_UI) {
+    return <AppShell />;
+  }
+
+  if (isGlobalAppPath(location.pathname)) {
     return <AppShell />;
   }
 

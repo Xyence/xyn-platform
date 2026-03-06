@@ -205,11 +205,11 @@ describe("AppShell nav surfaces", () => {
     );
   });
 
-  it("redirects /app/platform/settings to workbench", async () => {
+  it("keeps /app/platform/settings as a global route", async () => {
     apiMocks.listArtifactNavSurfaces.mockResolvedValueOnce({ surfaces: [] });
     renderGlobalApp("/app/platform/settings?tab=workspaces&wsTab=profile");
     await waitFor(() =>
-      expect(screen.getByTestId("location-probe").textContent).toContain("/w/ws-1/workbench?tab=workspaces&wsTab=profile")
+      expect(screen.getByTestId("location-probe").textContent).toContain("/app/platform/settings?tab=workspaces&wsTab=profile")
     );
   });
 });
