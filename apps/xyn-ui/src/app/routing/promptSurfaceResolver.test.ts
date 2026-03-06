@@ -41,10 +41,17 @@ describe("resolvePromptSurfaceTarget", () => {
     });
     expect(result).toEqual({
       key: "platform_settings",
-      route: "/w/ws-1/workbench?panel=platform_settings",
+      route: "/app/platform/hub",
       scope: "global",
       source: "core_surface",
     });
+  });
+
+  it("does not resolve restricted global admin surfaces for unauthorized roles", () => {
+    const result = resolvePromptSurfaceTarget("open access control", {
+      user: { roles: ["app_user"], permissions: [] },
+    });
+    expect(result).toBeNull();
   });
 
   it("selects exact global artifact surface when prompt matches a surfaced label", () => {
@@ -92,11 +99,33 @@ describe("resolvePromptSurfaceTarget", () => {
       source: "artifact_surface",
     });
   });
-});
 
-describe("canonicalLegacyRouteForPlatformSettings", () => {
-  it("returns canonical workbench panel route for workspace scope", () => {
-    expect(canonicalLegacyRouteForPlatformSettings("ws-1")).toBe("/w/ws-1/workbench?panel=platform_settings");
+  it("resolves child global admin prompts to canonical child surfaces", () => {
+    expect(
+      resolvePromptSurfaceTarget("open oidc app clients", {
+        user: { roles: ["platform_admin"] },
+      })
+    ).toEqual({
+      key: "oidc_app_clients",
+      route: "/app/platform/identity-configuration?tab=oidc-app-clients",
+      scope: "global",
+      source: "core_surface",
+    });
+    expect(
+      resolvePromptSurfaceTarget("open ai agents", {
+        user: { roles: ["platform_admin"] },
+      })
+    ).toEqual({
+      key: "ai_agents",
+      route: "/app/platform/ai-agents?tab=agents",
+      scope: "global",
+      source: "core_surface",
+    });
   });
 });
 
+describe("canonicalLegacyRouteForPlatformSettings", () => {
+  it("returns canonical platform settings hub route", () => {
+    expect(canonicalLegacyRouteForPlatformSettings("ws-1")).toBe("/app/platform/hub");
+  });
+});

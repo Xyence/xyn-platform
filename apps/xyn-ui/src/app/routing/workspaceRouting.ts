@@ -1,7 +1,12 @@
 export const DEFAULT_WORKSPACE_SUBPATH = "workbench";
 
 const GLOBAL_APP_PATH_PREFIXES = [
+  "/app/platform/hub",
   "/app/platform/settings",
+  "/app/platform/activity",
+  "/app/platform/deploy",
+  "/app/platform/workspaces",
+  "/app/platform/rendering-settings",
   "/app/platform/access-control",
   "/app/platform/identity-configuration",
   "/app/platform/secrets",

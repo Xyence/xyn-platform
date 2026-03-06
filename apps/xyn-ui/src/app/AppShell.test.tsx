@@ -209,11 +209,15 @@ describe("AppShell nav surfaces", () => {
     apiMocks.listArtifactNavSurfaces.mockResolvedValueOnce({ surfaces: [] });
     renderGlobalApp("/app/platform/settings?tab=workspaces&wsTab=profile");
     await waitFor(() =>
-      expect(screen.getByTestId("location-probe").textContent).toContain(
-        "/w/ws-1/workbench?panel=platform_settings&tab=workspaces&wsTab=profile"
-      )
+      expect(screen.getByTestId("location-probe").textContent).toContain("/app/platform/workspaces")
     );
     expect(apiMocks.listArtifactNavSurfaces).toHaveBeenCalledWith(undefined);
+  });
+
+  it("routes bare /app/platform/settings to canonical hub", async () => {
+    apiMocks.listArtifactNavSurfaces.mockResolvedValueOnce({ surfaces: [] });
+    renderGlobalApp("/app/platform/settings");
+    await waitFor(() => expect(screen.getByTestId("location-probe").textContent).toContain("/app/platform/hub"));
   });
 
   it("renders legacy /app/platform/settings view when forced via legacy=1", async () => {

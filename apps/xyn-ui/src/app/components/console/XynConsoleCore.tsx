@@ -4,6 +4,7 @@ import { AlertTriangle, CheckCircle2, CircleHelp, Wrench } from "lucide-react";
 import { getRecentArtifacts } from "../../../api/xyn";
 import { provisionLocalXynInstance } from "../../../api/xyn";
 import { listArtifactNavSurfaces } from "../../../api/xyn";
+import { getMe } from "../../../api/xyn";
 import type { RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
@@ -112,9 +113,6 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
   }
   if (/^list\s+artifacts$/.test(normalized) || /^show\s+artifacts$/.test(normalized)) {
     return { panelKey: "artifact_list", params: {} };
-  }
-  if (/^open\s+platform\s+settings$/.test(normalized)) {
-    return { panelKey: "platform_settings", params: {} };
   }
   if (/^list\s+workspaces$/.test(normalized)) {
     return {
@@ -506,20 +504,6 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
             entity_id: directPanel.params.run_id,
             open_in: "new_panel",
             placement: "right",
-          },
-        },
-      };
-    }
-    if (directPanel.panelKey === "platform_settings") {
-      return {
-        type: "ui.action",
-        action: {
-          name: "canvas.open_detail",
-          params: {
-            entity_type: "platform_settings",
-            entity_id: "current",
-            open_in: "current_panel",
-            placement: "center",
           },
         },
       };
@@ -1209,14 +1193,19 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     const workspaceIdFromPath = workspaceMatch?.[1] ? decodeURIComponent(workspaceMatch[1]) : "";
 
     try {
-      const [globalResponse, workspaceResponse] = await Promise.all([
+      const [globalResponse, workspaceResponse, meResponse] = await Promise.all([
         listArtifactNavSurfaces(),
         workspaceIdFromPath ? listArtifactNavSurfaces(workspaceIdFromPath) : Promise.resolve({ surfaces: [] }),
+        getMe(),
       ]);
       const surfacedTarget = resolvePromptSurfaceTarget(prompt, {
         workspaceId: workspaceIdFromPath,
         globalSurfaces: globalResponse.surfaces || [],
         workspaceSurfaces: workspaceResponse.surfaces || [],
+        user: {
+          roles: meResponse.roles || [],
+          permissions: meResponse.permissions || [],
+        },
       });
       if (surfacedTarget?.route) {
         navigate(surfacedTarget.route);

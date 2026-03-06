@@ -25,6 +25,9 @@ import ToursPage from "./pages/ToursPage";
 import TourDetailPage from "./pages/TourDetailPage";
 import XynMapPage from "./pages/XynMapPage";
 import PlatformSettingsPage from "./pages/PlatformSettingsPage";
+import PlatformSettingsHubPage from "./pages/PlatformSettingsHubPage";
+import PlatformDeploySettingsPage from "./pages/PlatformDeploySettingsPage";
+import PlatformRenderingSettingsPage from "./pages/PlatformRenderingSettingsPage";
 import VideoAdapterConfigPage from "./pages/VideoAdapterConfigPage";
 import SeedPacksPage from "./pages/SeedPacksPage";
 import ArtifactsRegistryPage from "./pages/ArtifactsRegistryPage";
@@ -38,6 +41,7 @@ import WorkspaceSettingsPage from "./pages/WorkspaceSettingsPage";
 import DraftsListPage from "./pages/DraftsListPage";
 import DraftCreatePage from "./pages/DraftCreatePage";
 import DraftDetailPage from "./pages/DraftDetailPage";
+import WorkspacesPage from "./pages/WorkspacesPage";
 import { useGlobalHotkeys } from "./hooks/useGlobalHotkeys";
 import ReportOverlay from "./components/ReportOverlay";
 import UserMenu from "./components/common/UserMenu";
@@ -197,6 +201,16 @@ function PlatformSettingsLegacyRoute({ workspaceId }: { workspaceId: string }) {
   if (incomingParams.get("legacy") === "1") {
     return <PlatformSettingsPage />;
   }
+  const tab = String(incomingParams.get("tab") || "").trim().toLowerCase();
+  const wsTab = String(incomingParams.get("wsTab") || "").trim().toLowerCase();
+  if (tab === "security") return <Navigate to="/app/platform/settings/security" replace />;
+  if (tab === "integrations") return <Navigate to="/app/platform/settings/integrations" replace />;
+  if (tab === "deploy") return <Navigate to="/app/platform/deploy" replace />;
+  if (tab === "workspaces") {
+    if (wsTab === "members") return <Navigate to="/app/platform/access-control?tab=users" replace />;
+    return <Navigate to="/app/platform/workspaces" replace />;
+  }
+  if (tab === "general") return <Navigate to="/app/platform/settings/general" replace />;
   const canonical = canonicalLegacyRouteForPlatformSettings(workspaceId);
   if (!canonical) {
     return <PlatformSettingsPage />;
@@ -1066,13 +1080,24 @@ export default function AppShell() {
             <Route path="platform/tenants/:tenantId" element={<RedirectLegacyWorkspacesRoute />} />
             <Route path="platform/tenant-contacts" element={<RedirectLegacyWorkspacesRoute />} />
             <Route path="platform/tenant-contacts/:tenantId" element={<RedirectLegacyTenantContactsDetailRoute />} />
+            <Route path="platform/hub" element={<PlatformSettingsHubPage />} />
+            <Route path="platform/settings/general" element={<PlatformSettingsHubPage sectionOverride="general" />} />
+            <Route path="platform/settings/security" element={<PlatformSettingsHubPage sectionOverride="security" />} />
+            <Route path="platform/settings/integrations" element={<PlatformSettingsHubPage sectionOverride="integrations" />} />
+            <Route path="platform/settings/deploy" element={<PlatformDeploySettingsPage />} />
+            <Route path="platform/settings/workspaces" element={<WorkspacesPage />} />
             <Route path="platform/access-control" element={<AccessControlPage />} />
             <Route path="platform/access-explorer" element={<RedirectLegacyAccessControlRoute tab="explorer" />} />
             <Route path="platform/users" element={<RedirectLegacyAccessControlRoute tab="users" />} />
             <Route path="platform/roles" element={<RedirectLegacyAccessControlRoute tab="roles" />} />
             <Route path="platform/branding" element={<PlatformBrandingPage />} />
             <Route path="platform/settings" element={<PlatformSettingsLegacyRoute workspaceId={activeWorkspace?.id || ""} />} />
+            <Route path="platform/settings/legacy" element={<PlatformSettingsPage />} />
             <Route path="platform/video-adapter-configs/:artifactId" element={<VideoAdapterConfigPage />} />
+            <Route path="platform/rendering-settings" element={<PlatformRenderingSettingsPage />} />
+            <Route path="platform/deploy" element={<PlatformDeploySettingsPage />} />
+            <Route path="platform/workspaces" element={<WorkspacesPage />} />
+            <Route path="platform/activity" element={<ActivityPage workspaceId="" />} />
             <Route path="platform/seeds" element={<SeedPacksPage />} />
             <Route path="platform/identity-configuration" element={<IdentityConfigurationPage />} />
             <Route path="platform/identity-providers" element={<RedirectLegacyIdentityRoute tab="identity-providers" />} />

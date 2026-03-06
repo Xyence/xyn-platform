@@ -3,10 +3,6 @@ import { resolvePanelCommand } from "./XynConsoleCore";
 
 describe("resolvePanelCommand", () => {
   it("parses list namespace artifacts", () => {
-    expect(resolvePanelCommand("open platform settings")).toEqual({
-      panelKey: "platform_settings",
-      params: {},
-    });
     expect(resolvePanelCommand("list workspaces")).toEqual({
       panelKey: "workspaces",
       params: {
