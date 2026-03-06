@@ -1222,13 +1222,8 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       }
       if (action.name === "canvas.open_detail") {
         if (String(action.params.entity_type || "") === "platform_settings") {
-          const workspaceFromPath = String(location.pathname.match(/^\/w\/([^/]+)(?:\/|$)/)?.[1] || "").trim();
-          const workspaceFromAction = String(action.params.workspace_id || "").trim();
-          const workspaceFromStorage =
-            typeof window !== "undefined" ? String(window.localStorage.getItem("xyn.activeWorkspaceId") || "").trim() : "";
-          const preferredWorkspace =
-            workspaceFromAction || workspaceFromPath || workspaceFromStorage;
-          navigate(preferredWorkspace ? toWorkspacePath(preferredWorkspace, "platform/settings") : "/app/platform/settings");
+          // Route through the canonical app path so AppShell can resolve/fallback to a valid workspace.
+          navigate("/app/platform/settings");
           clearSessionResolution();
           if (isOverlay) setOpen(false);
           return;
