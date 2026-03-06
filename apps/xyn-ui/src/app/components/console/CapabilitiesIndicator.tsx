@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { useXynConsole } from "../../state/xynConsoleStore";
@@ -7,9 +7,21 @@ import { type CapabilityEntry, useCapabilitySuggestions } from "./capabilitySugg
 export default function CapabilitiesIndicator({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
   const { openPanel, setInputText, setOpen, requestSubmit } = useXynConsole();
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpenPopover] = useState(false);
   const [platformOpen, setPlatformOpen] = useState(false);
   const { loading, error, capabilities, platform } = useCapabilitySuggestions(workspaceId);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (!rootRef.current) return;
+      if (rootRef.current.contains(event.target as Node)) return;
+      setOpenPopover(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [open]);
 
   const openCapability = (entry: CapabilityEntry) => {
     const target = entry.managePath || entry.docsPath;
@@ -41,7 +53,7 @@ export default function CapabilitiesIndicator({ workspaceId }: { workspaceId: st
   };
 
   return (
-    <div className="workbench-capabilities">
+    <div className="workbench-capabilities" ref={rootRef}>
       <button
         type="button"
         className="ghost workbench-capabilities-button"
