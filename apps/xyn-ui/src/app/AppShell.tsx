@@ -63,11 +63,9 @@ import { useXynConsole } from "./state/xynConsoleStore";
 import useWorkspaceFromRoute from "./hooks/useWorkspaceFromRoute";
 import {
   DEFAULT_WORKSPACE_SUBPATH,
-  isGlobalAppPath,
   isWorkspaceScopedPath,
   swapWorkspaceInPath,
   toWorkspacePath,
-  toWorkspaceScopedPath,
   withWorkspaceInNavPath,
 } from "./routing/workspaceRouting";
 import { canonicalLegacyRouteForPlatformSettings } from "./routing/promptSurfaceResolver";
@@ -251,7 +249,6 @@ export default function AppShell() {
   const [tourSlug, setTourSlug] = useState<string | null>(null);
   const [tourLaunchToken, setTourLaunchToken] = useState(0);
   const [agentActivityOpen, setAgentActivityOpen] = useState(false);
-  const lastForbiddenRedirectRef = useRef<string>("");
   const { push } = useNotifications();
   const { runningAiCount } = useOperations();
   const { preview, disablePreviewMode } = usePreview();
@@ -259,44 +256,11 @@ export default function AppShell() {
   const hideFloatingConsoleNode = location.pathname.includes("/console");
   const workspaceRoute = useWorkspaceFromRoute(workspaces);
   const workspaceIdFromRoute = workspaceRoute.workspaceId;
+  const inWorkspaceScope = isWorkspaceScopedPath(location.pathname);
   const routeWorkspaceIsValid = Boolean(workspaceIdFromRoute && workspaces.some((workspace) => workspace.id === workspaceIdFromRoute));
   const preferredWorkspaceIsValid = Boolean(preferredWorkspaceId && workspaces.some((workspace) => workspace.id === preferredWorkspaceId));
-  const activeWorkspaceId = routeWorkspaceIsValid ? workspaceIdFromRoute : preferredWorkspaceIsValid ? preferredWorkspaceId : "";
-  const inWorkspaceScope = isWorkspaceScopedPath(location.pathname);
-  const inGlobalAppScope = isGlobalAppPath(location.pathname);
-  const recoverFromForbiddenWorkspace = useCallback(
-    (forbiddenWorkspaceId: string) => {
-      const forbidden = String(forbiddenWorkspaceId || "").trim();
-      if (!forbidden) return;
-      const fallbackWorkspaceId = workspaces.find((workspace) => workspace.id !== forbidden)?.id || workspaces[0]?.id || "";
-      if (!fallbackWorkspaceId) return;
-      if (inGlobalAppScope) {
-        push({
-          level: "warning",
-          title: "Workspace access denied",
-          message: `Current workspace is not accessible (${forbidden}). Staying on global view.`,
-        });
-        return;
-      }
-      if (lastForbiddenRedirectRef.current === `${forbidden}->${fallbackWorkspaceId}`) return;
-      lastForbiddenRedirectRef.current = `${forbidden}->${fallbackWorkspaceId}`;
-      const nextPath = inWorkspaceScope ? swapWorkspaceInPath(location.pathname, fallbackWorkspaceId) : toWorkspacePath(fallbackWorkspaceId, DEFAULT_WORKSPACE_SUBPATH);
-      push({
-        level: "info",
-        title: "Workspace switched",
-        message: `Switched to an accessible workspace after access was denied for ${forbidden}.`,
-      });
-      navigate(
-        {
-          pathname: nextPath,
-          search: location.search,
-          hash: location.hash,
-        },
-        { replace: true }
-      );
-    },
-    [inGlobalAppScope, inWorkspaceScope, location.hash, location.pathname, location.search, navigate, push, workspaces]
-  );
+  const invalidWorkspaceRoute = Boolean(inWorkspaceScope && workspaceIdFromRoute && !routeWorkspaceIsValid);
+  const activeWorkspaceId = inWorkspaceScope ? (routeWorkspaceIsValid ? workspaceIdFromRoute : "") : (preferredWorkspaceIsValid ? preferredWorkspaceId : "");
 
   useEffect(() => {
     let mounted = true;
@@ -413,14 +377,17 @@ export default function AppShell() {
       try {
         const payload = await listArtifactNavSurfaces(navWorkspaceId);
         if (!mounted) return;
-        lastForbiddenRedirectRef.current = "";
         setSurfaceNavItems(payload.surfaces || []);
       } catch (error) {
         if (!mounted) return;
         const message = error instanceof Error ? error.message : String(error || "");
         const normalized = message.toLowerCase();
         if ((normalized.includes("forbidden") || normalized.includes("403")) && navWorkspaceId) {
-          recoverFromForbiddenWorkspace(navWorkspaceId);
+          push({
+            level: "warning",
+            title: "Workspace access denied",
+            message: `Current workspace is not accessible (${navWorkspaceId}).`,
+          });
         }
         setSurfaceNavItems([]);
       }
@@ -428,18 +395,7 @@ export default function AppShell() {
     return () => {
       mounted = false;
     };
-  }, [authed, activeWorkspaceId, inWorkspaceScope, navRefreshToken, recoverFromForbiddenWorkspace]);
-
-  useEffect(() => {
-    const onWorkspaceForbidden = (event: Event) => {
-      const detail = (event as CustomEvent<{ workspaceId?: string }>).detail || {};
-      const workspaceId = String(detail.workspaceId || "").trim();
-      if (!workspaceId) return;
-      recoverFromForbiddenWorkspace(workspaceId);
-    };
-    window.addEventListener("xyn:workspace-forbidden", onWorkspaceForbidden as EventListener);
-    return () => window.removeEventListener("xyn:workspace-forbidden", onWorkspaceForbidden as EventListener);
-  }, [recoverFromForbiddenWorkspace]);
+  }, [authed, activeWorkspaceId, inWorkspaceScope, navRefreshToken, push]);
 
   useEffect(() => {
     const onWorkspaceArtifactsChanged = () => setNavRefreshToken((value) => value + 1);
@@ -456,66 +412,6 @@ export default function AppShell() {
       setPreferredWorkspaceId(workspaceIdFromRoute);
     }
   }, [workspaceIdFromRoute]);
-
-  useEffect(() => {
-    if (!workspaces.length) return;
-    const debugEnabled = navDebugEnabled(location.search);
-    const fallbackWorkspaceId = preferredWorkspaceIsValid ? preferredWorkspaceId : workspaces[0]?.id || "";
-    if (!fallbackWorkspaceId) return;
-
-    if (inWorkspaceScope) {
-      if (!routeWorkspaceIsValid) {
-        const nextPath = swapWorkspaceInPath(location.pathname, fallbackWorkspaceId);
-        if (debugEnabled) {
-          console.debug("[xyn-nav] invalid route workspace; rewriting path", {
-            from: location.pathname,
-            to: nextPath,
-            route_workspace_id: workspaceIdFromRoute,
-            fallback_workspace_id: fallbackWorkspaceId,
-          });
-        }
-        navigate(
-          {
-            pathname: nextPath,
-            search: location.search,
-            hash: location.hash,
-          },
-          { replace: true }
-        );
-      }
-      return;
-    }
-
-    const redirected = toWorkspaceScopedPath(location.pathname, fallbackWorkspaceId);
-    if (redirected) {
-      if (debugEnabled) {
-        console.debug("[xyn-nav] converting app/global path to workspace path", {
-          from: location.pathname,
-          to: redirected,
-          fallback_workspace_id: fallbackWorkspaceId,
-        });
-      }
-      navigate(
-        {
-          pathname: redirected,
-          search: location.search,
-          hash: location.hash,
-        },
-        { replace: true }
-      );
-    }
-  }, [
-    inWorkspaceScope,
-    location.hash,
-    location.pathname,
-    location.search,
-    navigate,
-    preferredWorkspaceId,
-    preferredWorkspaceIsValid,
-    routeWorkspaceIsValid,
-    workspaceIdFromRoute,
-    workspaces,
-  ]);
 
   const startLogin = () => {
     const returnTo = window.location.pathname || "/";
@@ -609,7 +505,7 @@ export default function AppShell() {
     [activeWorkspaceId]
   );
   const activeWorkspace = useMemo(
-    () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) || workspaces[0] || null,
+    () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) || null,
     [workspaces, activeWorkspaceId]
   );
   const workspaceScopedContextId = inWorkspaceScope ? activeWorkspace?.id || "" : "";
@@ -841,6 +737,14 @@ export default function AppShell() {
               {breadcrumbTrail.map((crumb) => crumb.label).join(" / ")}
             </div>
           )}
+          {invalidWorkspaceRoute ? (
+            <LegacyStatePanel
+              title="Workspace Not Accessible"
+              message={`Workspace "${workspaceIdFromRoute}" is unavailable or you do not have access. Select a workspace manually from the sidebar.`}
+              actionLabel="Go to Global Platform Settings"
+              actionTo="/app/platform/hub"
+            />
+          ) : (
           <Routes>
             <Route path="/" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "/"} replace />} />
             <Route path="workbench" element={<WorkbenchPage />} />
@@ -1135,6 +1039,7 @@ export default function AppShell() {
             <Route path="settings" element={<WorkspaceSettingsPage workspaceName={activeWorkspace?.name || "Workspace"} />} />
             <Route path="*" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "workspaces"} replace />} />
           </Routes>
+          )}
         </main>
       </div>
       <HelpDrawer

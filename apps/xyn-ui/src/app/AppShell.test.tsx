@@ -228,13 +228,13 @@ describe("AppShell nav surfaces", () => {
     );
   });
 
-  it("rewrites stale workspace routes before nav surface calls and avoids stale workspace fetch loops", async () => {
+  it("does not auto-switch stale workspace routes", async () => {
     apiMocks.listArtifactNavSurfaces.mockResolvedValue({ surfaces: [] });
     renderWorkspaceApp("/w/ws-stale/workbench");
     await waitFor(() =>
-      expect(screen.getByTestId("location-probe").textContent).toContain("/w/ws-1/workbench")
+      expect(screen.getByTestId("location-probe").textContent).toContain("/w/ws-stale/workbench")
     );
-    expect(apiMocks.listArtifactNavSurfaces).toHaveBeenCalledWith("ws-1");
+    expect(apiMocks.listArtifactNavSurfaces).toHaveBeenCalledWith(undefined);
     expect(apiMocks.listArtifactNavSurfaces).not.toHaveBeenCalledWith("ws-stale");
   });
 });
