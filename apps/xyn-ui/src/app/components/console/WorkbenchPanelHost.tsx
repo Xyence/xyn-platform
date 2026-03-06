@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
-  getAiBootstrapStatus,
   getArtifactConsoleDetailBySlug,
   getArtifactConsoleFilesBySlug,
   getEmsDatasetSchemaTable,
@@ -10,15 +9,12 @@ import {
   getEmsStatusRollupCanvasTable,
   getRunCanvasApi,
   listRunsCanvasApi,
-  listWorkspaceArtifacts,
   listWorkspacesCanvasApi,
   queryArtifactCanvasTable,
   queryEmsDevicesCanvasTable,
   queryEmsRegistrationsCanvasTable,
 } from "../../../api/xyn";
-import { getRuntimeAuthMode, resolveApiBaseUrl } from "../../../api/client";
 import type {
-  AiBootstrapStatus,
   ArtifactCanvasTableResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFileRow,
@@ -565,112 +561,12 @@ function RunDetailPanel({ runId, panel, onContextChange }: { runId: string; pane
   );
 }
 
-function PlatformSettingsPanel({ workspaceId }: { workspaceId: string }) {
-  const [workspace, setWorkspace] = useState<WorkspaceSummary | null>(null);
-  const [artifacts, setArtifacts] = useState<Array<{ name?: string; slug?: string; installed_state?: string }>>([]);
-  const [aiBootstrap, setAiBootstrap] = useState<AiBootstrapStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
+function PlatformSettingsPanel() {
+  const navigate = useNavigate();
   useEffect(() => {
-    let active = true;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const workspaceResponse = await listWorkspacesCanvasApi();
-        if (!active) return;
-        const found = (workspaceResponse.workspaces || []).find((entry) => String(entry.id) === workspaceId) || null;
-        setWorkspace(found);
-        const aiStatus = await getAiBootstrapStatus();
-        if (!active) return;
-        setAiBootstrap(aiStatus.default_agent || null);
-        if (workspaceId) {
-          const installed = await listWorkspaceArtifacts(workspaceId);
-          if (!active) return;
-          setArtifacts((installed.artifacts || []).map((entry) => ({ name: entry.title || entry.name, slug: entry.slug, installed_state: entry.installed_state })));
-        } else {
-          setArtifacts([]);
-        }
-      } catch (err) {
-        if (!active) return;
-        setError(err instanceof Error ? err.message : "Failed to load platform settings");
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [workspaceId]);
-
-  if (loading) return <p className="muted">Loading platform settings…</p>;
-  if (error) return <p className="danger-text">{error}</p>;
-
-  return (
-    <div className="ems-panel-body">
-      <h4>Platform Settings</h4>
-      <p className="muted small">Workspace info, installed artifacts, and environment summary.</p>
-      <div className="card">
-        <p className="muted small">Workspace</p>
-        <pre className="code-block">
-          {JSON.stringify(
-            workspace
-              ? {
-                  id: workspace.id,
-                  slug: workspace.slug,
-                  name: workspace.name,
-                  org_name: workspace.org_name || workspace.name,
-                  kind: workspace.kind,
-                  lifecycle_stage: workspace.lifecycle_stage,
-                  auth_mode: workspace.auth_mode,
-                }
-              : { id: workspaceId || "", status: "not found or inaccessible" },
-            null,
-            2
-          )}
-        </pre>
-      </div>
-      <div className="card">
-        <p className="muted small">Installed artifacts</p>
-        <pre className="code-block">{JSON.stringify(artifacts, null, 2)}</pre>
-      </div>
-      <div className="card">
-        <p className="muted small">AI bootstrap</p>
-        <pre className="code-block">
-          {JSON.stringify(
-            aiBootstrap
-              ? {
-                  provider: aiBootstrap.provider,
-                  model: aiBootstrap.model,
-                  key_present: aiBootstrap.key_present,
-                  default_agent_slug: aiBootstrap.default_agent_slug,
-                  last_updated: aiBootstrap.default_agent_updated_at,
-                }
-              : { status: "unavailable" },
-            null,
-            2
-          )}
-        </pre>
-      </div>
-      <div className="card">
-        <p className="muted small">Environment</p>
-        <pre className="code-block">
-          {JSON.stringify(
-            {
-              api_base_url: resolveApiBaseUrl(),
-              app_origin: typeof window !== "undefined" ? window.location.origin : "",
-              path: typeof window !== "undefined" ? window.location.pathname : "",
-              time_utc: new Date().toISOString(),
-              auth_mode: getRuntimeAuthMode(),
-            },
-            null,
-            2
-          )}
-        </pre>
-      </div>
-    </div>
-  );
+    navigate("/app/platform/hub", { replace: true });
+  }, [navigate]);
+  return <p className="muted">Redirecting to platform settings…</p>;
 }
 
 function ArtifactListPanel({
@@ -1221,7 +1117,7 @@ export default function WorkbenchPanelHost({
       });
 
     if (panel.key === "platform_settings") {
-      return <PlatformSettingsPanel workspaceId={String(panel.params?.workspace_id || workspaceId || "")} />;
+      return <PlatformSettingsPanel />;
     }
 
     if (panel.key === "workspaces") {
@@ -1234,7 +1130,7 @@ export default function WorkbenchPanelHost({
           onTitleChange={setResolvedTitle}
           onOpenDetail={(target) => {
             if (target.entity_type === "workspace") {
-              openPanel("platform_settings", { workspace_id: target.entity_id });
+              openPanel("record_detail", { ...target }, { open_in: "new_panel", return_to_panel_id: panel.panel_id });
               return;
             }
             openPanel("record_detail", { ...target }, { open_in: "new_panel", return_to_panel_id: panel.panel_id });

@@ -36,7 +36,6 @@ type ResolvedPanelCommand =
   | { panelKey: "workspaces"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "runs"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "run_detail"; params: { run_id: string } }
-  | { panelKey: "platform_settings"; params: { workspace_id?: string } }
   | { panelKey: "artifact_detail"; params: { slug: string } }
   | { panelKey: "artifact_raw_json"; params: { slug: string } }
   | { panelKey: "artifact_files"; params: { slug: string } }
@@ -1192,6 +1191,19 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     const workspaceMatch = String(location.pathname || "").match(/^\/w\/([^/]+)(?:\/|$)/);
     const workspaceIdFromPath = workspaceMatch?.[1] ? decodeURIComponent(workspaceMatch[1]) : "";
 
+    // Resolve canonical core prompt surfaces without relying on surface API fetches.
+    // This keeps global actions (like Platform Settings) deterministic even when nav APIs fail.
+    const coreTarget = resolvePromptSurfaceTarget(prompt, {
+      workspaceId: workspaceIdFromPath,
+      user: { roles: [], permissions: [] },
+    });
+    if (coreTarget?.source === "core_surface" && coreTarget.route) {
+      navigate(coreTarget.route);
+      clearSessionResolution();
+      if (isOverlay) setOpen(false);
+      return;
+    }
+
     try {
       const [globalResponse, workspaceResponse, meResponse] = await Promise.all([
         listArtifactNavSurfaces(),
@@ -1272,8 +1284,12 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
         if (String(action.params.entity_type || "") === "workspace") {
           const workspaceId = String(action.params.entity_id || "").trim();
           openPanel({
-            key: "platform_settings",
-            params: { workspace_id: workspaceId },
+            key: "record_detail",
+            params: {
+              entity_type: "workspace",
+              entity_id: workspaceId,
+              dataset: "workspaces",
+            },
             open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
             return_to_panel_id: returnTarget,
           });
@@ -1325,7 +1341,16 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
             openPanel({ key: "run_detail", params: { run_id: entityId }, open_in: "new_panel", return_to_panel_id: returnTarget });
           }
           if (entityId && entityType === "workspace") {
-            openPanel({ key: "platform_settings", params: { workspace_id: entityId }, open_in: "new_panel", return_to_panel_id: returnTarget });
+            openPanel({
+              key: "record_detail",
+              params: {
+                entity_type: "workspace",
+                entity_id: entityId,
+                dataset: "workspaces",
+              },
+              open_in: "new_panel",
+              return_to_panel_id: returnTarget,
+            });
           }
           if (entityId && entityType === "record") {
             openPanel({
