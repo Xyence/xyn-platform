@@ -1053,7 +1053,8 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
 
   const isOverlay = mode === "overlay";
   const isSurfaceVisible = isOverlay ? open : true;
-  const isWorkbenchPath = /\/(?:w\/[^/]+\/)?workbench\/?$/.test(location.pathname);
+  const isWorkbenchPath =
+    /\/(?:w\/[^/]+\/)?workbench\/?$/.test(location.pathname) || /^\/app\/platform(?:\/|$)/.test(location.pathname);
   const hasContextArtifact = Boolean(context.artifact_id && context.artifact_type);
   const isGlobalContext = !hasContextArtifact;
 

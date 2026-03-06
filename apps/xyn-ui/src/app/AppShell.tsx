@@ -578,7 +578,7 @@ export default function AppShell() {
   );
   const workspaceScopedContextId = inWorkspaceScope ? activeWorkspace?.id || "" : "";
   const isWorkbenchRoute = useMemo(
-    () => /\/w\/[^/]+\/workbench\/?$/.test(location.pathname),
+    () => /\/w\/[^/]+\/workbench\/?$/.test(location.pathname) || /^\/app\/platform(?:\/|$)/.test(location.pathname),
     [location.pathname]
   );
   const workspaceRole = activeWorkspace?.role || "reader";
