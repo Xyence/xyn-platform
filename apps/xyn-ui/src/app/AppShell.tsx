@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Bot } from "lucide-react";
 import { getAuthMode, getMe, getMyProfile, getTenantBranding, listArtifactNavSurfaces, listWorkspaces } from "../api/xyn";
@@ -211,6 +211,7 @@ export default function AppShell() {
   const [tourSlug, setTourSlug] = useState<string | null>(null);
   const [tourLaunchToken, setTourLaunchToken] = useState(0);
   const [agentActivityOpen, setAgentActivityOpen] = useState(false);
+  const lastForbiddenRedirectRef = useRef<string>("");
   const { push } = useNotifications();
   const { runningAiCount } = useOperations();
   const { preview, disablePreviewMode } = usePreview();
@@ -222,6 +223,26 @@ export default function AppShell() {
   const preferredWorkspaceIsValid = Boolean(preferredWorkspaceId && workspaces.some((workspace) => workspace.id === preferredWorkspaceId));
   const activeWorkspaceId = routeWorkspaceIsValid ? workspaceIdFromRoute : preferredWorkspaceIsValid ? preferredWorkspaceId : "";
   const inWorkspaceScope = isWorkspaceScopedPath(location.pathname);
+  const recoverFromForbiddenWorkspace = useCallback(
+    (forbiddenWorkspaceId: string) => {
+      const forbidden = String(forbiddenWorkspaceId || "").trim();
+      if (!forbidden) return;
+      const fallbackWorkspaceId = workspaces.find((workspace) => workspace.id !== forbidden)?.id || workspaces[0]?.id || "";
+      if (!fallbackWorkspaceId) return;
+      if (lastForbiddenRedirectRef.current === `${forbidden}->${fallbackWorkspaceId}`) return;
+      lastForbiddenRedirectRef.current = `${forbidden}->${fallbackWorkspaceId}`;
+      const nextPath = inWorkspaceScope ? swapWorkspaceInPath(location.pathname, fallbackWorkspaceId) : toWorkspacePath(fallbackWorkspaceId, DEFAULT_WORKSPACE_SUBPATH);
+      navigate(
+        {
+          pathname: nextPath,
+          search: location.search,
+          hash: location.hash,
+        },
+        { replace: true }
+      );
+    },
+    [inWorkspaceScope, location.hash, location.pathname, location.search, navigate, workspaces]
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -337,16 +358,33 @@ export default function AppShell() {
       try {
         const payload = await listArtifactNavSurfaces(activeWorkspaceId || undefined);
         if (!mounted) return;
+        lastForbiddenRedirectRef.current = "";
         setSurfaceNavItems(payload.surfaces || []);
-      } catch {
+      } catch (error) {
         if (!mounted) return;
+        const message = error instanceof Error ? error.message : String(error || "");
+        const normalized = message.toLowerCase();
+        if ((normalized.includes("forbidden") || normalized.includes("403")) && activeWorkspaceId) {
+          recoverFromForbiddenWorkspace(activeWorkspaceId);
+        }
         setSurfaceNavItems([]);
       }
     })();
     return () => {
       mounted = false;
     };
-  }, [authed, activeWorkspaceId, navRefreshToken]);
+  }, [authed, activeWorkspaceId, navRefreshToken, recoverFromForbiddenWorkspace]);
+
+  useEffect(() => {
+    const onWorkspaceForbidden = (event: Event) => {
+      const detail = (event as CustomEvent<{ workspaceId?: string }>).detail || {};
+      const workspaceId = String(detail.workspaceId || "").trim();
+      if (!workspaceId) return;
+      recoverFromForbiddenWorkspace(workspaceId);
+    };
+    window.addEventListener("xyn:workspace-forbidden", onWorkspaceForbidden as EventListener);
+    return () => window.removeEventListener("xyn:workspace-forbidden", onWorkspaceForbidden as EventListener);
+  }, [recoverFromForbiddenWorkspace]);
 
   useEffect(() => {
     const onWorkspaceArtifactsChanged = () => setNavRefreshToken((value) => value + 1);

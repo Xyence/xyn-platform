@@ -145,6 +145,13 @@ export function useCapabilitySuggestions(workspaceId: string): CapabilitySuggest
             normalized.includes("404")
           ) {
             setRows([]);
+            if (normalized.includes("forbidden") || normalized.includes("403")) {
+              window.dispatchEvent(
+                new CustomEvent("xyn:workspace-forbidden", {
+                  detail: { workspaceId },
+                })
+              );
+            }
           } else {
             throw artifactsResult.reason;
           }
