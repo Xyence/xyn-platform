@@ -81,7 +81,7 @@ export default function WorkbenchPage() {
                 if (activePanel?.panel_id) closePanel(activePanel.panel_id);
               }}
             >
-              <X size={14} aria-hidden="true" />
+              <X size={12} aria-hidden="true" />
             </button>
           </div>
         ) : null}
