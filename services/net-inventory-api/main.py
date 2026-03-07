@@ -8,6 +8,7 @@ from typing import Optional
 
 import psycopg2
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from psycopg2.extras import RealDictCursor
 
@@ -73,6 +74,72 @@ def on_startup() -> None:
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "net-inventory-api", "time": utc_now()}
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return """
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Net Inventory API</title>
+        <style>
+          body {
+            margin: 0;
+            font-family: ui-sans-serif, system-ui, sans-serif;
+            background: #08111f;
+            color: #e7edf7;
+          }
+          main {
+            max-width: 760px;
+            margin: 48px auto;
+            padding: 24px;
+          }
+          .card {
+            background: linear-gradient(180deg, #10203b 0%, #0b1628 100%);
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            border-radius: 18px;
+            padding: 24px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+          }
+          h1 {
+            margin: 0 0 12px;
+            font-size: 28px;
+          }
+          p, li {
+            color: #c5d0df;
+            line-height: 1.5;
+          }
+          code {
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 8px;
+            padding: 2px 6px;
+          }
+          a {
+            color: #7dd3fc;
+          }
+        </style>
+      </head>
+      <body>
+        <main>
+          <section class="card">
+            <h1>Net Inventory API</h1>
+            <p>This deployment is running and ready to serve workspace-scoped device inventory data.</p>
+            <ul>
+              <li><a href="/health">/health</a> for service health</li>
+              <li><code>GET /devices?workspace_id=&lt;uuid&gt;</code> to list devices</li>
+              <li><code>POST /devices</code> to create a device</li>
+              <li><code>GET /reports/devices-by-status?workspace_id=&lt;uuid&gt;</code> for the chart dataset</li>
+              <li><a href="/docs">/docs</a> for interactive API docs</li>
+            </ul>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
 
 
 @app.get("/devices")

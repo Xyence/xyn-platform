@@ -25,6 +25,12 @@ function parseJsonText(value: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+function withDocsUrl(url: string): string {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  return raw.replace(/\/+$/, "") + "/docs";
+}
+
 function normalizeJobStatus(status?: string): "queued" | "running" | "succeeded" | "failed" {
   const token = String(status || "").trim().toLowerCase();
   if (token === "succeeded") return "succeeded";
@@ -293,7 +299,7 @@ export default function DraftDetailPage({
           <div>
             <strong>Running app</strong>
             <p className="muted small">
-              {deploymentUrls.appUrl ? <a href={deploymentUrls.appUrl} target="_blank" rel="noreferrer">{deploymentUrls.appUrl}</a> : "Not deployed yet"}
+              {deploymentUrls.appUrl ? <a href={withDocsUrl(deploymentUrls.appUrl)} target="_blank" rel="noreferrer">{withDocsUrl(deploymentUrls.appUrl)}</a> : "Not deployed yet"}
             </p>
           </div>
           <div>
