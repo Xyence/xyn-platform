@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import InlineMessage from "../../components/InlineMessage";
 import Tabs from "../components/ui/Tabs";
-import { getAppIntentDraft, listAppJobs, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
-import type { AppIntentDraft, AppJob } from "../../api/types";
+import { getAppIntentDraft, listAppExecutionNotes, listAppJobs, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
+import type { AppExecutionNote, AppIntentDraft, AppJob } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { useNotifications } from "../state/notificationsStore";
@@ -73,6 +73,56 @@ function collectRelatedJobs(allJobs: AppJob[], draftId: string, seedJobId: strin
     .sort((left, right) => jobTimestamp(left) - jobTimestamp(right));
 }
 
+function uniqueTokens(values: unknown[]): string[] {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => String(value || "").trim())
+        .filter((value) => value.length > 0),
+    ),
+  );
+}
+
+function extractBuildSelectors(allJobs: AppJob[]): {
+  noteIds: string[];
+  jobIds: string[];
+  relatedArtifactIds: string[];
+} {
+  const noteIds: unknown[] = [];
+  const jobIds: unknown[] = [];
+  const relatedArtifactIds: unknown[] = [];
+  for (const job of allJobs) {
+    jobIds.push(job.id);
+    const payloads = [job.input_json, job.output_json];
+    for (const payload of payloads) {
+      if (!payload || typeof payload !== "object") continue;
+      const record = payload as Record<string, unknown>;
+      noteIds.push(record.execution_note_artifact_id);
+      relatedArtifactIds.push(record.app_spec_artifact_id);
+      const queued = Array.isArray(record.queued_jobs) ? record.queued_jobs : [];
+      queued.forEach((item) => {
+        if (item && typeof item === "object") {
+          const jobRef = item as Record<string, unknown>;
+          jobIds.push(jobRef.job_id);
+        }
+      });
+    }
+  }
+  return {
+    noteIds: uniqueTokens(noteIds),
+    jobIds: uniqueTokens(jobIds),
+    relatedArtifactIds: uniqueTokens(relatedArtifactIds),
+  };
+}
+
+function formatTimestamp(value?: string | null): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "—";
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return raw;
+  return parsed.toLocaleString();
+}
+
 export default function DraftDetailPage({
   workspaceId,
   workspaceName,
@@ -104,6 +154,10 @@ export default function DraftDetailPage({
   const [error, setError] = useState<string | null>(null);
   const [latestJobId, setLatestJobId] = useState<string>(String(linkedJobId || "").trim());
   const [relatedJobs, setRelatedJobs] = useState<AppJob[]>([]);
+  const [executionNotes, setExecutionNotes] = useState<AppExecutionNote[]>([]);
+  const [executionNotesLoading, setExecutionNotesLoading] = useState(false);
+  const [executionNotesError, setExecutionNotesError] = useState<string | null>(null);
+  const [executionTraceExpanded, setExecutionTraceExpanded] = useState(false);
   const { push } = useNotifications();
   const rawPrompt = useMemo(() => {
     if (!draft?.content_json || typeof draft.content_json !== "object") return "";
@@ -153,6 +207,42 @@ export default function DraftDetailPage({
   useEffect(() => {
     void loadJobs();
   }, [loadJobs]);
+
+  const buildSelectors = useMemo(() => extractBuildSelectors(relatedJobs), [relatedJobs]);
+
+  const loadExecutionNotes = useCallback(async () => {
+    if (!workspaceId) {
+      setExecutionNotes([]);
+      setExecutionNotesError(null);
+      return;
+    }
+    const hasSelectors =
+      buildSelectors.noteIds.length > 0 ||
+      buildSelectors.jobIds.length > 0 ||
+      buildSelectors.relatedArtifactIds.length > 0;
+    if (!hasSelectors) {
+      setExecutionNotes([]);
+      setExecutionNotesError(null);
+      return;
+    }
+    try {
+      setExecutionNotesLoading(true);
+      setExecutionNotesError(null);
+      const payload = await listAppExecutionNotes(workspaceId, buildSelectors);
+      setExecutionNotes(payload);
+    } catch (err) {
+      setExecutionNotes([]);
+      setExecutionNotesError((err as Error).message);
+    } finally {
+      setExecutionNotesLoading(false);
+    }
+  }, [buildSelectors, workspaceId]);
+
+  useEffect(() => {
+    void loadExecutionNotes();
+  }, [loadExecutionNotes]);
+
+  const executionNote = useMemo(() => (executionNotes.length ? executionNotes[0] : null), [executionNotes]);
 
   const buildStatus = useMemo(() => {
     if (relatedJobs.some((job) => normalizeJobStatus(job.status) === "failed")) return "failed";
@@ -338,6 +428,72 @@ export default function DraftDetailPage({
                 </tbody>
               </table>
             </div>
+          </div>
+        ) : null}
+        {(String(draft?.status || status).toLowerCase() === "submitted" || relatedJobs.length > 0) ? (
+          <div className="card" style={{ marginBottom: 12 }}>
+            <div className="card-header">
+              <h3>Execution Trace</h3>
+              {executionNote ? <span className="chip">{executionNote.status}</span> : null}
+            </div>
+            {executionNotesLoading ? <p className="muted small">Loading execution trace…</p> : null}
+            {executionNotesError ? <InlineMessage tone="error" title="Trace unavailable" body={executionNotesError} /> : null}
+            {!executionNotesLoading && !executionNotesError && !executionNote ? (
+              <p className="muted small">Execution trace not yet linked to this build.</p>
+            ) : null}
+            {executionNote ? (
+              <>
+                <div className="detail-grid" style={{ marginTop: 12, marginBottom: 12 }}>
+                  <div>
+                    <strong>Recorded</strong>
+                    <p className="muted small">{formatTimestamp(executionNote.updated_at || executionNote.timestamp)}</p>
+                  </div>
+                  <div>
+                    <strong>Match</strong>
+                    <p className="muted small">{executionNote.match_reason.replace(/_/g, " ")}</p>
+                  </div>
+                  <div className="span-full">
+                    <strong>Request</strong>
+                    <p className="muted small">{executionNote.prompt_or_request || "—"}</p>
+                  </div>
+                  <div>
+                    <strong>Findings</strong>
+                    <ul className="muted small" style={{ margin: "6px 0 0 18px" }}>
+                      {(executionNote.findings || []).slice(0, 3).map((item, index) => <li key={`finding-${index}`}>{item}</li>)}
+                    </ul>
+                  </div>
+                  <div>
+                    <strong>Proposed Fix</strong>
+                    <p className="muted small">{executionNote.proposed_fix || "—"}</p>
+                  </div>
+                  <div>
+                    <strong>Validation</strong>
+                    <ul className="muted small" style={{ margin: "6px 0 0 18px" }}>
+                      {(executionNote.validation_summary || []).slice(0, 4).map((item, index) => <li key={`validation-${index}`}>{item}</li>)}
+                    </ul>
+                  </div>
+                  <div>
+                    <strong>Debt / Warnings</strong>
+                    {executionNote.debt_recorded && executionNote.debt_recorded.length > 0 ? (
+                      <ul className="muted small" style={{ margin: "6px 0 0 18px" }}>
+                        {executionNote.debt_recorded.slice(0, 3).map((item, index) => <li key={`debt-${index}`}>{item}</li>)}
+                      </ul>
+                    ) : (
+                      <p className="muted small">None recorded.</p>
+                    )}
+                  </div>
+                </div>
+                {executionNotes.length > 1 ? (
+                  <p className="muted small">Showing latest of {executionNotes.length} explicitly linked execution traces.</p>
+                ) : null}
+                <button className="ghost small" type="button" onClick={() => setExecutionTraceExpanded((value) => !value)}>
+                  {executionTraceExpanded ? "Hide full execution note" : "View full execution note"}
+                </button>
+                {executionTraceExpanded ? (
+                  <pre className="code-block" style={{ marginTop: 12 }}>{prettyJson(executionNote)}</pre>
+                ) : null}
+              </>
+            ) : null}
           </div>
         ) : null}
         <Tabs

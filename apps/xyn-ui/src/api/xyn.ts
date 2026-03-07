@@ -159,6 +159,9 @@ import type {
   AppIntentDraftPatchPayload,
   AppDraftSubmitResponse,
   AppJob,
+  AppExecutionNote,
+  AppBuilderArtifact,
+  AppPaletteResult,
   AppJobPatchPayload,
 } from "./types";
 import { authHeaders, resolveApiBaseUrl, resolveSeedBaseUrl } from "./client";
@@ -849,6 +852,56 @@ export async function getAppJob(jobId: string, workspaceId: string): Promise<App
   const url = withWorkspaceId(`/xyn/api/app-builder/jobs/${jobId}`, workspaceId);
   const response = await apiFetch(url.toString(), { credentials: "include" });
   return handle<AppJob>(response);
+}
+
+export async function listAppExecutionNotes(
+  workspaceId: string,
+  params: {
+    noteIds?: string[];
+    jobIds?: string[];
+    relatedArtifactIds?: string[];
+  } = {},
+): Promise<AppExecutionNote[]> {
+  const url = withWorkspaceId("/xyn/api/app-builder/execution-notes", workspaceId);
+  (params.noteIds || []).forEach((value) => {
+    const token = String(value || "").trim();
+    if (token) url.searchParams.append("note_id", token);
+  });
+  (params.jobIds || []).forEach((value) => {
+    const token = String(value || "").trim();
+    if (token) url.searchParams.append("job_id", token);
+  });
+  (params.relatedArtifactIds || []).forEach((value) => {
+    const token = String(value || "").trim();
+    if (token) url.searchParams.append("related_artifact_id", token);
+  });
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<AppExecutionNote[]>(response);
+}
+
+export async function executeAppPalettePrompt(
+  workspaceId: string,
+  payload: { prompt: string }
+): Promise<AppPaletteResult> {
+  const url = withWorkspaceId("/xyn/api/palette/execute", workspaceId);
+  const response = await apiFetch(url.toString(), {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<AppPaletteResult>(response);
+}
+
+export async function listAppBuilderArtifacts(
+  workspaceId: string,
+  params: { kind?: string; limit?: number } = {}
+): Promise<AppBuilderArtifact[]> {
+  const url = withWorkspaceId("/xyn/api/app-builder/artifacts", workspaceId);
+  if (params.kind) url.searchParams.set("kind", params.kind);
+  if (params.limit) url.searchParams.set("limit", String(params.limit));
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<AppBuilderArtifact[]>(response);
 }
 
 export async function updateAppJob(jobId: string, workspaceId: string, payload: AppJobPatchPayload): Promise<AppJob> {

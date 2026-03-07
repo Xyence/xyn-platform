@@ -1,0 +1,4 @@
+apps/xyn-ui/node_modules/
+apps/xyn-ui/playwright-artifacts/
+apps/xyn-ui/playwright-report/
+apps/xyn-ui/test-results/

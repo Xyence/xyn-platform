@@ -3805,7 +3805,7 @@ button.sm {
   top: calc(var(--xyn-header-top-offset) + var(--xyn-header-height) + var(--xyn-console-safe-top) + 4px);
   right: var(--xyn-console-safe-right);
   z-index: var(--xyn-z-console);
-  pointer-events: none;
+  pointer-events: auto;
   display: flex;
   flex-direction: column;
   align-items: flex-end;

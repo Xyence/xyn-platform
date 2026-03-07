@@ -339,6 +339,75 @@ class IntentEngineApiTests(TestCase):
         items = activity.json().get("items") or []
         prompt_item = next((item for item in items if item.get("event_type") == "prompt_submission"), None)
         self.assertIsNotNone(prompt_item)
+
+    @patch("xyn_orchestrator.xyn_api.requests.request")
+    def test_app_builder_execution_notes_proxy_returns_explicitly_matched_note(self, request_mock):
+        class _FakeResponse:
+            def __init__(self, status_code: int, payload):
+                self.status_code = status_code
+                self._payload = payload
+                self.content = json.dumps(payload).encode("utf-8")
+                self.text = json.dumps(payload)
+                self.headers = {"content-type": "application/json"}
+
+            def json(self):
+                return self._payload
+
+        note_id = "c105190a-92f4-49fc-b81d-43723004e18b"
+        artifact_id = "40b9dd27-2195-4d10-b9e1-6f633c8f7d8d"
+        job_id = "b8cfcdcb-4c25-4688-b703-1f4a86d6d17a"
+        request_mock.side_effect = [
+            _FakeResponse(
+                200,
+                {
+                    "items": [
+                        {
+                            "id": note_id,
+                            "workspace_id": str(self.workspace.id),
+                            "name": f"execution-note.{note_id}",
+                            "kind": "execution-note",
+                            "metadata": {
+                                "prompt_or_request": "Build a network inventory app.",
+                                "related_artifact_ids": [artifact_id],
+                                "status": "completed",
+                                "job_id": job_id,
+                                "app_spec_artifact_id": artifact_id,
+                            },
+                            "created_at": "2026-03-07T10:00:00+00:00",
+                        }
+                    ]
+                },
+            ),
+            _FakeResponse(
+                200,
+                {
+                    "id": note_id,
+                    "timestamp": "2026-03-07T10:00:00+00:00",
+                    "workspace_id": str(self.workspace.id),
+                    "related_artifact_ids": [artifact_id],
+                    "prompt_or_request": "Build a network inventory app.",
+                    "findings": ["Draft reached non-trivial generation path."],
+                    "root_cause": "AppSpec generation must be auditable.",
+                    "proposed_fix": "Persist AppSpec and carry execution note through the pipeline.",
+                    "implementation_summary": "Generated AppSpec and linked execution note.",
+                    "validation_summary": ["AppSpec validated.", "Deployment started."],
+                    "debt_recorded": [],
+                    "status": "completed",
+                    "updated_at": "2026-03-07T10:05:00+00:00",
+                },
+            ),
+        ]
+
+        response = self.client.get(
+            f"/xyn/api/app-builder/execution-notes?workspace_id={self.workspace.id}&related_artifact_id={artifact_id}&job_id={job_id}"
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["id"], note_id)
+        self.assertEqual(payload[0]["match_reason"], "related_artifact_ids")
+        self.assertEqual(payload[0]["prompt_or_request"], "Build a network inventory app.")
+        self.assertIn("AppSpec validated.", payload[0]["validation_summary"])
         self.assertIn("Build a new app", str((prompt_item or {}).get("prompt") or ""))
 
     def test_apply_patch_rejects_unauthorized_fields(self):

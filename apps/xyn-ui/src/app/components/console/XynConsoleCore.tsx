@@ -5,6 +5,7 @@ import { getRecentArtifacts } from "../../../api/xyn";
 import { provisionLocalXynInstance } from "../../../api/xyn";
 import { listArtifactNavSurfaces } from "../../../api/xyn";
 import { getMe } from "../../../api/xyn";
+import { executeAppPalettePrompt } from "../../../api/xyn";
 import type { RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
@@ -101,6 +102,17 @@ function defaultArtifactStructuredQuery(): ArtifactStructuredQuery {
     limit: 50,
     offset: 0,
   };
+}
+
+function isExplicitPaletteCommand(input: string): boolean {
+  return /^(show|list)\s+devices$/i.test(String(input || "").trim());
+}
+
+function explicitAppBuilderArtifactKind(input: string): string {
+  const match = String(input || "").trim().toLowerCase().match(/^show\s+artifacts\s+of\s+kind\s+([a-z0-9_.-]+)$/);
+  const kind = String(match?.[1] || "").trim();
+  if (kind === "app_spec") return kind;
+  return "";
 }
 
 export function resolvePanelCommand(input: string): ResolvedPanelCommand | null {
@@ -447,6 +459,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
   const prompt = String(rawPrompt || "").trim();
   if (!prompt) return null;
   const normalized = prompt.toLowerCase();
+  if (explicitAppBuilderArtifactKind(prompt)) return null;
   const activePanelId = canvasContext?.ui?.active_panel_id || canvasContext?.ui?.panel_id;
   const activeDataset = String(canvasContext?.dataset?.name || "").trim();
   const viewType = canvasContext?.view_type;
@@ -1406,11 +1419,49 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     }
 
     const directPanel = resolvePanelCommand(prompt);
-    if (directPanel && onOpenPanel) {
-      onOpenPanel(directPanel.panelKey, directPanel.params);
+    const appBuilderArtifactKind = explicitAppBuilderArtifactKind(prompt);
+    if (appBuilderArtifactKind && onOpenPanel) {
+      onOpenPanel("app_builder_artifact_list", { kind: appBuilderArtifactKind });
+      setInputText("");
       clearSessionResolution();
       if (isOverlay) setOpen(false);
       return;
+    }
+    if (directPanel && onOpenPanel) {
+      onOpenPanel(directPanel.panelKey, directPanel.params);
+      setInputText("");
+      clearSessionResolution();
+      if (isOverlay) setOpen(false);
+      return;
+    }
+
+    if (isExplicitPaletteCommand(prompt) && onOpenPanel) {
+      const workspaceId = workspaceIdFromPath;
+      if (!workspaceId) {
+        onOpenPanel("palette_result", {
+          prompt,
+          error: "Workspace context is required for this palette command.",
+        });
+        clearSessionResolution();
+        if (isOverlay) setOpen(false);
+        return;
+      }
+      try {
+        const result = await executeAppPalettePrompt(workspaceId, { prompt });
+        onOpenPanel("palette_result", { prompt, result });
+        setInputText("");
+        clearSessionResolution();
+        if (isOverlay) setOpen(false);
+        return;
+      } catch (error) {
+        onOpenPanel("palette_result", {
+          prompt,
+          error: error instanceof Error ? error.message : "Palette execution failed.",
+        });
+        clearSessionResolution();
+        if (isOverlay) setOpen(false);
+        return;
+      }
     }
 
     void submitResolve();

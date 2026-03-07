@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles } from "lucide-react";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import XynConsolePanel from "./XynConsolePanel";
@@ -7,6 +7,7 @@ const XYN_PALETTE_USED_KEY = "xyn.palette.used.v1";
 
 export default function XynConsoleNode() {
   const { open, setOpen, badgeActive } = useXynConsole();
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
   const [showHint, setShowHint] = useState(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem(XYN_PALETTE_USED_KEY) !== "1";
@@ -20,13 +21,24 @@ export default function XynConsoleNode() {
     setShowHint(false);
   }, [open]);
 
+  useEffect(() => {
+    const button = buttonRef.current;
+    if (!button) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      event.preventDefault();
+      setOpen(!open);
+    };
+    button.addEventListener("pointerdown", handlePointerDown);
+    return () => button.removeEventListener("pointerdown", handlePointerDown);
+  }, [open, setOpen]);
+
   return (
     <div className="xyn-console-anchor">
       {showHint ? <span className="xyn-console-hint">Press ⌘K</span> : null}
       <button
+        ref={buttonRef}
         type="button"
         className={`xyn-console-node ${open ? "open" : ""}`}
-        onClick={() => setOpen(!open)}
         aria-label="Xyn (⌘K / Ctrl+K)"
         title="Xyn (⌘K / Ctrl+K)"
       >

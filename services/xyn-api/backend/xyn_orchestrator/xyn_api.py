@@ -15024,6 +15024,91 @@ def app_builder_job_detail(request: HttpRequest, job_id: str) -> JsonResponse:
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
+@csrf_exempt
+def app_builder_artifacts_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_ref = str(
+        request.GET.get("workspace_id")
+        or request.GET.get("workspace")
+        or request.GET.get("operator_workspace_id")
+        or request.headers.get("X-Workspace-Id")
+        or ""
+    ).strip()
+    workspace = _resolve_workspace_for_identity(identity, workspace_ref)
+    if not workspace:
+        return JsonResponse({"error": "workspace context is required"}, status=400)
+    kind = str(request.GET.get("kind") or "").strip()
+    limit = str(request.GET.get("limit") or "50").strip()
+    path = f"/api/v1/artifacts?limit={quote(limit, safe='')}"
+    if kind:
+        path += f"&kind={quote(kind, safe='')}"
+    try:
+        response = _seed_api_request(method="GET", path=path, workspace_slug=str(workspace.slug or ""), timeout=20)
+    except requests.RequestException as exc:
+        return JsonResponse({"error": "failed to reach xyn-core", "details": exc.__class__.__name__}, status=502)
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return JsonResponse({"error": "unexpected xyn-core response", "response_text": response.text[:800]}, status=502)
+    payload = response.json() if response.content else {}
+    items = payload.get("items") if isinstance(payload, dict) else []
+    normalized = [item for item in items if isinstance(item, dict)]
+    return JsonResponse(normalized, safe=False, status=response.status_code)
+
+
+@csrf_exempt
+def app_builder_execution_notes_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_ref = str(
+        request.GET.get("workspace_id")
+        or request.GET.get("workspace")
+        or request.GET.get("operator_workspace_id")
+        or request.headers.get("X-Workspace-Id")
+        or ""
+    ).strip()
+    workspace = _resolve_workspace_for_identity(identity, workspace_ref)
+    if not workspace:
+        return JsonResponse({"error": "workspace context is required"}, status=400)
+    note_ids = [str(item).strip() for item in request.GET.getlist("note_id") if str(item).strip()]
+    job_ids = [str(item).strip() for item in request.GET.getlist("job_id") if str(item).strip()]
+    related_artifact_ids = [str(item).strip() for item in request.GET.getlist("related_artifact_id") if str(item).strip()]
+    if not note_ids and not job_ids and not related_artifact_ids:
+        return JsonResponse({"error": "explicit execution-note selectors are required"}, status=400)
+    try:
+        payload = _list_app_builder_execution_notes(
+            workspace_slug=str(workspace.slug or ""),
+            note_ids=note_ids,
+            job_ids=job_ids,
+            related_artifact_ids=related_artifact_ids,
+        )
+    except requests.RequestException as exc:
+        return JsonResponse({"error": "failed to reach xyn-core", "details": exc.__class__.__name__}, status=502)
+    except RuntimeError as exc:
+        return JsonResponse({"error": str(exc)}, status=502)
+    return JsonResponse(payload, safe=False, status=200)
+
+
+@csrf_exempt
+def app_palette_execute(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    return _proxy_seed_workspace_request(
+        request,
+        path="/api/v1/palette/execute",
+        method="POST",
+        payload=payload,
+        timeout=30,
+    )
+
+
 def _intent_apply_patch(
     *,
     identity: UserIdentity,
@@ -15461,6 +15546,113 @@ def _proxy_seed_workspace_request(
         status_code = response.status_code if 400 <= response.status_code <= 599 else 502
         return JsonResponse(payload_json if isinstance(payload_json, dict) else {"error": "xyn-core request failed"}, status=status_code, safe=isinstance(payload_json, dict))
     return JsonResponse(payload_json, safe=not isinstance(payload_json, list), status=response.status_code)
+
+
+def _seed_json_download(
+    *,
+    workspace_slug: str,
+    artifact_id: str,
+    timeout: int = 20,
+) -> Dict[str, Any]:
+    response = _seed_api_request(
+        method="GET",
+        path=f"/api/v1/artifacts/{artifact_id}/download",
+        workspace_slug=workspace_slug,
+        timeout=timeout,
+    )
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if response.status_code >= 400:
+        raise RuntimeError(f"xyn-core execution-note download failed ({response.status_code})")
+    if "application/json" not in content_type:
+        raise RuntimeError("xyn-core execution-note download returned non-json content")
+    payload = response.json() if response.content else {}
+    if not isinstance(payload, dict):
+        raise RuntimeError("xyn-core execution-note payload was not a JSON object")
+    return payload
+
+
+def _sort_execution_notes(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    reason_priority = {
+        "related_artifact_ids": 1,
+        "generated_artifact_chain": 2,
+        "job_id": 3,
+        "note_id": 4,
+    }
+
+    by_time = sorted(items, key=lambda item: str(item.get("updated_at") or item.get("timestamp") or ""), reverse=True)
+    return sorted(by_time, key=lambda item: reason_priority.get(str(item.get("match_reason") or ""), 99))
+
+
+def _list_app_builder_execution_notes(
+    *,
+    workspace_slug: str,
+    note_ids: List[str],
+    job_ids: List[str],
+    related_artifact_ids: List[str],
+) -> List[Dict[str, Any]]:
+    if not note_ids and not job_ids and not related_artifact_ids:
+        return []
+    response = _seed_api_request(
+        method="GET",
+        path="/api/v1/artifacts?kind=execution-note&limit=100",
+        workspace_slug=workspace_slug,
+        payload=None,
+        timeout=20,
+    )
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if response.status_code >= 400 or "application/json" not in content_type:
+        raise RuntimeError("Failed to list execution-note artifacts from xyn-core")
+    payload = response.json() if response.content else {}
+    rows = payload.get("items") if isinstance(payload, dict) else []
+    artifacts = [row for row in rows if isinstance(row, dict) and str(row.get("kind") or "") == "execution-note"]
+    note_id_set = {str(item).strip() for item in note_ids if str(item).strip()}
+    job_id_set = {str(item).strip() for item in job_ids if str(item).strip()}
+    related_artifact_id_set = {str(item).strip() for item in related_artifact_ids if str(item).strip()}
+    matches: List[Dict[str, Any]] = []
+    for row in artifacts:
+        artifact_id = str(row.get("id") or "").strip()
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        related = {str(item).strip() for item in (metadata.get("related_artifact_ids") or []) if str(item).strip()}
+        app_spec_artifact_id = str(metadata.get("app_spec_artifact_id") or "").strip()
+        job_id = str(metadata.get("job_id") or "").strip()
+        match_reason = ""
+        match_values: List[str] = []
+        if related_artifact_id_set and related.intersection(related_artifact_id_set):
+            match_reason = "related_artifact_ids"
+            match_values = sorted(related.intersection(related_artifact_id_set))
+        elif app_spec_artifact_id and related_artifact_id_set and app_spec_artifact_id in related_artifact_id_set:
+            match_reason = "generated_artifact_chain"
+            match_values = [app_spec_artifact_id]
+        elif job_id and job_id in job_id_set:
+            match_reason = "job_id"
+            match_values = [job_id]
+        elif artifact_id and artifact_id in note_id_set:
+            match_reason = "note_id"
+            match_values = [artifact_id]
+        if not match_reason:
+            continue
+        note_payload = _seed_json_download(workspace_slug=workspace_slug, artifact_id=artifact_id, timeout=20)
+        matches.append(
+            {
+                "id": artifact_id,
+                "workspace_id": note_payload.get("workspace_id") or row.get("workspace_id"),
+                "related_artifact_ids": list(note_payload.get("related_artifact_ids") or []),
+                "prompt_or_request": str(note_payload.get("prompt_or_request") or metadata.get("prompt_or_request") or ""),
+                "findings": list(note_payload.get("findings") or []),
+                "root_cause": str(note_payload.get("root_cause") or ""),
+                "proposed_fix": str(note_payload.get("proposed_fix") or ""),
+                "implementation_summary": str(note_payload.get("implementation_summary") or ""),
+                "validation_summary": list(note_payload.get("validation_summary") or []),
+                "debt_recorded": list(note_payload.get("debt_recorded") or []),
+                "status": str(note_payload.get("status") or metadata.get("status") or ""),
+                "timestamp": str(note_payload.get("timestamp") or row.get("created_at") or ""),
+                "updated_at": str(note_payload.get("updated_at") or row.get("created_at") or ""),
+                "match_reason": match_reason,
+                "match_values": match_values,
+                "metadata": metadata,
+            }
+        )
+    return _sort_execution_notes(matches)
 
 
 def _build_workspace_slug_from_name(name: str) -> str:

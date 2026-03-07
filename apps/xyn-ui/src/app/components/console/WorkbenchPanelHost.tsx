@@ -7,6 +7,7 @@ import {
   getEmsDatasetSchemaTable,
   getEmsRegistrationsTimeseriesCanvasTable,
   getEmsStatusRollupCanvasTable,
+  listAppBuilderArtifacts,
   getRunCanvasApi,
   listRunsCanvasApi,
   listWorkspacesCanvasApi,
@@ -15,6 +16,8 @@ import {
   queryEmsRegistrationsCanvasTable,
 } from "../../../api/xyn";
 import type {
+  AppPaletteResult,
+  AppBuilderArtifact,
   ArtifactCanvasTableResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFileRow,
@@ -26,6 +29,7 @@ import type {
   WorkspaceSummary,
 } from "../../../api/types";
 import CanvasRenderer from "../../../components/canvas/CanvasRenderer";
+import InlineMessage from "../../../components/InlineMessage";
 import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityRegistry";
 import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
@@ -41,6 +45,8 @@ export type ConsolePanelKey =
   | "draft_detail"
   | "jobs_list"
   | "job_detail"
+  | "palette_result"
+  | "app_builder_artifact_list"
   | "run_detail"
   | "artifact_list"
   | "artifact_detail"
@@ -82,6 +88,154 @@ type CanvasQuery = {
 };
 
 type ContextEmitter = (context: Record<string, unknown> | null) => void;
+
+function PaletteResultPanel({ result, prompt, error }: { result?: AppPaletteResult; prompt?: string; error?: string }) {
+  const safeResult = result || { kind: "table", columns: [], rows: [] };
+  const columns = Array.isArray(safeResult.columns) ? safeResult.columns : [];
+  const rows = Array.isArray(safeResult.rows) ? safeResult.rows : [];
+  const meta = safeResult.meta && typeof safeResult.meta === "object" ? safeResult.meta : {};
+  const contextPackSlugs = Array.isArray(meta.context_pack_slugs)
+    ? meta.context_pack_slugs.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const warnings = Array.isArray(meta.context_warnings)
+    ? meta.context_warnings.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  return (
+    <>
+      <div className="page-header">
+        <div>
+          <h2>Palette Result</h2>
+          <p className="muted">{String(safeResult.text || error || "Command executed.")}</p>
+        </div>
+      </div>
+      <section className="card">
+        <div className="detail-grid">
+          <div>
+            <div className="field-label">Prompt</div>
+            <div className="field-value">{String(prompt || "—")}</div>
+          </div>
+          <div>
+            <div className="field-label">Result Kind</div>
+            <div className="field-value">{String(safeResult.kind || "—")}</div>
+          </div>
+          <div>
+            <div className="field-label">Resolved Context Packs</div>
+            <div className="field-value">{contextPackSlugs.length ? contextPackSlugs.join(", ") : "—"}</div>
+          </div>
+        </div>
+        {error ? <InlineMessage tone="error" title="Palette request failed" body={error} /> : null}
+        {warnings.length ? <InlineMessage tone="warn" title="Warnings" body={warnings.join(" ")} /> : null}
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                {columns.map((column) => (
+                  <th key={column}>{column}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, index) => (
+                <tr key={String(row.id || index)}>
+                  {columns.map((column) => (
+                    <td key={column}>{String(row[column] ?? "")}</td>
+                  ))}
+                </tr>
+              ))}
+              {!rows.length ? (
+                <tr>
+                  <td colSpan={Math.max(columns.length, 1)} className="muted">
+                    No rows returned.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function AppBuilderArtifactListPanel({ workspaceId, kind }: { workspaceId: string; kind?: string }) {
+  const [items, setItems] = useState<AppBuilderArtifact[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    if (!workspaceId) {
+      setItems([]);
+      setError("Workspace context is required.");
+      return;
+    }
+    void (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const payload = await listAppBuilderArtifacts(workspaceId, { kind, limit: 50 });
+        if (!active) return;
+        setItems(payload);
+      } catch (err) {
+        if (!active) return;
+        setError((err as Error).message);
+        setItems([]);
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [kind, workspaceId]);
+
+  return (
+    <>
+      <div className="page-header">
+        <div>
+          <h2>Artifacts</h2>
+          <p className="muted">
+            {kind ? `Generated artifacts filtered by kind=${kind}.` : "Generated artifacts from the app-builder runtime."}
+          </p>
+        </div>
+      </div>
+      {error ? <InlineMessage tone="error" title="Request failed" body={error} /> : null}
+      <section className="card">
+        <p className="muted">Rows: {items.length}{loading ? " (loading...)" : ""}</p>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Kind</th>
+                <th>Scope</th>
+                <th>Sync</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.name}</td>
+                  <td>{item.kind}</td>
+                  <td>{String(item.storage_scope || "")}</td>
+                  <td>{String(item.sync_state || "")}</td>
+                  <td>{String(item.created_at || "")}</td>
+                </tr>
+              ))}
+              {!loading && !items.length ? (
+                <tr>
+                  <td colSpan={5} className="muted">
+                    No artifacts found.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  );
+}
 
 const WORKSPACES_DATASET_COLUMNS = [
   { key: "id", label: "ID", type: "string", filterable: true, sortable: true },
@@ -1050,6 +1204,8 @@ const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   draft_detail: "Build Draft",
   jobs_list: "Jobs",
   job_detail: "Pipeline Job",
+  palette_result: "Palette Result",
+  app_builder_artifact_list: "Artifacts",
   run_detail: "Run Detail",
   artifact_list: "Artifact List",
   artifact_detail: "Artifact Detail",
@@ -1220,6 +1376,20 @@ export default function WorkbenchPanelHost({
           }}
         />
       );
+    }
+
+    if (panel.key === "palette_result") {
+      return (
+        <PaletteResultPanel
+          result={panel.params?.result as AppPaletteResult | undefined}
+          prompt={String(panel.params?.prompt || "")}
+          error={String(panel.params?.error || "")}
+        />
+      );
+    }
+
+    if (panel.key === "app_builder_artifact_list") {
+      return <AppBuilderArtifactListPanel workspaceId={workspaceId} kind={String(panel.params?.kind || "")} />;
     }
 
     if (panel.key === "run_detail") {

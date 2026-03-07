@@ -1,0 +1,22 @@
+import { defineConfig } from "@playwright/test";
+
+const baseURL = process.env.XYN_UI_BASE_URL || "http://localhost";
+
+export default defineConfig({
+  testDir: "./e2e",
+  timeout: 10 * 60 * 1000,
+  expect: {
+    timeout: 30_000,
+  },
+  fullyParallel: false,
+  retries: 0,
+  reporter: [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],
+  use: {
+    baseURL,
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
+    video: "retain-on-failure",
+    viewport: { width: 1600, height: 1100 },
+  },
+  outputDir: "test-results",
+});

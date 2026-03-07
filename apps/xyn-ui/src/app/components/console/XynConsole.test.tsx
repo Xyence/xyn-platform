@@ -137,6 +137,14 @@ describe("XynConsole", () => {
     await screen.findByText("Recent");
   });
 
+  it("opens from a pointer interaction on the floating palette button", async () => {
+    renderConsole();
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Xyn (⌘K / Ctrl+K)" }));
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(screen.getByRole("dialog", { name: "Xyn Console" })).toBeInTheDocument();
+  });
+
   it("submits intent with Enter from the textarea", async () => {
     apiMocks.resolveXynIntent.mockResolvedValue({
       status: "UnsupportedIntent",

@@ -2806,3 +2806,44 @@ export type AppJobPatchPayload = {
   output_json?: Record<string, unknown>;
   logs_text?: string;
 };
+
+export type AppExecutionNote = {
+  id: string;
+  workspace_id?: string | null;
+  related_artifact_ids: string[];
+  prompt_or_request: string;
+  findings: string[];
+  root_cause: string;
+  proposed_fix: string;
+  implementation_summary: string;
+  validation_summary: string[];
+  debt_recorded: string[];
+  status: string;
+  timestamp: string;
+  updated_at?: string | null;
+  match_reason: "note_id" | "related_artifact_ids" | "job_id" | "generated_artifact_chain";
+  match_values: string[];
+  metadata: Record<string, unknown>;
+};
+
+export type AppPaletteResult = {
+  kind: "table" | string;
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  text?: string;
+  meta?: Record<string, unknown>;
+};
+
+export type AppBuilderArtifact = {
+  id: string;
+  workspace_id?: string | null;
+  name: string;
+  kind: string;
+  storage_scope?: string | null;
+  sync_state?: string | null;
+  content_type?: string | null;
+  byte_length?: number | null;
+  created_at?: string | null;
+  created_by?: string | null;
+  metadata?: Record<string, unknown>;
+};
