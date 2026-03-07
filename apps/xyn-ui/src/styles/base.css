@@ -4456,6 +4456,25 @@ button.sm {
   white-space: nowrap;
 }
 
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.48rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  background: rgba(34, 197, 94, 0.16);
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.button-link:hover,
+.button-link:focus-visible {
+  background: rgba(34, 197, 94, 0.24);
+  border-color: rgba(34, 197, 94, 0.42);
+}
+
 @media (max-width: 768px) {
   .workbench-topbar {
     justify-content: center;

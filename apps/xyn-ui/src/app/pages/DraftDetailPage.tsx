@@ -387,18 +387,55 @@ export default function DraftDetailPage({
             <p className="muted small">{relatedJobs.length || 0}</p>
           </div>
           <div>
-            <strong>Running app</strong>
-            <p className="muted small">
-              {deploymentUrls.appUrl ? <a href={withDocsUrl(deploymentUrls.appUrl)} target="_blank" rel="noreferrer">{withDocsUrl(deploymentUrls.appUrl)}</a> : "Not deployed yet"}
-            </p>
+            <strong>Open deployed app</strong>
+            {deploymentUrls.appUrl ? (
+              <>
+                <p className="muted small">
+                  <a
+                    className="button-link"
+                    href={withDocsUrl(deploymentUrls.appUrl)}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label="Open deployed app"
+                  >
+                    Open deployed app
+                  </a>
+                </p>
+                <p className="muted small">{withDocsUrl(deploymentUrls.appUrl)}</p>
+              </>
+            ) : (
+              <p className="muted small">Not deployed yet</p>
+            )}
           </div>
           <div>
-            <strong>Sibling Xyn</strong>
-            <p className="muted small">
-              {deploymentUrls.siblingUiUrl ? <a href={deploymentUrls.siblingUiUrl} target="_blank" rel="noreferrer">{deploymentUrls.siblingUiUrl}</a> : "Not provisioned yet"}
-            </p>
+            <strong>Open sibling Xyn</strong>
+            {deploymentUrls.siblingUiUrl ? (
+              <>
+                <p className="muted small">
+                  <a
+                    className="button-link"
+                    href={deploymentUrls.siblingUiUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label="Open sibling Xyn"
+                  >
+                    Open sibling Xyn
+                  </a>
+                </p>
+                <p className="muted small">{deploymentUrls.siblingUiUrl}</p>
+              </>
+            ) : (
+              <p className="muted small">Not provisioned yet</p>
+            )}
           </div>
         </div>
+        {deploymentUrls.appUrl ? (
+          <InlineMessage
+            tone="info"
+            title="Demo app entrypoint"
+            body="The current generated network inventory demo app is exposed through its FastAPI docs route. This is the visible application entrypoint for the current demo path."
+          />
+        ) : null}
         {relatedJobs.length > 0 ? (
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="card-header">
