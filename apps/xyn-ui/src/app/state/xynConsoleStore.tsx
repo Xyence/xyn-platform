@@ -343,6 +343,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     (result: XynIntentResolutionResult, message: string) => {
       updateSession((current) => ({
         ...current,
+        inputText: result.status === "DraftReady" && result.action_type === "CreateDraft" ? "" : current.inputText,
         lastMessage: message,
         lastResolution: result,
         pendingProposal:

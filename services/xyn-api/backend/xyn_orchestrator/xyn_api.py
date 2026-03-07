@@ -14983,6 +14983,7 @@ def _intent_apply_create_app_intent_draft(
     return JsonResponse(payload_response)
 
 
+@csrf_exempt
 def app_builder_drafts_collection(request: HttpRequest) -> JsonResponse:
     if request.method == "GET":
         return _proxy_seed_workspace_request(request, path="/api/v1/drafts", method="GET")
@@ -14991,6 +14992,7 @@ def app_builder_drafts_collection(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
+@csrf_exempt
 def app_builder_draft_detail(request: HttpRequest, draft_id: str) -> JsonResponse:
     if request.method == "GET":
         return _proxy_seed_workspace_request(request, path=f"/api/v1/drafts/{draft_id}", method="GET")
@@ -14999,18 +15001,21 @@ def app_builder_draft_detail(request: HttpRequest, draft_id: str) -> JsonRespons
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
+@csrf_exempt
 def app_builder_draft_submit(request: HttpRequest, draft_id: str) -> JsonResponse:
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
     return _proxy_seed_workspace_request(request, path=f"/api/v1/drafts/{draft_id}/submit", method="POST", payload=_parse_json(request))
 
 
+@csrf_exempt
 def app_builder_jobs_collection(request: HttpRequest) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     return _proxy_seed_workspace_request(request, path="/api/v1/jobs", method="GET")
 
 
+@csrf_exempt
 def app_builder_job_detail(request: HttpRequest, job_id: str) -> JsonResponse:
     if request.method == "GET":
         return _proxy_seed_workspace_request(request, path=f"/api/v1/jobs/{job_id}", method="GET")

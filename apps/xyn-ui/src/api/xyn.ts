@@ -833,6 +833,7 @@ export async function submitAppIntentDraft(draftId: string, workspaceId: string)
   const url = withWorkspaceId(`/xyn/api/app-builder/drafts/${draftId}/submit`, workspaceId);
   const response = await apiFetch(url.toString(), {
     method: "POST",
+    headers: buildHeaders(),
     credentials: "include",
   });
   return handle<AppDraftSubmitResponse>(response);

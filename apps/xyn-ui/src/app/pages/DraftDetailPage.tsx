@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import InlineMessage from "../../components/InlineMessage";
 import Tabs from "../components/ui/Tabs";
-import { getAppIntentDraft, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
-import type { AppIntentDraft } from "../../api/types";
+import { getAppIntentDraft, listAppJobs, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
+import type { AppIntentDraft, AppJob } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
+import { useNotifications } from "../state/notificationsStore";
 
 type DraftDetailTab = "editor" | "meta";
 type DraftStatusValue = "draft" | "ready" | "submitted" | "archived";
@@ -22,6 +23,48 @@ function parseJsonText(value: string): Record<string, unknown> {
   const parsed = JSON.parse(value);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   return parsed as Record<string, unknown>;
+}
+
+function normalizeJobStatus(status?: string): "queued" | "running" | "succeeded" | "failed" {
+  const token = String(status || "").trim().toLowerCase();
+  if (token === "succeeded") return "succeeded";
+  if (token === "failed") return "failed";
+  if (token === "running") return "running";
+  return "queued";
+}
+
+function jobTimestamp(job: AppJob): number {
+  const value = job.updated_at || job.created_at || "";
+  const parsed = new Date(value).getTime();
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function collectRelatedJobs(allJobs: AppJob[], draftId: string, seedJobId: string): AppJob[] {
+  const related = new Set<string>();
+  const trimmedDraftId = String(draftId || "").trim();
+  const trimmedSeedJobId = String(seedJobId || "").trim();
+  if (trimmedSeedJobId) related.add(trimmedSeedJobId);
+  for (const job of allJobs) {
+    const input = job.input_json && typeof job.input_json === "object" ? job.input_json : {};
+    if (trimmedDraftId && String(input.draft_id || "").trim() === trimmedDraftId) {
+      related.add(job.id);
+    }
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const job of allJobs) {
+      const input = job.input_json && typeof job.input_json === "object" ? job.input_json : {};
+      const sourceJobId = String(input.source_job_id || "").trim();
+      if (sourceJobId && related.has(sourceJobId) && !related.has(job.id)) {
+        related.add(job.id);
+        changed = true;
+      }
+    }
+  }
+  return allJobs
+    .filter((job) => related.has(job.id))
+    .sort((left, right) => jobTimestamp(left) - jobTimestamp(right));
 }
 
 export default function DraftDetailPage({
@@ -54,6 +97,8 @@ export default function DraftDetailPage({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [latestJobId, setLatestJobId] = useState<string>(String(linkedJobId || "").trim());
+  const [relatedJobs, setRelatedJobs] = useState<AppJob[]>([]);
+  const { push } = useNotifications();
   const rawPrompt = useMemo(() => {
     if (!draft?.content_json || typeof draft.content_json !== "object") return "";
     return String((draft.content_json as Record<string, unknown>).raw_prompt || "");
@@ -81,6 +126,81 @@ export default function DraftDetailPage({
   useEffect(() => {
     setLatestJobId(String(linkedJobId || "").trim());
   }, [linkedJobId]);
+
+  const loadJobs = useCallback(async () => {
+    if (!workspaceId || !draftId) {
+      setRelatedJobs([]);
+      return;
+    }
+    try {
+      const payload = await listAppJobs(workspaceId);
+      const related = collectRelatedJobs(payload, draftId, latestJobId);
+      setRelatedJobs(related);
+      if (!latestJobId && related.length) {
+        setLatestJobId(related[0].id);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }, [draftId, latestJobId, workspaceId]);
+
+  useEffect(() => {
+    void loadJobs();
+  }, [loadJobs]);
+
+  const buildStatus = useMemo(() => {
+    if (relatedJobs.some((job) => normalizeJobStatus(job.status) === "failed")) return "failed";
+    if (relatedJobs.some((job) => job.type === "smoke_test" && normalizeJobStatus(job.status) === "succeeded")) return "succeeded";
+    if (relatedJobs.some((job) => {
+      const status = normalizeJobStatus(job.status);
+      return status === "queued" || status === "running";
+    })) {
+      return "running";
+    }
+    if (String(draft?.status || status).toLowerCase() === "submitted") return "running";
+    return "draft";
+  }, [draft?.status, relatedJobs, status]);
+
+  const deploymentUrls = useMemo(() => {
+    let appUrl = "";
+    let siblingUiUrl = "";
+    let siblingApiUrl = "";
+    for (const job of relatedJobs) {
+      const output = job.output_json && typeof job.output_json === "object" ? job.output_json : {};
+      if (!appUrl && typeof output.app_url === "string") appUrl = output.app_url;
+      if (!siblingUiUrl && typeof output.ui_url === "string") siblingUiUrl = output.ui_url;
+      if (!siblingApiUrl && typeof output.api_url === "string") siblingApiUrl = output.api_url;
+      const sibling = output.sibling_xyn && typeof output.sibling_xyn === "object" ? output.sibling_xyn as Record<string, unknown> : {};
+      if (!siblingUiUrl && typeof sibling.ui_url === "string") siblingUiUrl = sibling.ui_url;
+      if (!siblingApiUrl && typeof sibling.api_url === "string") siblingApiUrl = sibling.api_url;
+    }
+    return { appUrl, siblingUiUrl, siblingApiUrl };
+  }, [relatedJobs]);
+
+  useEffect(() => {
+    if (!relatedJobs.length) return;
+    if (buildStatus !== "succeeded" && buildStatus !== "failed") return;
+    push({
+      level: buildStatus === "succeeded" ? "success" : "error",
+      title: buildStatus === "succeeded" ? "App build completed" : "App build failed",
+      message:
+        buildStatus === "succeeded"
+          ? draft?.title || "Draft build succeeded."
+          : (relatedJobs.find((job) => normalizeJobStatus(job.status) === "failed")?.logs_text || "Review build pipeline logs."),
+      entityType: "run",
+      entityId: latestJobId || draftId,
+      status: buildStatus,
+      href: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl || undefined,
+      ctaLabel: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl ? "Open" : undefined,
+      dedupeKey: `app-build:${draftId}:${buildStatus}`,
+    });
+  }, [buildStatus, deploymentUrls.appUrl, deploymentUrls.siblingUiUrl, draft?.title, draftId, latestJobId, push, relatedJobs]);
+
+  useEffect(() => {
+    if (buildStatus !== "running") return;
+    const interval = window.setInterval(() => void loadJobs(), 4000);
+    return () => window.clearInterval(interval);
+  }, [buildStatus, loadJobs]);
 
   const save = async () => {
     if (!workspaceId || !draftId) return;
@@ -161,6 +281,59 @@ export default function DraftDetailPage({
           <h3>{draft?.title || "Draft"}</h3>
           <span className="chip">{draft?.status || status || "draft"}</span>
         </div>
+        <div className="detail-grid" style={{ marginTop: 12, marginBottom: 12 }}>
+          <div>
+            <strong>Build status</strong>
+            <p className="muted small">{buildStatus}</p>
+          </div>
+          <div>
+            <strong>Tracked jobs</strong>
+            <p className="muted small">{relatedJobs.length || 0}</p>
+          </div>
+          <div>
+            <strong>Running app</strong>
+            <p className="muted small">
+              {deploymentUrls.appUrl ? <a href={deploymentUrls.appUrl} target="_blank" rel="noreferrer">{deploymentUrls.appUrl}</a> : "Not deployed yet"}
+            </p>
+          </div>
+          <div>
+            <strong>Sibling Xyn</strong>
+            <p className="muted small">
+              {deploymentUrls.siblingUiUrl ? <a href={deploymentUrls.siblingUiUrl} target="_blank" rel="noreferrer">{deploymentUrls.siblingUiUrl}</a> : "Not provisioned yet"}
+            </p>
+          </div>
+        </div>
+        {relatedJobs.length > 0 ? (
+          <div className="card" style={{ marginBottom: 12 }}>
+            <div className="card-header">
+              <h3>Build Pipeline</h3>
+            </div>
+            <div className="canvas-table-wrap">
+              <table className="canvas-table">
+                <thead>
+                  <tr>
+                    <th>Step</th>
+                    <th>Status</th>
+                    <th>Updated</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {relatedJobs.map((job) => (
+                    <tr key={job.id}>
+                      <td>
+                        <button className="ghost small" type="button" onClick={() => (onOpenJob ? onOpenJob(job.id) : navigate(toWorkspacePath(workspaceId, `jobs/${job.id}`)))}>
+                          {job.type}
+                        </button>
+                      </td>
+                      <td><span className="chip">{job.status}</span></td>
+                      <td>{job.updated_at || job.created_at || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
         <Tabs
           value={activeTab}
           onChange={(next) => setActiveTab(next)}

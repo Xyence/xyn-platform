@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bot, RefreshCw, X } from "lucide-react";
-import { listAiActivity } from "../../../api/xyn";
-import type { AiActivityEntry } from "../../../api/types";
+import { listAiActivity, listAppJobs } from "../../../api/xyn";
+import type { AiActivityEntry, AppJob } from "../../../api/types";
 import { useOperations } from "../../state/operationRegistry";
 
 type Props = {
@@ -20,6 +20,38 @@ function relativeTime(value?: string): string {
   if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
   if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
   return `${Math.floor(delta / 86400)}d ago`;
+}
+
+function mapJobStatus(status?: string): "running" | "succeeded" | "failed" {
+  const token = String(status || "").trim().toLowerCase();
+  if (token === "succeeded" || token === "completed") return "succeeded";
+  if (token === "failed") return "failed";
+  return "running";
+}
+
+function mapAppJobToActivity(job: AppJob): AiActivityEntry {
+  const input = job.input_json && typeof job.input_json === "object" ? job.input_json : {};
+  return {
+    id: `app-job:${job.id}`,
+    event_type: "app_builder_job",
+    status: mapJobStatus(job.status),
+    summary: `Build step ${job.type} ${job.status}`,
+    created_at: job.updated_at || job.created_at,
+    actor_id: null,
+    agent_slug: "xyn-app-builder",
+    provider: "",
+    model_name: "",
+    artifact_id: undefined,
+    artifact_type: "",
+    artifact_title: "",
+    request_type: "app_builder.job",
+    prompt: "",
+    workspace_id: job.workspace_id,
+    draft_id: typeof input.draft_id === "string" ? input.draft_id : null,
+    job_id: job.id,
+    error: mapJobStatus(job.status) === "failed" ? String(job.logs_text || "").split("\n").slice(-1)[0] || "" : "",
+    source: "app_job",
+  };
 }
 
 export default function AgentActivityDrawer({ open, onClose, workspaceId, artifactId }: Props) {
@@ -41,11 +73,20 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
     try {
       setError(null);
       setLoading(true);
-      const result = await listAiActivity({
-        workspaceId,
-        artifactId: artifactOnly ? artifactId : undefined,
+      const [activityResult, appJobs] = await Promise.all([
+        listAiActivity({
+          workspaceId,
+          artifactId: artifactOnly ? artifactId : undefined,
+        }),
+        listAppJobs(workspaceId),
+      ]);
+      const merged = [...(activityResult.items || []), ...appJobs.map(mapAppJobToActivity)];
+      merged.sort((left, right) => {
+        const leftTs = new Date(left.created_at || 0).getTime();
+        const rightTs = new Date(right.created_at || 0).getTime();
+        return rightTs - leftTs;
       });
-      setItems(result.items || []);
+      setItems(merged);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -56,6 +97,12 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
   useEffect(() => {
     if (!open) return;
     void load();
+  }, [open, workspaceId, artifactId, artifactOnly]);
+
+  useEffect(() => {
+    if (!open) return;
+    const interval = window.setInterval(() => void load(), 5000);
+    return () => window.clearInterval(interval);
   }, [open, workspaceId, artifactId, artifactOnly]);
 
   const badgeCount = useMemo(() => items.filter((item) => item.status === "running").length, [items]);

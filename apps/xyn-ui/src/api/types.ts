@@ -1936,7 +1936,7 @@ export type AiActivityEntry = {
   artifact_id?: string;
   artifact_type?: string;
   artifact_title?: string;
-  source?: "audit_log" | "artifact_event";
+  source?: "audit_log" | "artifact_event" | "app_job";
 };
 
 export type WorkspaceMembershipSummary = {
