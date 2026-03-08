@@ -6812,6 +6812,65 @@ def _workspace_is_visible(workspace: Workspace, *, include_system: bool = False)
     return not _is_system_workspace(workspace)
 
 
+DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "core.workbench",
+        "Workbench",
+        "registry/modules/workbench.artifact.manifest.json",
+        "Console-first, panel-based runtime landing experience.",
+    ),
+    (
+        "xyn-api",
+        "xyn-api",
+        "registry/modules/xyn-api.artifact.manifest.json",
+        "Deployable Xyn API runtime artifact.",
+    ),
+    (
+        "xyn-ui",
+        "xyn-ui",
+        "registry/modules/xyn-ui.artifact.manifest.json",
+        "Deployable Xyn UI runtime artifact.",
+    ),
+)
+
+
+def _runtime_artifact_host_workspace(fallback_workspace: Workspace) -> Workspace:
+    host_workspace = Workspace.objects.filter(slug="platform-builder").first()
+    if host_workspace is not None:
+        return host_workspace
+    first_workspace = Workspace.objects.order_by("created_at").first()
+    if first_workspace is not None:
+        return first_workspace
+    return fallback_workspace
+
+
+def _ensure_default_workspace_artifact_bindings(workspace: Workspace) -> None:
+    host_workspace = _runtime_artifact_host_workspace(workspace)
+    for slug, title, manifest_ref, summary in DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS:
+        artifact = _ensure_runtime_artifact(
+            workspace=host_workspace,
+            slug=slug,
+            title=title,
+            manifest_ref=manifest_ref,
+            summary=summary,
+        )
+        binding, _ = WorkspaceArtifactBinding.objects.get_or_create(
+            workspace=workspace,
+            artifact=artifact,
+            defaults={"enabled": True, "installed_state": "installed", "config_ref": None},
+        )
+        update_fields: List[str] = []
+        if not binding.enabled:
+            binding.enabled = True
+            update_fields.append("enabled")
+        if str(binding.installed_state or "").strip().lower() != "installed":
+            binding.installed_state = "installed"
+            update_fields.append("installed_state")
+        if update_fields:
+            update_fields.append("updated_at")
+            binding.save(update_fields=update_fields)
+
+
 def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspace]:
     if _auth_mode() != "dev":
         return None
@@ -6841,6 +6900,7 @@ def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspac
         user_identity=identity,
         defaults={"role": "admin", "termination_authority": True},
     )
+    _ensure_default_workspace_artifact_bindings(workspace)
     return workspace
 
 
@@ -9965,6 +10025,7 @@ def workspaces_collection(request: HttpRequest) -> JsonResponse:
         user_identity=identity,
         defaults={"role": "admin", "termination_authority": True},
     )
+    _ensure_default_workspace_artifact_bindings(workspace)
     return JsonResponse({"workspace": _serialize_workspace_summary(workspace, role="admin", termination_authority=True)})
 
 
@@ -15686,6 +15747,7 @@ def _find_or_create_customer_workspace(
         .first()
     )
     if existing:
+        _ensure_default_workspace_artifact_bindings(existing)
         return existing, False
     next_slug = _next_workspace_slug(_build_workspace_slug_from_name(normalized))
     created = Workspace.objects.create(
@@ -15700,6 +15762,7 @@ def _find_or_create_customer_workspace(
         parent_workspace=operator_workspace,
         metadata_json={},
     )
+    _ensure_default_workspace_artifact_bindings(created)
     return created, True
 
 
@@ -16211,6 +16274,7 @@ def _intent_apply_deploy_ems_customer(
         user_identity=identity,
         defaults={"role": "admin", "termination_authority": True},
     )
+    _ensure_default_workspace_artifact_bindings(child_workspace)
 
     ems_artifact = Artifact.objects.filter(slug="ems").order_by("-updated_at", "-created_at").first()
     if ems_artifact:

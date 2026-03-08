@@ -11,6 +11,7 @@ export default function CapabilitiesIndicator({ workspaceId }: { workspaceId: st
   const [open, setOpenPopover] = useState(false);
   const [platformOpen, setPlatformOpen] = useState(false);
   const { loading, error, capabilities, platform } = useCapabilitySuggestions(workspaceId);
+  const visibleCount = capabilities.length + platform.length;
 
   useEffect(() => {
     if (!open) return;
@@ -62,7 +63,7 @@ export default function CapabilitiesIndicator({ workspaceId }: { workspaceId: st
         aria-haspopup="dialog"
       >
         Capabilities
-        <span className="workbench-capabilities-count">{capabilities.length}</span>
+        <span className="workbench-capabilities-count">{loading ? "…" : visibleCount}</span>
       </button>
       {open ? (
         <div className="workbench-capabilities-popover" role="dialog" aria-label="Capabilities">

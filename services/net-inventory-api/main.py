@@ -47,6 +47,22 @@ def init_schema_with_retry() -> None:
                     )
                     cur.execute("CREATE INDEX IF NOT EXISTS ix_devices_workspace_id ON devices(workspace_id)")
                     cur.execute("CREATE INDEX IF NOT EXISTS ix_devices_workspace_status ON devices(workspace_id, status)")
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS locations (
+                          id UUID PRIMARY KEY,
+                          workspace_id UUID NOT NULL,
+                          name TEXT NOT NULL,
+                          kind TEXT NOT NULL DEFAULT 'site',
+                          city TEXT NULL,
+                          region TEXT NULL,
+                          country TEXT NULL,
+                          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute("CREATE INDEX IF NOT EXISTS ix_locations_workspace_id ON locations(workspace_id)")
                 conn.commit()
             return
         except Exception as exc:
@@ -64,6 +80,15 @@ class DeviceCreateRequest(BaseModel):
     kind: str = "device"
     status: str = "unknown"
     location_id: Optional[uuid.UUID] = None
+
+
+class LocationCreateRequest(BaseModel):
+    workspace_id: uuid.UUID
+    name: str = Field(min_length=1)
+    kind: str = "site"
+    city: Optional[str] = None
+    region: Optional[str] = None
+    country: Optional[str] = None
 
 
 @app.on_event("startup")
@@ -132,6 +157,8 @@ def index():
               <li><a href="/health">/health</a> for service health</li>
               <li><code>GET /devices?workspace_id=&lt;uuid&gt;</code> to list devices</li>
               <li><code>POST /devices</code> to create a device</li>
+              <li><code>GET /locations?workspace_id=&lt;uuid&gt;</code> to list locations</li>
+              <li><code>POST /locations</code> to create a location</li>
               <li><code>GET /reports/devices-by-status?workspace_id=&lt;uuid&gt;</code> for the chart dataset</li>
               <li><a href="/docs">/docs</a> for interactive API docs</li>
             </ul>
@@ -187,6 +214,72 @@ def create_device(payload: DeviceCreateRequest):
             )
             row = cur.fetchone()
         conn.commit()
+    return row
+
+
+@app.get("/locations")
+def list_locations(workspace_id: uuid.UUID = Query(...)):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, workspace_id, name, kind, city, region, country, created_at, updated_at
+                FROM locations
+                WHERE workspace_id = %s
+                ORDER BY created_at DESC
+                """,
+                (str(workspace_id),),
+            )
+            rows = cur.fetchall()
+    return {"items": rows}
+
+
+@app.post("/locations", status_code=201)
+def create_location(payload: LocationCreateRequest):
+    row_id = uuid.uuid4()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO locations (id, workspace_id, name, kind, city, region, country, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                """,
+                (
+                    str(row_id),
+                    str(payload.workspace_id),
+                    payload.name.strip(),
+                    payload.kind.strip() or "site",
+                    payload.city.strip() if payload.city else None,
+                    payload.region.strip() if payload.region else None,
+                    payload.country.strip() if payload.country else None,
+                ),
+            )
+            cur.execute(
+                """
+                SELECT id, workspace_id, name, kind, city, region, country, created_at, updated_at
+                FROM locations WHERE id = %s
+                """,
+                (str(row_id),),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return row
+
+
+@app.get("/locations/{location_id}")
+def get_location(location_id: uuid.UUID):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, workspace_id, name, kind, city, region, country, created_at, updated_at
+                FROM locations WHERE id = %s
+                """,
+                (str(location_id),),
+            )
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Location not found")
     return row
 
 
