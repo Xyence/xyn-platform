@@ -115,6 +115,30 @@ function extractBuildSelectors(allJobs: AppJob[]): {
   };
 }
 
+function extractInstalledCapability(allJobs: AppJob[]): {
+  appSlug: string;
+  title: string;
+  reports: string[];
+} | null {
+  for (const job of allJobs) {
+    const payloads = [job.input_json, job.output_json];
+    for (const payload of payloads) {
+      if (!payload || typeof payload !== "object") continue;
+      const record = payload as Record<string, unknown>;
+      const appSpec = record.app_spec && typeof record.app_spec === "object" ? (record.app_spec as Record<string, unknown>) : null;
+      if (!appSpec) continue;
+      const appSlug = String(appSpec.app_slug || "").trim();
+      if (!appSlug) continue;
+      return {
+        appSlug,
+        title: String(appSpec.title || appSlug).trim() || appSlug,
+        reports: Array.isArray(appSpec.reports) ? appSpec.reports.map((item) => String(item || "").trim()).filter(Boolean) : [],
+      };
+    }
+  }
+  return null;
+}
+
 function formatTimestamp(value?: string | null): string {
   const raw = String(value || "").trim();
   if (!raw) return "—";
@@ -130,6 +154,7 @@ export default function DraftDetailPage({
   draftId: explicitDraftId,
   onBack,
   onOpenJob,
+  onOpenArtifacts,
   linkedJobId,
 }: {
   workspaceId: string;
@@ -138,6 +163,7 @@ export default function DraftDetailPage({
   draftId?: string;
   onBack?: () => void;
   onOpenJob?: (jobId: string) => void;
+  onOpenArtifacts?: (kind?: string) => void;
   linkedJobId?: string | null;
 }) {
   const params = useParams();
@@ -272,6 +298,7 @@ export default function DraftDetailPage({
     }
     return { appUrl, siblingUiUrl, siblingApiUrl };
   }, [relatedJobs]);
+  const installedCapability = useMemo(() => extractInstalledCapability(relatedJobs), [relatedJobs]);
 
   useEffect(() => {
     if (!relatedJobs.length) return;
@@ -387,24 +414,14 @@ export default function DraftDetailPage({
             <p className="muted small">{relatedJobs.length || 0}</p>
           </div>
           <div>
-            <strong>Open deployed app</strong>
-            {deploymentUrls.appUrl ? (
+            <strong>Installed capability</strong>
+            {installedCapability ? (
               <>
-                <p className="muted small">
-                  <a
-                    className="button-link"
-                    href={withDocsUrl(deploymentUrls.appUrl)}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-label="Open deployed app"
-                  >
-                    Open deployed app
-                  </a>
-                </p>
-                <p className="muted small">{withDocsUrl(deploymentUrls.appUrl)}</p>
+                <p className="muted small">{installedCapability.title}</p>
+                <p className="muted small">{installedCapability.appSlug}</p>
               </>
             ) : (
-              <p className="muted small">Not deployed yet</p>
+              <p className="muted small">Not installed yet</p>
             )}
           </div>
           <div>
@@ -429,12 +446,51 @@ export default function DraftDetailPage({
             )}
           </div>
         </div>
-        {deploymentUrls.appUrl ? (
+        {installedCapability ? (
           <InlineMessage
             tone="info"
-            title="Demo app entrypoint"
-            body="The current generated network inventory demo app is exposed through its FastAPI docs route. This is the visible application entrypoint for the current demo path."
+            title="Installed in Xyn"
+            body={`Deployment installed ${installedCapability.title} into the Xyn runtime shell. Operate it through the palette using commands like "show devices" and "show devices by status".`}
           />
+        ) : null}
+        {installedCapability ? (
+          <div className="card capability-card" style={{ marginBottom: 12 }}>
+            <div className="card-header">
+              <h3>Installed Capability</h3>
+              <span className="chip">active in Xyn</span>
+            </div>
+            <div className="detail-grid" style={{ marginTop: 12 }}>
+              <div>
+                <strong>Capability</strong>
+                <p className="muted small">{installedCapability.title}</p>
+              </div>
+              <div>
+                <strong>Shell</strong>
+                <p className="muted small">Xyn workbench</p>
+              </div>
+              <div className="span-full">
+                <strong>Operate with palette</strong>
+                <ul className="muted small" style={{ margin: "6px 0 0 18px" }}>
+                  <li><code>show devices</code></li>
+                  <li><code>show devices by status</code></li>
+                  <li><code>show artifacts of kind app_spec</code></li>
+                </ul>
+              </div>
+              {installedCapability.reports.length > 0 ? (
+                <div className="span-full">
+                  <strong>Installed reports</strong>
+                  <p className="muted small">{installedCapability.reports.join(", ")}</p>
+                </div>
+              ) : null}
+            </div>
+            {onOpenArtifacts ? (
+              <div className="inline-actions" style={{ marginTop: 12 }}>
+                <button className="ghost" type="button" onClick={() => onOpenArtifacts("app_spec")}>
+                  View generated artifacts
+                </button>
+              </div>
+            ) : null}
+          </div>
         ) : null}
         {relatedJobs.length > 0 ? (
           <div className="card" style={{ marginBottom: 12 }}>

@@ -53,7 +53,7 @@ async function submitPalettePrompt(page: Page, prompt: string) {
 }
 
 test.describe("demo golden path", () => {
-  test("walks the demo path through the UI", async ({ page, context }, testInfo) => {
+  test("walks the demo path through the UI", async ({ page }, testInfo) => {
     const browserLogs: string[] = [];
     const pushLog = (line: string) => browserLogs.push(`${new Date().toISOString()} ${line}`);
     page.on("console", (message) => pushLog(`[console:${message.type()}] ${message.text()}`));
@@ -128,28 +128,30 @@ test.describe("demo golden path", () => {
       });
 
       await test.step(STEP_SEQUENCE[5], async () => {
-        const runningAppLink = page.getByRole("link", { name: "Open deployed app" });
-        await expect(runningAppLink, "Open deployed app CTA should be visible on draft detail.").toBeVisible({ timeout: 120_000 });
         await expect(
-          page.getByText(/FastAPI docs route|visible application entrypoint/i),
-          "Draft detail should explain the current deployed app entrypoint.",
+          page.getByText(/Installed in Xyn/i),
+          "Draft detail should explain that the capability is installed into the Xyn shell.",
         ).toBeVisible();
-        const [appPage] = await Promise.all([context.waitForEvent("page"), runningAppLink.click()]);
-        await appPage.waitForLoadState("domcontentloaded");
-        await expect(appPage, "Running app should open in a new tab.").toHaveURL(/\/docs$/);
-        await expect.poll(() => appPage.title(), { timeout: 30_000 }).toMatch(/Swagger UI|OpenAPI|FastAPI/i);
-        await shot(appPage, testInfo, 5, STEP_SEQUENCE[5]);
-        await appPage.close();
+        await expect(page.getByRole("heading", { name: "Installed Capability" }), "Installed capability card should be visible.").toBeVisible();
+        await expect(page.getByText(/Network Inventory|net-inventory/i).first(), "Installed capability should identify the deployed app.").toBeVisible();
+        await expect(
+          page.locator("code").filter({ hasText: /^show devices by status$/i }),
+          "Installed capability should advertise palette-driven report usage.",
+        ).toBeVisible();
+        await shot(page, testInfo, 5, STEP_SEQUENCE[5]);
       });
 
       await test.step(STEP_SEQUENCE[6], async () => {
         await submitPalettePrompt(page, "show devices");
         await expect(page.getByText(/seeded-device-1/i), "Palette should show seeded device data.").toBeVisible({ timeout: 60_000 });
+        await submitPalettePrompt(page, "show devices by status");
+        await expect(page.getByText(/Devices by status/i), "Palette should surface a devices-by-status report.").toBeVisible({ timeout: 60_000 });
+        await expect(page.getByText(/online/i).first(), "Devices-by-status report should include at least one status bucket.").toBeVisible();
         await shot(page, testInfo, 6, STEP_SEQUENCE[6]);
       });
 
       await test.step(STEP_SEQUENCE[7], async () => {
-        await submitPalettePrompt(page, "show artifacts of kind app_spec");
+        await page.getByRole("button", { name: /View generated artifacts/i }).click();
         await expect(page.getByText(/Artifacts/i).first(), "Artifacts panel should open.").toBeVisible({ timeout: 30_000 });
         await expect(page.getByText(/appspec\.net-inventory|net-inventory/i).first(), "Generated app_spec artifact should be visible.").toBeVisible({
           timeout: 60_000,

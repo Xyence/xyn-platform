@@ -105,7 +105,7 @@ function defaultArtifactStructuredQuery(): ArtifactStructuredQuery {
 }
 
 function isExplicitPaletteCommand(input: string): boolean {
-  return /^(show|list)\s+devices$/i.test(String(input || "").trim());
+  return /^(show|list)\s+devices(\s+by\s+status)?$/i.test(String(input || "").trim());
 }
 
 function explicitAppBuilderArtifactKind(input: string): string {

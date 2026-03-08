@@ -2831,6 +2831,9 @@ export type AppPaletteResult = {
   columns: string[];
   rows: Array<Record<string, unknown>>;
   text?: string;
+  labels?: string[];
+  values?: Array<number>;
+  title?: string;
   meta?: Record<string, unknown>;
 };
 

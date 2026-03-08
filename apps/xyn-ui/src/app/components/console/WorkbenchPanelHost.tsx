@@ -93,6 +93,8 @@ function PaletteResultPanel({ result, prompt, error }: { result?: AppPaletteResu
   const safeResult = result || { kind: "table", columns: [], rows: [] };
   const columns = Array.isArray(safeResult.columns) ? safeResult.columns : [];
   const rows = Array.isArray(safeResult.rows) ? safeResult.rows : [];
+  const labels = Array.isArray(safeResult.labels) ? safeResult.labels : [];
+  const values = Array.isArray(safeResult.values) ? safeResult.values : [];
   const meta = safeResult.meta && typeof safeResult.meta === "object" ? safeResult.meta : {};
   const contextPackSlugs = Array.isArray(meta.context_pack_slugs)
     ? meta.context_pack_slugs.map((value) => String(value || "").trim()).filter(Boolean)
@@ -125,6 +127,29 @@ function PaletteResultPanel({ result, prompt, error }: { result?: AppPaletteResu
         </div>
         {error ? <InlineMessage tone="error" title="Palette request failed" body={error} /> : null}
         {warnings.length ? <InlineMessage tone="warn" title="Warnings" body={warnings.join(" ")} /> : null}
+        {safeResult.kind === "bar_chart" && labels.length > 0 ? (
+          <div className="card" style={{ marginTop: 12, marginBottom: 12 }}>
+            <div className="card-header">
+              <h3>{String(safeResult.title || "Report")}</h3>
+            </div>
+            <div className="chart-bars">
+              {labels.map((label, index) => {
+                const numeric = Number(values[index] ?? 0);
+                const maxValue = Math.max(...values.map((value) => Number(value || 0)), 1);
+                const width = `${Math.max((numeric / maxValue) * 100, 6)}%`;
+                return (
+                  <div className="chart-row" key={`${label}-${index}`}>
+                    <div className="chart-label">{label}</div>
+                    <div className="chart-track">
+                      <div className="chart-bar" style={{ width }} />
+                    </div>
+                    <div className="chart-value">{numeric}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
         <div className="canvas-table-wrap">
           <table className="canvas-table">
             <thead>
@@ -1359,6 +1384,9 @@ export default function WorkbenchPanelHost({
             }
           }}
           onOpenJob={(jobId) => openPanel("job_detail", { job_id: jobId }, { open_in: "new_panel", return_to_panel_id: panel.panel_id })}
+          onOpenArtifacts={(kind) =>
+            openPanel("app_builder_artifact_list", { kind: String(kind || "") }, { open_in: "new_panel", return_to_panel_id: panel.panel_id })
+          }
         />
       );
     }
