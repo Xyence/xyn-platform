@@ -41,7 +41,7 @@ describe("resolvePromptSurfaceTarget", () => {
     });
     expect(result).toEqual({
       key: "platform_settings",
-      route: "/app/platform/hub",
+      route: "/w/ws-1/workbench?panel=platform_settings",
       scope: "global",
       source: "core_surface",
     });
@@ -57,10 +57,11 @@ describe("resolvePromptSurfaceTarget", () => {
   it("resolves platform settings hub even without admin roles", () => {
     const result = resolvePromptSurfaceTarget("open platform settings", {
       user: { roles: ["app_user"], permissions: [] },
+      workspaceId: "ws-1",
     });
     expect(result).toEqual({
       key: "platform_settings",
-      route: "/app/platform/hub",
+      route: "/w/ws-1/workbench?panel=platform_settings",
       scope: "global",
       source: "core_surface",
     });

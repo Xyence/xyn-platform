@@ -131,6 +131,7 @@ from .artifact_packages import (
     ArtifactPackageValidationError,
     export_artifact_package,
     import_package_blob,
+    import_package_blob_idempotent,
     install_package,
     validate_package_install,
 )
@@ -7562,6 +7563,7 @@ def _serialize_workspace_artifact_binding(binding: WorkspaceArtifactBinding) -> 
         "enabled": bool(binding.enabled),
         "installed_state": str(binding.installed_state or "installed"),
         "version": artifact.version,
+        "package_version": str(artifact.package_version or ""),
         "slug": _artifact_slug(artifact),
         "manifest_ref": manifest_ref or None,
         "manifest_summary": manifest_summary,
@@ -8626,6 +8628,7 @@ def validate_artifact(artifact: Artifact) -> Tuple[str, List[str]]:
 def artifacts_collection(request: HttpRequest) -> JsonResponse:
     if staff_error := _require_staff(request):
         return staff_error
+    include_bridge = _include_bridge_artifacts(request)
     if request.method == "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
     if request.method == "GET" and (
@@ -8648,6 +8651,7 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
                     installed_state="installed",
                 ).only("artifact_id")
             }
+        artifacts = [artifact for artifact in artifacts if _generic_artifact_visible(artifact, installed_ids=installed_ids, include_bridge=include_bridge)]
         artifacts = _dedupe_artifacts_for_dataset(artifacts, installed_ids=installed_ids)
         rows = [_artifact_table_row(artifact, workspace_id=workspace_id, installed_ids=installed_ids) for artifact in artifacts]
         for filter_row in structured_query.get("filters") or []:
@@ -8714,8 +8718,9 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
         )
     qs = qs.order_by("-updated_at", "-created_at")
     total = qs.count()
-    items = list(qs[offset : offset + limit])
-
+    items = [artifact for artifact in qs if _generic_artifact_visible(artifact, include_bridge=include_bridge)]
+    total = len(items)
+    items = items[offset : offset + limit]
     blueprint_ids = [item.source_ref_id for item in items if item.source_ref_type == "Blueprint" and item.source_ref_id]
     draft_ids = [item.source_ref_id for item in items if item.source_ref_type == "BlueprintDraftSession" and item.source_ref_id]
     blueprints_by_id = {str(item.id): item for item in Blueprint.objects.filter(id__in=blueprint_ids)} if blueprint_ids else {}
@@ -8743,6 +8748,17 @@ def artifacts_catalog_collection(request: HttpRequest) -> JsonResponse:
     query = str(request.GET.get("query") or request.GET.get("q") or "").strip()
     kind = str(request.GET.get("kind") or "").strip().lower()
     workspace_id = str(request.GET.get("workspace_id") or "").strip() or None
+    include_bridge = _include_bridge_artifacts(request)
+    installed_ids: Set[str] = set()
+    if workspace_id:
+        installed_ids = {
+            str(binding.artifact_id)
+            for binding in WorkspaceArtifactBinding.objects.filter(
+                workspace_id=workspace_id,
+                enabled=True,
+                installed_state="installed",
+            ).only("artifact_id")
+        }
 
     qs = Artifact.objects.select_related("type").all()
     if kind:
@@ -8751,7 +8767,12 @@ def artifacts_catalog_collection(request: HttpRequest) -> JsonResponse:
         qs = qs.filter(models.Q(title__icontains=query) | models.Q(summary__icontains=query) | models.Q(slug__icontains=query))
 
     rows: List[Dict[str, Any]] = []
-    for artifact in qs.order_by("-updated_at", "-created_at")[:500]:
+    visible = [
+        artifact
+        for artifact in qs.order_by("-updated_at", "-created_at")
+        if _generic_artifact_visible(artifact, installed_ids=installed_ids, include_bridge=include_bridge)
+    ]
+    for artifact in visible[:500]:
         try:
             manifest_summary = _manifest_summary_for_artifact(artifact, workspace_id=workspace_id)
         except ValueError as exc:
@@ -8766,6 +8787,7 @@ def artifacts_catalog_collection(request: HttpRequest) -> JsonResponse:
                 "kind": artifact.type.slug if artifact.type_id else None,
                 "description": (artifact.summary or "").strip() or None,
                 "version": artifact.version,
+                "package_version": str(artifact.package_version or ""),
                 "updated_at": artifact.updated_at,
                 "manifest_summary": manifest_summary,
                 "capability": capability,
@@ -9074,6 +9096,54 @@ def _resolve_artifact_by_slug(artifact_slug: str) -> Optional[Artifact]:
     )
 
 
+def _artifact_scope(artifact: Artifact) -> Dict[str, Any]:
+    return artifact.scope_json if isinstance(artifact.scope_json, dict) else {}
+
+
+def _artifact_is_bridge_only(artifact: Artifact) -> bool:
+    scope = _artifact_scope(artifact)
+    return bool(scope.get("bridge_artifact")) and str(scope.get("bridge_visibility") or "").strip().lower() == "workspace_bound_only"
+
+
+def _include_bridge_artifacts(request: HttpRequest) -> bool:
+    return str(request.GET.get("include_bridge") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _generic_artifact_visible(
+    artifact: Artifact,
+    *,
+    installed_ids: Optional[Set[str]] = None,
+    include_bridge: bool = False,
+) -> bool:
+    if include_bridge:
+        return True
+    if not _artifact_is_bridge_only(artifact):
+        return True
+    if installed_ids and str(artifact.id) in installed_ids:
+        return True
+    return False
+
+
+def _artifact_visible_for_request(
+    request: HttpRequest,
+    artifact: Artifact,
+    *,
+    workspace_id: Optional[str] = None,
+) -> bool:
+    include_bridge = _include_bridge_artifacts(request)
+    installed_ids: Set[str] = set()
+    workspace_token = str(workspace_id or request.GET.get("workspace_id") or "").strip()
+    if workspace_token:
+        installed_ids = {
+            str(binding.artifact_id)
+            for binding in WorkspaceArtifactBinding.objects.filter(
+                workspace_id=workspace_token,
+                artifact_id=artifact.id,
+            ).only("artifact_id")
+        }
+    return _generic_artifact_visible(artifact, installed_ids=installed_ids, include_bridge=include_bridge)
+
+
 def _artifact_file_metadata_rows(artifact: Artifact) -> List[Dict[str, Any]]:
     file_map = _artifact_raw_file_map(artifact)
     rows: List[Dict[str, Any]] = []
@@ -9101,6 +9171,8 @@ def artifact_by_slug_detail(request: HttpRequest, artifact_slug: str) -> JsonRes
     if artifact is None:
         return JsonResponse({"error": "artifact not found"}, status=404)
     workspace_id = str(request.GET.get("workspace_id") or "").strip() or None
+    if not _artifact_visible_for_request(request, artifact, workspace_id=workspace_id):
+        return JsonResponse({"error": "artifact not found"}, status=404)
     manifest = _load_artifact_manifest(artifact)
     manifest_ref = str((artifact.scope_json or {}).get("manifest_ref") or "").strip()
     manifest_summary = _manifest_summary_for_artifact(artifact, workspace_id=workspace_id)
@@ -9143,6 +9215,9 @@ def artifact_by_slug_files(request: HttpRequest, artifact_slug: str) -> JsonResp
         return staff_error
     artifact = _resolve_artifact_by_slug(artifact_slug)
     if artifact is None:
+        return JsonResponse({"error": "artifact not found"}, status=404)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip() or None
+    if not _artifact_visible_for_request(request, artifact, workspace_id=workspace_id):
         return JsonResponse({"error": "artifact not found"}, status=404)
     return JsonResponse(
         {
@@ -9350,6 +9425,76 @@ def artifact_packages_collection(request: HttpRequest) -> JsonResponse:
     except ArtifactPackageValidationError as exc:
         return JsonResponse({"error": "invalid package", "details": exc.errors}, status=400)
     return JsonResponse({"package": _serialize_artifact_package(package)})
+
+
+@csrf_exempt
+@login_required
+def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if staff_error := _require_staff(request):
+        return staff_error
+    if not request.FILES or "file" not in request.FILES:
+        return JsonResponse({"error": "file upload required (multipart field: file)"}, status=400)
+    upload = request.FILES["file"]
+    try:
+        package, created = import_package_blob_idempotent(
+            blob=upload.read(),
+            created_by=request.user if request.user.is_authenticated else None,
+        )
+    except ArtifactPackageValidationError as exc:
+        return JsonResponse({"error": "invalid package", "details": exc.errors}, status=400)
+
+    manifest = package.manifest if isinstance(package.manifest, dict) else {}
+    artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
+    invalid = [
+        f"{item.get('type')}:{item.get('slug')}@{item.get('version')}"
+        for item in artifacts
+        if isinstance(item, dict) and not str(item.get("slug") or "").strip().startswith("app.")
+    ]
+    if invalid:
+        return JsonResponse(
+            {
+                "error": "generated artifact import only accepts app.* slugs",
+                "details": invalid,
+            },
+            status=400,
+        )
+
+    receipt = install_package(
+        package,
+        binding_overrides={},
+        installed_by=request.user if request.user.is_authenticated else None,
+    )
+    status = 200 if receipt.status == "success" else 400
+    imported_rows: List[Dict[str, Any]] = []
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        artifact = Artifact.objects.filter(
+            type__slug=str(item.get("type") or "").strip(),
+            slug=str(item.get("slug") or "").strip(),
+        ).order_by("-updated_at", "-created_at").first()
+        if not artifact:
+            continue
+        imported_rows.append(
+            {
+                "id": str(artifact.id),
+                "slug": _artifact_slug(artifact),
+                "type": artifact.type.slug if artifact.type_id else "",
+                "package_version": str(artifact.package_version or ""),
+                "title": artifact.title,
+            }
+        )
+    return JsonResponse(
+        {
+            "package": _serialize_artifact_package(package),
+            "created": created,
+            "receipt": _serialize_artifact_install_receipt(receipt),
+            "artifacts": imported_rows,
+        },
+        status=status,
+    )
 
 
 @csrf_exempt
@@ -10043,6 +10188,7 @@ def workspace_artifacts_collection(request: HttpRequest, workspace_id: str) -> J
             return JsonResponse({"error": "forbidden"}, status=403)
         payload = _parse_json(request)
         install_artifact_ref = str(payload.get("artifact_id") or "").strip()
+        install_artifact_version = str(payload.get("artifact_version") or "").strip()
         if install_artifact_ref:
             target_artifact: Optional[Artifact] = None
             try:
@@ -10050,12 +10196,10 @@ def workspace_artifacts_collection(request: HttpRequest, workspace_id: str) -> J
             except Exception:
                 target_artifact = None
             if not target_artifact:
-                target_artifact = (
-                    Artifact.objects.filter(slug=install_artifact_ref)
-                    .order_by("-updated_at")
-                    .select_related("type")
-                    .first()
-                )
+                target_qs = Artifact.objects.filter(slug=install_artifact_ref)
+                if install_artifact_version:
+                    target_qs = target_qs.filter(package_version=install_artifact_version)
+                target_artifact = target_qs.order_by("-updated_at").select_related("type").first()
             if not target_artifact:
                 return JsonResponse({"error": "artifact not found"}, status=404)
             enabled = bool(payload.get("enabled", True))
@@ -10186,6 +10330,115 @@ def workspace_artifacts_collection(request: HttpRequest, workspace_id: str) -> J
         except ValueError as exc:
             return JsonResponse({"error": str(exc)}, status=500)
     return JsonResponse({"artifacts": data})
+
+
+@csrf_exempt
+def workspace_app_runtime_targets_collection(request: HttpRequest, workspace_id: str) -> JsonResponse:
+    workspace = get_object_or_404(Workspace, id=workspace_id)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    membership = _workspace_membership(identity, workspace_id)
+    if not membership:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _workspace_has_role(identity, workspace_id, "contributor"):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    app_slug = str(payload.get("app_slug") or "").strip()
+    artifact_slug = str(payload.get("artifact_slug") or "").strip()
+    runtime_target = payload.get("runtime_target") if isinstance(payload.get("runtime_target"), dict) else None
+    if not app_slug:
+        return JsonResponse({"error": "app_slug is required"}, status=400)
+    if not artifact_slug:
+        return JsonResponse({"error": "artifact_slug is required"}, status=400)
+    if not runtime_target:
+        return JsonResponse({"error": "runtime_target is required"}, status=400)
+    runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip().rstrip("/")
+    public_app_url = str(runtime_target.get("app_url") or runtime_target.get("public_app_url") or "").strip()
+    compose_project = str(runtime_target.get("compose_project") or "").strip()
+    if not runtime_base_url:
+        return JsonResponse({"error": "runtime_target.runtime_base_url is required"}, status=400)
+    if not compose_project:
+        return JsonResponse({"error": "runtime_target.compose_project is required"}, status=400)
+    artifact = Artifact.objects.filter(slug=artifact_slug).order_by("-updated_at", "-created_at").first()
+    if not artifact:
+        return JsonResponse({"error": "artifact not found"}, status=404)
+    if not WorkspaceArtifactBinding.objects.filter(
+        workspace=workspace,
+        artifact=artifact,
+        enabled=True,
+        installed_state="installed",
+    ).exists():
+        return JsonResponse({"error": "artifact is not installed in workspace"}, status=400)
+
+    # Temporary bridge record for sibling-owned runtime execution until generated app
+    # artifacts are promoted/imported/installed natively. See DEBT-02.
+    runtime_payload = {
+        "runtime_owner": "sibling",
+        "runtime_base_url": runtime_base_url,
+        "public_app_url": public_app_url,
+        "compose_project": compose_project,
+        "app_container_name": str(runtime_target.get("app_container_name") or "").strip(),
+        "app_slug": app_slug,
+        "source_build_job_id": str(runtime_target.get("source_build_job_id") or "").strip(),
+        "source_workspace_id": str(runtime_target.get("source_workspace_id") or "").strip(),
+        "installed_artifact_slug": artifact_slug,
+        "bridge_artifact_slug": artifact_slug if not artifact_slug.startswith("app.") else "",
+    }
+    fqdn = str(runtime_target.get("network_alias") or f"{compose_project}.internal").strip()
+    desired_dns = {
+        "runtime_target": runtime_payload,
+        "bridge_artifact": artifact_slug,
+        "bridge_debt_ref": "DEBT-02",
+    }
+    instance, created = WorkspaceAppInstance.objects.get_or_create(
+        workspace=workspace,
+        app_slug=app_slug,
+        fqdn=fqdn,
+        defaults={
+            "artifact": artifact,
+            "customer_name": str(workspace.name or workspace.slug or app_slug),
+            "deployment_target": "local",
+            "status": "active",
+            "dns_config_json": desired_dns,
+        },
+    )
+    update_fields: List[str] = []
+    desired_customer_name = str(workspace.name or workspace.slug or app_slug)
+    if instance.artifact_id != artifact.id:
+        instance.artifact = artifact
+        update_fields.append("artifact")
+    if instance.customer_name != desired_customer_name:
+        instance.customer_name = desired_customer_name
+        update_fields.append("customer_name")
+    if instance.deployment_target != "local":
+        instance.deployment_target = "local"
+        update_fields.append("deployment_target")
+    if instance.status != "active":
+        instance.status = "active"
+        update_fields.append("status")
+    if instance.dns_config_json != desired_dns:
+        instance.dns_config_json = desired_dns
+        update_fields.append("dns_config_json")
+    if update_fields:
+        update_fields.append("updated_at")
+        instance.save(update_fields=update_fields)
+    return JsonResponse(
+        {
+            "runtime_target": runtime_payload,
+            "instance": {
+                "id": str(instance.id),
+                "created": created,
+                "app_slug": instance.app_slug,
+                "fqdn": instance.fqdn,
+                "deployment_target": instance.deployment_target,
+                "status": instance.status,
+            },
+        },
+        status=201 if created else 200,
+    )
 
 
 @csrf_exempt
@@ -15094,6 +15347,7 @@ def app_builder_artifacts_collection(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "not authenticated"}, status=401)
     workspace_ref = str(
         request.GET.get("workspace_id")
+        or request.GET.get("workspace_slug")
         or request.GET.get("workspace")
         or request.GET.get("operator_workspace_id")
         or request.headers.get("X-Workspace-Id")
@@ -15161,6 +15415,35 @@ def app_palette_execute(request: HttpRequest) -> JsonResponse:
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
     payload = _parse_json(request)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_ref = str(
+        request.GET.get("workspace_id")
+        or request.GET.get("workspace")
+        or request.GET.get("operator_workspace_id")
+        or request.headers.get("X-Workspace-Id")
+        or ""
+    ).strip()
+    workspace = _resolve_workspace_for_identity(identity, workspace_ref)
+    if not workspace:
+        return JsonResponse({"error": "workspace context is required"}, status=400)
+    prompt = str(payload.get("prompt") or "").strip()
+    prompt_key = _normalize_palette_prompt(prompt)
+    runtime_target_record = _workspace_runtime_target(workspace, "net-inventory")
+    if (
+        prompt_key in BRIDGE_NET_INVENTORY_COMMANDS
+        and runtime_target_record
+        and _workspace_has_installed_any_artifact_slug(workspace, ["app.net-inventory", "net-inventory"])
+    ):
+        try:
+            return _bridge_palette_execution_response(
+                workspace=workspace,
+                prompt=prompt,
+                runtime_target=runtime_target_record["runtime_target"],
+            )
+        except RuntimeError as exc:
+            return JsonResponse({"error": "runtime bridge failed", "details": str(exc)}, status=502)
     return _proxy_seed_workspace_request(
         request,
         path="/api/v1/palette/execute",
@@ -15524,8 +15807,17 @@ def _resolve_workspace_for_identity(identity: UserIdentity, workspace_id: str) -
         ).first()
         if membership:
             return membership.workspace
+        membership = WorkspaceMembership.objects.select_related("workspace").filter(
+            user_identity=identity,
+            workspace__slug=requested,
+        ).first()
+        if membership:
+            return membership.workspace
         if _is_platform_admin(identity):
-            return Workspace.objects.filter(id=requested).first()
+            workspace = Workspace.objects.filter(id=requested).first()
+            if workspace:
+                return workspace
+            return Workspace.objects.filter(slug=requested).first()
         return None
     fallback = WorkspaceMembership.objects.select_related("workspace").filter(user_identity=identity).order_by("workspace__name").first()
     return fallback.workspace if fallback else None
@@ -15607,6 +15899,230 @@ def _proxy_seed_workspace_request(
         status_code = response.status_code if 400 <= response.status_code <= 599 else 502
         return JsonResponse(payload_json if isinstance(payload_json, dict) else {"error": "xyn-core request failed"}, status=status_code, safe=isinstance(payload_json, dict))
     return JsonResponse(payload_json, safe=not isinstance(payload_json, list), status=response.status_code)
+
+
+BRIDGE_NET_INVENTORY_COMMANDS = {
+    "show devices",
+    "show locations",
+    "create device",
+    "show devices by status",
+}
+
+
+def _normalize_palette_prompt(prompt: str) -> str:
+    return re.sub(r"\s+", " ", str(prompt or "").strip().lower())
+
+
+def _workspace_has_installed_artifact_slug(workspace: Workspace, artifact_slug: str) -> bool:
+    return WorkspaceArtifactBinding.objects.filter(
+        workspace=workspace,
+        enabled=True,
+        installed_state="installed",
+        artifact__slug=artifact_slug,
+    ).exists()
+
+
+def _workspace_has_installed_any_artifact_slug(workspace: Workspace, artifact_slugs: List[str]) -> bool:
+    clean = [str(item).strip() for item in artifact_slugs if str(item).strip()]
+    if not clean:
+        return False
+    return WorkspaceArtifactBinding.objects.filter(
+        workspace=workspace,
+        enabled=True,
+        installed_state="installed",
+        artifact__slug__in=clean,
+    ).exists()
+
+
+def _workspace_runtime_instance(workspace: Workspace, app_slug: str) -> Optional[WorkspaceAppInstance]:
+    return (
+        WorkspaceAppInstance.objects.filter(workspace=workspace, app_slug=app_slug, status="active")
+        .exclude(dns_config_json={})
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+
+
+def _workspace_runtime_target(workspace: Workspace, app_slug: str) -> Optional[Dict[str, Any]]:
+    instance = _workspace_runtime_instance(workspace, app_slug)
+    if not instance or not isinstance(instance.dns_config_json, dict):
+        return None
+    runtime_target = instance.dns_config_json.get("runtime_target")
+    if not isinstance(runtime_target, dict):
+        return None
+    if str(runtime_target.get("runtime_owner") or "").strip().lower() != "sibling":
+        return None
+    base_url = str(runtime_target.get("runtime_base_url") or "").strip().rstrip("/")
+    if not base_url:
+        return None
+    return {
+        "instance": instance,
+        "runtime_target": runtime_target,
+        "runtime_base_url": base_url,
+    }
+
+
+def _seed_context_pack_meta(workspace_slug: str) -> Dict[str, Any]:
+    try:
+        response = _seed_api_request(
+            method="GET",
+            path="/api/v1/context-packs/bindings",
+            workspace_slug=workspace_slug,
+            timeout=20,
+        )
+    except requests.RequestException:
+        return {}
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if response.status_code >= 400 or "application/json" not in content_type:
+        return {}
+    payload = response.json() if response.content else {}
+    if not isinstance(payload, dict):
+        return {}
+    bindings = payload.get("bindings") if isinstance(payload.get("bindings"), list) else []
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    return {
+        "context_pack_artifact_ids": [str(item.get("artifact_id") or "") for item in bindings if isinstance(item, dict)],
+        "context_pack_slugs": [str(item.get("slug") or "") for item in bindings if isinstance(item, dict)],
+        "context_warnings": [str(item) for item in warnings],
+    }
+
+
+def _runtime_target_request(
+    *,
+    base_url: str,
+    method: str,
+    path: str,
+    query: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: int = 20,
+) -> requests.Response:
+    return requests.request(
+        method=method.upper(),
+        url=f"{base_url.rstrip('/')}{path}",
+        params=query or None,
+        json=payload,
+        timeout=timeout,
+    )
+
+
+def _bridge_create_device_name() -> str:
+    return f"demo-device-{uuid.uuid4().hex[:8]}"
+
+
+def _execute_net_inventory_bridge_command(
+    *,
+    runtime_base_url: str,
+    prompt: str,
+    workspace: Workspace,
+) -> Dict[str, Any]:
+    command_key = _normalize_palette_prompt(prompt)
+    workspace_id = str(workspace.id)
+    if command_key == "show devices":
+        response = _runtime_target_request(
+            base_url=runtime_base_url,
+            method="GET",
+            path="/devices",
+            query={"workspace_id": workspace_id},
+            timeout=20,
+        )
+    elif command_key == "show locations":
+        response = _runtime_target_request(
+            base_url=runtime_base_url,
+            method="GET",
+            path="/locations",
+            query={"workspace_id": workspace_id},
+            timeout=20,
+        )
+    elif command_key == "create device":
+        response = _runtime_target_request(
+            base_url=runtime_base_url,
+            method="POST",
+            path="/devices",
+            payload={
+                "workspace_id": workspace_id,
+                "name": _bridge_create_device_name(),
+                "kind": "router",
+                "status": "online",
+            },
+            timeout=20,
+        )
+    elif command_key == "show devices by status":
+        response = _runtime_target_request(
+            base_url=runtime_base_url,
+            method="GET",
+            path="/reports/devices-by-status",
+            query={"workspace_id": workspace_id},
+            timeout=20,
+        )
+    else:
+        raise ValueError("unsupported bridge command")
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        raise RuntimeError(f"bridge runtime returned non-json content ({response.status_code})")
+    payload = response.json() if response.content else {}
+    if response.status_code >= 400:
+        raise RuntimeError(f"bridge runtime request failed ({response.status_code})")
+    if command_key == "show devices":
+        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
+        return {
+            "kind": "table",
+            "columns": ["id", "name", "kind", "status", "location_id"],
+            "rows": rows,
+            "text": f"Found {len(rows)} devices.",
+        }
+    if command_key == "show locations":
+        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
+        return {
+            "kind": "table",
+            "columns": ["id", "name", "kind", "city", "region", "country"],
+            "rows": rows,
+            "text": f"Found {len(rows)} locations.",
+        }
+    if command_key == "create device":
+        row = payload if isinstance(payload, dict) else {}
+        return {
+            "kind": "table",
+            "columns": ["id", "name", "kind", "status", "location_id"],
+            "rows": [row] if row else [],
+            "text": f"Created 1 device: {row.get('name') or 'unknown'}",
+        }
+    report = payload if isinstance(payload, dict) else {}
+    labels = report.get("labels") if isinstance(report.get("labels"), list) else []
+    values = report.get("values") if isinstance(report.get("values"), list) else []
+    return {
+        "kind": "bar_chart",
+        "columns": [],
+        "rows": [],
+        "labels": labels,
+        "values": values,
+        "title": "Devices by Status",
+        "text": f"Generated status chart for {sum(int(value or 0) for value in values)} devices.",
+    }
+
+
+def _bridge_palette_execution_response(
+    *,
+    workspace: Workspace,
+    prompt: str,
+    runtime_target: Dict[str, Any],
+) -> JsonResponse:
+    result = _execute_net_inventory_bridge_command(
+        runtime_base_url=str(runtime_target.get("runtime_base_url") or ""),
+        prompt=prompt,
+        workspace=workspace,
+    )
+    context_meta = _seed_context_pack_meta(str(workspace.slug or ""))
+    meta = {
+        "base_url": str(runtime_target.get("runtime_base_url") or ""),
+        "public_app_url": str(runtime_target.get("public_app_url") or ""),
+        "runtime_owner": str(runtime_target.get("runtime_owner") or "sibling"),
+        "app_slug": str(runtime_target.get("app_slug") or "net-inventory"),
+        "compose_project": str(runtime_target.get("compose_project") or ""),
+        "command_key": _normalize_palette_prompt(prompt),
+        **context_meta,
+    }
+    result["meta"] = meta
+    return JsonResponse(result, status=200)
 
 
 def _seed_json_download(

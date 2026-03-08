@@ -1053,7 +1053,16 @@ export default function AppShell() {
             <Route path="platform/tenant-contacts" element={<RedirectLegacyWorkspacesRoute />} />
             <Route path="platform/tenant-contacts/:tenantId" element={<RedirectLegacyTenantContactsDetailRoute />} />
             <Route path="setup/initialize" element={<PlatformInitializationPage />} />
-            <Route path="platform/hub" element={<PlatformSettingsHubPage />} />
+            <Route
+              path="platform/hub"
+              element={
+                activeWorkspace?.id ? (
+                  <Navigate to={`${workspaceScopedTarget("workbench")}?panel=platform_settings`} replace />
+                ) : (
+                  <PlatformSettingsHubPage />
+                )
+              }
+            />
             <Route path="platform/settings/general" element={<PlatformSettingsHubPage sectionOverride="general" />} />
             <Route path="platform/settings/security" element={<PlatformSettingsHubPage sectionOverride="security" />} />
             <Route path="platform/settings/integrations" element={<PlatformSettingsHubPage sectionOverride="integrations" />} />

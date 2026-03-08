@@ -31,6 +31,7 @@ PACKAGE_STORAGE_ROOT = Path(os.environ.get("XYN_ARTIFACT_PACKAGE_ROOT") or "/tmp
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][0-9A-Za-z.-]+)?$")
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ALLOWED_ARTIFACT_TYPES = {
+    "application",
     "article",
     "workflow",
     "app_shell",
@@ -300,6 +301,18 @@ def import_package_blob(*, blob: bytes, created_by=None) -> ArtifactPackage:
     package.file_blob_ref = str(blob_path)
     package.save(update_fields=["file_blob_ref"])
     return package
+
+
+def import_package_blob_idempotent(*, blob: bytes, created_by=None) -> Tuple[ArtifactPackage, bool]:
+    manifest, _file_map, package_hash = _parse_package_blob(blob)
+    existing = ArtifactPackage.objects.filter(
+        name=str(manifest.get("package_name") or "").strip(),
+        version=str(manifest.get("package_version") or "").strip(),
+        package_hash=package_hash,
+    ).order_by("-created_at").first()
+    if existing:
+        return existing, False
+    return import_package_blob(blob=blob, created_by=created_by), True
 
 
 def _binding_value_from_registry(binding: Dict[str, Any]) -> Optional[Any]:

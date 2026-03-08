@@ -1,12 +1,11 @@
 import { useEffect } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { X } from "lucide-react";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
 import { useCapabilitySuggestions } from "../components/console/capabilitySuggestions";
 import { useXynConsole } from "../state/xynConsoleStore";
 
 export default function WorkbenchPage() {
-  const navigate = useNavigate();
   const { setContext, setOpen, setInputText, clearSessionResolution, activePanel, closePanel, openPanel, setCanvasContext, requestSubmit } = useXynConsole();
   const params = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -38,11 +37,17 @@ export default function WorkbenchPage() {
   useEffect(() => {
     const panelKey = String(searchParams.get("panel") || "").trim().toLowerCase();
     if (panelKey !== "platform_settings") return;
-    navigate("/app/platform/hub");
+    if (!activePanel || activePanel.key !== "platform_settings") {
+      openPanel({
+        key: "platform_settings",
+        params: {},
+        open_in: "current_panel",
+      });
+    }
     const next = new URLSearchParams(searchParams);
     next.delete("panel");
     setSearchParams(next, { replace: true });
-  }, [navigate, searchParams, setSearchParams]);
+  }, [activePanel, openPanel, searchParams, setSearchParams]);
 
   const suggestions = (
     landingSuggestions.length

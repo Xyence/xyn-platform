@@ -139,6 +139,34 @@ function extractInstalledCapability(allJobs: AppJob[]): {
   return null;
 }
 
+function extractSiblingInstalledArtifact(allJobs: AppJob[]): {
+  artifactSlug: string;
+  workspaceSlug: string;
+} | null {
+  for (const job of allJobs) {
+    const payloads = [job.output_json, job.input_json];
+    for (const payload of payloads) {
+      if (!payload || typeof payload !== "object") continue;
+      const record = payload as Record<string, unknown>;
+      const sibling = record.sibling_xyn && typeof record.sibling_xyn === "object" ? (record.sibling_xyn as Record<string, unknown>) : {};
+      const installed =
+        sibling.installed_artifact && typeof sibling.installed_artifact === "object"
+          ? (sibling.installed_artifact as Record<string, unknown>)
+          : record.installed_artifact && typeof record.installed_artifact === "object"
+            ? (record.installed_artifact as Record<string, unknown>)
+            : null;
+      if (!installed) continue;
+      const artifactSlug = String(installed.artifact_slug || "").trim();
+      if (!artifactSlug) continue;
+      return {
+        artifactSlug,
+        workspaceSlug: String(installed.workspace_slug || "").trim(),
+      };
+    }
+  }
+  return null;
+}
+
 function formatTimestamp(value?: string | null): string {
   const raw = String(value || "").trim();
   if (!raw) return "—";
@@ -299,6 +327,7 @@ export default function DraftDetailPage({
     return { appUrl, siblingUiUrl, siblingApiUrl };
   }, [relatedJobs]);
   const installedCapability = useMemo(() => extractInstalledCapability(relatedJobs), [relatedJobs]);
+  const siblingInstalledArtifact = useMemo(() => extractSiblingInstalledArtifact(relatedJobs), [relatedJobs]);
 
   useEffect(() => {
     if (!relatedJobs.length) return;
@@ -414,14 +443,14 @@ export default function DraftDetailPage({
             <p className="muted small">{relatedJobs.length || 0}</p>
           </div>
           <div>
-            <strong>Installed capability</strong>
+            <strong>Generated capability</strong>
             {installedCapability ? (
               <>
                 <p className="muted small">{installedCapability.title}</p>
                 <p className="muted small">{installedCapability.appSlug}</p>
               </>
             ) : (
-              <p className="muted small">Not installed yet</p>
+              <p className="muted small">AppSpec not available yet</p>
             )}
           </div>
           <div>
@@ -446,27 +475,39 @@ export default function DraftDetailPage({
             )}
           </div>
         </div>
-        {installedCapability ? (
+        {installedCapability || siblingInstalledArtifact ? (
           <InlineMessage
             tone="info"
-            title="Installed in Xyn"
-            body={`Deployment installed ${installedCapability.title} into the Xyn runtime shell. Operate it through the palette using commands like "show devices" and "show devices by status".`}
+            title="Build state"
+            body={
+              siblingInstalledArtifact
+                ? `${installedCapability?.title || siblingInstalledArtifact.artifactSlug} has a local runtime deployed from the generated AppSpec, and the sibling Xyn instance has the temporary bridge artifact ${siblingInstalledArtifact.artifactSlug} installed for capability visibility.`
+                : `${installedCapability?.title || "This app"} currently has a local runtime deployed from the generated AppSpec. No sibling artifact installation has been recorded yet.`
+            }
           />
         ) : null}
         {installedCapability ? (
           <div className="card capability-card" style={{ marginBottom: 12 }}>
             <div className="card-header">
-              <h3>Installed Capability</h3>
-              <span className="chip">active in Xyn</span>
+              <h3>Generated Application State</h3>
+              <span className="chip">runtime deployed</span>
             </div>
             <div className="detail-grid" style={{ marginTop: 12 }}>
               <div>
-                <strong>Capability</strong>
+                <strong>Generated AppSpec</strong>
                 <p className="muted small">{installedCapability.title}</p>
               </div>
               <div>
-                <strong>Shell</strong>
-                <p className="muted small">Xyn workbench</p>
+                <strong>Root instance state</strong>
+                <p className="muted small">Local runtime deployed</p>
+              </div>
+              <div>
+                <strong>Sibling instance state</strong>
+                <p className="muted small">
+                  {siblingInstalledArtifact
+                    ? `Bridge artifact installed (${siblingInstalledArtifact.artifactSlug})`
+                    : "No sibling artifact install recorded"}
+                </p>
               </div>
               <div className="span-full">
                 <strong>Operate with palette</strong>
@@ -476,9 +517,15 @@ export default function DraftDetailPage({
                   <li><code>show artifacts of kind app_spec</code></li>
                 </ul>
               </div>
+              <div className="span-full">
+                <strong>Semantics</strong>
+                <p className="muted small">
+                  The root instance currently deploys the generated app as local runtime containers. The sibling instance receives a temporary bridge artifact for capability counting and UI visibility until the real generated-artifact publish/import/install flow exists.
+                </p>
+              </div>
               {installedCapability.reports.length > 0 ? (
                 <div className="span-full">
-                  <strong>Installed reports</strong>
+                  <strong>Generated reports</strong>
                   <p className="muted small">{installedCapability.reports.join(", ")}</p>
                 </div>
               ) : null}

@@ -35,6 +35,7 @@ import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
 import JobDetailPage from "../../pages/JobDetailPage";
 import JobsListPage from "../../pages/JobsListPage";
+import PlatformSettingsHubPage from "../../pages/PlatformSettingsHubPage";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 
 export type ConsolePanelKey =
@@ -749,11 +750,7 @@ function RunDetailPanel({ runId, panel, onContextChange }: { runId: string; pane
 }
 
 function PlatformSettingsPanel() {
-  const navigate = useNavigate();
-  useEffect(() => {
-    navigate("/app/platform/hub", { replace: true });
-  }, [navigate]);
-  return <p className="muted">Redirecting to platform settings…</p>;
+  return <PlatformSettingsHubPage />;
 }
 
 function ArtifactListPanel({

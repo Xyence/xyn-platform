@@ -131,6 +131,48 @@ class ArtifactPackagesApiTests(TestCase):
         payload = response.json()
         self.assertIn("checksum mismatch", " ".join(payload.get("details") or []))
 
+    def test_generated_artifact_import_alias_is_idempotent(self):
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "application",
+                    "slug": "app.net-inventory",
+                    "version": "0.0.1-dev",
+                    "title": "Generated Network Inventory",
+                    "content": {
+                        "artifact": {
+                            "id": "app.net-inventory",
+                            "type": "application",
+                            "slug": "app.net-inventory",
+                            "version": "0.0.1-dev",
+                            "generated": True,
+                        },
+                        "capability": {"visibility": "capabilities", "label": "Generated Network Inventory"},
+                        "suggestions": [{"id": "show-devices", "prompt": "Show devices"}],
+                        "surfaces": {"manage": [{"label": "Workbench", "path": "/app/workbench"}]},
+                    },
+                }
+            ],
+            package_name="app.net-inventory",
+            package_version="0.0.1-dev",
+        )
+        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
+        first = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        self.assertEqual(first.status_code, 200, first.content.decode())
+        self.assertTrue(
+            Artifact.objects.filter(slug="app.net-inventory", package_version="0.0.1-dev").exists()
+        )
+
+        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
+        second = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        self.assertEqual(second.status_code, 200, second.content.decode())
+        payload = second.json()
+        self.assertFalse(payload["created"])
+        self.assertEqual(
+            Artifact.objects.filter(slug="app.net-inventory", package_version="0.0.1-dev").count(),
+            1,
+        )
+
     def test_validate_returns_dependency_order_and_unresolved_bindings(self):
         blob = self._package_blob(
             artifacts=[

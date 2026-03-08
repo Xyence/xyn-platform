@@ -24,7 +24,8 @@ const CORE_PROMPT_SURFACES: CorePromptSurface[] = [
     key: "platform_settings",
     label: "Platform Settings",
     scope: "global",
-    routeFor: () => "/app/platform/hub",
+    routeFor: (workspaceId: string) =>
+      workspaceId ? `/w/${encodeURIComponent(workspaceId)}/workbench?panel=platform_settings` : "/app/platform/hub",
     aliases: [
       "platform settings",
       "open platform settings",

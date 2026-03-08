@@ -1,0 +1,78 @@
+{
+  "artifact": {
+    "id": "net-inventory",
+    "name": "Network Inventory",
+    "version": "0.1.0"
+  },
+  "bridge_notice": {
+    "temporary": true,
+    "purpose": "Temporary sibling install/count bridge until generated app artifacts are promoted through publish/import/install.",
+    "debt_ref": "DEBT-02"
+  },
+  "capability": {
+    "visibility": "capabilities",
+    "category": "application",
+    "label": "Network Inventory",
+    "description": "Manage devices and locations per workspace from within the Xyn runtime shell.",
+    "tags": ["network", "inventory", "devices", "locations"],
+    "order": 120
+  },
+  "suggestions": [
+    {
+      "id": "net-inventory-show-devices",
+      "name": "Show Devices",
+      "prompt": "Show devices",
+      "description": "List devices in the current workspace.",
+      "visibility": ["capability", "landing", "palette"],
+      "group": "Devices",
+      "order": 100,
+      "ui": { "badge": "Inventory" }
+    },
+    {
+      "id": "net-inventory-show-locations",
+      "name": "Show Locations",
+      "prompt": "Show locations",
+      "description": "List locations in the current workspace.",
+      "visibility": ["capability", "palette"],
+      "group": "Locations",
+      "order": 110,
+      "ui": { "badge": "Inventory" }
+    },
+    {
+      "id": "net-inventory-create-device",
+      "name": "Create Device",
+      "prompt": "Create device",
+      "description": "Create a new device in the current workspace.",
+      "visibility": ["capability", "palette"],
+      "group": "Devices",
+      "order": 120,
+      "ui": { "badge": "Inventory" }
+    },
+    {
+      "id": "net-inventory-devices-by-status",
+      "name": "Devices by Status",
+      "prompt": "Show devices by status",
+      "description": "Display a status rollup chart for devices in the current workspace.",
+      "visibility": ["capability", "landing", "palette"],
+      "group": "Reports",
+      "order": 130,
+      "ui": { "badge": "Inventory" }
+    }
+  ],
+  "surfaces": {
+    "manage": [
+      {
+        "label": "Workbench",
+        "path": "/app/workbench",
+        "order": 100
+      }
+    ],
+    "docs": [
+      {
+        "label": "Workbench",
+        "path": "/app/workbench",
+        "order": 1000
+      }
+    ]
+  }
+}

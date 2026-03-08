@@ -1227,6 +1227,12 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       user: { roles: [], permissions: [] },
     });
     if (coreTarget?.source === "core_surface" && coreTarget.route) {
+      if (coreTarget.key === "platform_settings" && onOpenPanel) {
+        onOpenPanel("platform_settings");
+        clearSessionResolution();
+        if (isOverlay) setOpen(false);
+        return;
+      }
       navigate(coreTarget.route);
       clearSessionResolution();
       if (isOverlay) setOpen(false);
@@ -1249,6 +1255,12 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
         },
       });
       if (surfacedTarget?.route) {
+        if (surfacedTarget.key === "platform_settings" && onOpenPanel) {
+          onOpenPanel("platform_settings");
+          clearSessionResolution();
+          if (isOverlay) setOpen(false);
+          return;
+        }
         navigate(surfacedTarget.route);
         clearSessionResolution();
         if (isOverlay) setOpen(false);
@@ -1277,7 +1289,11 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       }
       if (action.name === "canvas.open_detail") {
         if (String(action.params.entity_type || "") === "platform_settings") {
-          navigate("/app/platform/hub");
+          if (workspaceIdFromPath) {
+            navigate(`/w/${encodeURIComponent(workspaceIdFromPath)}/workbench?panel=platform_settings`);
+          } else {
+            navigate("/app/platform/hub");
+          }
           clearSessionResolution();
           if (isOverlay) setOpen(false);
           return;
