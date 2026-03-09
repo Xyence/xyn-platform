@@ -3546,20 +3546,21 @@ button.sm {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding-top: 10px;
 }
 
 .workbench-panel-actions {
   position: fixed;
-  top: calc(var(--xyn-header-top-offset) + var(--xyn-header-height) + var(--xyn-console-safe-top) + 12px);
-  right: calc(var(--xyn-console-safe-right) + 92px);
+  top: calc(var(--xyn-header-top-offset) + var(--xyn-header-height) + var(--xyn-console-safe-top) + 4px);
+  right: calc(var(--xyn-console-safe-right) + 88px);
   margin-top: 0;
   z-index: calc(var(--xyn-z-console) - 1);
 }
 
 .workbench-clear-panel-button {
-  width: 30px;
-  height: 30px;
-  min-width: 30px;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
   border-radius: 999px;
   padding: 0;
   display: inline-flex;
@@ -4526,8 +4527,8 @@ button.sm {
   }
 
   .workbench-panel-actions {
-    top: calc(var(--xyn-header-top-offset) + 16px);
-    right: 56px;
+    top: calc(var(--xyn-header-top-offset) + 12px);
+    right: 52px;
   }
 
   .xyn-console-node {
