@@ -1,9 +1,9 @@
 {
   "channel": "dev",
-  "published_at": "2026-03-08T22:14:51Z",
+  "published_at": "2026-03-09T13:17:10Z",
   "images": {
-    "xyn-ui": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:sha-a0e0219",
-    "xyn-api": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:sha-a0e0219",
-    "net-inventory-api": "public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:sha-a0e0219"
+    "xyn-ui": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-ui:sha-74138ac",
+    "xyn-api": "public.ecr.aws/i0h0h0n4/xyn/artifacts/xyn-api:sha-74138ac",
+    "net-inventory-api": "public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:sha-74138ac"
   }
 }

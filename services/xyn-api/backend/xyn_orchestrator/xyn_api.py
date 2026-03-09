@@ -15393,7 +15393,7 @@ def app_palette_execute(request: HttpRequest) -> JsonResponse:
     if not workspace:
         return JsonResponse({"error": "workspace context is required"}, status=400)
     prompt = str(payload.get("prompt") or "").strip()
-    prompt_key = _normalize_palette_prompt(prompt)
+    prompt_key = _generated_net_inventory_command_key(prompt)
     runtime_target_record = _workspace_runtime_target(workspace, "net-inventory")
     if (
         prompt_key in GENERATED_NET_INVENTORY_COMMANDS
@@ -16035,6 +16035,7 @@ GENERATED_NET_INVENTORY_COMMANDS = {
     "show devices",
     "show locations",
     "create device",
+    "create location",
     "show devices by status",
     "show interfaces",
     "show interfaces by status",
@@ -16043,6 +16044,15 @@ GENERATED_NET_INVENTORY_COMMANDS = {
 
 def _normalize_palette_prompt(prompt: str) -> str:
     return re.sub(r"\s+", " ", str(prompt or "").strip().lower())
+
+
+def _generated_net_inventory_command_key(prompt: str) -> str:
+    key = _normalize_palette_prompt(prompt)
+    if key.startswith("create location"):
+        return "create location"
+    if key.startswith("create device"):
+        return "create device"
+    return key
 
 
 def _workspace_has_installed_artifact_slug(workspace: Workspace, artifact_slug: str) -> bool:
@@ -16129,13 +16139,78 @@ def _generated_app_create_device_name() -> str:
     return f"demo-device-{uuid.uuid4().hex[:8]}"
 
 
+def _generated_app_create_location_name() -> str:
+    return f"demo-location-{uuid.uuid4().hex[:8]}"
+
+
+def _parse_generated_location_create_prompt(prompt: str) -> tuple[Dict[str, Any], List[str]]:
+    raw = str(prompt or "").strip()
+    remainder = raw[len("create location"):].strip() if raw.lower().startswith("create location") else raw
+    if remainder.lower().startswith("named "):
+        remainder = remainder[6:].strip()
+    if not remainder:
+        return {}, ["name", "city"]
+    name_part = remainder
+    location_part = ""
+    split_match = re.split(r"\s+in\s+", remainder, maxsplit=1, flags=re.IGNORECASE)
+    if len(split_match) == 2:
+        name_part, location_part = split_match[0].strip(), split_match[1].strip()
+    payload: Dict[str, Any] = {"name": name_part, "kind": "site"}
+    if location_part:
+        tokens = [token.strip(", ") for token in location_part.split() if token.strip(", ")]
+        if len(tokens) >= 3 and len(tokens[-1]) >= 2 and len(tokens[-2]) <= 3:
+            payload["country"] = tokens[-1]
+            payload["region"] = tokens[-2]
+            payload["city"] = " ".join(tokens[:-2]).strip()
+        else:
+            payload["city"] = location_part.strip()
+    missing: List[str] = []
+    if not str(payload.get("name") or "").strip():
+        missing.append("name")
+    if not str(payload.get("city") or "").strip():
+        missing.append("city")
+    return payload, missing
+
+
+def _parse_generated_device_create_prompt(prompt: str) -> tuple[Dict[str, Any], List[str]]:
+    raw = str(prompt or "").strip()
+    remainder = raw[len("create device"):].strip() if raw.lower().startswith("create device") else raw
+    if remainder.lower().startswith("named "):
+        remainder = remainder[6:].strip()
+    payload: Dict[str, Any] = {
+        "name": remainder,
+        "kind": "router",
+        "status": "online",
+    }
+    missing = [] if str(payload.get("name") or "").strip() else ["name"]
+    return payload, missing
+
+
+def _generated_missing_fields_response(
+    *,
+    command_key: str,
+    missing_fields: List[str],
+    example: str,
+) -> Dict[str, Any]:
+    return {
+        "kind": "text",
+        "columns": [],
+        "rows": [],
+        "text": f"To {command_key}, provide: {', '.join(missing_fields)}. Example: {example}",
+        "meta": {
+            "command_key": command_key,
+            "missing_fields": missing_fields,
+        },
+    }
+
+
 def _execute_net_inventory_runtime_command(
     *,
     runtime_base_url: str,
     prompt: str,
     workspace: Workspace,
 ) -> Dict[str, Any]:
-    command_key = _normalize_palette_prompt(prompt)
+    command_key = _generated_net_inventory_command_key(prompt)
     workspace_id = str(workspace.id)
     if command_key == "show devices":
         response = _runtime_target_request(
@@ -16154,15 +16229,44 @@ def _execute_net_inventory_runtime_command(
             timeout=20,
         )
     elif command_key == "create device":
+        payload, missing_fields = _parse_generated_device_create_prompt(prompt)
+        if missing_fields:
+            return _generated_missing_fields_response(
+                command_key=command_key,
+                missing_fields=missing_fields,
+                example="create device named edge-router-1",
+            )
         response = _runtime_target_request(
             base_url=runtime_base_url,
             method="POST",
             path="/devices",
             payload={
                 "workspace_id": workspace_id,
-                "name": _generated_app_create_device_name(),
-                "kind": "router",
-                "status": "online",
+                "name": payload.get("name") or _generated_app_create_device_name(),
+                "kind": payload.get("kind") or "router",
+                "status": payload.get("status") or "online",
+            },
+            timeout=20,
+        )
+    elif command_key == "create location":
+        payload, missing_fields = _parse_generated_location_create_prompt(prompt)
+        if missing_fields:
+            return _generated_missing_fields_response(
+                command_key=command_key,
+                missing_fields=missing_fields,
+                example="create location named office in St. Louis MO USA",
+            )
+        response = _runtime_target_request(
+            base_url=runtime_base_url,
+            method="POST",
+            path="/locations",
+            payload={
+                "workspace_id": workspace_id,
+                "name": payload.get("name") or _generated_app_create_location_name(),
+                "kind": payload.get("kind") or "site",
+                "city": payload.get("city"),
+                "region": payload.get("region"),
+                "country": payload.get("country"),
             },
             timeout=20,
         )
@@ -16222,6 +16326,14 @@ def _execute_net_inventory_runtime_command(
             "rows": [row] if row else [],
             "text": f"Created 1 device: {row.get('name') or 'unknown'}",
         }
+    if command_key == "create location":
+        row = payload if isinstance(payload, dict) else {}
+        return {
+            "kind": "table",
+            "columns": ["id", "name", "kind", "city", "region", "country"],
+            "rows": [row] if row else [],
+            "text": f"Created 1 location: {row.get('name') or 'unknown'}",
+        }
     if command_key == "show interfaces":
         rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
         return {
@@ -16259,6 +16371,7 @@ def _generated_app_palette_execution_response(
         prompt=prompt,
         workspace=workspace,
     )
+    existing_meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
     context_meta = _seed_context_pack_meta(str(workspace.slug or ""))
     meta = {
         "base_url": str(runtime_target.get("runtime_base_url") or ""),
@@ -16267,6 +16380,7 @@ def _generated_app_palette_execution_response(
         "app_slug": str(runtime_target.get("app_slug") or "net-inventory"),
         "compose_project": str(runtime_target.get("compose_project") or ""),
         "command_key": _normalize_palette_prompt(prompt),
+        **existing_meta,
         **context_meta,
     }
     result["meta"] = meta

@@ -108,7 +108,8 @@ function isExplicitPaletteCommand(input: string): boolean {
   return /^(show|list)\s+devices(\s+by\s+status)?$/i.test(String(input || "").trim())
     || /^(show|list)\s+interfaces(\s+by\s+status)?$/i.test(String(input || "").trim())
     || /^(show|list)\s+locations$/i.test(String(input || "").trim())
-    || /^create\s+device$/i.test(String(input || "").trim());
+    || /^create\s+device(\b.*)?$/i.test(String(input || "").trim())
+    || /^create\s+location(\b.*)?$/i.test(String(input || "").trim());
 }
 
 function explicitAppBuilderArtifactKind(input: string): string {
