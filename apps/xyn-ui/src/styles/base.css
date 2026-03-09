@@ -3546,26 +3546,6 @@ button.sm {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding-top: 10px;
-}
-
-.workbench-panel-actions {
-  position: fixed;
-  top: calc(var(--xyn-header-top-offset) + var(--xyn-header-height) + var(--xyn-console-safe-top) + 4px);
-  right: calc(var(--xyn-console-safe-right) + 88px);
-  margin-top: 0;
-  z-index: calc(var(--xyn-z-console) - 1);
-}
-
-.workbench-clear-panel-button {
-  width: 28px;
-  height: 28px;
-  min-width: 28px;
-  border-radius: 999px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .app-breadcrumbs {
@@ -4525,12 +4505,6 @@ button.sm {
     left: auto;
     bottom: auto;
   }
-
-  .workbench-panel-actions {
-    top: calc(var(--xyn-header-top-offset) + 12px);
-    right: 52px;
-  }
-
   .xyn-console-node {
     width: auto;
     justify-content: flex-start;
