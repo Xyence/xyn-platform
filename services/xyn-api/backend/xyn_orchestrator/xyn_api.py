@@ -16212,6 +16212,7 @@ def _execute_net_inventory_runtime_command(
 ) -> Dict[str, Any]:
     command_key = _generated_net_inventory_command_key(prompt)
     workspace_id = str(workspace.id)
+    created_name = ""
     if command_key == "show devices":
         response = _runtime_target_request(
             base_url=runtime_base_url,
@@ -16236,6 +16237,7 @@ def _execute_net_inventory_runtime_command(
                 missing_fields=missing_fields,
                 example="create device named edge-router-1",
             )
+        created_name = str(payload.get("name") or "unknown")
         response = _runtime_target_request(
             base_url=runtime_base_url,
             method="POST",
@@ -16248,6 +16250,16 @@ def _execute_net_inventory_runtime_command(
             },
             timeout=20,
         )
+        if response.status_code < 400:
+            list_response = _runtime_target_request(
+                base_url=runtime_base_url,
+                method="GET",
+                path="/devices",
+                query={"workspace_id": workspace_id},
+                timeout=20,
+            )
+            if list_response.status_code < 400:
+                response = list_response
     elif command_key == "create location":
         payload, missing_fields = _parse_generated_location_create_prompt(prompt)
         if missing_fields:
@@ -16256,6 +16268,7 @@ def _execute_net_inventory_runtime_command(
                 missing_fields=missing_fields,
                 example="create location named office in St. Louis MO USA",
             )
+        created_name = str(payload.get("name") or "unknown")
         response = _runtime_target_request(
             base_url=runtime_base_url,
             method="POST",
@@ -16270,6 +16283,16 @@ def _execute_net_inventory_runtime_command(
             },
             timeout=20,
         )
+        if response.status_code < 400:
+            list_response = _runtime_target_request(
+                base_url=runtime_base_url,
+                method="GET",
+                path="/locations",
+                query={"workspace_id": workspace_id},
+                timeout=20,
+            )
+            if list_response.status_code < 400:
+                response = list_response
     elif command_key == "show devices by status":
         response = _runtime_target_request(
             base_url=runtime_base_url,
@@ -16319,20 +16342,20 @@ def _execute_net_inventory_runtime_command(
             "text": f"Found {len(rows)} locations.",
         }
     if command_key == "create device":
-        row = payload if isinstance(payload, dict) else {}
+        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
         return {
             "kind": "table",
             "columns": ["id", "name", "kind", "status", "location_id"],
-            "rows": [row] if row else [],
-            "text": f"Created 1 device: {row.get('name') or 'unknown'}",
+            "rows": rows,
+            "text": f"Created 1 device: {created_name}",
         }
     if command_key == "create location":
-        row = payload if isinstance(payload, dict) else {}
+        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
         return {
             "kind": "table",
             "columns": ["id", "name", "kind", "city", "region", "country"],
-            "rows": [row] if row else [],
-            "text": f"Created 1 location: {row.get('name') or 'unknown'}",
+            "rows": rows,
+            "text": f"Created 1 location: {created_name}",
         }
     if command_key == "show interfaces":
         rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
