@@ -1205,6 +1205,34 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
 
   const canSubmit = Boolean(inputText.trim()) && !processing;
 
+  const refreshPaletteResultAfterCreate = async (
+    workspaceId: string,
+    prompt: string,
+    result: Awaited<ReturnType<typeof executeAppPalettePrompt>>,
+  ) => {
+    const normalized = prompt.trim().toLowerCase();
+    const refreshPrompt = normalized.startsWith("create location")
+      ? "show locations"
+      : normalized.startsWith("create device")
+        ? "show devices"
+        : "";
+    if (!refreshPrompt || result.kind !== "table") return result;
+    try {
+      const refreshed = await executeAppPalettePrompt(workspaceId, { prompt: refreshPrompt });
+      if (refreshed.kind !== "table") return result;
+      return {
+        ...refreshed,
+        text: String(result.text || refreshed.text || ""),
+        meta: {
+          ...(refreshed.meta && typeof refreshed.meta === "object" ? refreshed.meta : {}),
+          ...(result.meta && typeof result.meta === "object" ? result.meta : {}),
+        },
+      };
+    } catch {
+      return result;
+    }
+  };
+
   const submitPrompt = async () => {
     const prompt = String(inputText || "").trim();
     if (!prompt) return;
@@ -1503,7 +1531,8 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       }
       try {
         const result = await executeAppPalettePrompt(workspaceId, { prompt });
-        onOpenPanel("palette_result", { prompt, result });
+        const panelResult = await refreshPaletteResultAfterCreate(workspaceId, prompt, result);
+        onOpenPanel("palette_result", { prompt, result: panelResult });
         setInputText("");
         clearSessionResolution();
         if (isOverlay) setOpen(false);

@@ -38,6 +38,13 @@ async function palettePrompt(page: Page, prompt: string) {
   }, { prompt });
 }
 
+async function submitPalettePromptThroughUi(page: Page, prompt: string) {
+  const textarea = page.locator("textarea").first();
+  await textarea.fill(prompt);
+  await page.getByRole("button", { name: /submit/i }).click();
+  await expect(page.getByRole("heading", { name: "Palette Result" })).toBeVisible({ timeout: 30_000 });
+}
+
 test.describe("generated app create flows", () => {
   test("supports data-driven create location and create device in the sibling app", async ({ page }) => {
     test.slow();
@@ -96,6 +103,15 @@ test.describe("generated app create flows", () => {
         kind: "table",
         text: expect.stringMatching(/^Created 1 location:/),
       });
+    const createLocationRows = await palettePrompt(page, "create location named office in St. Louis MO USA");
+    expect(Array.isArray(createLocationRows.rows)).toBe(true);
+    expect(createLocationRows.rows.some((row: Record<string, unknown>) => String(row.name || "") === "sibling-location-1")).toBe(true);
+    expect(createLocationRows.rows.some((row: Record<string, unknown>) => String(row.name || "") === "office")).toBe(true);
+
+    await submitPalettePromptThroughUi(page, "create location named office in St. Louis MO USA");
+    await expect(page.getByText(/^Created 1 location: office$/)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("cell", { name: "sibling-location-1" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("cell", { name: "office" })).toBeVisible({ timeout: 30_000 });
 
     await expect
       .poll(
@@ -117,6 +133,15 @@ test.describe("generated app create flows", () => {
         kind: "table",
         text: expect.stringMatching(/^Created 1 device:/),
       });
+    const createDeviceRows = await palettePrompt(page, "create device named edge-router-1");
+    expect(Array.isArray(createDeviceRows.rows)).toBe(true);
+    expect(createDeviceRows.rows.some((row: Record<string, unknown>) => String(row.name || "") === "sibling-device-1")).toBe(true);
+    expect(createDeviceRows.rows.some((row: Record<string, unknown>) => String(row.name || "") === "edge-router-1")).toBe(true);
+
+    await submitPalettePromptThroughUi(page, "create device named edge-router-1");
+    await expect(page.getByText(/^Created 1 device: edge-router-1$/)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("cell", { name: "sibling-device-1" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("cell", { name: "edge-router-1" })).toBeVisible({ timeout: 30_000 });
 
     await expect
       .poll(
