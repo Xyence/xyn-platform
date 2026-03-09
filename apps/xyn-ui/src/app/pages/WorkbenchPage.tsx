@@ -6,7 +6,8 @@ import { useCapabilitySuggestions } from "../components/console/capabilitySugges
 import { useXynConsole } from "../state/xynConsoleStore";
 
 export default function WorkbenchPage() {
-  const { setContext, setOpen, setInputText, clearSessionResolution, activePanel, closePanel, openPanel, setCanvasContext, requestSubmit } = useXynConsole();
+  const { setContext, setOpen, setInputText, clearSessionResolution, activePanel, closePanel, openPanel, setCanvasContext, requestSubmit, setLastArtifactHint } =
+    useXynConsole();
   const params = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = String(params.workspaceId || "").trim();
@@ -48,6 +49,32 @@ export default function WorkbenchPage() {
     next.delete("panel");
     setSearchParams(next, { replace: true });
   }, [activePanel, openPanel, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    const revise = String(searchParams.get("revise") || "").trim().toLowerCase();
+    if (revise !== "1") return;
+    const prompt = String(searchParams.get("prompt") || "").trim();
+    const artifactSlug = String(searchParams.get("artifact_slug") || "").trim();
+    const artifactTitle = String(searchParams.get("artifact_title") || "").trim() || artifactSlug;
+    setContext({ artifact_id: null, artifact_type: null });
+    if (artifactSlug) {
+      setLastArtifactHint({
+        artifact_id: artifactSlug,
+        artifact_type: "GeneratedApplication",
+        artifact_state: "installed",
+        title: artifactTitle,
+        route: `/w/${encodeURIComponent(workspaceId)}/workbench`,
+      });
+    }
+    setInputText(prompt || "Add ");
+    setOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("revise");
+    next.delete("prompt");
+    next.delete("artifact_slug");
+    next.delete("artifact_title");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setContext, setInputText, setLastArtifactHint, setOpen, setSearchParams, workspaceId]);
 
   const suggestions = (
     landingSuggestions.length

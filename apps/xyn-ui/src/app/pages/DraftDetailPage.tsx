@@ -7,6 +7,7 @@ import type { AppExecutionNote, AppIntentDraft, AppJob } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { useNotifications } from "../state/notificationsStore";
+import { useXynConsole } from "../state/xynConsoleStore";
 
 type DraftDetailTab = "editor" | "meta";
 type DraftStatusValue = "draft" | "ready" | "submitted" | "archived";
@@ -140,7 +141,9 @@ function extractInstalledCapability(allJobs: AppJob[]): {
 }
 
 function extractSiblingInstalledArtifact(allJobs: AppJob[]): {
+  artifactId: string;
   artifactSlug: string;
+  workspaceId: string;
   workspaceSlug: string;
 } | null {
   for (const job of allJobs) {
@@ -159,8 +162,45 @@ function extractSiblingInstalledArtifact(allJobs: AppJob[]): {
       const artifactSlug = String(installed.artifact_slug || "").trim();
       if (!artifactSlug) continue;
       return {
+        artifactId: String(installed.artifact_id || "").trim(),
         artifactSlug,
+        workspaceId: String(installed.workspace_id || "").trim(),
         workspaceSlug: String(installed.workspace_slug || "").trim(),
+      };
+    }
+  }
+  return null;
+}
+
+function extractApplicationDefinition(allJobs: AppJob[]): {
+  appSlug: string;
+  title: string;
+  artifactSlug: string;
+  entities: string[];
+  reports: string[];
+} | null {
+  for (const job of allJobs) {
+    const payloads = [job.output_json, job.input_json];
+    for (const payload of payloads) {
+      if (!payload || typeof payload !== "object") continue;
+      const record = payload as Record<string, unknown>;
+      const appSpec = record.app_spec && typeof record.app_spec === "object" ? (record.app_spec as Record<string, unknown>) : null;
+      if (!appSpec) continue;
+      const appSlug = String(appSpec.app_slug || "").trim();
+      if (!appSlug) continue;
+      const entities = Array.isArray(appSpec.entities) ? appSpec.entities.map((item) => String(item || "").trim()).filter(Boolean) : [];
+      const reports = Array.isArray(appSpec.reports) ? appSpec.reports.map((item) => String(item || "").trim()).filter(Boolean) : [];
+      const generatedArtifact =
+        record.generated_artifact && typeof record.generated_artifact === "object"
+          ? (record.generated_artifact as Record<string, unknown>)
+          : {};
+      const artifactSlug = String(generatedArtifact.artifact_slug || `app.${appSlug}`).trim() || `app.${appSlug}`;
+      return {
+        appSlug,
+        title: String(appSpec.title || appSlug).trim() || appSlug,
+        artifactSlug,
+        entities,
+        reports,
       };
     }
   }
@@ -213,6 +253,7 @@ export default function DraftDetailPage({
   const [executionNotesError, setExecutionNotesError] = useState<string | null>(null);
   const [executionTraceExpanded, setExecutionTraceExpanded] = useState(false);
   const { push } = useNotifications();
+  const { setInputText, setOpen, setLastArtifactHint, clearContext } = useXynConsole();
   const rawPrompt = useMemo(() => {
     if (!draft?.content_json || typeof draft.content_json !== "object") return "";
     return String((draft.content_json as Record<string, unknown>).raw_prompt || "");
@@ -328,6 +369,67 @@ export default function DraftDetailPage({
   }, [relatedJobs]);
   const installedCapability = useMemo(() => extractInstalledCapability(relatedJobs), [relatedJobs]);
   const siblingInstalledArtifact = useMemo(() => extractSiblingInstalledArtifact(relatedJobs), [relatedJobs]);
+  const applicationDefinition = useMemo(() => extractApplicationDefinition(relatedJobs), [relatedJobs]);
+  const revisionUrl = useMemo(() => {
+    const artifactSlug = siblingInstalledArtifact?.artifactSlug || applicationDefinition?.artifactSlug || "";
+    const artifactTitle = applicationDefinition?.title || installedCapability?.title || draft?.title || "Generated application";
+    const siblingWorkspaceId = String(siblingInstalledArtifact?.workspaceId || "").trim();
+    if (!deploymentUrls.siblingUiUrl || !siblingWorkspaceId) return "";
+    const workbenchPath = new URL(`/w/${encodeURIComponent(siblingWorkspaceId)}/workbench`, deploymentUrls.siblingUiUrl);
+    workbenchPath.searchParams.set("revise", "1");
+    workbenchPath.searchParams.set("prompt", "Add ");
+    if (artifactSlug) workbenchPath.searchParams.set("artifact_slug", artifactSlug);
+    if (artifactTitle) workbenchPath.searchParams.set("artifact_title", artifactTitle);
+    const authLogin = new URL("/auth/login", deploymentUrls.siblingUiUrl);
+    authLogin.searchParams.set("appId", "xyn-ui");
+    authLogin.searchParams.set("returnTo", `${workbenchPath.pathname}${workbenchPath.search}`);
+    return authLogin.toString();
+  }, [
+    applicationDefinition?.artifactSlug,
+    applicationDefinition?.title,
+    deploymentUrls.siblingUiUrl,
+    draft?.title,
+    installedCapability?.title,
+    siblingInstalledArtifact?.artifactSlug,
+    siblingInstalledArtifact?.workspaceId,
+  ]);
+
+  const openRevisionPrompt = useCallback(() => {
+    const artifactSlug = siblingInstalledArtifact?.artifactSlug || applicationDefinition?.artifactSlug || "";
+    const artifactTitle = applicationDefinition?.title || installedCapability?.title || draft?.title || "Generated application";
+    if (revisionUrl) {
+      window.location.assign(revisionUrl);
+      return;
+    }
+    clearContext();
+    setLastArtifactHint(
+      artifactSlug
+        ? {
+            artifact_id: siblingInstalledArtifact?.artifactId || artifactSlug,
+            artifact_type: "GeneratedApplication",
+            artifact_state: "installed",
+            title: artifactTitle,
+            route: toWorkspacePath(workspaceId, "workbench"),
+          }
+        : null,
+    );
+    setInputText("Add ");
+    setOpen(true);
+    setMessage(`Revision prompt scoped to ${artifactTitle}${artifactSlug ? ` (${artifactSlug})` : ""}.`);
+  }, [
+    applicationDefinition?.artifactSlug,
+    applicationDefinition?.title,
+    clearContext,
+    draft?.title,
+    installedCapability?.title,
+    revisionUrl,
+    setInputText,
+    setLastArtifactHint,
+    setOpen,
+    siblingInstalledArtifact?.artifactId,
+    siblingInstalledArtifact?.artifactSlug,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     if (!relatedJobs.length) return;
@@ -481,10 +583,59 @@ export default function DraftDetailPage({
             title="Build state"
             body={
               siblingInstalledArtifact
-                ? `${installedCapability?.title || siblingInstalledArtifact.artifactSlug} has a local runtime deployed from the generated AppSpec, and the sibling Xyn instance has the temporary bridge artifact ${siblingInstalledArtifact.artifactSlug} installed for capability visibility.`
+                ? `${installedCapability?.title || siblingInstalledArtifact.artifactSlug} has a local runtime deployed from the generated AppSpec, and the sibling Xyn instance has the generated artifact ${siblingInstalledArtifact.artifactSlug} installed for capability visibility and workbench access.`
                 : `${installedCapability?.title || "This app"} currently has a local runtime deployed from the generated AppSpec. No sibling artifact installation has been recorded yet.`
             }
           />
+        ) : null}
+        {applicationDefinition ? (
+          <div className="card capability-card" style={{ marginBottom: 12 }}>
+            <div className="card-header">
+              <h3>Application Definition</h3>
+              <span className="chip">definition-driven</span>
+            </div>
+            <div className="detail-grid" style={{ marginTop: 12 }}>
+              <div>
+                <strong>Originating prompt</strong>
+                <p className="muted small">{rawPrompt || "Prompt unavailable."}</p>
+              </div>
+              <div>
+                <strong>Generated artifact</strong>
+                <p className="muted small">{applicationDefinition.artifactSlug}</p>
+              </div>
+              <div>
+                <strong>Capability summary</strong>
+                <p className="muted small">{applicationDefinition.entities.join(", ") || "No entities recorded"}</p>
+              </div>
+              <div>
+                <strong>Reports</strong>
+                <p className="muted small">{applicationDefinition.reports.join(", ") || "No reports recorded"}</p>
+              </div>
+              <div className="span-full">
+                <strong>Revision model</strong>
+                <p className="muted small">
+                  The generated artifact is the canonical installed identity. Follow-up prompts revise this application in place rather than creating a separate app.
+                </p>
+              </div>
+              <div className="span-full">
+                <strong>Revision entry point</strong>
+                <p className="muted small">
+                  Revise the installed capability from the sibling workbench so the prompt runs in the application workspace and targets the current generated artifact.
+                </p>
+              </div>
+            </div>
+            <div className="inline-actions" style={{ marginTop: 12 }}>
+              {revisionUrl ? (
+                <a className="primary button-link" href={revisionUrl}>
+                  Revise application
+                </a>
+              ) : (
+                <button className="primary" type="button" onClick={openRevisionPrompt}>
+                  Revise application
+                </button>
+              )}
+            </div>
+          </div>
         ) : null}
         {installedCapability ? (
           <div className="card capability-card" style={{ marginBottom: 12 }}>
@@ -505,7 +656,7 @@ export default function DraftDetailPage({
                 <strong>Sibling instance state</strong>
                 <p className="muted small">
                   {siblingInstalledArtifact
-                    ? `Bridge artifact installed (${siblingInstalledArtifact.artifactSlug})`
+                    ? `Generated artifact installed (${siblingInstalledArtifact.artifactSlug})`
                     : "No sibling artifact install recorded"}
                 </p>
               </div>
@@ -520,7 +671,7 @@ export default function DraftDetailPage({
               <div className="span-full">
                 <strong>Semantics</strong>
                 <p className="muted small">
-                  The root instance currently deploys the generated app as local runtime containers. The sibling instance receives a temporary bridge artifact for capability counting and UI visibility until the real generated-artifact publish/import/install flow exists.
+                  The root instance currently deploys the generated app as local runtime containers. The sibling instance installs the generated artifact and executes against its own sibling-owned runtime target.
                 </p>
               </div>
               {installedCapability.reports.length > 0 ? (

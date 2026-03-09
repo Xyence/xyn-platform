@@ -8628,7 +8628,6 @@ def validate_artifact(artifact: Artifact) -> Tuple[str, List[str]]:
 def artifacts_collection(request: HttpRequest) -> JsonResponse:
     if staff_error := _require_staff(request):
         return staff_error
-    include_bridge = _include_bridge_artifacts(request)
     if request.method == "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
     if request.method == "GET" and (
@@ -8651,7 +8650,6 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
                     installed_state="installed",
                 ).only("artifact_id")
             }
-        artifacts = [artifact for artifact in artifacts if _generic_artifact_visible(artifact, installed_ids=installed_ids, include_bridge=include_bridge)]
         artifacts = _dedupe_artifacts_for_dataset(artifacts, installed_ids=installed_ids)
         rows = [_artifact_table_row(artifact, workspace_id=workspace_id, installed_ids=installed_ids) for artifact in artifacts]
         for filter_row in structured_query.get("filters") or []:
@@ -8718,7 +8716,7 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
         )
     qs = qs.order_by("-updated_at", "-created_at")
     total = qs.count()
-    items = [artifact for artifact in qs if _generic_artifact_visible(artifact, include_bridge=include_bridge)]
+    items = list(qs)
     total = len(items)
     items = items[offset : offset + limit]
     blueprint_ids = [item.source_ref_id for item in items if item.source_ref_type == "Blueprint" and item.source_ref_id]
@@ -8748,7 +8746,6 @@ def artifacts_catalog_collection(request: HttpRequest) -> JsonResponse:
     query = str(request.GET.get("query") or request.GET.get("q") or "").strip()
     kind = str(request.GET.get("kind") or "").strip().lower()
     workspace_id = str(request.GET.get("workspace_id") or "").strip() or None
-    include_bridge = _include_bridge_artifacts(request)
     installed_ids: Set[str] = set()
     if workspace_id:
         installed_ids = {
@@ -8767,11 +8764,7 @@ def artifacts_catalog_collection(request: HttpRequest) -> JsonResponse:
         qs = qs.filter(models.Q(title__icontains=query) | models.Q(summary__icontains=query) | models.Q(slug__icontains=query))
 
     rows: List[Dict[str, Any]] = []
-    visible = [
-        artifact
-        for artifact in qs.order_by("-updated_at", "-created_at")
-        if _generic_artifact_visible(artifact, installed_ids=installed_ids, include_bridge=include_bridge)
-    ]
+    visible = list(qs.order_by("-updated_at", "-created_at"))
     for artifact in visible[:500]:
         try:
             manifest_summary = _manifest_summary_for_artifact(artifact, workspace_id=workspace_id)
@@ -9096,52 +9089,13 @@ def _resolve_artifact_by_slug(artifact_slug: str) -> Optional[Artifact]:
     )
 
 
-def _artifact_scope(artifact: Artifact) -> Dict[str, Any]:
-    return artifact.scope_json if isinstance(artifact.scope_json, dict) else {}
-
-
-def _artifact_is_bridge_only(artifact: Artifact) -> bool:
-    scope = _artifact_scope(artifact)
-    return bool(scope.get("bridge_artifact")) and str(scope.get("bridge_visibility") or "").strip().lower() == "workspace_bound_only"
-
-
-def _include_bridge_artifacts(request: HttpRequest) -> bool:
-    return str(request.GET.get("include_bridge") or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _generic_artifact_visible(
-    artifact: Artifact,
-    *,
-    installed_ids: Optional[Set[str]] = None,
-    include_bridge: bool = False,
-) -> bool:
-    if include_bridge:
-        return True
-    if not _artifact_is_bridge_only(artifact):
-        return True
-    if installed_ids and str(artifact.id) in installed_ids:
-        return True
-    return False
-
-
 def _artifact_visible_for_request(
     request: HttpRequest,
     artifact: Artifact,
     *,
     workspace_id: Optional[str] = None,
 ) -> bool:
-    include_bridge = _include_bridge_artifacts(request)
-    installed_ids: Set[str] = set()
-    workspace_token = str(workspace_id or request.GET.get("workspace_id") or "").strip()
-    if workspace_token:
-        installed_ids = {
-            str(binding.artifact_id)
-            for binding in WorkspaceArtifactBinding.objects.filter(
-                workspace_id=workspace_token,
-                artifact_id=artifact.id,
-            ).only("artifact_id")
-        }
-    return _generic_artifact_visible(artifact, installed_ids=installed_ids, include_bridge=include_bridge)
+    return True
 
 
 def _artifact_file_metadata_rows(artifact: Artifact) -> List[Dict[str, Any]]:
@@ -10373,8 +10327,6 @@ def workspace_app_runtime_targets_collection(request: HttpRequest, workspace_id:
     ).exists():
         return JsonResponse({"error": "artifact is not installed in workspace"}, status=400)
 
-    # Temporary bridge record for sibling-owned runtime execution until generated app
-    # artifacts are promoted/imported/installed natively. See DEBT-02.
     runtime_payload = {
         "runtime_owner": "sibling",
         "runtime_base_url": runtime_base_url,
@@ -10385,14 +10337,9 @@ def workspace_app_runtime_targets_collection(request: HttpRequest, workspace_id:
         "source_build_job_id": str(runtime_target.get("source_build_job_id") or "").strip(),
         "source_workspace_id": str(runtime_target.get("source_workspace_id") or "").strip(),
         "installed_artifact_slug": artifact_slug,
-        "bridge_artifact_slug": artifact_slug if not artifact_slug.startswith("app.") else "",
     }
     fqdn = str(runtime_target.get("network_alias") or f"{compose_project}.internal").strip()
-    desired_dns = {
-        "runtime_target": runtime_payload,
-        "bridge_artifact": artifact_slug,
-        "bridge_debt_ref": "DEBT-02",
-    }
+    desired_dns = {"runtime_target": runtime_payload}
     instance, created = WorkspaceAppInstance.objects.get_or_create(
         workspace=workspace,
         app_slug=app_slug,
@@ -15120,19 +15067,33 @@ def _intent_apply_create_app_intent_draft(
         return JsonResponse({"error": "raw_prompt is required"}, status=400)
     extracted = _extract_app_intent_fields(raw_prompt)
     initial_intent = payload.get("initial_intent") if isinstance(payload.get("initial_intent"), dict) else {}
+    revision_anchor = payload.get("revision_anchor") if isinstance(payload.get("revision_anchor"), dict) else {}
+    current_app_summary = payload.get("current_app_summary") if isinstance(payload.get("current_app_summary"), dict) else {}
+    current_app_spec = payload.get("current_app_spec") if isinstance(payload.get("current_app_spec"), dict) else {}
+    latest_appspec_ref = payload.get("latest_appspec_ref") if isinstance(payload.get("latest_appspec_ref"), dict) else {}
     merged_intent = {
         "app_kind": str(initial_intent.get("app_kind") or extracted.get("app_kind") or "custom_app"),
-        "requested_entities": list(initial_intent.get("requested_entities") or extracted.get("requested_entities") or []),
-        "phase_1_scope": list(initial_intent.get("phase_1_scope") or extracted.get("phase_1_scope") or []),
-        "requested_visuals": list(initial_intent.get("requested_visuals") or extracted.get("requested_visuals") or []),
+        "requested_entities": _normalize_unique_strings(list(initial_intent.get("requested_entities") or extracted.get("requested_entities") or [])),
+        "phase_1_scope": _normalize_unique_strings(list(initial_intent.get("phase_1_scope") or extracted.get("phase_1_scope") or [])),
+        "requested_visuals": _normalize_unique_strings(list(initial_intent.get("requested_visuals") or extracted.get("requested_visuals") or [])),
         "workspace_scoped": bool(initial_intent.get("workspace_scoped", extracted.get("workspace_scoped", True))),
     }
-    draft_title = str(payload.get("title") or extracted.get("title") or "New App").strip() or "New App"
-    draft_status = "ready" if merged_intent.get("requested_entities") else "draft"
+    if revision_anchor:
+        merged_intent["evolution_mode"] = str(initial_intent.get("evolution_mode") or "modify_installed_generated_app")
+    draft_title = str(payload.get("title") or current_app_summary.get("title") or extracted.get("title") or "New App").strip() or "New App"
+    draft_status = "ready" if merged_intent.get("requested_entities") or revision_anchor else "draft"
     draft_content = {
         "raw_prompt": raw_prompt,
         "initial_intent": merged_intent,
     }
+    if revision_anchor:
+        draft_content["revision_anchor"] = revision_anchor
+    if current_app_summary:
+        draft_content["current_app_summary"] = current_app_summary
+    if current_app_spec:
+        draft_content["current_app_spec"] = current_app_spec
+    if latest_appspec_ref:
+        draft_content["latest_appspec_ref"] = latest_appspec_ref
 
     created_by = str(identity.email or identity.subject or "xyn-ui").strip() or "xyn-ui"
     try:
@@ -15250,13 +15211,16 @@ def _intent_apply_create_app_intent_draft(
         "action_type": "CreateDraft",
         "artifact_type": "Workspace",
         "artifact_id": None,
-        "summary": "App intent draft created and submitted for processing.",
+        "summary": "Generated app revision draft created and submitted for processing."
+        if revision_anchor
+        else "App intent draft created and submitted for processing.",
         "result": {
             "workspace_id": str(workspace.id),
             "draft_id": draft_id,
             "job_id": job_id,
             "seed_api_base_url": _seed_api_base_url(),
             "initial_intent": merged_intent,
+            "revision_anchor": revision_anchor or None,
         },
         "next_actions": [
             {
@@ -15280,7 +15244,7 @@ def _intent_apply_create_app_intent_draft(
         identity=identity,
         request_id=request_id,
         artifact_id=None,
-        proposal={"operation": "create_app_intent_draft"},
+        proposal={"operation": str(payload.get("__operation") or "create_app_intent_draft"), "revision_anchor": revision_anchor or None},
         resolution=payload_response,
     )
     _log_prompt_activity(
@@ -15432,18 +15396,18 @@ def app_palette_execute(request: HttpRequest) -> JsonResponse:
     prompt_key = _normalize_palette_prompt(prompt)
     runtime_target_record = _workspace_runtime_target(workspace, "net-inventory")
     if (
-        prompt_key in BRIDGE_NET_INVENTORY_COMMANDS
+        prompt_key in GENERATED_NET_INVENTORY_COMMANDS
         and runtime_target_record
-        and _workspace_has_installed_any_artifact_slug(workspace, ["app.net-inventory", "net-inventory"])
+        and _workspace_has_installed_artifact_slug(workspace, "app.net-inventory")
     ):
         try:
-            return _bridge_palette_execution_response(
+            return _generated_app_palette_execution_response(
                 workspace=workspace,
                 prompt=prompt,
                 runtime_target=runtime_target_record["runtime_target"],
             )
         except RuntimeError as exc:
-            return JsonResponse({"error": "runtime bridge failed", "details": str(exc)}, status=502)
+            return JsonResponse({"error": "generated app runtime request failed", "details": str(exc)}, status=502)
     return _proxy_seed_workspace_request(
         request,
         path="/api/v1/palette/execute",
@@ -15736,10 +15700,14 @@ def _extract_app_intent_fields(message: str) -> Dict[str, Any]:
         requested_entities.append("devices")
     if "interfaces" in lower:
         requested_entities.append("interfaces")
+    if "vlans" in lower or "vlan" in lower:
+        requested_entities.append("vlans")
     if "ip addresses" in lower or "ip_address" in lower or "ip address" in lower:
         requested_entities.append("ip_addresses")
     if "locations" in lower or "location" in lower:
         requested_entities.append("locations")
+    if "racks" in lower or "rack" in lower:
+        requested_entities.append("racks")
 
     phase_1_scope: List[str] = []
     if re.search(r"start\s+with\s+devices?\s+and\s+locations?", lower):
@@ -15750,6 +15718,8 @@ def _extract_app_intent_fields(message: str) -> Dict[str, Any]:
     requested_visuals: List[str] = []
     if re.search(r"devices?\s+by\s+status", lower):
         requested_visuals.append("devices_by_status_chart")
+    if re.search(r"interfaces?\s+by\s+status", lower):
+        requested_visuals.append("interfaces_by_status_chart")
 
     app_kind = "network_inventory" if ("network inventory" in lower or "devices" in lower) else "custom_app"
     workspace_scoped = "workspace" in lower
@@ -15762,6 +15732,166 @@ def _extract_app_intent_fields(message: str) -> Dict[str, Any]:
         "requested_visuals": requested_visuals,
         "workspace_scoped": workspace_scoped,
         "raw_prompt": text,
+    }
+
+
+def _normalize_unique_strings(values: List[Any]) -> List[str]:
+    result: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        token = str(value or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        result.append(token)
+    return result
+
+
+def _infer_entities_from_app_spec(app_spec: Dict[str, Any]) -> List[str]:
+    entities = app_spec.get("entities") if isinstance(app_spec.get("entities"), list) else []
+    normalized = _normalize_unique_strings(list(entities))
+    if normalized:
+        return normalized
+    inferred: List[str] = []
+    reports = [str(item or "").strip() for item in (app_spec.get("reports") or []) if str(item or "").strip()]
+    requires_primitives = [str(item or "").strip() for item in (app_spec.get("requires_primitives") or []) if str(item or "").strip()]
+    services = app_spec.get("services") if isinstance(app_spec.get("services"), list) else []
+    service_names = [str(item.get("name") or "").strip() for item in services if isinstance(item, dict)]
+    if "net-inventory-api" in service_names:
+        inferred.append("devices")
+    if "location" in requires_primitives:
+        inferred.append("locations")
+    if any("interfaces" in report for report in reports):
+        inferred.append("interfaces")
+    return _normalize_unique_strings(inferred)
+
+
+def _installed_generated_app_contexts(workspace: Workspace) -> List[Dict[str, Any]]:
+    rows = (
+        WorkspaceArtifactBinding.objects.filter(
+            workspace=workspace,
+            enabled=True,
+            installed_state="installed",
+            artifact__slug__startswith="app.",
+            artifact__type__slug="application",
+        )
+        .select_related("artifact", "artifact__type")
+        .order_by("-updated_at", "-created_at")
+    )
+    contexts: List[Dict[str, Any]] = []
+    for binding in rows:
+        artifact = binding.artifact
+        if not artifact:
+            continue
+        slug = str(artifact.slug or "").strip()
+        if not slug.startswith("app."):
+            continue
+        app_slug = slug[len("app.") :].strip()
+        if not app_slug:
+            continue
+        manifest = _load_artifact_manifest(artifact)
+        content = manifest.get("content") if isinstance(manifest.get("content"), dict) else {}
+        current_app_spec = content.get("app_spec") if isinstance(content.get("app_spec"), dict) else {}
+        runtime_config = content.get("runtime_config") if isinstance(content.get("runtime_config"), dict) else {}
+        runtime_target_record = _workspace_runtime_target(workspace, app_slug)
+        runtime_instance = runtime_target_record.get("instance") if isinstance(runtime_target_record, dict) else None
+        latest_appspec_ref = {
+            "artifact_slug": slug,
+            "artifact_id": str(artifact.id),
+            "artifact_version": str(artifact.package_version or ""),
+            "source_build_job_id": str(runtime_config.get("source_job_id") or ""),
+            "app_spec_artifact_id": str(runtime_config.get("app_spec_artifact_id") or ""),
+        }
+        current_app_summary = {
+            "app_slug": str(current_app_spec.get("app_slug") or app_slug or "").strip(),
+            "title": str(current_app_spec.get("title") or artifact.title or slug).strip(),
+            "entities": _infer_entities_from_app_spec(current_app_spec),
+            "reports": _normalize_unique_strings(list(current_app_spec.get("reports") or [])),
+            "requires_primitives": _normalize_unique_strings(list(current_app_spec.get("requires_primitives") or [])),
+        }
+        if isinstance(runtime_target_record, dict):
+            runtime_target = runtime_target_record.get("runtime_target") if isinstance(runtime_target_record.get("runtime_target"), dict) else {}
+            current_app_summary["runtime_owner"] = str(runtime_target.get("runtime_owner") or "")
+            current_app_summary["runtime_base_url"] = str(runtime_target.get("runtime_base_url") or "")
+        contexts.append(
+            {
+                "binding": binding,
+                "artifact": artifact,
+                "artifact_slug": slug,
+                "app_slug": app_slug,
+                "package_version": str(artifact.package_version or ""),
+                "runtime_instance_id": str(getattr(runtime_instance, "id", "") or ""),
+                "current_app_spec": current_app_spec,
+                "current_runtime_config": runtime_config,
+                "current_app_summary": current_app_summary,
+                "latest_appspec_ref": latest_appspec_ref,
+            }
+        )
+    return contexts
+
+
+def _looks_like_generated_app_evolution_request(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    lower = text.lower()
+    if _match_app_builder_command(text):
+        return False
+    if re.match(r"^\s*(show|list|open|create)\s+devices?\b", lower):
+        return False
+    if re.match(r"^\s*(show|list)\s+locations?\b", lower):
+        return False
+    if re.match(r"^\s*show\s+devices?\s+by\s+status\b", lower):
+        return False
+    evolution_verb = re.search(r"\b(add|include|update|extend|modify|change|remove|support|enhance)\b", lower)
+    evolution_target = re.search(
+        r"\b(this app|current app|application|interfaces?|vlans?|racks?|locations?|devices?|chart|report|status)\b",
+        lower,
+    )
+    return bool(evolution_verb and evolution_target)
+
+
+def _match_generated_app_evolution_command(message: str, workspace: Workspace) -> Optional[Dict[str, Any]]:
+    if not _looks_like_generated_app_evolution_request(message):
+        return None
+    contexts = _installed_generated_app_contexts(workspace)
+    if len(contexts) != 1:
+        return None
+    context = contexts[0]
+    fields = _extract_app_intent_fields(message)
+    current_app_summary = context.get("current_app_summary") if isinstance(context.get("current_app_summary"), dict) else {}
+    current_entities = current_app_summary.get("entities") if isinstance(current_app_summary.get("entities"), list) else []
+    current_reports = current_app_summary.get("reports") if isinstance(current_app_summary.get("reports"), list) else []
+    merged_intent = {
+        "app_kind": str(fields.get("app_kind") or "custom_app"),
+        "requested_entities": _normalize_unique_strings(list(current_entities) + list(fields.get("requested_entities") or [])),
+        "phase_1_scope": _normalize_unique_strings(list(fields.get("phase_1_scope") or [])),
+        "requested_visuals": _normalize_unique_strings(list(fields.get("requested_visuals") or [])),
+        "workspace_scoped": True,
+        "evolution_mode": "modify_installed_generated_app",
+        "current_entities": _normalize_unique_strings(list(current_entities)),
+        "current_reports": _normalize_unique_strings(list(current_reports)),
+    }
+    revision_anchor = {
+        "anchor_type": "installed_generated_artifact",
+        "workspace_id": str(workspace.id),
+        "workspace_slug": str(workspace.slug or ""),
+        "artifact_id": str(context.get("artifact").id if context.get("artifact") else ""),
+        "artifact_slug": str(context.get("artifact_slug") or ""),
+        "artifact_version": str(context.get("package_version") or ""),
+        "app_slug": str(context.get("app_slug") or ""),
+        "workspace_app_instance_id": str(context.get("runtime_instance_id") or ""),
+    }
+    latest_appspec_ref = context.get("latest_appspec_ref") if isinstance(context.get("latest_appspec_ref"), dict) else {}
+    return {
+        "operation": "evolve_app_intent_draft",
+        "title": str(current_app_summary.get("title") or context.get("artifact").title or "Generated App").strip() or "Generated App",
+        "initial_intent": merged_intent,
+        "raw_prompt": str(fields.get("raw_prompt") or message),
+        "revision_anchor": revision_anchor,
+        "current_app_summary": current_app_summary,
+        "current_app_spec": context.get("current_app_spec") if isinstance(context.get("current_app_spec"), dict) else {},
+        "latest_appspec_ref": latest_appspec_ref,
     }
 
 
@@ -15901,11 +16031,13 @@ def _proxy_seed_workspace_request(
     return JsonResponse(payload_json, safe=not isinstance(payload_json, list), status=response.status_code)
 
 
-BRIDGE_NET_INVENTORY_COMMANDS = {
+GENERATED_NET_INVENTORY_COMMANDS = {
     "show devices",
     "show locations",
     "create device",
     "show devices by status",
+    "show interfaces",
+    "show interfaces by status",
 }
 
 
@@ -15919,18 +16051,6 @@ def _workspace_has_installed_artifact_slug(workspace: Workspace, artifact_slug: 
         enabled=True,
         installed_state="installed",
         artifact__slug=artifact_slug,
-    ).exists()
-
-
-def _workspace_has_installed_any_artifact_slug(workspace: Workspace, artifact_slugs: List[str]) -> bool:
-    clean = [str(item).strip() for item in artifact_slugs if str(item).strip()]
-    if not clean:
-        return False
-    return WorkspaceArtifactBinding.objects.filter(
-        workspace=workspace,
-        enabled=True,
-        installed_state="installed",
-        artifact__slug__in=clean,
     ).exists()
 
 
@@ -16005,11 +16125,11 @@ def _runtime_target_request(
     )
 
 
-def _bridge_create_device_name() -> str:
+def _generated_app_create_device_name() -> str:
     return f"demo-device-{uuid.uuid4().hex[:8]}"
 
 
-def _execute_net_inventory_bridge_command(
+def _execute_net_inventory_runtime_command(
     *,
     runtime_base_url: str,
     prompt: str,
@@ -16040,7 +16160,7 @@ def _execute_net_inventory_bridge_command(
             path="/devices",
             payload={
                 "workspace_id": workspace_id,
-                "name": _bridge_create_device_name(),
+                "name": _generated_app_create_device_name(),
                 "kind": "router",
                 "status": "online",
             },
@@ -16054,14 +16174,30 @@ def _execute_net_inventory_bridge_command(
             query={"workspace_id": workspace_id},
             timeout=20,
         )
+    elif command_key == "show interfaces":
+        response = _runtime_target_request(
+            base_url=runtime_base_url,
+            method="GET",
+            path="/interfaces",
+            query={"workspace_id": workspace_id},
+            timeout=20,
+        )
+    elif command_key == "show interfaces by status":
+        response = _runtime_target_request(
+            base_url=runtime_base_url,
+            method="GET",
+            path="/reports/interfaces-by-status",
+            query={"workspace_id": workspace_id},
+            timeout=20,
+        )
     else:
-        raise ValueError("unsupported bridge command")
+        raise ValueError("unsupported generated-app runtime command")
     content_type = str(response.headers.get("content-type") or "").lower()
     if "application/json" not in content_type:
-        raise RuntimeError(f"bridge runtime returned non-json content ({response.status_code})")
+        raise RuntimeError(f"generated-app runtime returned non-json content ({response.status_code})")
     payload = response.json() if response.content else {}
     if response.status_code >= 400:
-        raise RuntimeError(f"bridge runtime request failed ({response.status_code})")
+        raise RuntimeError(f"generated-app runtime request failed ({response.status_code})")
     if command_key == "show devices":
         rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
         return {
@@ -16086,6 +16222,14 @@ def _execute_net_inventory_bridge_command(
             "rows": [row] if row else [],
             "text": f"Created 1 device: {row.get('name') or 'unknown'}",
         }
+    if command_key == "show interfaces":
+        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
+        return {
+            "kind": "table",
+            "columns": ["id", "device_id", "name", "status", "workspace_id"],
+            "rows": rows,
+            "text": f"Found {len(rows)} interfaces.",
+        }
     report = payload if isinstance(payload, dict) else {}
     labels = report.get("labels") if isinstance(report.get("labels"), list) else []
     values = report.get("values") if isinstance(report.get("values"), list) else []
@@ -16095,18 +16239,22 @@ def _execute_net_inventory_bridge_command(
         "rows": [],
         "labels": labels,
         "values": values,
-        "title": "Devices by Status",
-        "text": f"Generated status chart for {sum(int(value or 0) for value in values)} devices.",
+        "title": "Interfaces by Status" if command_key == "show interfaces by status" else "Devices by Status",
+        "text": (
+            f"Generated status chart for {sum(int(value or 0) for value in values)} interfaces."
+            if command_key == "show interfaces by status"
+            else f"Generated status chart for {sum(int(value or 0) for value in values)} devices."
+        ),
     }
 
 
-def _bridge_palette_execution_response(
+def _generated_app_palette_execution_response(
     *,
     workspace: Workspace,
     prompt: str,
     runtime_target: Dict[str, Any],
 ) -> JsonResponse:
-    result = _execute_net_inventory_bridge_command(
+    result = _execute_net_inventory_runtime_command(
         runtime_base_url=str(runtime_target.get("runtime_base_url") or ""),
         prompt=prompt,
         workspace=workspace,
@@ -17136,6 +17284,57 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         )
         return JsonResponse(response_payload)
 
+    operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
+    generated_app_evolution = _match_generated_app_evolution_command(message, operator_workspace) if operator_workspace else None
+    if generated_app_evolution:
+        response_payload = {
+            "status": "DraftReady",
+            "action_type": "CreateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": "Will create and submit a revision draft for the installed generated app.",
+            "draft_payload": {
+                "__operation": "evolve_app_intent_draft",
+                "workspace_id": str(operator_workspace.id),
+                "title": str(generated_app_evolution.get("title") or "Generated App"),
+                "raw_prompt": str(generated_app_evolution.get("raw_prompt") or message),
+                "initial_intent": generated_app_evolution.get("initial_intent") if isinstance(generated_app_evolution.get("initial_intent"), dict) else {},
+                "revision_anchor": generated_app_evolution.get("revision_anchor") if isinstance(generated_app_evolution.get("revision_anchor"), dict) else {},
+                "current_app_summary": generated_app_evolution.get("current_app_summary") if isinstance(generated_app_evolution.get("current_app_summary"), dict) else {},
+                "current_app_spec": generated_app_evolution.get("current_app_spec") if isinstance(generated_app_evolution.get("current_app_spec"), dict) else {},
+                "latest_appspec_ref": generated_app_evolution.get("latest_appspec_ref") if isinstance(generated_app_evolution.get("latest_appspec_ref"), dict) else {},
+            },
+            "next_actions": [{"label": "Create revision draft", "action": "CreateDraft"}],
+            "audit": {
+                "request_id": request_id,
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        _audit_intent_event(
+            message="intent.resolve",
+            identity=identity,
+            request_id=request_id,
+            artifact_id=str((generated_app_evolution.get("revision_anchor") or {}).get("artifact_id") or ""),
+            proposal={
+                "action_type": "CreateDraft",
+                "artifact_type": "Workspace",
+                "operation": "evolve_app_intent_draft",
+                "prompt": message,
+                "revision_anchor": generated_app_evolution.get("revision_anchor") if isinstance(generated_app_evolution.get("revision_anchor"), dict) else {},
+            },
+            resolution=response_payload,
+        )
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="completed",
+            prompt=message,
+            request_type="intent.resolve",
+            workspace_id=str(operator_workspace.id),
+            summary=response_payload["summary"],
+        )
+        return JsonResponse(response_payload)
+
     remote_provision_request = _match_provision_xyn_remote_command(message)
     if remote_provision_request:
         operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
@@ -17423,7 +17622,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                 return _intent_apply_open_ems_panel(identity=identity, payload=body_payload, request_id=request_id)
             if operation == "open_artifact_panel":
                 return _intent_apply_open_artifact_panel(identity=identity, payload=body_payload, request_id=request_id)
-            if operation == "create_app_intent_draft":
+            if operation in {"create_app_intent_draft", "evolve_app_intent_draft"}:
                 return _intent_apply_create_app_intent_draft(identity=identity, payload=body_payload, request_id=request_id)
             return JsonResponse({"error": "CreateDraft currently supports ArticleDraft only"}, status=400)
         return _intent_apply_create_draft(identity=identity, payload=body_payload, request_id=request_id)
@@ -21765,8 +21964,20 @@ def _resolve_manifest_path_for_artifact(artifact: Artifact) -> Optional[Path]:
 
 
 def _load_artifact_manifest(artifact: Artifact) -> Dict[str, Any]:
+    scope = artifact.scope_json if isinstance(artifact.scope_json, dict) else {}
     manifest_path = _resolve_manifest_path_for_artifact(artifact)
     if not manifest_path:
+        embedded = scope.get("imported_manifest") if isinstance(scope.get("imported_manifest"), dict) else {}
+        if embedded:
+            manifest_artifact = embedded.get("artifact") if isinstance(embedded.get("artifact"), dict) else {}
+            manifest_slug = str(manifest_artifact.get("id") or manifest_artifact.get("slug") or "").strip()
+            expected_slug = str(_artifact_slug(artifact) or "").strip()
+            if manifest_slug and expected_slug and manifest_slug != expected_slug:
+                raise ValueError(
+                    f"embedded manifest slug mismatch artifact_id={artifact.id} slug={expected_slug} "
+                    f"manifest.artifact.id={manifest_slug}"
+                )
+            return embedded
         return {}
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))

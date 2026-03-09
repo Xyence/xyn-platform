@@ -241,6 +241,99 @@ class IntentEngineApiTests(TestCase):
         self.assertTrue(initial_intent.get("workspace_scoped"))
         self.assertNotEqual(payload.get("summary"), "Intent is ambiguous; provide clearer draft instructions.")
 
+    def test_resolve_follow_up_prompt_targets_installed_generated_app(self):
+        application_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        generated_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=application_type,
+            title="Network Inventory",
+            slug="app.net-inventory",
+            status="published",
+            visibility="team",
+            artifact_state="canonical",
+            package_version="0.0.1-dev",
+            scope_json={
+                "imported_manifest": {
+                    "artifact": {
+                        "type": "application",
+                        "slug": "app.net-inventory",
+                        "version": "0.0.1-dev",
+                        "generated": True,
+                        "title": "Network Inventory",
+                        "capability": {
+                            "visibility": "capabilities",
+                            "label": "Network Inventory",
+                            "category": "application",
+                        },
+                    },
+                    "content": {
+                        "app_spec": {
+                            "schema_version": "xyn.appspec.v0",
+                            "app_slug": "net-inventory",
+                            "title": "Network Inventory",
+                            "workspace_id": str(self.workspace.id),
+                            "entities": ["devices", "locations"],
+                            "phase_1_scope": ["devices", "locations"],
+                            "requested_visuals": ["devices_by_status_chart"],
+                            "reports": ["devices_by_status"],
+                            "services": [
+                                {"name": "net-inventory-api", "image": "public.ecr.aws/i0h0h0n4/xyn/artifacts/net-inventory-api:dev"},
+                                {"name": "net-inventory-db", "image": "postgres:16-alpine"},
+                            ],
+                            "source_prompt": "Build a network inventory app.",
+                        }
+                    },
+                    "runtime": {
+                        "runtime_config": {
+                            "app_slug": "net-inventory",
+                            "artifact_slug": "app.net-inventory",
+                            "artifact_version": "0.0.1-dev",
+                            "app_spec_artifact_id": "appspec-123",
+                        }
+                    },
+                }
+            },
+        )
+        WorkspaceArtifactBinding.objects.create(workspace=self.workspace, artifact=generated_artifact)
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=generated_artifact,
+            app_slug="net-inventory",
+            fqdn="net-inventory.localtest.me",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://xyn-sibling-net-inventory-api:8080",
+                    "app_slug": "net-inventory",
+                    "installed_artifact_slug": "app.net-inventory",
+                }
+            },
+        )
+
+        prompt = "Add interfaces to devices and include a chart showing interfaces by status."
+        response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": prompt, "context": {"workspace_id": str(self.workspace.id)}}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "DraftReady")
+        draft_payload = payload.get("draft_payload") or {}
+        self.assertEqual(draft_payload.get("__operation"), "evolve_app_intent_draft")
+        revision_anchor = draft_payload.get("revision_anchor") or {}
+        self.assertEqual(revision_anchor.get("artifact_slug"), "app.net-inventory")
+        self.assertEqual(revision_anchor.get("app_slug"), "net-inventory")
+        initial_intent = draft_payload.get("initial_intent") or {}
+        self.assertIn("interfaces", initial_intent.get("requested_entities") or [])
+        self.assertIn("interfaces_by_status_chart", initial_intent.get("requested_visuals") or [])
+        self.assertEqual(initial_intent.get("evolution_mode"), "modify_installed_generated_app")
+        current_app_spec = draft_payload.get("current_app_spec") or {}
+        self.assertIn("devices", current_app_spec.get("entities") or [])
+        self.assertIn("locations", current_app_spec.get("entities") or [])
+        self.assertIn("installed generated app", str(payload.get("summary") or "").lower())
+
     @patch("xyn_orchestrator.xyn_api.requests.request")
     def test_apply_create_app_intent_draft_submits_to_seed_and_returns_ids(self, request_mock):
         class _FakeResponse:
@@ -323,6 +416,103 @@ class IntentEngineApiTests(TestCase):
         second_call = request_mock.call_args_list[1]
         self.assertEqual(second_call.kwargs.get("method"), "POST")
         self.assertIn("/api/v1/drafts", str(second_call.kwargs.get("url") or ""))
+
+    @patch("xyn_orchestrator.xyn_api.requests.request")
+    def test_apply_evolved_app_intent_draft_posts_revision_anchor_to_seed(self, request_mock):
+        class _FakeResponse:
+            def __init__(self, status_code: int, payload: dict):
+                self.status_code = status_code
+                self._payload = payload
+                self.content = json.dumps(payload).encode("utf-8")
+                self.text = json.dumps(payload)
+
+            def json(self):
+                return self._payload
+
+        draft_id = "1b5bf3f6-5588-4cae-a79e-3f5d2fb1cf78"
+        job_id = "f4fcbfb8-2d66-4675-8766-b61af7948ddb"
+        request_mock.side_effect = [
+            _FakeResponse(
+                200,
+                [
+                    {
+                        "id": "a50816b5-16d9-45f0-a4d4-31483bbdb307",
+                        "slug": str(self.workspace.slug),
+                        "title": str(self.workspace.name),
+                    }
+                ],
+            ),
+            _FakeResponse(
+                201,
+                {
+                    "id": draft_id,
+                    "workspace_id": str(self.workspace.id),
+                    "type": "app_intent",
+                    "title": "Network Inventory Revision",
+                    "content_json": {},
+                    "status": "ready",
+                    "created_by": "intent-admin@example.com",
+                },
+            ),
+            _FakeResponse(
+                200,
+                {
+                    "draft": {"id": draft_id},
+                    "job_id": job_id,
+                    "job_status": "queued",
+                },
+            ),
+        ]
+
+        response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": {
+                        "__operation": "evolve_app_intent_draft",
+                        "workspace_id": str(self.workspace.id),
+                        "title": "Network Inventory Revision",
+                        "raw_prompt": "Add interfaces to devices and include a chart showing interfaces by status.",
+                        "initial_intent": {
+                            "app_kind": "network_inventory",
+                            "requested_entities": ["interfaces"],
+                            "requested_visuals": ["interfaces_by_status_chart"],
+                            "workspace_scoped": True,
+                            "evolution_mode": "modify_installed_generated_app",
+                        },
+                        "revision_anchor": {
+                            "artifact_slug": "app.net-inventory",
+                            "app_slug": "net-inventory",
+                            "runtime_instance_id": "runtime-123",
+                        },
+                        "current_app_summary": {
+                            "app_slug": "net-inventory",
+                            "entities": ["devices", "locations"],
+                        },
+                        "current_app_spec": {
+                            "app_slug": "net-inventory",
+                            "entities": ["devices", "locations"],
+                            "reports": ["devices_by_status"],
+                        },
+                        "latest_appspec_ref": {"artifact_id": "appspec-123"},
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "DraftReady")
+        self.assertEqual((payload.get("result") or {}).get("draft_id"), draft_id)
+        self.assertEqual((payload.get("result") or {}).get("job_id"), job_id)
+        draft_create_call = request_mock.call_args_list[1]
+        body = draft_create_call.kwargs.get("json") or {}
+        content_json = body.get("content_json") or {}
+        self.assertEqual((content_json.get("revision_anchor") or {}).get("artifact_slug"), "app.net-inventory")
+        self.assertEqual((content_json.get("initial_intent") or {}).get("evolution_mode"), "modify_installed_generated_app")
+        self.assertEqual((content_json.get("latest_appspec_ref") or {}).get("artifact_id"), "appspec-123")
 
     def test_prompt_submission_activity_is_visible(self):
         prompt = "Build a new app for network inventory with devices and locations."

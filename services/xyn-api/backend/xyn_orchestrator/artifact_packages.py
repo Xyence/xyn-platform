@@ -729,6 +729,15 @@ def install_package(
                     continue
 
                 action = "install"
+                imported_scope = dict(existing.scope_json or {}) if existing else {}
+                if isinstance(artifact_json, dict) and artifact_json:
+                    # Preserve imported package metadata so generated artifacts can expose
+                    # capability/suggestion/surface summaries without a file-backed manifest_ref.
+                    imported_scope["imported_manifest"] = artifact_json
+                    imported_scope["imported_from_package"] = {
+                        "package_name": package.name,
+                        "package_version": package.version,
+                    }
                 if existing:
                     action = "upgrade" if str(existing.package_version or "") != item_version else "reinstall"
                     if action == "upgrade":
@@ -750,6 +759,7 @@ def install_package(
                     existing.status = "active"
                     existing.content_hash = item_hash
                     existing.artifact_state = "canonical"
+                    existing.scope_json = imported_scope
                     existing.save(
                         update_fields=[
                             "title",
@@ -762,6 +772,7 @@ def install_package(
                             "status",
                             "content_hash",
                             "artifact_state",
+                            "scope_json",
                             "updated_at",
                         ]
                     )
@@ -788,6 +799,7 @@ def install_package(
                         source_ref_type="ArtifactPackage",
                         source_ref_id=str(package.id),
                         visibility="private",
+                        scope_json=imported_scope,
                     )
 
                 next_rev = (

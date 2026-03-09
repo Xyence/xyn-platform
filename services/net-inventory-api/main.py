@@ -63,6 +63,21 @@ def init_schema_with_retry() -> None:
                         """
                     )
                     cur.execute("CREATE INDEX IF NOT EXISTS ix_locations_workspace_id ON locations(workspace_id)")
+                    cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS interfaces (
+                          id UUID PRIMARY KEY,
+                          workspace_id UUID NOT NULL,
+                          device_id UUID NOT NULL,
+                          name TEXT NOT NULL,
+                          status TEXT NOT NULL DEFAULT 'unknown',
+                          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                        )
+                        """
+                    )
+                    cur.execute("CREATE INDEX IF NOT EXISTS ix_interfaces_workspace_id ON interfaces(workspace_id)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS ix_interfaces_workspace_status ON interfaces(workspace_id, status)")
                 conn.commit()
             return
         except Exception as exc:
@@ -89,6 +104,13 @@ class LocationCreateRequest(BaseModel):
     city: Optional[str] = None
     region: Optional[str] = None
     country: Optional[str] = None
+
+
+class InterfaceCreateRequest(BaseModel):
+    workspace_id: uuid.UUID
+    device_id: uuid.UUID
+    name: str = Field(min_length=1)
+    status: str = "unknown"
 
 
 @app.on_event("startup")
@@ -159,7 +181,10 @@ def index():
               <li><code>POST /devices</code> to create a device</li>
               <li><code>GET /locations?workspace_id=&lt;uuid&gt;</code> to list locations</li>
               <li><code>POST /locations</code> to create a location</li>
+              <li><code>GET /interfaces?workspace_id=&lt;uuid&gt;</code> to list interfaces</li>
+              <li><code>POST /interfaces</code> to create an interface</li>
               <li><code>GET /reports/devices-by-status?workspace_id=&lt;uuid&gt;</code> for the chart dataset</li>
+              <li><code>GET /reports/interfaces-by-status?workspace_id=&lt;uuid&gt;</code> for the interface chart dataset</li>
               <li><a href="/docs">/docs</a> for interactive API docs</li>
             </ul>
           </section>
@@ -300,6 +325,70 @@ def get_device(device_id: uuid.UUID):
     return row
 
 
+@app.get("/interfaces")
+def list_interfaces(workspace_id: uuid.UUID = Query(...)):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, workspace_id, device_id, name, status, created_at, updated_at
+                FROM interfaces
+                WHERE workspace_id = %s
+                ORDER BY created_at DESC
+                """,
+                (str(workspace_id),),
+            )
+            rows = cur.fetchall()
+    return {"items": rows}
+
+
+@app.post("/interfaces", status_code=201)
+def create_interface(payload: InterfaceCreateRequest):
+    row_id = uuid.uuid4()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO interfaces (id, workspace_id, device_id, name, status, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                """,
+                (
+                    str(row_id),
+                    str(payload.workspace_id),
+                    str(payload.device_id),
+                    payload.name.strip(),
+                    payload.status.strip() or "unknown",
+                ),
+            )
+            cur.execute(
+                """
+                SELECT id, workspace_id, device_id, name, status, created_at, updated_at
+                FROM interfaces WHERE id = %s
+                """,
+                (str(row_id),),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return row
+
+
+@app.get("/interfaces/{interface_id}")
+def get_interface(interface_id: uuid.UUID):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, workspace_id, device_id, name, status, created_at, updated_at
+                FROM interfaces WHERE id = %s
+                """,
+                (str(interface_id),),
+            )
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Interface not found")
+    return row
+
+
 @app.get("/reports/devices-by-status")
 def report_devices_by_status(workspace_id: uuid.UUID = Query(...)):
     with get_conn() as conn:
@@ -308,6 +397,26 @@ def report_devices_by_status(workspace_id: uuid.UUID = Query(...)):
                 """
                 SELECT status, COUNT(*)::int AS total
                 FROM devices
+                WHERE workspace_id = %s
+                GROUP BY status
+                ORDER BY status ASC
+                """,
+                (str(workspace_id),),
+            )
+            rows = cur.fetchall()
+    labels = [str(row.get("status") or "unknown") for row in rows]
+    values = [int(row.get("total") or 0) for row in rows]
+    return {"labels": labels, "values": values}
+
+
+@app.get("/reports/interfaces-by-status")
+def report_interfaces_by_status(workspace_id: uuid.UUID = Query(...)):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status, COUNT(*)::int AS total
+                FROM interfaces
                 WHERE workspace_id = %s
                 GROUP BY status
                 ORDER BY status ASC

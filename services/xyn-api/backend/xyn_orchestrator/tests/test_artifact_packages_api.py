@@ -15,6 +15,9 @@ from xyn_orchestrator.models import (
     ArtifactSurface,
     RoleBinding,
     UserIdentity,
+    Workspace,
+    WorkspaceArtifactBinding,
+    WorkspaceMembership,
 )
 
 
@@ -171,6 +174,72 @@ class ArtifactPackagesApiTests(TestCase):
         self.assertEqual(
             Artifact.objects.filter(slug="app.net-inventory", package_version="0.0.1-dev").count(),
             1,
+        )
+
+    def test_generated_artifact_import_preserves_manifest_summary_in_workspace_registry(self):
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "application",
+                    "slug": "app.net-inventory",
+                    "version": "0.0.1-dev",
+                    "title": "Generated Network Inventory",
+                    "content": {
+                        "artifact": {
+                            "id": "app.net-inventory",
+                            "type": "application",
+                            "slug": "app.net-inventory",
+                            "version": "0.0.1-dev",
+                            "generated": True,
+                        },
+                        "capability": {
+                            "visibility": "capabilities",
+                            "label": "Generated Network Inventory",
+                            "description": "Generated application capability installed through the artifact registry.",
+                        },
+                        "suggestions": [
+                            {
+                                "id": "show-devices",
+                                "name": "Show Devices",
+                                "prompt": "Show devices",
+                                "visibility": ["capability", "palette"],
+                            }
+                        ],
+                        "surfaces": {
+                            "manage": [{"label": "Workbench", "path": "/app/workbench", "order": 100}],
+                            "docs": [{"label": "Docs", "path": "/app/workbench", "order": 1000}],
+                        },
+                    },
+                }
+            ],
+            package_name="app.net-inventory",
+            package_version="0.0.1-dev",
+        )
+        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
+        imported = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+
+        artifact = Artifact.objects.get(slug="app.net-inventory", package_version="0.0.1-dev")
+        workspace = Workspace.objects.create(slug="generated-netinv", name="Generated NetInv")
+        WorkspaceMembership.objects.create(workspace=workspace, user_identity=self.identity, role="admin", termination_authority=True)
+        WorkspaceArtifactBinding.objects.create(
+            workspace=workspace,
+            artifact=artifact,
+            installed_state="installed",
+            enabled=True,
+        )
+
+        response = self.client.get(f"/xyn/api/workspaces/{workspace.id}/artifacts")
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        rows = response.json().get("artifacts", [])
+        match = next(row for row in rows if row.get("slug") == "app.net-inventory")
+        self.assertEqual((match.get("capability") or {}).get("visibility"), "capabilities")
+        self.assertEqual(str((match.get("capability") or {}).get("label") or ""), "Generated Network Inventory")
+        self.assertEqual(len(match.get("suggestions") or []), 1)
+        self.assertEqual(str((match.get("suggestions") or [])[0].get("prompt") or ""), "Show devices")
+        self.assertEqual(
+            str((((match.get("manifest_summary") or {}).get("surfaces") or {}).get("manage") or [])[0].get("path") or ""),
+            "/app/workbench",
         )
 
     def test_validate_returns_dependency_order_and_unresolved_bindings(self):

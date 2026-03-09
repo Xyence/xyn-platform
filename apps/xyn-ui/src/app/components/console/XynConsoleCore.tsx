@@ -106,6 +106,7 @@ function defaultArtifactStructuredQuery(): ArtifactStructuredQuery {
 
 function isExplicitPaletteCommand(input: string): boolean {
   return /^(show|list)\s+devices(\s+by\s+status)?$/i.test(String(input || "").trim())
+    || /^(show|list)\s+interfaces(\s+by\s+status)?$/i.test(String(input || "").trim())
     || /^(show|list)\s+locations$/i.test(String(input || "").trim())
     || /^create\s+device$/i.test(String(input || "").trim());
 }
@@ -979,6 +980,9 @@ function ResolutionCard({
   const panelLinks = (resolution.next_actions || []).filter(
     (item) => item.action === "OpenPanel" && typeof item.panel_key === "string" && item.panel_key.length > 0
   );
+  const createActionLabel =
+    (resolution.next_actions || []).find((item) => item.action === "CreateDraft" && String(item.label || "").trim())?.label ||
+    "Create draft";
 
   return (
     <section className="xyn-console-card" aria-label="Resolution">
@@ -997,7 +1001,7 @@ function ResolutionCard({
       <div className="inline-actions">
         {canCreate ? (
           <button type="button" className="primary sm" onClick={() => void applyDraftPayload()}>
-            Create draft
+            {createActionLabel}
           </button>
         ) : null}
         {canOpen ? (
@@ -1091,11 +1095,46 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     /\/(?:w\/[^/]+\/)?workbench\/?$/.test(location.pathname) || /^\/app\/platform(?:\/|$)/.test(location.pathname);
   const hasContextArtifact = Boolean(context.artifact_id && context.artifact_type);
   const isGlobalContext = !hasContextArtifact;
+  const workspaceIdFromPath = useMemo(() => {
+    const match = String(location.pathname || "").match(/^\/w\/([^/]+)(?:\/|$)/);
+    return match?.[1] ? decodeURIComponent(match[1]) : "";
+  }, [location.pathname]);
 
   useEffect(() => {
     if (!isSurfaceVisible) return;
     inputRef.current?.focus();
   }, [isSurfaceVisible]);
+
+  useEffect(() => {
+    if (!isWorkbenchPath) return;
+    const params = new URLSearchParams(location.search || "");
+    if (String(params.get("revise") || "").trim().toLowerCase() !== "1") return;
+    const prompt = String(params.get("prompt") || "").trim();
+    const artifactSlug = String(params.get("artifact_slug") || "").trim();
+    const artifactTitle = String(params.get("artifact_title") || "").trim() || artifactSlug;
+    if (artifactSlug) {
+      setLastArtifactHint({
+        artifact_id: artifactSlug,
+        artifact_type: "GeneratedApplication",
+        artifact_state: "installed",
+        title: artifactTitle,
+        route: location.pathname,
+      });
+    }
+    setInputText(prompt || "Add ");
+    setOpen(true);
+    params.delete("revise");
+    params.delete("prompt");
+    params.delete("artifact_slug");
+    params.delete("artifact_title");
+    navigate(
+      {
+        pathname: location.pathname,
+        search: params.toString() ? `?${params.toString()}` : "",
+      },
+      { replace: true },
+    );
+  }, [isWorkbenchPath, location.pathname, location.search, navigate, setInputText, setLastArtifactHint, setOpen]);
 
   useEffect(() => {
     if (!isSurfaceVisible) return;
@@ -1217,9 +1256,6 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       })();
       return;
     }
-    const workspaceMatch = String(location.pathname || "").match(/^\/w\/([^/]+)(?:\/|$)/);
-    const workspaceIdFromPath = workspaceMatch?.[1] ? decodeURIComponent(workspaceMatch[1]) : "";
-
     // Resolve canonical core prompt surfaces without relying on surface API fetches.
     // This keeps global actions (like Platform Settings) deterministic even when nav APIs fail.
     const coreTarget = resolvePromptSurfaceTarget(prompt, {
