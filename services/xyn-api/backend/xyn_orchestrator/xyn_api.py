@@ -16266,7 +16266,7 @@ def _execute_net_inventory_runtime_command(
             return _generated_missing_fields_response(
                 command_key=command_key,
                 missing_fields=missing_fields,
-                example="create location named office in St. Louis MO USA",
+                example="create location named sibling-location-2 in Austin TX USA",
             )
         created_name = str(payload.get("name") or "unknown")
         response = _runtime_target_request(

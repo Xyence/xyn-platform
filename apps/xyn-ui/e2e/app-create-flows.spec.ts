@@ -95,7 +95,7 @@ test.describe("generated app create flows", () => {
 
     await expect
       .poll(
-        async () => palettePrompt(page, "create location named office in St. Louis MO USA"),
+        async () => palettePrompt(page, "create location named sibling-location-2 in Austin TX USA"),
         { timeout: 60_000, message: "Sibling app should create a location from supplied values." },
       )
       .toMatchObject({
@@ -103,20 +103,20 @@ test.describe("generated app create flows", () => {
         kind: "table",
         text: expect.stringMatching(/^Created 1 location:/),
       });
-    const createLocationRows = await palettePrompt(page, "create location named office in St. Louis MO USA");
+    const createLocationRows = await palettePrompt(page, "create location named sibling-location-2 in Austin TX USA");
     expect(Array.isArray(createLocationRows.rows)).toBe(true);
     expect(createLocationRows.rows.some((row: Record<string, unknown>) => String(row.name || "") === "sibling-location-1")).toBe(true);
-    expect(createLocationRows.rows.some((row: Record<string, unknown>) => String(row.name || "") === "office")).toBe(true);
+    expect(createLocationRows.rows.some((row: Record<string, unknown>) => String(row.name || "") === "sibling-location-2")).toBe(true);
 
-    await submitPalettePromptThroughUi(page, "create location named office in St. Louis MO USA");
-    await expect(page.getByText(/^Created 1 location: office$/)).toBeVisible({ timeout: 30_000 });
+    await submitPalettePromptThroughUi(page, "create location named sibling-location-2 in Austin TX USA");
+    await expect(page.getByText(/^Created 1 location: sibling-location-2$/)).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole("cell", { name: "sibling-location-1" })).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByRole("cell", { name: "office" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("cell", { name: "sibling-location-2" })).toBeVisible({ timeout: 30_000 });
 
     await expect
       .poll(
         async () => palettePrompt(page, "show locations"),
-        { timeout: 60_000, message: "Sibling app should show the created office location." },
+        { timeout: 60_000, message: "Sibling app should show the created sibling validation location." },
       )
       .toMatchObject({
         status: 200,
@@ -158,9 +158,9 @@ test.describe("generated app create flows", () => {
     expect(Array.isArray(locationRows.rows)).toBe(true);
     expect(Array.isArray(deviceRows.rows)).toBe(true);
     expect(locationRows.rows.some((row: Record<string, unknown>) =>
-      String(row.name || "") === "office"
-      && String(row.city || "") === "St. Louis"
-      && String(row.region || "") === "MO"
+      String(row.name || "") === "sibling-location-2"
+      && String(row.city || "") === "Austin"
+      && String(row.region || "") === "TX"
       && String(row.country || "") === "USA")).toBe(true);
     expect(deviceRows.rows.some((row: Record<string, unknown>) => String(row.name || "") === "edge-router-1")).toBe(true);
 

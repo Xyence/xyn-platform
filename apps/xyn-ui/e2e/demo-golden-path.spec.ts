@@ -173,10 +173,10 @@ test.describe("demo golden path", () => {
         await expect(page.getByText(/seeded-location-1/i), "Palette should show seeded location data.").toBeVisible({ timeout: 60_000 });
         await submitPalettePrompt(page, "create location");
         await expect(page.getByText(/provide: name, city/i), "Palette should request required location fields.").toBeVisible({ timeout: 60_000 });
-        await submitPalettePrompt(page, "create location named office in St. Louis MO USA");
-        await expect(page.getByText(/Created 1 location: office/i), "Palette should confirm location creation.").toBeVisible({ timeout: 60_000 });
+        await submitPalettePrompt(page, "create location named sibling-location-2 in Austin TX USA");
+        await expect(page.getByText(/Created 1 location: sibling-location-2/i), "Palette should confirm location creation.").toBeVisible({ timeout: 60_000 });
         await submitPalettePrompt(page, "show locations");
-        await expect(page.getByText(/office/i), "Created location should appear in the locations list.").toBeVisible({ timeout: 60_000 });
+        await expect(page.getByText(/sibling-location-2/i), "Created location should appear in the locations list.").toBeVisible({ timeout: 60_000 });
         await submitPalettePrompt(page, "create device named edge-router-1");
         await expect(page.getByText(/Created 1 device: edge-router-1/i), "Palette should confirm device creation.").toBeVisible({ timeout: 60_000 });
         await submitPalettePrompt(page, "show devices");
