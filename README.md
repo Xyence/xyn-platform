@@ -69,12 +69,12 @@ Backend modes:
 - `token`: token paste flow
 - `oidc`: OIDC provider login flow
 
-## Pre-push publish hook
+## Pre-push checks
 
 This repo includes `.githooks/pre-push`, and local Git is configured with `core.hooksPath=.githooks`.
 
-- Every `git push` runs `make publish-dev` first.
-- If publish fails, the push is blocked.
+- Every `git push` runs local image build checks first.
+- If the local checks fail, the push is blocked.
 - Emergency bypass: `SKIP_XYN_PUBLISH=1 git push`
 
 ## CI publishing
@@ -83,6 +83,7 @@ GitHub Actions workflow: `.github/workflows/publish.yml`
 
 Triggers:
 
+- push to `develop`
 - push to `main`
 - push tags matching `v*`
 
