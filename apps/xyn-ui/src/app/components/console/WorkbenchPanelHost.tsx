@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  executeAppPalettePrompt,
   getArtifactConsoleDetailBySlug,
   getArtifactConsoleFilesBySlug,
   getEmsDatasetSchemaTable,
@@ -31,6 +32,7 @@ import type {
 import CanvasRenderer from "../../../components/canvas/CanvasRenderer";
 import InlineMessage from "../../../components/InlineMessage";
 import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityRegistry";
+import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail } from "../../utils/entityChangeEvents";
 import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
 import JobDetailPage from "../../pages/JobDetailPage";
@@ -90,8 +92,48 @@ type CanvasQuery = {
 
 type ContextEmitter = (context: Record<string, unknown> | null) => void;
 
-function PaletteResultPanel({ result, prompt, error }: { result?: AppPaletteResult; prompt?: string; error?: string }) {
-  const safeResult = result || { kind: "table", columns: [], rows: [] };
+function PaletteResultPanel({
+  result,
+  prompt,
+  error,
+  workspaceId,
+}: {
+  result?: AppPaletteResult;
+  prompt?: string;
+  error?: string;
+  workspaceId: string;
+}) {
+  const [liveResult, setLiveResult] = useState<AppPaletteResult | undefined>(result);
+  const [refreshing, setRefreshing] = useState(false);
+  const listPrompt = useMemo(() => inferEntityListPrompt(String(prompt || "")), [prompt]);
+
+  useEffect(() => {
+    setLiveResult(result);
+  }, [result]);
+
+  useEffect(() => {
+    if (!workspaceId || !listPrompt) return;
+    let active = true;
+    const onEntityChange = async (event: Event) => {
+      const detail = (event as CustomEvent<EntityChangeDetail>).detail;
+      if (!detail || detail.entityKey !== listPrompt.entityKey) return;
+      try {
+        setRefreshing(true);
+        const refreshed = await executeAppPalettePrompt(workspaceId, { prompt: listPrompt.prompt });
+        if (!active || refreshed.kind !== "table") return;
+        setLiveResult(refreshed);
+      } finally {
+        if (active) setRefreshing(false);
+      }
+    };
+    window.addEventListener(XYN_ENTITY_CHANGE_EVENT, onEntityChange as EventListener);
+    return () => {
+      active = false;
+      window.removeEventListener(XYN_ENTITY_CHANGE_EVENT, onEntityChange as EventListener);
+    };
+  }, [listPrompt, workspaceId]);
+
+  const safeResult = liveResult || { kind: "table", columns: [], rows: [] };
   const columns = Array.isArray(safeResult.columns) ? safeResult.columns : [];
   const rows = Array.isArray(safeResult.rows) ? safeResult.rows : [];
   const labels = Array.isArray(safeResult.labels) ? safeResult.labels : [];
@@ -125,6 +167,12 @@ function PaletteResultPanel({ result, prompt, error }: { result?: AppPaletteResu
             <div className="field-label">Resolved Context Packs</div>
             <div className="field-value">{contextPackSlugs.length ? contextPackSlugs.join(", ") : "—"}</div>
           </div>
+          {listPrompt ? (
+            <div>
+              <div className="field-label">Auto Refresh</div>
+              <div className="field-value">{refreshing ? "Refreshing…" : "Watching entity changes"}</div>
+            </div>
+          ) : null}
         </div>
         {error ? <InlineMessage tone="error" title="Palette request failed" body={error} /> : null}
         {warnings.length ? <InlineMessage tone="warn" title="Warnings" body={warnings.join(" ")} /> : null}
@@ -1409,6 +1457,7 @@ export default function WorkbenchPanelHost({
           result={panel.params?.result as AppPaletteResult | undefined}
           prompt={String(panel.params?.prompt || "")}
           error={String(panel.params?.error || "")}
+          workspaceId={workspaceId}
         />
       );
     }

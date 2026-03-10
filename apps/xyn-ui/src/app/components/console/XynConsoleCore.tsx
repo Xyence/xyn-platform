@@ -11,6 +11,7 @@ import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntit
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
 import { useXynConsole } from "../../state/xynConsoleStore";
+import { emitEntityChange, inferEntityChangeFromPrompt } from "../../utils/entityChangeEvents";
 import RecentArtifactsMiniTable from "./RecentArtifactsMiniTable";
 import ConsolePromptCard from "./ConsolePromptCard";
 import ConsoleGuidancePanel from "./ConsoleGuidancePanel";
@@ -1211,11 +1212,13 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     result: Awaited<ReturnType<typeof executeAppPalettePrompt>>,
   ) => {
     const normalized = prompt.trim().toLowerCase();
-    const refreshPrompt = normalized.startsWith("create location")
+    const refreshPrompt = normalized.startsWith("create location") || normalized.startsWith("update location") || normalized.startsWith("rename location") || normalized.startsWith("delete location")
       ? "show locations"
-      : normalized.startsWith("create device")
+      : normalized.startsWith("create device") || normalized.startsWith("update device") || normalized.startsWith("rename device") || normalized.startsWith("delete device")
         ? "show devices"
-        : "";
+        : normalized.startsWith("create interface") || normalized.startsWith("update interface") || normalized.startsWith("rename interface") || normalized.startsWith("delete interface")
+          ? "show interfaces"
+          : "";
     if (!refreshPrompt || result.kind !== "table") return result;
     try {
       const refreshed = await executeAppPalettePrompt(workspaceId, { prompt: refreshPrompt });
@@ -1532,6 +1535,10 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       try {
         const result = await executeAppPalettePrompt(workspaceId, { prompt });
         const panelResult = await refreshPaletteResultAfterCreate(workspaceId, prompt, result);
+        const entityChange = inferEntityChangeFromPrompt(prompt);
+        if (entityChange && panelResult.kind === "table") {
+          emitEntityChange(entityChange);
+        }
         onOpenPanel("palette_result", { prompt, result: panelResult });
         setInputText("");
         clearSessionResolution();
