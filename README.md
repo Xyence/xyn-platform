@@ -90,3 +90,19 @@ Required repository secrets (choose one auth mode):
 
 - OIDC (recommended): `AWS_ROLE_TO_ASSUME`
 - Access keys: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+
+## License
+
+This repository follows the same GNU Affero General Public License v3.0 model as the core Xyn project.
+
+In plain language, if you modify Xyn runtime or platform components and let users interact with those modified versions over a network, you must also make the corresponding source code for those modifications available under AGPLv3.
+
+Commercial use, including paid hosting, support, and consulting, is allowed so long as AGPL obligations are honored. Separate commercial licensing may also be available.
+
+See [LICENSE](/home/jrestivo/src/xyn-platform/LICENSE) and [NOTICE](/home/jrestivo/src/xyn-platform/NOTICE).
+
+## Trademark and branding
+
+The software license does not grant rights to use project names, logos, or branding except as required for reasonable nominative use.
+
+Any formal trademark policy will be published separately.
