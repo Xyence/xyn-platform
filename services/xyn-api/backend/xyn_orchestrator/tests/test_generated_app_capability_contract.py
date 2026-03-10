@@ -458,6 +458,27 @@ class GeneratedAppCapabilityContractTests(TestCase):
         self.assertTrue(device_fields["name"]["required"])
         self.assertEqual(device_fields["location_id"]["relation"]["target_entity"], "locations")
         self.assertIn("name", devices["presentation"]["default_list_fields"])
+
+    def test_palette_execute_accepts_workspace_slug_for_generated_runtime(self):
+        self._bind_generated_artifact(include_interfaces=False, package_version="0.0.1-dev")
+        self._ensure_runtime()
+
+        with mock.patch(
+            "xyn_orchestrator.xyn_api.requests.request",
+            return_value=_FakeResponse(body={"items": [{"id": "dev-1", "name": "router-1", "kind": "router", "status": "online", "location_id": "loc-1"}]}),
+        ) as runtime_request:
+            response = self.client.post(
+                f"/xyn/api/palette/execute?workspace_slug={self.workspace.slug}",
+                data=json.dumps({"prompt": "show devices"}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("kind"), "table")
+        self.assertEqual(payload.get("meta", {}).get("base_url"), "http://generated-runtime:8080")
+        self.assertEqual(runtime_request.call_count, 1)
+        self.assertEqual(runtime_request.call_args.kwargs.get("url"), "http://generated-runtime:8080/devices")
         self.assertIn("location_id", devices["validation"]["allowed_on_update"])
 
         locations = entities["locations"]

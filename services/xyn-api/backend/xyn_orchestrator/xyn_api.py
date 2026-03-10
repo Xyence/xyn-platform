@@ -15352,6 +15352,7 @@ def app_builder_execution_notes_collection(request: HttpRequest) -> JsonResponse
         return JsonResponse({"error": "not authenticated"}, status=401)
     workspace_ref = str(
         request.GET.get("workspace_id")
+        or request.GET.get("workspace_slug")
         or request.GET.get("workspace")
         or request.GET.get("operator_workspace_id")
         or request.headers.get("X-Workspace-Id")
