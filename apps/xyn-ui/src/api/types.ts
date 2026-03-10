@@ -976,6 +976,50 @@ export type ArtifactManifestSummary = {
   ui_mount_scope?: "global" | "workspace" | string;
   capability?: ArtifactCapability;
   suggestions?: ArtifactSuggestion[];
+  entities?: Array<{
+    key: string;
+    singular_label: string;
+    plural_label: string;
+    collection_path: string;
+    item_path_template: string;
+    operations: {
+      list: { declared: boolean; method: string; path: string };
+      get: { declared: boolean; method: string; path: string };
+      create: { declared: boolean; method: string; path: string };
+      update: { declared: boolean; method: string; path: string };
+      delete: { declared: boolean; method: string; path: string };
+    };
+    fields: Array<{
+      name: string;
+      type: string;
+      required: boolean;
+      readable: boolean;
+      writable: boolean;
+      identity: boolean;
+      relation?: {
+        target_entity: string;
+        target_field: string;
+        relation_kind: string;
+      };
+      options?: string[];
+    }>;
+    presentation: {
+      default_list_fields: string[];
+      default_detail_fields: string[];
+      title_field?: string | null;
+    };
+    validation: {
+      required_on_create: string[];
+      allowed_on_update: string[];
+    };
+    relationships: Array<{
+      field: string;
+      target_entity: string;
+      target_field: string;
+      relation_kind: string;
+      required: boolean;
+    }>;
+  }>;
   surfaces: {
     nav: ArtifactManifestSurfaceEntry[];
     manage: ArtifactManifestSurfaceEntry[];
@@ -1936,6 +1980,8 @@ export type AiActivityEntry = {
   artifact_id?: string;
   artifact_type?: string;
   artifact_title?: string;
+  trace?: Array<Record<string, unknown>>;
+  structured_operation?: Record<string, unknown>;
   source?: "audit_log" | "artifact_event" | "app_job";
 };
 

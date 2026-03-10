@@ -3,6 +3,7 @@ name = "ems-api"
 version = "0.1.0"
 description = "EMS API scaffold"
 requires-python = ">=3.10"
+license = { text = "AGPL-3.0-only" }
 
 [project.optional-dependencies]
 dev = [

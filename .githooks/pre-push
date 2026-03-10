@@ -5,11 +5,12 @@ ROOT_DIR="$(git rev-parse --show-toplevel)"
 cd "$ROOT_DIR"
 
 if [[ "${SKIP_XYN_PUBLISH:-0}" == "1" ]]; then
-  echo "[pre-push] SKIP_XYN_PUBLISH=1 set, skipping artifact publish."
+  echo "[pre-push] SKIP_XYN_PUBLISH=1 set, skipping local pre-push checks."
   exit 0
 fi
 
-echo "[pre-push] Publishing xyn-platform artifacts before push..."
-SKIP_RELEASE_MANIFEST_WRITE=1 make publish-dev
-
-echo "[pre-push] Artifact publish completed; continuing push."
+echo "[pre-push] Running local validation checks..."
+docker build -f apps/xyn-ui/Dockerfile -t xyn-platform-prepush-ui apps/xyn-ui >/dev/null
+docker build -f services/xyn-api/Dockerfile -t xyn-platform-prepush-api services/xyn-api >/dev/null
+docker build -f services/net-inventory-api/Dockerfile -t xyn-platform-prepush-net-inventory services/net-inventory-api >/dev/null
+echo "[pre-push] Local validation passed. Publishing is handled by GitHub Actions."

@@ -1,4 +1,5 @@
 import base64
+import copy
 import datetime as dt
 import ipaddress
 import json
@@ -387,6 +388,8 @@ def _log_prompt_activity(
     job_id: str = "",
     summary: str = "",
     error: str = "",
+    trace: Optional[List[Dict[str, Any]]] = None,
+    structured_operation: Optional[Dict[str, Any]] = None,
 ) -> None:
     AuditLog.objects.create(
         message="prompt_submission",
@@ -401,6 +404,8 @@ def _log_prompt_activity(
             "job_id": str(job_id or ""),
             "summary": str(summary or ""),
             "error": str(error or ""),
+            "trace": [item for item in (trace or []) if isinstance(item, dict)],
+            "structured_operation": structured_operation if isinstance(structured_operation, dict) else {},
         },
     )
 
@@ -15347,6 +15352,7 @@ def app_builder_execution_notes_collection(request: HttpRequest) -> JsonResponse
         return JsonResponse({"error": "not authenticated"}, status=401)
     workspace_ref = str(
         request.GET.get("workspace_id")
+        or request.GET.get("workspace_slug")
         or request.GET.get("workspace")
         or request.GET.get("operator_workspace_id")
         or request.headers.get("X-Workspace-Id")
@@ -15393,21 +15399,64 @@ def app_palette_execute(request: HttpRequest) -> JsonResponse:
     if not workspace:
         return JsonResponse({"error": "workspace context is required"}, status=400)
     prompt = str(payload.get("prompt") or "").strip()
-    prompt_key = _generated_net_inventory_command_key(prompt)
+    prompt_key = _normalize_palette_prompt(prompt)
+    request_id = str(uuid.uuid4())
     runtime_target_record = _workspace_runtime_target(workspace, "net-inventory")
-    if (
-        prompt_key in GENERATED_NET_INVENTORY_COMMANDS
-        and runtime_target_record
-        and _workspace_has_installed_artifact_slug(workspace, "app.net-inventory")
-    ):
+    generated_artifact_issue = _workspace_generated_artifact_issue(workspace, "net-inventory")
+    capability_manifest = _workspace_installed_capability_manifest(workspace, "net-inventory")
+    if runtime_target_record and generated_artifact_issue and _looks_like_generated_crud_prompt(prompt):
+        result = _generated_app_invalid_contract_response(prompt=prompt, issue=generated_artifact_issue)
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="failed",
+            prompt=prompt,
+            request_type="palette.execute",
+            workspace_id=str(workspace.id),
+            summary="Generated app contract is unavailable for the installed artifact.",
+            error=str(generated_artifact_issue.get("reason") or "invalid_generated_artifact_contract"),
+            trace=[
+                _generated_trace_step("user_command", source="palette", prompt=prompt),
+                _generated_trace_step("invalid_generated_artifact_contract", **generated_artifact_issue),
+            ],
+        )
+        return result
+    if runtime_target_record and capability_manifest:
         try:
             return _generated_app_palette_execution_response(
+                identity=identity,
+                request_id=request_id,
                 workspace=workspace,
                 prompt=prompt,
                 runtime_target=runtime_target_record["runtime_target"],
+                capability_manifest=capability_manifest,
             )
         except RuntimeError as exc:
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="failed",
+                prompt=prompt,
+                request_type="palette.execute",
+                workspace_id=str(workspace.id),
+                summary="Generated app runtime request failed.",
+                error=str(exc),
+                trace=[_generated_trace_step("user_command", source="palette", prompt=prompt), _generated_trace_step("error", error=str(exc))],
+            )
             return JsonResponse({"error": "generated app runtime request failed", "details": str(exc)}, status=502)
+    if runtime_target_record and prompt_key in _manifest_latent_command_keys(capability_manifest or {}):
+        result = _generated_app_disabled_response(prompt=prompt, capability_manifest=capability_manifest or {})
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="completed",
+            prompt=prompt,
+            request_type="palette.execute",
+            workspace_id=str(workspace.id),
+            summary="No matching palette command found.",
+            trace=[_generated_trace_step("user_command", source="palette", prompt=prompt), _generated_trace_step("result", outcome="latent_disabled")],
+        )
+        return result
     return _proxy_seed_workspace_request(
         request,
         path="/api/v1/palette/execute",
@@ -16031,28 +16080,25 @@ def _proxy_seed_workspace_request(
     return JsonResponse(payload_json, safe=not isinstance(payload_json, list), status=response.status_code)
 
 
-GENERATED_NET_INVENTORY_COMMANDS = {
-    "show devices",
-    "show locations",
-    "create device",
-    "create location",
-    "show devices by status",
-    "show interfaces",
-    "show interfaces by status",
-}
-
-
 def _normalize_palette_prompt(prompt: str) -> str:
-    return re.sub(r"\s+", " ", str(prompt or "").strip().lower())
-
-
-def _generated_net_inventory_command_key(prompt: str) -> str:
-    key = _normalize_palette_prompt(prompt)
+    key = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
     if key.startswith("create location"):
         return "create location"
     if key.startswith("create device"):
         return "create device"
     return key
+
+
+def _looks_like_generated_crud_prompt(prompt: str) -> bool:
+    text = str(prompt or "").strip().lower()
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"\b(show|list|create|add|update|change|rename|delete|remove)\b.*\b(device|devices|location|locations|interface|interfaces)\b",
+            text,
+        )
+    )
 
 
 def _workspace_has_installed_artifact_slug(workspace: Workspace, artifact_slug: str) -> bool:
@@ -16090,6 +16136,909 @@ def _workspace_runtime_target(workspace: Workspace, app_slug: str) -> Optional[D
         "runtime_target": runtime_target,
         "runtime_base_url": base_url,
     }
+
+
+def _installed_generated_artifact(workspace: Workspace, app_slug: str) -> Optional[Artifact]:
+    artifact_slug = f"app.{app_slug}"
+    binding = (
+        WorkspaceArtifactBinding.objects.filter(
+            workspace=workspace,
+            enabled=True,
+            installed_state="installed",
+            artifact__slug=artifact_slug,
+        )
+        .select_related("artifact", "artifact__type")
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+    return binding.artifact if binding and binding.artifact else None
+
+
+def _generated_artifact_contract_issue(artifact: Optional[Artifact], resolved: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not artifact:
+        return None
+    artifact_slug = str(getattr(artifact, "slug", "") or "").strip()
+    if not artifact_slug.startswith("app."):
+        return None
+    manifest = resolved if isinstance(resolved, dict) else {}
+    if str(manifest.get("schema_version") or "").strip() != "xyn.capability_manifest.v1":
+        return {
+            "status": "invalid",
+            "reason": "missing_capability_manifest_v1",
+            "artifact_slug": artifact_slug,
+            "artifact_id": str(artifact.id),
+        }
+    entities = manifest.get("entities") if isinstance(manifest.get("entities"), list) else []
+    if not entities:
+        return {
+            "status": "invalid",
+            "reason": "missing_entity_contracts",
+            "artifact_slug": artifact_slug,
+            "artifact_id": str(artifact.id),
+        }
+    return None
+
+
+def _workspace_generated_artifact_state(workspace: Workspace, app_slug: str) -> Dict[str, Any]:
+    artifact = _installed_generated_artifact(workspace, app_slug)
+    if not artifact:
+        return {"artifact": None, "manifest": None, "issue": None}
+    manifest = _load_artifact_manifest(artifact)
+    resolved = _resolved_capability_manifest(manifest)
+    return {
+        "artifact": artifact,
+        "manifest": resolved or None,
+        "issue": _generated_artifact_contract_issue(artifact, resolved),
+    }
+
+
+def _workspace_installed_capability_manifest(workspace: Workspace, app_slug: str) -> Optional[Dict[str, Any]]:
+    state = _workspace_generated_artifact_state(workspace, app_slug)
+    if state.get("issue"):
+        return None
+    manifest = state.get("manifest")
+    return manifest if isinstance(manifest, dict) else None
+
+
+def _workspace_generated_artifact_issue(workspace: Workspace, app_slug: str) -> Optional[Dict[str, Any]]:
+    state = _workspace_generated_artifact_state(workspace, app_slug)
+    issue = state.get("issue")
+    return copy.deepcopy(issue) if isinstance(issue, dict) else None
+
+
+def _manifest_command_entry(manifest: Dict[str, Any], prompt: str) -> Optional[Dict[str, Any]]:
+    command_key = _normalize_palette_prompt(prompt)
+    commands = manifest.get("commands") if isinstance(manifest.get("commands"), list) else []
+    for command in commands:
+        if not isinstance(command, dict):
+            continue
+        entry_key = _normalize_palette_prompt(str(command.get("key") or command.get("prompt") or ""))
+        if entry_key == command_key:
+            return command
+    return None
+
+
+def _manifest_latent_command_keys(manifest: Dict[str, Any]) -> set[str]:
+    diagnostics = manifest.get("diagnostics") if isinstance(manifest.get("diagnostics"), dict) else {}
+    rows = diagnostics.get("latent_commands") if isinstance(diagnostics.get("latent_commands"), list) else []
+    keys: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = _normalize_palette_prompt(str(row.get("key") or row.get("prompt") or ""))
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _manifest_entity_contracts(manifest: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    rows = manifest.get("entities") if isinstance(manifest.get("entities"), list) else []
+    return {
+        str(row.get("key") or "").strip(): row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("key") or "").strip()
+    }
+
+
+def _entity_operation_declared(contract: Dict[str, Any], operation: str) -> bool:
+    operations = contract.get("operations") if isinstance(contract.get("operations"), dict) else {}
+    spec = operations.get(operation) if isinstance(operations.get(operation), dict) else {}
+    return bool(spec.get("declared"))
+
+
+def _entity_field_map(contract: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    rows = contract.get("fields") if isinstance(contract.get("fields"), list) else []
+    return {
+        str(row.get("name") or "").strip(): row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    }
+
+
+def _entity_title_field(contract: Dict[str, Any]) -> str:
+    presentation = contract.get("presentation") if isinstance(contract.get("presentation"), dict) else {}
+    return str(presentation.get("title_field") or "").strip()
+
+
+def _entity_required_create_fields(contract: Dict[str, Any]) -> List[str]:
+    validation = contract.get("validation") if isinstance(contract.get("validation"), dict) else {}
+    return [
+        str(field).strip()
+        for field in (validation.get("required_on_create") if isinstance(validation.get("required_on_create"), list) else [])
+        if str(field).strip() and str(field).strip() != "workspace_id"
+    ]
+
+
+def _entity_allowed_update_fields(contract: Dict[str, Any]) -> List[str]:
+    validation = contract.get("validation") if isinstance(contract.get("validation"), dict) else {}
+    return [str(field).strip() for field in (validation.get("allowed_on_update") if isinstance(validation.get("allowed_on_update"), list) else []) if str(field).strip()]
+
+
+def _entity_table_columns(contract: Dict[str, Any], *, detail: bool) -> List[str]:
+    presentation = contract.get("presentation") if isinstance(contract.get("presentation"), dict) else {}
+    preferred = presentation.get("default_detail_fields" if detail else "default_list_fields")
+    preferred_rows = preferred if isinstance(preferred, list) else []
+    columns: List[str] = []
+    field_names = set(_entity_field_map(contract))
+    if "id" in field_names:
+        columns.append("id")
+    for item in preferred_rows:
+        token = str(item or "").strip()
+        if token and token in field_names and token not in columns:
+            columns.append(token)
+    return columns or ["id", _entity_title_field(contract) or "name"]
+
+
+def _entity_field_aliases(contract: Dict[str, Any]) -> Dict[str, str]:
+    aliases: Dict[str, str] = {}
+    for name in _entity_field_map(contract):
+        aliases[name.casefold()] = name
+        if name.endswith("_id"):
+            aliases[name[:-3].casefold()] = name
+    title_field = _entity_title_field(contract)
+    if title_field:
+        aliases["title"] = title_field
+    return aliases
+
+
+def _generated_structured_missing_response(
+    *,
+    operation: str,
+    entity_label: str,
+    missing_fields: List[str],
+    example: str,
+    target_required: bool = False,
+) -> Dict[str, Any]:
+    lines = [f"To {operation} {entity_label}, provide:"]
+    if target_required:
+        lines.append("- record reference")
+    for field in missing_fields:
+        lines.append(f"- {field}")
+    lines.append(f"Example: {example}")
+    return {
+        "kind": "text",
+        "columns": [],
+        "rows": [],
+        "text": "\n".join(lines),
+        "meta": {
+            "operation": operation,
+            "entity": entity_label,
+            "missing_fields": missing_fields,
+            "target_required": target_required,
+        },
+    }
+
+
+def _parse_generated_create_fields(contract: Dict[str, Any], remainder: str) -> Tuple[Dict[str, Any], List[str]]:
+    rest = str(remainder or "").strip()
+    lowered = rest.lower()
+    for prefix in ("named ", "called "):
+        if lowered.startswith(prefix):
+            rest = rest[len(prefix) :].strip()
+            lowered = rest.lower()
+            break
+    title_field = _entity_title_field(contract) or "name"
+    field_map = _entity_field_map(contract)
+    fields: Dict[str, Any] = {}
+    geo_fields = {
+        key: key
+        for key in ("city", "region", "country")
+        if key in field_map and bool((field_map.get(key) or {}).get("writable"))
+    }
+    relation_fields = [
+        name
+        for name, field in field_map.items()
+        if (
+            isinstance(field.get("relation"), dict)
+            and bool(field.get("writable"))
+            and str(((field.get("relation") if isinstance(field.get("relation"), dict) else {}) or {}).get("target_entity") or "").strip()
+            != str(contract.get("key") or "").strip()
+        )
+    ]
+    relation_field = relation_fields[0] if len(relation_fields) == 1 else ""
+    for relation_token in (" in ", " at "):
+        if relation_token in rest.lower():
+            split = re.split(rf"\s+{relation_token.strip()}\s+", rest, maxsplit=1, flags=re.IGNORECASE)
+            if len(split) == 2:
+                rest, suffix_ref = split[0].strip(), split[1].strip()
+                if suffix_ref and geo_fields.get("city"):
+                    tokens = [token.strip(", ") for token in suffix_ref.split() if token.strip(", ")]
+                    if geo_fields.get("country") and geo_fields.get("region") and len(tokens) >= 3 and len(tokens[-1]) >= 2 and len(tokens[-2]) <= 3:
+                        fields[geo_fields["country"]] = tokens[-1]
+                        fields[geo_fields["region"]] = tokens[-2]
+                        fields[geo_fields["city"]] = " ".join(tokens[:-2]).strip()
+                    else:
+                        fields[geo_fields["city"]] = suffix_ref
+                elif relation_field and suffix_ref:
+                    fields[relation_field] = suffix_ref
+                break
+    if rest:
+        fields[title_field] = rest
+    missing = [field for field in _entity_required_create_fields(contract) if not str(fields.get(field) or "").strip()]
+    return fields, missing
+
+
+def _parse_generated_update_fields(contract: Dict[str, Any], remainder: str) -> Tuple[str, Dict[str, Any], List[str], bool]:
+    rest = str(remainder or "").strip()
+    if not rest:
+        return "", {}, [], True
+    rename_match = re.match(r"^(?P<target>\S+)\s+to\s+(?P<value>.+)$", rest, flags=re.IGNORECASE)
+    if rename_match:
+        title_field = _entity_title_field(contract) or "name"
+        return (
+            str(rename_match.group("target") or "").strip(),
+            {title_field: str(rename_match.group("value") or "").strip()},
+            [],
+            False,
+        )
+    if rest.lower().startswith("set "):
+        rest = rest[4:].strip()
+    parts = rest.split(None, 2)
+    if len(parts) < 2:
+        return str(parts[0] or "").strip() if parts else "", {}, [], True
+    target_reference = str(parts[0] or "").strip()
+    field_alias = str(parts[1] or "").strip().casefold()
+    value = str(parts[2] or "").strip() if len(parts) > 2 else ""
+    aliases = _entity_field_aliases(contract)
+    field_name = aliases.get(field_alias)
+    allowed = set(_entity_allowed_update_fields(contract))
+    if not field_name or field_name not in allowed:
+        return target_reference, {}, [f"one of: {', '.join(sorted(allowed))}"], False
+    if not value:
+        return target_reference, {}, [field_name], False
+    return target_reference, {field_name: value}, [], False
+
+
+def _resolve_generated_entity_operation(prompt: str, capability_manifest: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    raw = str(prompt or "").strip()
+    if not raw:
+        return None
+    normalized_source = re.sub(
+        r"^\s*(please\s+|i\s+(?:want|need|would\s+like)\s+to\s+|can\s+you\s+|could\s+you\s+)",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    ).strip()
+    entities = _manifest_entity_contracts(capability_manifest)
+    explicit_entity_operation_requested = False
+    for entity_key, contract in entities.items():
+        singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip()
+        plural = str(contract.get("plural_label") or entity_key).strip()
+        singular_pattern = re.escape(singular)
+        plural_pattern = re.escape(plural)
+        if _entity_operation_declared(contract, "list") and re.match(rf"^\s*(show|list)\s+{plural_pattern}\s*$", normalized_source, flags=re.IGNORECASE):
+            return {"operation": "list", "entity_key": entity_key, "contract": contract, "command_key": f"show {plural}"}
+        create_match = re.match(rf"^\s*(create|add)\s+(?:a|an)?\s*{singular_pattern}\b(?P<rest>.*)$", normalized_source, flags=re.IGNORECASE)
+        if create_match:
+            explicit_entity_operation_requested = True
+            if _entity_operation_declared(contract, "create"):
+                fields, missing = _parse_generated_create_fields(contract, str(create_match.group("rest") or ""))
+                example = f"create {singular} named demo-{singular}"
+                return {
+                    "operation": "create",
+                    "entity_key": entity_key,
+                    "contract": contract,
+                    "command_key": f"create {singular}",
+                    "fields": fields,
+                    "missing_fields": missing,
+                    "example": example,
+                }
+        delete_match = re.match(rf"^\s*(delete|remove)\s+{singular_pattern}\s+(?P<target>.+?)\s*$", normalized_source, flags=re.IGNORECASE)
+        if delete_match:
+            explicit_entity_operation_requested = True
+            if _entity_operation_declared(contract, "delete"):
+                return {
+                    "operation": "delete",
+                    "entity_key": entity_key,
+                    "contract": contract,
+                    "command_key": f"delete {singular}",
+                    "target_reference": str(delete_match.group("target") or "").strip(),
+                }
+        rename_match = re.match(rf"^\s*rename\s+{singular_pattern}\s+(?P<target>\S+)\s+to\s+(?P<value>.+?)\s*$", normalized_source, flags=re.IGNORECASE)
+        if rename_match:
+            explicit_entity_operation_requested = True
+            if _entity_operation_declared(contract, "update"):
+                title_field = _entity_title_field(contract) or "name"
+                return {
+                    "operation": "update",
+                    "entity_key": entity_key,
+                    "contract": contract,
+                    "command_key": f"update {singular}",
+                    "target_reference": str(rename_match.group("target") or "").strip(),
+                    "field_mutations": {title_field: str(rename_match.group("value") or "").strip()},
+                    "example": f"rename {singular} old-name to new-name",
+                }
+        update_match = re.match(rf"^\s*(update|change)\s+{singular_pattern}\b(?P<rest>.*)$", normalized_source, flags=re.IGNORECASE)
+        if update_match:
+            explicit_entity_operation_requested = True
+            if _entity_operation_declared(contract, "update"):
+                target_reference, mutations, missing, target_required = _parse_generated_update_fields(contract, str(update_match.group("rest") or ""))
+                return {
+                    "operation": "update",
+                    "entity_key": entity_key,
+                    "contract": contract,
+                    "command_key": f"update {singular}",
+                    "target_reference": target_reference,
+                    "field_mutations": mutations,
+                    "missing_fields": missing,
+                    "target_required": target_required or not target_reference,
+                    "example": f"update {singular} demo-{singular} status offline",
+                }
+    if explicit_entity_operation_requested:
+        return None
+    target_change_match = re.match(r"^\s*(change|update)\s+(?P<target>\S+)\s+to\s+(?P<value>.+?)\s*$", normalized_source, flags=re.IGNORECASE)
+    if target_change_match:
+        target_reference = str(target_change_match.group("target") or "").strip()
+        value = str(target_change_match.group("value") or "").strip()
+        candidates = [
+            (entity_key, contract)
+            for entity_key, contract in entities.items()
+            if _entity_operation_declared(contract, "update") and "status" in set(_entity_allowed_update_fields(contract))
+        ]
+        if len(candidates) == 1:
+            entity_key, contract = candidates[0]
+            singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip()
+            return {
+                "operation": "update",
+                "entity_key": entity_key,
+                "contract": contract,
+                "command_key": f"update {singular}",
+                "target_reference": target_reference,
+                "field_mutations": {"status": value},
+                "example": f"update {singular} {target_reference} status {value}",
+            }
+    return None
+
+
+def _resolve_generated_entity_operation_with_runtime(
+    *,
+    prompt: str,
+    capability_manifest: Dict[str, Any],
+    runtime_base_url: str,
+    workspace: Workspace,
+) -> Optional[Dict[str, Any]]:
+    structured = _resolve_generated_entity_operation(prompt, capability_manifest)
+    if structured:
+        return structured
+    raw = str(prompt or "").strip()
+    if not raw:
+        return None
+    normalized_source = re.sub(
+        r"^\s*(please\s+|i\s+(?:want|need|would\s+like)\s+to\s+|can\s+you\s+|could\s+you\s+)",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    ).strip()
+    entities = _manifest_entity_contracts(capability_manifest)
+    rename_match = re.match(r"^\s*rename\s+(?P<target>\S+)\s+to\s+(?P<value>.+?)\s*$", normalized_source, flags=re.IGNORECASE)
+    if rename_match:
+        target_reference = str(rename_match.group("target") or "").strip()
+        value = str(rename_match.group("value") or "").strip()
+        candidates: List[Tuple[str, Dict[str, Any]]] = []
+        for entity_key, contract in entities.items():
+            if not _entity_operation_declared(contract, "update"):
+                continue
+            title_field = _entity_title_field(contract) or "name"
+            if title_field not in set(_entity_allowed_update_fields(contract)):
+                continue
+            resolution = _resolve_generated_entity_reference(
+                contract=contract,
+                target_reference=target_reference,
+                runtime_base_url=runtime_base_url,
+                workspace=workspace,
+            )
+            if resolution.get("status") in {"resolved", "ambiguous"}:
+                candidates.append((entity_key, contract))
+        if len(candidates) == 1:
+            entity_key, contract = candidates[0]
+            singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip()
+            title_field = _entity_title_field(contract) or "name"
+            return {
+                "operation": "update",
+                "entity_key": entity_key,
+                "contract": contract,
+                "command_key": f"update {singular}",
+                "target_reference": target_reference,
+                "field_mutations": {title_field: value},
+                "example": f"rename {singular} old-name to new-name",
+            }
+    bare_delete_match = re.match(r"^\s*(delete|remove)\s+(?P<target>.+?)\s*$", normalized_source, flags=re.IGNORECASE)
+    if bare_delete_match:
+        target_reference = str(bare_delete_match.group("target") or "").strip()
+        candidates = []
+        for entity_key, contract in entities.items():
+            if not _entity_operation_declared(contract, "delete"):
+                continue
+            resolution = _resolve_generated_entity_reference(
+                contract=contract,
+                target_reference=target_reference,
+                runtime_base_url=runtime_base_url,
+                workspace=workspace,
+            )
+            if resolution.get("status") in {"resolved", "ambiguous"}:
+                candidates.append((entity_key, contract))
+        if len(candidates) == 1:
+            entity_key, contract = candidates[0]
+            singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip()
+            return {
+                "operation": "delete",
+                "entity_key": entity_key,
+                "contract": contract,
+                "command_key": f"delete {singular}",
+                "target_reference": target_reference,
+            }
+    return None
+
+
+def _generated_entity_operation_path(contract: Dict[str, Any], operation: str, *, target_reference: str = "") -> str:
+    operations = contract.get("operations") if isinstance(contract.get("operations"), dict) else {}
+    spec = operations.get(operation) if isinstance(operations.get(operation), dict) else {}
+    path = str(spec.get("path") or "").strip()
+    if operation in {"update", "delete", "get"} and "{id}" in path:
+        return path.replace("{id}", quote(str(target_reference or "").strip(), safe=""))
+    return path
+
+
+def _normalized_generated_operation(structured: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "operation": str(structured.get("operation") or "").strip(),
+        "entity_key": str(structured.get("entity_key") or "").strip(),
+        "command_key": str(structured.get("command_key") or "").strip(),
+    }
+    if str(structured.get("target_reference") or "").strip():
+        payload["target_reference"] = str(structured.get("target_reference") or "").strip()
+    if isinstance(structured.get("fields"), dict) and structured.get("fields"):
+        payload["fields"] = structured.get("fields")
+    if isinstance(structured.get("field_mutations"), dict) and structured.get("field_mutations"):
+        payload["field_mutations"] = structured.get("field_mutations")
+    return payload
+
+
+def _generated_trace_step(step: str, **kwargs: Any) -> Dict[str, Any]:
+    row: Dict[str, Any] = {"step": step}
+    for key, value in kwargs.items():
+        if value is None:
+            continue
+        row[key] = value
+    return row
+
+
+def _list_generated_entity_records(
+    *,
+    contract: Dict[str, Any],
+    runtime_base_url: str,
+    workspace: Workspace,
+) -> List[Dict[str, Any]]:
+    response = _runtime_target_request(
+        base_url=runtime_base_url,
+        method="GET",
+        path=str(contract.get("collection_path") or "").strip() or _generated_entity_operation_path(contract, "list"),
+        query={"workspace_id": str(workspace.id)},
+        timeout=20,
+    )
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        raise RuntimeError(f"generated-app runtime returned non-json content ({response.status_code})")
+    body = response.json() if response.content else {}
+    if response.status_code >= 400:
+        detail = body.get("detail") if isinstance(body, dict) else ""
+        raise RuntimeError(f"generated-app runtime request failed ({response.status_code}): {detail or body}")
+    items = body.get("items") if isinstance(body, dict) and isinstance(body.get("items"), list) else body
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _record_identity_values(contract: Dict[str, Any], record: Dict[str, Any]) -> List[str]:
+    values: List[str] = []
+    if str(record.get("id") or "").strip():
+        values.append(str(record.get("id") or "").strip())
+    for name, field in _entity_field_map(contract).items():
+        if not bool(field.get("identity")):
+            continue
+        value = record.get(name)
+        if value is None:
+            continue
+        token = str(value).strip()
+        if token and token not in values:
+            values.append(token)
+    return values
+
+
+def _resolve_generated_entity_reference(
+    *,
+    contract: Dict[str, Any],
+    target_reference: str,
+    runtime_base_url: str,
+    workspace: Workspace,
+) -> Dict[str, Any]:
+    reference = str(target_reference or "").strip()
+    if not reference:
+        return {"status": "missing"}
+    records = _list_generated_entity_records(contract=contract, runtime_base_url=runtime_base_url, workspace=workspace)
+    lowered_reference = reference.casefold()
+    title_field = _entity_title_field(contract)
+    title_exact_matches = []
+    if title_field:
+        title_exact_matches = [
+            record
+            for record in records
+            if str(record.get(title_field) or "").strip().casefold() == lowered_reference
+        ]
+    if len(title_exact_matches) == 1:
+        return {"status": "resolved", "record": title_exact_matches[0], "match_type": "title_exact"}
+    if len(title_exact_matches) > 1:
+        return {"status": "ambiguous", "matches": title_exact_matches, "match_type": "title_exact"}
+    exact_matches = [
+        record
+        for record in records
+        if any(candidate.casefold() == lowered_reference for candidate in _record_identity_values(contract, record))
+    ]
+    if len(exact_matches) == 1:
+        return {"status": "resolved", "record": exact_matches[0], "match_type": "exact"}
+    if len(exact_matches) > 1:
+        return {"status": "ambiguous", "matches": exact_matches, "match_type": "exact"}
+    title_partial_matches = []
+    if title_field:
+        title_partial_matches = [
+            record
+            for record in records
+            if lowered_reference in str(record.get(title_field) or "").strip().casefold()
+        ]
+    if len(title_partial_matches) == 1:
+        return {"status": "resolved", "record": title_partial_matches[0], "match_type": "title_partial"}
+    if len(title_partial_matches) > 1:
+        return {"status": "ambiguous", "matches": title_partial_matches, "match_type": "title_partial"}
+    partial_matches = [
+        record
+        for record in records
+        if any(lowered_reference in candidate.casefold() for candidate in _record_identity_values(contract, record))
+    ]
+    if len(partial_matches) == 1:
+        return {"status": "resolved", "record": partial_matches[0], "match_type": "partial"}
+    if len(partial_matches) > 1:
+        return {"status": "ambiguous", "matches": partial_matches, "match_type": "partial"}
+    return {"status": "not_found", "reference": reference}
+
+
+def _generated_disambiguation_response(
+    *,
+    contract: Dict[str, Any],
+    operation: str,
+    target_reference: str,
+    matches: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    singular = str(contract.get("singular_label") or contract.get("key") or "record").strip() or "record"
+    title_field = _entity_title_field(contract) or "name"
+    labels = [str(row.get(title_field) or row.get("id") or "").strip() for row in matches if isinstance(row, dict)]
+    verb = {
+        "delete": "deleted",
+        "update": "updated",
+        "get": "shown",
+        "linked": "linked",
+    }.get(operation, f"{operation}d")
+    lines = [f"Multiple matches found for {singular} \"{target_reference}\":"] + [f"- {label}" for label in labels if label]
+    lines.append(f"Which {singular} should be {verb}?")
+    return {
+        "kind": "text",
+        "columns": [],
+        "rows": [],
+        "text": "\n".join(lines),
+        "meta": {
+            "disambiguation": {
+                "operation": operation,
+                "entity_key": str(contract.get("key") or "").strip(),
+                "target_reference": target_reference,
+                "matches": labels,
+            }
+        },
+    }
+
+
+def _resolve_generated_relation_fields(
+    *,
+    contract: Dict[str, Any],
+    payload_fields: Dict[str, Any],
+    capability_manifest: Dict[str, Any],
+    runtime_base_url: str,
+    workspace: Workspace,
+    trace: List[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    resolved_fields = dict(payload_fields)
+    entities = _manifest_entity_contracts(capability_manifest)
+    for field_name, field in _entity_field_map(contract).items():
+        relation = field.get("relation") if isinstance(field.get("relation"), dict) else {}
+        if not relation or field_name not in resolved_fields:
+            continue
+        raw_value = resolved_fields.get(field_name)
+        if raw_value is None:
+            continue
+        token = str(raw_value).strip()
+        if not token or re.match(r"^[0-9a-fA-F-]{32,36}$", token):
+            continue
+        target_contract = entities.get(str(relation.get("target_entity") or "").strip())
+        if not target_contract:
+            continue
+        resolution = _resolve_generated_entity_reference(
+            contract=target_contract,
+            target_reference=token,
+            runtime_base_url=runtime_base_url,
+            workspace=workspace,
+        )
+        trace.append(
+            _generated_trace_step(
+                "relationship_resolution",
+                source_entity=str(contract.get("key") or "").strip(),
+                field=field_name,
+                target_entity=str(target_contract.get("key") or "").strip(),
+                input=token,
+                status=str(resolution.get("status") or ""),
+            )
+        )
+        if resolution.get("status") == "resolved":
+            resolved_fields[field_name] = str(((resolution.get("record") or {}).get("id")) or token)
+            continue
+        if resolution.get("status") == "ambiguous":
+            return (
+                _generated_disambiguation_response(
+                    contract=target_contract,
+                    operation="linked",
+                    target_reference=token,
+                    matches=resolution.get("matches") if isinstance(resolution.get("matches"), list) else [],
+                ),
+                resolved_fields,
+            )
+        return (
+            {
+                "kind": "text",
+                "columns": [],
+                "rows": [],
+                "text": f'No matching {str(target_contract.get("singular_label") or target_contract.get("key") or "record")} found for "{token}".',
+                "meta": {
+                    "relation_resolution_error": {
+                        "field": field_name,
+                        "target_entity": str(target_contract.get("key") or "").strip(),
+                        "target_reference": token,
+                    }
+                },
+            },
+            resolved_fields,
+        )
+    return None, resolved_fields
+
+
+def _generated_entity_result(
+    *,
+    contract: Dict[str, Any],
+    operation: str,
+    payload: Any,
+    target_reference: str = "",
+) -> Dict[str, Any]:
+    singular = str(contract.get("singular_label") or contract.get("key") or "record").strip() or "record"
+    plural = str(contract.get("plural_label") or singular + "s").strip() or (singular + "s")
+    if operation == "list":
+        items = payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else []
+        return {
+            "kind": "table",
+            "columns": _entity_table_columns(contract, detail=False),
+            "rows": items,
+            "text": f"Found {len(items)} {plural}.",
+        }
+    if operation == "delete":
+        item = payload.get("item") if isinstance(payload, dict) and isinstance(payload.get("item"), dict) else {}
+        display = str(item.get(_entity_title_field(contract) or "name") or target_reference or "record").strip()
+        return {
+            "kind": "table",
+            "columns": _entity_table_columns(contract, detail=True),
+            "rows": [item] if item else [],
+            "text": f"Deleted 1 {singular}: {display}",
+        }
+    item = payload if isinstance(payload, dict) else {}
+    display = str(item.get(_entity_title_field(contract) or "name") or target_reference or singular).strip()
+    return {
+        "kind": "table",
+        "columns": _entity_table_columns(contract, detail=True),
+        "rows": [item] if item else [],
+        "text": {
+            "create": f"Created 1 {singular}: {display}",
+            "update": f"Updated 1 {singular}: {display}",
+            "get": f"Found 1 {singular}: {display}",
+        }.get(operation, f"Completed {operation} for {singular}: {display}"),
+    }
+
+
+def _execute_generated_entity_operation(
+    *,
+    structured: Dict[str, Any],
+    capability_manifest: Dict[str, Any],
+    runtime_base_url: str,
+    workspace: Workspace,
+    trace: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    contract = structured.get("contract") if isinstance(structured.get("contract"), dict) else {}
+    operation = str(structured.get("operation") or "").strip()
+    target_reference = str(structured.get("target_reference") or "").strip()
+    active_trace = trace if isinstance(trace, list) else []
+    resolved_target_reference = target_reference
+    if operation in {"get", "update", "delete"}:
+        resolution = _resolve_generated_entity_reference(
+            contract=contract,
+            target_reference=target_reference,
+            runtime_base_url=runtime_base_url,
+            workspace=workspace,
+        )
+        active_trace.append(
+            _generated_trace_step(
+                "target_resolution",
+                entity_key=str(contract.get("key") or "").strip(),
+                target_reference=target_reference,
+                status=str(resolution.get("status") or ""),
+                match_type=str(resolution.get("match_type") or ""),
+            )
+        )
+        if resolution.get("status") == "ambiguous":
+            return _generated_disambiguation_response(
+                contract=contract,
+                operation=operation,
+                target_reference=target_reference,
+                matches=resolution.get("matches") if isinstance(resolution.get("matches"), list) else [],
+            )
+        if resolution.get("status") == "not_found":
+            singular = str(contract.get("singular_label") or contract.get("key") or "record").strip() or "record"
+            return {
+                "kind": "text",
+                "columns": [],
+                "rows": [],
+                "text": f'No matching {singular} found for "{target_reference}".',
+                "meta": {"target_reference": target_reference, "entity_key": str(contract.get("key") or "").strip()},
+            }
+        if resolution.get("status") == "resolved":
+            resolved_target_reference = str(((resolution.get("record") or {}).get("id")) or target_reference)
+    payload_fields = structured.get("fields") if isinstance(structured.get("fields"), dict) else {}
+    mutation_fields = structured.get("field_mutations") if isinstance(structured.get("field_mutations"), dict) else {}
+    relation_error = None
+    if operation == "create":
+        relation_error, payload_fields = _resolve_generated_relation_fields(
+            contract=contract,
+            payload_fields=payload_fields,
+            capability_manifest=capability_manifest,
+            runtime_base_url=runtime_base_url,
+            workspace=workspace,
+            trace=active_trace,
+        )
+    elif operation == "update":
+        relation_error, mutation_fields = _resolve_generated_relation_fields(
+            contract=contract,
+            payload_fields=mutation_fields,
+            capability_manifest=capability_manifest,
+            runtime_base_url=runtime_base_url,
+            workspace=workspace,
+            trace=active_trace,
+        )
+    if relation_error:
+        return relation_error
+    path = _generated_entity_operation_path(contract, operation, target_reference=resolved_target_reference)
+    query = {"workspace_id": str(workspace.id)} if operation in {"list", "get", "update", "delete"} else None
+    payload = None
+    if operation == "create":
+        payload = {"workspace_id": str(workspace.id), **payload_fields}
+    elif operation == "update":
+        payload = mutation_fields
+    active_trace.append(
+        _generated_trace_step(
+            "runtime_execution",
+            entity_key=str(contract.get("key") or "").strip(),
+            operation=operation,
+            method=str((((contract.get("operations") or {}).get(operation) or {}).get("method")) or "GET").upper(),
+            path=path,
+            query=query or {},
+            payload=payload or {},
+        )
+    )
+    response = _runtime_target_request(
+        base_url=runtime_base_url,
+        method=str((((contract.get("operations") or {}).get(operation) or {}).get("method")) or "GET"),
+        path=path,
+        query=query,
+        payload=payload,
+        timeout=20,
+    )
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        raise RuntimeError(f"generated-app runtime returned non-json content ({response.status_code})")
+    body = response.json() if response.content else {}
+    if response.status_code >= 400:
+        detail = body.get("detail") if isinstance(body, dict) else ""
+        raise RuntimeError(f"generated-app runtime request failed ({response.status_code}): {detail or body}")
+    result = _generated_entity_result(contract=contract, operation=operation, payload=body, target_reference=resolved_target_reference)
+    active_trace.append(
+        _generated_trace_step(
+            "result",
+            entity_key=str(contract.get("key") or "").strip(),
+            operation=operation,
+            kind=str(result.get("kind") or ""),
+            text=str(result.get("text") or ""),
+        )
+    )
+    return result
+
+
+def _run_generated_entity_operation(
+    *,
+    prompt: str,
+    structured: Dict[str, Any],
+    capability_manifest: Dict[str, Any],
+    runtime_base_url: str,
+    workspace: Workspace,
+    source: str,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+    contract = structured.get("contract") if isinstance(structured.get("contract"), dict) else {}
+    normalized = _normalized_generated_operation(structured)
+    trace = [
+        _generated_trace_step("user_command", source=source, prompt=str(prompt or "").strip()),
+        _generated_trace_step("parsed_intent", structured_operation=normalized),
+        _generated_trace_step(
+            "entity_contract_consulted",
+            entity_key=str(contract.get("key") or "").strip(),
+            operation=str(structured.get("operation") or "").strip(),
+            declared_operations=sorted(
+                name
+                for name, spec in ((contract.get("operations") if isinstance(contract.get("operations"), dict) else {}) or {}).items()
+                if isinstance(spec, dict) and bool(spec.get("declared"))
+            ),
+            title_field=_entity_title_field(contract),
+        ),
+    ]
+    missing_fields = structured.get("missing_fields") if isinstance(structured.get("missing_fields"), list) else []
+    if structured.get("operation") == "create" and missing_fields:
+        singular = str((contract.get("singular_label")) or structured.get("entity_key") or "record")
+        result = _generated_structured_missing_response(
+            operation="create",
+            entity_label=singular,
+            missing_fields=[str(field) for field in missing_fields],
+            example=str(structured.get("example") or f"create {singular} named demo-{singular}"),
+        )
+        trace.append(_generated_trace_step("result", outcome="missing_fields", missing_fields=[str(field) for field in missing_fields]))
+        return result, trace, normalized
+    if structured.get("operation") == "update" and (
+        bool(structured.get("target_required")) or missing_fields or not isinstance(structured.get("field_mutations"), dict) or not structured.get("field_mutations")
+    ):
+        singular = str((contract.get("singular_label")) or structured.get("entity_key") or "record")
+        result = _generated_structured_missing_response(
+            operation="update",
+            entity_label=singular,
+            missing_fields=[str(field) for field in missing_fields],
+            example=str(structured.get("example") or f"update {singular} demo-{singular} status offline"),
+            target_required=bool(structured.get("target_required")),
+        )
+        trace.append(_generated_trace_step("result", outcome="missing_fields", missing_fields=[str(field) for field in missing_fields]))
+        return result, trace, normalized
+    result = _execute_generated_entity_operation(
+        structured=structured,
+        capability_manifest=capability_manifest,
+        runtime_base_url=runtime_base_url,
+        workspace=workspace,
+        trace=trace,
+    )
+    return result, trace, normalized
 
 
 def _seed_context_pack_meta(workspace_slug: str) -> Dict[str, Any]:
@@ -16204,32 +17153,39 @@ def _generated_missing_fields_response(
     }
 
 
-def _execute_net_inventory_runtime_command(
+def _resolve_generated_handler_value(value: Any, *, workspace: Workspace) -> Any:
+    if isinstance(value, str):
+        token = value.strip()
+        if token == "$workspace_id":
+            return str(workspace.id)
+        if token == "$workspace_slug":
+            return str(workspace.slug or "")
+        if token == "$generated.device_name":
+            return _generated_app_create_device_name()
+        if token == "$generated.location_name":
+            return _generated_app_create_location_name()
+    return value
+
+
+def _execute_generated_runtime_command(
     *,
+    command: Dict[str, Any],
     runtime_base_url: str,
     prompt: str,
     workspace: Workspace,
 ) -> Dict[str, Any]:
-    command_key = _generated_net_inventory_command_key(prompt)
+    command_key = _normalize_palette_prompt(prompt)
     workspace_id = str(workspace.id)
+    handler = command.get("handler") if isinstance(command.get("handler"), dict) else {}
+    method = str(handler.get("method") or "GET").upper()
+    path = str(handler.get("path") or "/").strip() or "/"
+    query_map = handler.get("query_map") if isinstance(handler.get("query_map"), dict) else {}
+    body_map = handler.get("body_map") if isinstance(handler.get("body_map"), dict) else {}
+    adapter = handler.get("response_adapter") if isinstance(handler.get("response_adapter"), dict) else {}
+    resolved_query = {key: _resolve_generated_handler_value(value, workspace=workspace) for key, value in query_map.items()}
+    resolved_body = {key: _resolve_generated_handler_value(value, workspace=workspace) for key, value in body_map.items()}
     created_name = ""
-    if command_key == "show devices":
-        response = _runtime_target_request(
-            base_url=runtime_base_url,
-            method="GET",
-            path="/devices",
-            query={"workspace_id": workspace_id},
-            timeout=20,
-        )
-    elif command_key == "show locations":
-        response = _runtime_target_request(
-            base_url=runtime_base_url,
-            method="GET",
-            path="/locations",
-            query={"workspace_id": workspace_id},
-            timeout=20,
-        )
-    elif command_key == "create device":
+    if command_key == "create device":
         payload, missing_fields = _parse_generated_device_create_prompt(prompt)
         if missing_fields:
             return _generated_missing_fields_response(
@@ -16238,28 +17194,8 @@ def _execute_net_inventory_runtime_command(
                 example="create device named edge-router-1",
             )
         created_name = str(payload.get("name") or "unknown")
-        response = _runtime_target_request(
-            base_url=runtime_base_url,
-            method="POST",
-            path="/devices",
-            payload={
-                "workspace_id": workspace_id,
-                "name": payload.get("name") or _generated_app_create_device_name(),
-                "kind": payload.get("kind") or "router",
-                "status": payload.get("status") or "online",
-            },
-            timeout=20,
-        )
-        if response.status_code < 400:
-            list_response = _runtime_target_request(
-                base_url=runtime_base_url,
-                method="GET",
-                path="/devices",
-                query={"workspace_id": workspace_id},
-                timeout=20,
-            )
-            if list_response.status_code < 400:
-                response = list_response
+        resolved_body.update(payload)
+        resolved_body["workspace_id"] = workspace_id
     elif command_key == "create location":
         payload, missing_fields = _parse_generated_location_create_prompt(prompt)
         if missing_fields:
@@ -16269,127 +17205,193 @@ def _execute_net_inventory_runtime_command(
                 example="create location named sibling-location-2 in Austin TX USA",
             )
         created_name = str(payload.get("name") or "unknown")
-        response = _runtime_target_request(
+        resolved_body.update(payload)
+        resolved_body["workspace_id"] = workspace_id
+    response = _runtime_target_request(
+        base_url=runtime_base_url,
+        method=method,
+        path=path,
+        query=resolved_query or None,
+        payload=resolved_body or None,
+        timeout=20,
+    )
+    if command_key == "create device" and response.status_code < 400:
+        list_response = _runtime_target_request(
             base_url=runtime_base_url,
-            method="POST",
+            method="GET",
+            path="/devices",
+            query={"workspace_id": workspace_id},
+            timeout=20,
+        )
+        if list_response.status_code < 400:
+            response = list_response
+    elif command_key == "create location" and response.status_code < 400:
+        list_response = _runtime_target_request(
+            base_url=runtime_base_url,
+            method="GET",
             path="/locations",
-            payload={
-                "workspace_id": workspace_id,
-                "name": payload.get("name") or _generated_app_create_location_name(),
-                "kind": payload.get("kind") or "site",
-                "city": payload.get("city"),
-                "region": payload.get("region"),
-                "country": payload.get("country"),
-            },
-            timeout=20,
-        )
-        if response.status_code < 400:
-            list_response = _runtime_target_request(
-                base_url=runtime_base_url,
-                method="GET",
-                path="/locations",
-                query={"workspace_id": workspace_id},
-                timeout=20,
-            )
-            if list_response.status_code < 400:
-                response = list_response
-    elif command_key == "show devices by status":
-        response = _runtime_target_request(
-            base_url=runtime_base_url,
-            method="GET",
-            path="/reports/devices-by-status",
             query={"workspace_id": workspace_id},
             timeout=20,
         )
-    elif command_key == "show interfaces":
-        response = _runtime_target_request(
-            base_url=runtime_base_url,
-            method="GET",
-            path="/interfaces",
-            query={"workspace_id": workspace_id},
-            timeout=20,
-        )
-    elif command_key == "show interfaces by status":
-        response = _runtime_target_request(
-            base_url=runtime_base_url,
-            method="GET",
-            path="/reports/interfaces-by-status",
-            query={"workspace_id": workspace_id},
-            timeout=20,
-        )
-    else:
-        raise ValueError("unsupported generated-app runtime command")
+        if list_response.status_code < 400:
+            response = list_response
     content_type = str(response.headers.get("content-type") or "").lower()
     if "application/json" not in content_type:
         raise RuntimeError(f"generated-app runtime returned non-json content ({response.status_code})")
     payload = response.json() if response.content else {}
     if response.status_code >= 400:
         raise RuntimeError(f"generated-app runtime request failed ({response.status_code})")
-    if command_key == "show devices":
-        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
+    adapter_kind = str(adapter.get("kind") or "table").strip().lower()
+    if adapter_kind == "bar_chart":
+        report = payload if isinstance(payload, dict) else {}
+        labels = report.get("labels") if isinstance(report.get("labels"), list) else []
+        values = report.get("values") if isinstance(report.get("values"), list) else []
         return {
-            "kind": "table",
-            "columns": ["id", "name", "kind", "status", "location_id"],
-            "rows": rows,
-            "text": f"Found {len(rows)} devices.",
+            "kind": "bar_chart",
+            "columns": [],
+            "rows": [],
+            "labels": labels,
+            "values": values,
+            "title": str(adapter.get("title") or command.get("name") or "Report"),
+            "text": (
+                f"Generated status chart for {sum(int(value or 0) for value in values)} "
+                f"{'interfaces' if 'interface' in command_key else 'devices'}."
+            ),
         }
-    if command_key == "show locations":
-        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
-        return {
-            "kind": "table",
-            "columns": ["id", "name", "kind", "city", "region", "country"],
-            "rows": rows,
-            "text": f"Found {len(rows)} locations.",
-        }
-    if command_key == "create device":
-        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
-        return {
-            "kind": "table",
-            "columns": ["id", "name", "kind", "status", "location_id"],
-            "rows": rows,
-            "text": f"Created 1 device: {created_name}",
-        }
-    if command_key == "create location":
-        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
-        return {
-            "kind": "table",
-            "columns": ["id", "name", "kind", "city", "region", "country"],
-            "rows": rows,
-            "text": f"Created 1 location: {created_name}",
-        }
-    if command_key == "show interfaces":
-        rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
-        return {
-            "kind": "table",
-            "columns": ["id", "device_id", "name", "status", "workspace_id"],
-            "rows": rows,
-            "text": f"Found {len(rows)} interfaces.",
-        }
-    report = payload if isinstance(payload, dict) else {}
-    labels = report.get("labels") if isinstance(report.get("labels"), list) else []
-    values = report.get("values") if isinstance(report.get("values"), list) else []
+    rows = payload if isinstance(payload, list) else (payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else [])
+    columns = adapter.get("columns") if isinstance(adapter.get("columns"), list) else []
+    text = str(adapter.get("text_template") or "{{count}} rows").replace("{{count}}", str(len(rows)))
+    if created_name and command_key.startswith("create "):
+        text = f"Created 1 {command_key.split(' ', 1)[1]}: {created_name}"
+    elif command_key.startswith("show "):
+        label = "interfaces" if "interface" in command_key else ("locations" if "location" in command_key else "devices")
+        text = f"Found {len(rows)} {label}."
     return {
-        "kind": "bar_chart",
-        "columns": [],
-        "rows": [],
-        "labels": labels,
-        "values": values,
-        "title": "Interfaces by Status" if command_key == "show interfaces by status" else "Devices by Status",
-        "text": (
-            f"Generated status chart for {sum(int(value or 0) for value in values)} interfaces."
-            if command_key == "show interfaces by status"
-            else f"Generated status chart for {sum(int(value or 0) for value in values)} devices."
-        ),
+        "kind": "table",
+        "columns": columns,
+        "rows": rows,
+        "text": text,
     }
+
+
+def _generated_app_disabled_response(*, prompt: str, capability_manifest: Dict[str, Any]) -> JsonResponse:
+    command_key = _normalize_palette_prompt(prompt)
+    return JsonResponse(
+        {
+            "kind": "text",
+            "columns": [],
+            "rows": [],
+            "text": "No matching palette command found.",
+            "meta": {
+                "command_key": command_key,
+                "capability_diagnostics": {
+                    "source": "installed-capability-manifest",
+                    "enabled_command_keys": sorted(
+                        _normalize_palette_prompt(str(item.get("key") or item.get("prompt") or ""))
+                        for item in (capability_manifest.get("commands") if isinstance(capability_manifest.get("commands"), list) else [])
+                        if isinstance(item, dict)
+                    ),
+                    "latent_command_keys": sorted(_manifest_latent_command_keys(capability_manifest)),
+                },
+            },
+        },
+        status=200,
+    )
+
+
+def _generated_app_invalid_contract_response(*, prompt: str, issue: Dict[str, Any]) -> JsonResponse:
+    return JsonResponse(
+        {
+            "kind": "text",
+            "columns": [],
+            "rows": [],
+            "text": "Generated app contract is unavailable for this installed artifact. Rebuild or reinstall the app.",
+            "meta": {
+                "command_key": _normalize_palette_prompt(prompt),
+                "generated_artifact_contract_status": issue,
+            },
+        },
+        status=200,
+    )
 
 
 def _generated_app_palette_execution_response(
     *,
+    identity: UserIdentity,
+    request_id: str,
     workspace: Workspace,
     prompt: str,
     runtime_target: Dict[str, Any],
+    capability_manifest: Dict[str, Any],
 ) -> JsonResponse:
-    result = _execute_net_inventory_runtime_command(
+    structured = _resolve_generated_entity_operation(prompt, capability_manifest)
+    if structured:
+        result, trace, normalized = _run_generated_entity_operation(
+            prompt=prompt,
+            structured=structured,
+            capability_manifest=capability_manifest,
+            runtime_base_url=str(runtime_target.get("runtime_base_url") or ""),
+            workspace=workspace,
+            source="palette",
+        )
+        existing_meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+        context_meta = _seed_context_pack_meta(str(workspace.slug or ""))
+        result["meta"] = {
+            "base_url": str(runtime_target.get("runtime_base_url") or ""),
+            "public_app_url": str(runtime_target.get("public_app_url") or ""),
+            "runtime_owner": str(runtime_target.get("runtime_owner") or "sibling"),
+            "app_slug": str(runtime_target.get("app_slug") or "net-inventory"),
+            "compose_project": str(runtime_target.get("compose_project") or ""),
+            "command_key": str(structured.get("command_key") or _normalize_palette_prompt(prompt)),
+            **existing_meta,
+            **context_meta,
+        }
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="completed",
+            prompt=prompt,
+            request_type="palette.execute",
+            workspace_id=str(workspace.id),
+            summary=str(result.get("text") or ""),
+            trace=trace,
+            structured_operation=normalized,
+        )
+        return JsonResponse(result, status=200)
+    command = _manifest_command_entry(capability_manifest, prompt)
+    if not command:
+        result = _generated_app_disabled_response(prompt=prompt, capability_manifest=capability_manifest)
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="completed",
+            prompt=prompt,
+            request_type="palette.execute",
+            workspace_id=str(workspace.id),
+            summary="No matching palette command found.",
+            trace=[_generated_trace_step("user_command", source="palette", prompt=prompt), _generated_trace_step("result", outcome="disabled")],
+        )
+        return result
+    handler = command.get("handler") if isinstance(command.get("handler"), dict) else {}
+    entity_key = str(handler.get("entity_key") or "").strip()
+    entity_operation = str(handler.get("entity_operation") or "").strip()
+    if entity_key and entity_operation:
+        entity_contract = _manifest_entity_contracts(capability_manifest).get(entity_key)
+        if not entity_contract or not _entity_operation_declared(entity_contract, entity_operation):
+            result = _generated_app_disabled_response(prompt=prompt, capability_manifest=capability_manifest)
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="completed",
+                prompt=prompt,
+                request_type="palette.execute",
+                workspace_id=str(workspace.id),
+                summary="No matching palette command found.",
+                trace=[_generated_trace_step("user_command", source="palette", prompt=prompt), _generated_trace_step("result", outcome="disabled")],
+            )
+            return result
+    result = _execute_generated_runtime_command(
+        command=command,
         runtime_base_url=str(runtime_target.get("runtime_base_url") or ""),
         prompt=prompt,
         workspace=workspace,
@@ -16407,6 +17409,16 @@ def _generated_app_palette_execution_response(
         **context_meta,
     }
     result["meta"] = meta
+    _log_prompt_activity(
+        request_id=request_id,
+        identity=identity,
+        status="completed",
+        prompt=prompt,
+        request_type="palette.execute",
+        workspace_id=str(workspace.id),
+        summary=str(result.get("text") or ""),
+        trace=[_generated_trace_step("user_command", source="palette", prompt=prompt), _generated_trace_step("result", outcome="legacy_command")],
+    )
     return JsonResponse(result, status=200)
 
 
@@ -17422,6 +18434,105 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         return JsonResponse(response_payload)
 
     operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
+    generated_runtime_target = _workspace_runtime_target(operator_workspace, "net-inventory") if operator_workspace else None
+    generated_artifact_issue = _workspace_generated_artifact_issue(operator_workspace, "net-inventory") if operator_workspace else None
+    generated_capability_manifest = _workspace_installed_capability_manifest(operator_workspace, "net-inventory") if operator_workspace else None
+    if operator_workspace and generated_runtime_target and generated_artifact_issue and _looks_like_generated_crud_prompt(message):
+        response_payload = {
+            "status": "ValidationError",
+            "action_type": "CreateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": "Generated app contract is unavailable for the installed artifact.",
+            "validation_errors": ["Generated app contract is unavailable for this installed artifact. Rebuild or reinstall the app."],
+            "audit": {
+                "request_id": request_id,
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="failed",
+            prompt=message,
+            request_type="intent.resolve",
+            workspace_id=str(operator_workspace.id),
+            summary=response_payload["summary"],
+            error=str(generated_artifact_issue.get("reason") or "invalid_generated_artifact_contract"),
+            trace=[
+                _generated_trace_step("user_command", source="agent", prompt=message),
+                _generated_trace_step("invalid_generated_artifact_contract", **generated_artifact_issue),
+            ],
+        )
+        return JsonResponse(response_payload, status=409)
+    generated_structured = (
+        _resolve_generated_entity_operation_with_runtime(
+            prompt=message,
+            capability_manifest=generated_capability_manifest,
+            runtime_base_url=str(generated_runtime_target.get("runtime_base_url") or ""),
+            workspace=operator_workspace,
+        )
+        if operator_workspace and generated_runtime_target and generated_capability_manifest
+        else None
+    )
+    if operator_workspace and generated_runtime_target and generated_capability_manifest and generated_structured:
+        generated_artifact = _installed_generated_artifact(operator_workspace, "net-inventory")
+        normalized = _normalized_generated_operation(generated_structured)
+        contract = generated_structured.get("contract") if isinstance(generated_structured.get("contract"), dict) else {}
+        trace = [
+            _generated_trace_step("user_command", source="agent", prompt=message),
+            _generated_trace_step("parsed_intent", structured_operation=normalized),
+            _generated_trace_step(
+                "entity_contract_consulted",
+                entity_key=str(contract.get("key") or "").strip(),
+                operation=str(generated_structured.get("operation") or "").strip(),
+                declared_operations=sorted(
+                    name
+                    for name, spec in ((contract.get("operations") if isinstance(contract.get("operations"), dict) else {}) or {}).items()
+                    if isinstance(spec, dict) and bool(spec.get("declared"))
+                ),
+                title_field=_entity_title_field(contract),
+            ),
+        ]
+        response_payload = {
+            "status": "DraftReady",
+            "action_type": "CreateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": f'Will execute generated app {normalized.get("operation") or "operation"} for {normalized.get("entity_key") or "entity"}.',
+            "draft_payload": {
+                "__operation": "execute_generated_app_crud",
+                "workspace_id": str(operator_workspace.id),
+                "raw_prompt": message,
+                "structured_operation": normalized,
+            },
+            "next_actions": [{"label": "Execute generated app command", "action": "CreateDraft"}],
+            "audit": {
+                "request_id": request_id,
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        _audit_intent_event(
+            message="intent.resolve",
+            identity=identity,
+            request_id=request_id,
+            artifact_id=str(generated_artifact.id) if generated_artifact else None,
+            proposal={"action_type": "CreateDraft", "artifact_type": "Workspace", "operation": "execute_generated_app_crud", "prompt": message},
+            resolution=response_payload,
+        )
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="completed",
+            prompt=message,
+            request_type="intent.resolve",
+            workspace_id=str(operator_workspace.id),
+            summary=response_payload["summary"],
+            trace=trace,
+            structured_operation=normalized,
+        )
+        return JsonResponse(response_payload)
+
     generated_app_evolution = _match_generated_app_evolution_command(message, operator_workspace) if operator_workspace else None
     if generated_app_evolution:
         response_payload = {
@@ -17759,6 +18870,129 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                 return _intent_apply_open_ems_panel(identity=identity, payload=body_payload, request_id=request_id)
             if operation == "open_artifact_panel":
                 return _intent_apply_open_artifact_panel(identity=identity, payload=body_payload, request_id=request_id)
+            if operation == "execute_generated_app_crud":
+                workspace = _resolve_workspace_for_identity(identity, str(body_payload.get("workspace_id") or "").strip())
+                if not workspace:
+                    return JsonResponse({"error": "workspace context is required for generated app operations"}, status=400)
+                runtime_target_record = _workspace_runtime_target(workspace, "net-inventory")
+                generated_artifact_issue = _workspace_generated_artifact_issue(workspace, "net-inventory")
+                capability_manifest = _workspace_installed_capability_manifest(workspace, "net-inventory")
+                raw_prompt = str(body_payload.get("raw_prompt") or payload.get("message") or "").strip()
+                if runtime_target_record and generated_artifact_issue:
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary="Generated app contract is unavailable for the installed artifact.",
+                        error=str(generated_artifact_issue.get("reason") or "invalid_generated_artifact_contract"),
+                        trace=[
+                            _generated_trace_step("user_command", source="agent", prompt=raw_prompt),
+                            _generated_trace_step("invalid_generated_artifact_contract", **generated_artifact_issue),
+                        ],
+                    )
+                    return JsonResponse(
+                        {
+                            "status": "ValidationError",
+                            "action_type": "CreateDraft",
+                            "artifact_type": "Workspace",
+                            "artifact_id": None,
+                            "summary": "Generated app contract is unavailable for the installed artifact.",
+                            "validation_errors": ["Generated app contract is unavailable for this installed artifact. Rebuild or reinstall the app."],
+                            "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                        },
+                        status=409,
+                    )
+                if not runtime_target_record or not capability_manifest:
+                    return JsonResponse({"error": "generated app runtime is not available"}, status=404)
+                structured = _resolve_generated_entity_operation_with_runtime(
+                    prompt=raw_prompt,
+                    capability_manifest=capability_manifest,
+                    runtime_base_url=str(runtime_target_record.get("runtime_base_url") or ""),
+                    workspace=workspace,
+                )
+                if not structured:
+                    result_payload = {
+                        "status": "ValidationError",
+                        "action_type": "CreateDraft",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": "Generated app operation could not be resolved.",
+                        "validation_errors": ["No matching generated app CRUD operation found."],
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=result_payload["summary"],
+                        error="No matching generated app CRUD operation found.",
+                        trace=[_generated_trace_step("user_command", source="agent", prompt=raw_prompt), _generated_trace_step("error", error="unresolved_operation")],
+                    )
+                    return JsonResponse(result_payload, status=400)
+                try:
+                    result, trace, normalized = _run_generated_entity_operation(
+                        prompt=raw_prompt,
+                        structured=structured,
+                        capability_manifest=capability_manifest,
+                        runtime_base_url=str(runtime_target_record.get("runtime_base_url") or ""),
+                        workspace=workspace,
+                        source="agent",
+                    )
+                except RuntimeError as exc:
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary="Generated app operation failed.",
+                        error=str(exc),
+                        trace=[_generated_trace_step("user_command", source="agent", prompt=raw_prompt), _generated_trace_step("error", error=str(exc))],
+                        structured_operation=_normalized_generated_operation(structured),
+                    )
+                    return JsonResponse(
+                        {
+                            "status": "ValidationError",
+                            "action_type": "CreateDraft",
+                            "artifact_type": "Workspace",
+                            "artifact_id": None,
+                            "summary": "Generated app operation failed.",
+                            "validation_errors": [str(exc)],
+                            "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                        },
+                        status=502,
+                    )
+                summary = str(result.get("text") or "Generated app operation complete.")
+                _log_prompt_activity(
+                    request_id=request_id,
+                    identity=identity,
+                    status="completed",
+                    prompt=raw_prompt,
+                    request_type="intent.apply",
+                    workspace_id=str(workspace.id),
+                    summary=summary,
+                    trace=trace,
+                    structured_operation=normalized,
+                )
+                generated_artifact = _installed_generated_artifact(workspace, "net-inventory")
+                return JsonResponse(
+                    {
+                        "status": "DraftReady",
+                        "action_type": "CreateDraft",
+                        "artifact_type": "Workspace",
+                        "artifact_id": str(generated_artifact.id) if generated_artifact else None,
+                        "summary": summary,
+                        "result": result,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                )
             if operation in {"create_app_intent_draft", "evolve_app_intent_draft"}:
                 return _intent_apply_create_app_intent_draft(identity=identity, payload=body_payload, request_id=request_id)
             return JsonResponse({"error": "CreateDraft currently supports ArticleDraft only"}, status=400)
@@ -17924,6 +19158,8 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
                     "draft_id": draft_id,
                     "job_id": job_id,
                     "error": str(meta.get("error") or ""),
+                    "trace": meta.get("trace") if isinstance(meta.get("trace"), list) else [],
+                    "structured_operation": meta.get("structured_operation") if isinstance(meta.get("structured_operation"), dict) else {},
                     "source": "audit_log",
                 }
             )
@@ -22069,6 +23305,90 @@ def _manifest_suggestions(manifest: Dict[str, Any], workspace_id: Optional[str] 
     return rows
 
 
+def _resolved_capability_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    resolved = manifest.get("resolved_capability_manifest") if isinstance(manifest.get("resolved_capability_manifest"), dict) else {}
+    if resolved:
+        return resolved
+    content = manifest.get("content") if isinstance(manifest.get("content"), dict) else {}
+    resolved = content.get("resolved_capability_manifest") if isinstance(content.get("resolved_capability_manifest"), dict) else {}
+    return resolved
+
+
+def _resolved_manifest_suggestions(artifact: Artifact, resolved: Dict[str, Any]) -> List[Dict[str, Any]]:
+    artifact_slug = _artifact_slug(artifact) or str(artifact.id)
+    rows: List[Dict[str, Any]] = []
+    for command in resolved.get("commands") if isinstance(resolved.get("commands"), list) else []:
+        if not isinstance(command, dict):
+            continue
+        prompt = str(command.get("prompt") or "").strip()
+        if not prompt:
+            continue
+        key = str(command.get("key") or prompt).strip().lower().replace(" ", "-")
+        visibility = command.get("visibility") if isinstance(command.get("visibility"), list) else ["capability", "palette"]
+        rows.append(
+            {
+                "id": f"{artifact_slug}-{key}",
+                "name": str(command.get("name") or prompt).strip() or prompt,
+                "prompt": prompt,
+                "description": str(command.get("name") or "").strip(),
+                "visibility": [str(item).strip() for item in visibility if str(item).strip()],
+                "group": str(command.get("group") or "").strip(),
+                "order": int(command.get("order") or 1000),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            int(row.get("order") or 1000),
+            str(row.get("group") or "").lower(),
+            str(row.get("name") or row.get("prompt") or "").lower(),
+        )
+    )
+    return rows
+
+
+def _resolved_manifest_surfaces(resolved: Dict[str, Any], workspace_id: Optional[str] = None) -> Dict[str, List[Dict[str, Any]]]:
+    surfaces: Dict[str, List[Dict[str, Any]]] = {"nav": [], "manage": [], "docs": []}
+    for view in resolved.get("views") if isinstance(resolved.get("views"), list) else []:
+        if not isinstance(view, dict):
+            continue
+        surface = str(view.get("surface") or "").strip().lower()
+        if surface not in surfaces:
+            continue
+        path = _resolve_manifest_surface_path(
+            {"ui_mount_scope": "workspace"},
+            str(view.get("path") or ""),
+            workspace_id=workspace_id,
+        )
+        label = str(view.get("label") or "").strip()
+        if not label or not path:
+            continue
+        surfaces[surface].append(
+            {
+                "label": label,
+                "path": path,
+                "order": int(view.get("order") or (100 if surface == "manage" else 1000)),
+            }
+        )
+    for key in surfaces:
+        surfaces[key].sort(key=lambda row: (int(row.get("order") or 1000), str(row.get("label") or "").lower()))
+    return surfaces
+
+
+def _resolved_manifest_entities(resolved: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for entity in resolved.get("entities") if isinstance(resolved.get("entities"), list) else []:
+        if not isinstance(entity, dict):
+            continue
+        rows.append(copy.deepcopy(entity))
+    rows.sort(key=lambda row: str(row.get("key") or "").lower())
+    return rows
+
+
+def _manifest_contract_issue_summary(artifact: Artifact, resolved: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    issue = _generated_artifact_contract_issue(artifact, resolved)
+    return copy.deepcopy(issue) if isinstance(issue, dict) else None
+
+
 def _manifest_roots() -> List[Path]:
     resolved = Path(__file__).resolve()
     default_root = str(resolved.parents[1] if len(resolved.parents) > 1 else resolved.parent)
@@ -22197,6 +23517,8 @@ def _article_docs_surface_path(artifact: Artifact, workspace_id: Optional[str]) 
 
 def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[str] = None) -> Dict[str, Any]:
     manifest = _load_artifact_manifest(artifact)
+    resolved = _resolved_capability_manifest(manifest)
+    contract_issue = _manifest_contract_issue_summary(artifact, resolved)
     roles_raw = manifest.get("roles") if isinstance(manifest.get("roles"), list) else []
     roles: List[str] = []
     for role in roles_raw:
@@ -22206,17 +23528,27 @@ def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[st
         if role_name:
             roles.append(role_name)
     unique_roles = sorted(set(roles))
+    surfaces = {
+        "nav": _manifest_surface_entries(manifest, "nav", workspace_id=workspace_id),
+        "manage": _manifest_surface_entries(manifest, "manage", workspace_id=workspace_id),
+        "docs": _manifest_surface_entries(manifest, "docs", workspace_id=workspace_id),
+    }
+    suggestions = _manifest_suggestions(manifest, workspace_id=workspace_id)
+    if str(resolved.get("schema_version") or "").strip() == "xyn.capability_manifest.v1":
+        suggestions = _resolved_manifest_suggestions(artifact, resolved)
+        surfaces = _resolved_manifest_surfaces(resolved, workspace_id=workspace_id)
+    if contract_issue:
+        suggestions = []
     summary = {
         "roles": unique_roles,
         "ui_mount_scope": _manifest_ui_mount_scope(manifest),
         "capability": _manifest_capability(manifest),
-        "suggestions": _manifest_suggestions(manifest, workspace_id=workspace_id),
-        "surfaces": {
-            "nav": _manifest_surface_entries(manifest, "nav", workspace_id=workspace_id),
-            "manage": _manifest_surface_entries(manifest, "manage", workspace_id=workspace_id),
-            "docs": _manifest_surface_entries(manifest, "docs", workspace_id=workspace_id),
-        },
+        "suggestions": suggestions,
+        "entities": [] if contract_issue else _resolved_manifest_entities(resolved),
+        "surfaces": surfaces,
     }
+    if contract_issue:
+        summary["generated_artifact_contract_status"] = contract_issue
     if artifact.type_id and artifact.type.slug == "article":
         manage_rows = summary.get("surfaces", {}).get("manage") or []
         docs_rows = summary.get("surfaces", {}).get("docs") or []

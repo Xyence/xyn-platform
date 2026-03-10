@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { applyXynIntent, getXynIntentOptions, resolveXynIntent } from "../../api/xyn";
 import type { XynIntentOptionsResponse, XynIntentResolutionResult, XynIntentStatus } from "../../api/types";
+import { emitEntityChange, inferEntityChangeFromDraftPayload } from "../utils/entityChangeEvents";
 
 const STORAGE_KEY = "xyn.console.v1.sessions";
 const HINT_STORAGE_KEY = "xyn.console.v1.lastArtifactHint";
@@ -491,6 +492,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     if (processing) return;
     const payload = session.lastResolution?.draft_payload;
     if (!payload || typeof payload !== "object") return;
+    const entityChange = inferEntityChangeFromDraftPayload(payload);
     setProcessing(true);
     setProcessingStep("validating");
     try {
@@ -506,6 +508,9 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
         lastMessage: "",
         localMessage: "Draft submitted for processing.",
       }));
+      if (entityChange) {
+        emitEntityChange(entityChange);
+      }
       setPendingCloseBlock(false);
     } catch (error) {
       const failure: XynIntentResolutionResult = {
