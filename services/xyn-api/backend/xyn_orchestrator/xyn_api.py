@@ -16337,20 +16337,39 @@ def _parse_generated_create_fields(contract: Dict[str, Any], remainder: str) -> 
             lowered = rest.lower()
             break
     title_field = _entity_title_field(contract) or "name"
+    field_map = _entity_field_map(contract)
     fields: Dict[str, Any] = {}
+    geo_fields = {
+        key: key
+        for key in ("city", "region", "country")
+        if key in field_map and bool((field_map.get(key) or {}).get("writable"))
+    }
     relation_fields = [
         name
-        for name, field in _entity_field_map(contract).items()
-        if isinstance(field.get("relation"), dict) and bool(field.get("writable"))
+        for name, field in field_map.items()
+        if (
+            isinstance(field.get("relation"), dict)
+            and bool(field.get("writable"))
+            and str(((field.get("relation") if isinstance(field.get("relation"), dict) else {}) or {}).get("target_entity") or "").strip()
+            != str(contract.get("key") or "").strip()
+        )
     ]
     relation_field = relation_fields[0] if len(relation_fields) == 1 else ""
     for relation_token in (" in ", " at "):
-        if relation_field and relation_token in rest.lower():
+        if relation_token in rest.lower():
             split = re.split(rf"\s+{relation_token.strip()}\s+", rest, maxsplit=1, flags=re.IGNORECASE)
             if len(split) == 2:
-                rest, relation_ref = split[0].strip(), split[1].strip()
-                if relation_ref:
-                    fields[relation_field] = relation_ref
+                rest, suffix_ref = split[0].strip(), split[1].strip()
+                if suffix_ref and geo_fields.get("city"):
+                    tokens = [token.strip(", ") for token in suffix_ref.split() if token.strip(", ")]
+                    if geo_fields.get("country") and geo_fields.get("region") and len(tokens) >= 3 and len(tokens[-1]) >= 2 and len(tokens[-2]) <= 3:
+                        fields[geo_fields["country"]] = tokens[-1]
+                        fields[geo_fields["region"]] = tokens[-2]
+                        fields[geo_fields["city"]] = " ".join(tokens[:-2]).strip()
+                    else:
+                        fields[geo_fields["city"]] = suffix_ref
+                elif relation_field and suffix_ref:
+                    fields[relation_field] = suffix_ref
                 break
     if rest:
         fields[title_field] = rest
