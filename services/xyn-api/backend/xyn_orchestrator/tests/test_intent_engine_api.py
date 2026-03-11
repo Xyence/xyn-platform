@@ -8,6 +8,7 @@ from django.test import TestCase
 from xyn_orchestrator.intent_engine.contracts import DraftIntakeContractRegistry
 from xyn_orchestrator.intent_engine.engine import IntentResolutionEngine, ResolutionContext
 from xyn_orchestrator.intent_engine.proposal_provider import IntentContextPackMissingError
+from xyn_orchestrator.intent_engine.types import IntentEnvelope
 from xyn_orchestrator.artifact_links import ensure_context_pack_artifact
 from xyn_orchestrator.models import (
     AuditLog,
@@ -15,6 +16,7 @@ from xyn_orchestrator.models import (
     ArtifactType,
     ArticleCategory,
     ContextPack,
+    DevTask,
     LedgerEvent,
     RoleBinding,
     UserIdentity,
@@ -1192,3 +1194,183 @@ class IntentEngineApiTests(TestCase):
         self.assertIn("path", first)
         self.assertIn("size_bytes", first)
         self.assertIn("sha256", first)
+
+    def test_epic_d_intent_envelope_serializes(self):
+        envelope = IntentEnvelope(
+            intent_family="development_work",
+            intent_type="continue_work_item",
+            target_context={"workspace_id": str(self.workspace.id)},
+            resolved_subject={"id": "task-1"},
+            action_payload={"reference": "Epic D"},
+            policy={"run_tests": True},
+            confidence=0.88,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["serialized for audit"],
+        )
+        payload = envelope.model_dump(mode="json")
+        self.assertEqual(payload["intent_family"], "development_work")
+        self.assertEqual(payload["intent_type"], "continue_work_item")
+        self.assertEqual(payload["action_payload"]["reference"], "Epic D")
+
+    def test_epic_d_continue_epic_reuses_existing_dev_task(self):
+        DevTask.objects.create(
+            title="Continue Epic D implementation",
+            task_type="codegen",
+            status="queued",
+            source_entity_type="blueprint",
+            source_entity_id=self.workspace.id,
+            work_item_id="epic-d-impl",
+            runtime_workspace_id=self.workspace.id,
+            created_by=self.user,
+            updated_by=self.user,
+        )
+        response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": "continue Epic D implementation", "context": {"workspace_id": str(self.workspace.id)}}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "IntentResolved")
+        intent = payload.get("intent") or {}
+        self.assertEqual(intent.get("intent_family"), "development_work")
+        self.assertEqual(intent.get("intent_type"), "create_and_dispatch_run")
+        self.assertEqual((intent.get("resolved_subject") or {}).get("work_item_id"), "epic-d-impl")
+        self.assertFalse(intent.get("needs_clarification"))
+
+    def test_epic_d_ambiguous_continue_requests_clarification(self):
+        for index in range(2):
+            DevTask.objects.create(
+                title=f"Continue Epic D implementation #{index}",
+                task_type="codegen",
+                status="queued",
+                source_entity_type="blueprint",
+                source_entity_id=self.workspace.id,
+                work_item_id=f"epic-d-{index}",
+                runtime_workspace_id=self.workspace.id,
+                created_by=self.user,
+                updated_by=self.user,
+            )
+        response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": "continue the work", "context": {"workspace_id": str(self.workspace.id)}}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "IntentClarificationRequired")
+        intent = payload.get("intent") or {}
+        self.assertTrue(intent.get("needs_clarification"))
+        self.assertEqual(intent.get("clarification_reason"), "ambiguous_target")
+
+    def test_epic_d_generated_app_undeclared_entity_returns_structured_unsupported(self):
+        application_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        generated_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=application_type,
+            title="Network Inventory",
+            slug="app.net-inventory",
+            status="published",
+            visibility="team",
+            artifact_state="canonical",
+            package_version="0.0.1-dev",
+            scope_json={
+                "imported_manifest": {
+                    "resolved_capability_manifest": {
+                        "schema_version": "xyn.capability_manifest.v1",
+                        "entities": [
+                            {
+                                "key": "devices",
+                                "singular_label": "device",
+                                "plural_label": "devices",
+                                "operations": {
+                                    "list": {"declared": True, "path": "/devices"},
+                                    "create": {"declared": True, "path": "/devices"},
+                                    "update": {"declared": True, "path": "/devices/{id}"},
+                                    "delete": {"declared": True, "path": "/devices/{id}"},
+                                },
+                                "fields": [{"name": "name", "writable": True}],
+                                "presentation": {"title_field": "name"},
+                                "validation": {"required_on_create": ["name"], "allowed_on_update": ["name"]},
+                                "collection_path": "/devices",
+                                "item_path_template": "/devices/{id}",
+                            },
+                            {
+                                "key": "locations",
+                                "singular_label": "location",
+                                "plural_label": "locations",
+                                "operations": {
+                                    "list": {"declared": True, "path": "/locations"},
+                                    "create": {"declared": True, "path": "/locations"},
+                                    "update": {"declared": True, "path": "/locations/{id}"},
+                                    "delete": {"declared": True, "path": "/locations/{id}"},
+                                },
+                                "fields": [{"name": "name", "writable": True}],
+                                "presentation": {"title_field": "name"},
+                                "validation": {"required_on_create": ["name"], "allowed_on_update": ["name"]},
+                                "collection_path": "/locations",
+                                "item_path_template": "/locations/{id}",
+                            },
+                        ],
+                    }
+                }
+            },
+        )
+        WorkspaceArtifactBinding.objects.create(workspace=self.workspace, artifact=generated_artifact)
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=generated_artifact,
+            app_slug="net-inventory",
+            fqdn="net-inventory.localtest.me",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://xyn-sibling-net-inventory-api:8080",
+                    "app_slug": "net-inventory",
+                    "installed_artifact_slug": "app.net-inventory",
+                }
+            },
+        )
+        response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": "show interfaces", "context": {"workspace_id": str(self.workspace.id)}}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "UnsupportedIntent")
+        intent = payload.get("intent") or {}
+        self.assertEqual(intent.get("intent_family"), "app_operation")
+        self.assertEqual(intent.get("intent_type"), "unsupported_declared_entity")
+        self.assertEqual(((intent.get("action_payload") or {}).get("alternative")), "propose_app_evolution")
+
+    def test_epic_d_resolution_trace_is_visible_in_activity(self):
+        DevTask.objects.create(
+            title="Continue Epic D implementation",
+            task_type="codegen",
+            status="queued",
+            source_entity_type="blueprint",
+            source_entity_id=self.workspace.id,
+            work_item_id="epic-d-trace",
+            runtime_workspace_id=self.workspace.id,
+            created_by=self.user,
+            updated_by=self.user,
+        )
+        response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": "continue Epic D implementation", "context": {"workspace_id": str(self.workspace.id)}}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        activity = self.client.get(f"/xyn/api/ai/activity?workspace_id={self.workspace.id}")
+        self.assertEqual(activity.status_code, 200, activity.content.decode())
+        entry = next(
+            item
+            for item in activity.json().get("items", [])
+            if item.get("request_type") == "intent.resolve" and "Epic D" in str(item.get("prompt") or "")
+        )
+        trace = entry.get("trace") or []
+        self.assertTrue(any(step.get("step") == "intent_resolved" for step in trace if isinstance(step, dict)))

@@ -55,6 +55,26 @@ function mapAppJobToActivity(job: AppJob): AiActivityEntry {
   };
 }
 
+function interpretationSummary(item: AiActivityEntry): string {
+  const interpretation = item.prompt_interpretation;
+  if (!interpretation) return "";
+  const fieldSummary = (interpretation.fields || [])
+    .filter((field) => field.state !== "missing" && field.value != null && String(field.value).trim())
+    .slice(0, 2)
+    .map((field) => `${field.name}=${String(field.value)}`);
+  const parts = [
+    interpretation.action?.label,
+    interpretation.target_entity?.label || interpretation.target_work_item?.label || interpretation.target_run?.label,
+    interpretation.target_record?.reference,
+    interpretation.target_work_item?.reference ? `work item ${interpretation.target_work_item.reference}` : "",
+    interpretation.target_run?.id ? `run ${interpretation.target_run.id}` : "",
+    fieldSummary.length ? fieldSummary.join(", ") : "",
+    interpretation.needs_clarification ? "clarification required" : "",
+    interpretation.execution_mode ? interpretation.execution_mode.replace(/_/g, " ") : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
 export default function AgentActivityDrawer({ open, onClose, workspaceId, artifactId }: Props) {
   const [items, setItems] = useState<AiActivityEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -178,6 +198,7 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
                     ? [item.request_type, item.provider, item.model_name, item.agent_slug].filter(Boolean).join(" · ")
                     : "activity"}
                 </span>
+                {interpretationSummary(item) ? <span className="muted small">{interpretationSummary(item)}</span> : null}
                 <span className="muted small">
                   {item.artifact_type || "artifact"} {item.artifact_id || "—"} · {item.status} · {relativeTime(item.created_at)}
                   {item.draft_id ? ` · draft ${item.draft_id}` : ""}

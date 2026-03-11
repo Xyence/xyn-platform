@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { applyXynIntent, getXynIntentOptions, resolveXynIntent } from "../../api/xyn";
+import { applyXynIntent, getXynIntentOptions, previewXynIntent, resolveXynIntent } from "../../api/xyn";
 import type { XynIntentOptionsResponse, XynIntentResolutionResult, XynIntentStatus } from "../../api/types";
 import { emitEntityChange, inferEntityChangeFromResolution } from "../utils/entityChangeEvents";
 
@@ -22,6 +22,7 @@ type ConsoleSessionState = {
   inputText: string;
   lastMessage: string;
   lastResolution: XynIntentResolutionResult | null;
+  previewResolution: XynIntentResolutionResult | null;
   pendingProposal: PendingProposal | null;
   pendingMissingFields: Array<{ field: string; reason: string; options_available: boolean }>;
   optionsByField: Partial<Record<"category" | "format" | "duration", XynIntentOptionsResponse>>;
@@ -110,6 +111,7 @@ const DEFAULT_SESSION: ConsoleSessionState = {
   inputText: "",
   lastMessage: "",
   lastResolution: null,
+  previewResolution: null,
   pendingProposal: null,
   pendingMissingFields: [],
   optionsByField: {},
@@ -123,6 +125,7 @@ function cloneDefaultSession(): ConsoleSessionState {
     inputText: "",
     lastMessage: "",
     lastResolution: null,
+    previewResolution: null,
     pendingProposal: null,
     pendingMissingFields: [],
     optionsByField: {},
@@ -215,6 +218,7 @@ type XynConsoleContextValue = {
   inputText: string;
   setInputText: (value: string) => void;
   processing: boolean;
+  previewLoading: boolean;
   processingStep: ProcessingStep | null;
   session: ConsoleSessionState;
   badgeActive: boolean;
@@ -273,6 +277,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
   const [context, setContextState] = useState<XynConsoleContextRef>({ artifact_id: null, artifact_type: null });
   const [sessions, setSessions] = useState<PersistedSessions>(() => readSessionsFromStorage());
   const [processing, setProcessing] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [processingStep, setProcessingStep] = useState<ProcessingStep | null>(null);
   const [pendingCloseBlock, setPendingCloseBlock] = useState(false);
   const [lastArtifactHint, setLastArtifactHintState] = useState<ConsoleArtifactHint | null>(() => readArtifactHint());
@@ -286,6 +291,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
   const [suggestionSwitcherOpen, setSuggestionSwitcherOpen] = useState(false);
   const editorBridgesRef = useRef<Record<string, ConsoleEditorBridge>>({});
   const navigationGuardRef = useRef(false);
+  const previewRequestSeqRef = useRef(0);
 
   const contextKey = useMemo(() => toContextKey(context), [context]);
   const session = useMemo(() => sessions[contextKey] || DEFAULT_SESSION, [sessions, contextKey]);
@@ -347,6 +353,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
         inputText: result.status === "DraftReady" && result.action_type === "CreateDraft" ? "" : current.inputText,
         lastMessage: message,
         lastResolution: result,
+        previewResolution: result,
         pendingProposal:
           result.status === "ProposedPatch" && result.proposed_patch
             ? {
@@ -366,6 +373,57 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     },
     [updateSession]
   );
+
+  useEffect(() => {
+    const message = String(session.inputText || "").trim();
+    if (processing) return;
+    if (!message) {
+      previewRequestSeqRef.current += 1;
+      updateSession((current) => (current.previewResolution ? { ...current, previewResolution: null } : current));
+      setPreviewLoading(false);
+      return;
+    }
+    const requestSeq = previewRequestSeqRef.current + 1;
+    previewRequestSeqRef.current = requestSeq;
+    let active = true;
+    setPreviewLoading(true);
+    updateSession((current) => (current.previewResolution ? { ...current, previewResolution: null } : current));
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await previewXynIntent({
+            message,
+            context: {
+              artifact_id: context.artifact_id || null,
+              artifact_type: context.artifact_type || null,
+              workspace_id: workspaceIdFromPathname(typeof window !== "undefined" ? window.location.pathname : ""),
+            },
+            snapshot: activeEditorBridge?.getFormSnapshot ? activeEditorBridge.getFormSnapshot() : undefined,
+          });
+          if (!active || previewRequestSeqRef.current !== requestSeq) return;
+          updateSession((current) => ({ ...current, previewResolution: result }));
+        } catch {
+          if (!active || previewRequestSeqRef.current !== requestSeq) return;
+          updateSession((current) => ({
+            ...current,
+            previewResolution: {
+              status: "ValidationError",
+              action_type: "ValidateDraft",
+              artifact_type: null,
+              artifact_id: null,
+              summary: "Interpretation preview unavailable.",
+            },
+          }));
+        } finally {
+          if (active && previewRequestSeqRef.current === requestSeq) setPreviewLoading(false);
+        }
+      })();
+    }, 250);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [session.inputText, processing, context.artifact_id, context.artifact_type, activeEditorBridge, updateSession]);
 
   const submitResolve = useCallback(async () => {
     const message = String(session.inputText || "").trim();
@@ -929,6 +987,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       inputText: session.inputText,
       setInputText,
       processing,
+      previewLoading,
       processingStep,
       session,
       badgeActive,
@@ -977,6 +1036,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       session,
       setInputText,
       processing,
+      previewLoading,
       processingStep,
       badgeActive,
       pendingCloseBlock,

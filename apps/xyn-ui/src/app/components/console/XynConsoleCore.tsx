@@ -6,7 +6,7 @@ import { provisionLocalXynInstance } from "../../../api/xyn";
 import { listArtifactNavSurfaces } from "../../../api/xyn";
 import { getMe } from "../../../api/xyn";
 import { executeAppPalettePrompt } from "../../../api/xyn";
-import type { RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
+import type { PromptInterpretationClarificationOption, RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
@@ -14,6 +14,7 @@ import { useXynConsole } from "../../state/xynConsoleStore";
 import { emitEntityChange, inferEntityChangeFromPrompt } from "../../utils/entityChangeEvents";
 import RecentArtifactsMiniTable from "./RecentArtifactsMiniTable";
 import ConsolePromptCard from "./ConsolePromptCard";
+import PromptInterpretationPreview from "./PromptInterpretationPreview";
 import ConsoleGuidancePanel from "./ConsoleGuidancePanel";
 import ConsoleResultPanel from "./ConsoleResultPanel";
 
@@ -1064,6 +1065,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     inputText,
     setInputText,
     processing,
+    previewLoading,
     processingStep,
     session,
     submitResolve,
@@ -1207,6 +1209,32 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
   };
 
   const canSubmit = Boolean(inputText.trim()) && !processing;
+  const previewInterpretation = session.previewResolution?.prompt_interpretation || null;
+  const clarificationBlocksSubmit = Boolean(previewInterpretation?.needs_clarification);
+  const canSubmitPrompt = canSubmit && !clarificationBlocksSubmit;
+
+  const applyClarificationOption = (option: PromptInterpretationClarificationOption) => {
+    const label = String(option.label || "").trim();
+    const prompt = String(inputText || "").trim();
+    if (!label) return;
+    if (/^\s*(continue|resume)\b/i.test(prompt)) {
+      setInputText(`continue ${label}`);
+      return;
+    }
+    if (/^\s*(retry|rerun)\b/i.test(prompt)) {
+      setInputText(`retry ${label}`);
+      return;
+    }
+    if (/^\s*(pause|hold)\b/i.test(prompt)) {
+      setInputText(`pause ${label}`);
+      return;
+    }
+    if (/^\s*(update|rename|delete|remove)\b/i.test(prompt)) {
+      setInputText(`${prompt} ${label}`);
+      return;
+    }
+    setInputText(label);
+  };
 
   const refreshPaletteResultAfterCreate = async (
     workspaceId: string,
@@ -1567,7 +1595,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     const submitByHotkey = event.metaKey || event.ctrlKey || (!event.metaKey && !event.ctrlKey);
     if (submitByHotkey) {
       event.preventDefault();
-      if (!canSubmit) return;
+      if (!canSubmitPrompt) return;
       void submitPrompt();
     }
   };
@@ -1627,9 +1655,19 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
         }
         setInputText("");
       }}
-      canSubmit={canSubmit}
+      canSubmit={canSubmitPrompt}
       textareaRef={inputRef}
       pendingCloseBlock={pendingCloseBlock}
+      interpretationContent={
+        <PromptInterpretationPreview
+          inputText={inputText}
+          interpretation={previewInterpretation}
+          resolutionStatus={session.previewResolution?.status || null}
+          resolutionSummary={session.previewResolution?.summary || null}
+          loading={previewLoading}
+          onSelectClarificationOption={applyClarificationOption}
+        />
+      }
     />
   );
 

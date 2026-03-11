@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, TypedDict
+
+from pydantic import BaseModel, Field
 
 
 IntentAction = Literal["CreateDraft", "ProposePatch", "ShowOptions", "ValidateDraft"]
@@ -54,3 +57,131 @@ ARTICLE_PATCHABLE_FIELDS = {
     "body",
 }
 CONTEXT_PACK_PATCHABLE_FIELDS = {"title", "summary", "tags", "content", "format"}
+
+
+class IntentFamily(str, Enum):
+    APP_OPERATION = "app_operation"
+    DEVELOPMENT_WORK = "development_work"
+    RUN_SUPERVISION = "run_supervision"
+
+
+class IntentType(str, Enum):
+    CREATE_RECORD = "create_record"
+    UPDATE_RECORD = "update_record"
+    DELETE_RECORD = "delete_record"
+    LIST_RECORDS = "list_records"
+    GET_RECORD = "get_record"
+    CREATE_WORK_ITEM = "create_work_item"
+    CONTINUE_WORK_ITEM = "continue_work_item"
+    CREATE_AND_DISPATCH_RUN = "create_and_dispatch_run"
+    RUN_VALIDATION = "run_validation"
+    INVESTIGATE_ISSUE = "investigate_issue"
+    SUMMARIZE_RUN = "summarize_run"
+    SHOW_STATUS = "show_status"
+    RETRY_RUN = "retry_run"
+    PAUSE_OR_HOLD = "pause_or_hold"
+    REQUEST_REVIEW = "request_review"
+    UNSUPPORTED_DECLARED_ENTITY = "unsupported_declared_entity"
+    UNSUPPORTED_INTENT = "unsupported_intent"
+
+
+class ClarificationReason(str, Enum):
+    AMBIGUOUS_TARGET = "ambiguous_target"
+    MISSING_TARGET = "missing_target"
+    MISSING_WORKSPACE_CONTEXT = "missing_workspace_context"
+    UNSUPPORTED_DECLARED_ENTITY = "unsupported_declared_entity"
+
+
+class ClarificationOption(BaseModel):
+    id: str
+    label: str
+    kind: str = ""
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IntentEnvelope(BaseModel):
+    intent_family: str
+    intent_type: str
+    target_context: Dict[str, Any] = Field(default_factory=dict)
+    resolved_subject: Dict[str, Any] = Field(default_factory=dict)
+    action_payload: Dict[str, Any] = Field(default_factory=dict)
+    policy: Dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.0
+    needs_clarification: bool = False
+    clarification_reason: Optional[str] = None
+    clarification_options: List[ClarificationOption] = Field(default_factory=list)
+    resolution_notes: List[str] = Field(default_factory=list)
+
+
+class PromptInterpretationExecutionMode(str, Enum):
+    IMMEDIATE_EXECUTION = "immediate_execution"
+    QUEUED_RUN = "queued_run"
+    WORK_ITEM_CREATION = "work_item_creation"
+    WORK_ITEM_CONTINUATION = "work_item_continuation"
+    AWAITING_CLARIFICATION = "awaiting_clarification"
+    AWAITING_REVIEW = "awaiting_review"
+    BLOCKED = "blocked"
+
+
+class PromptInterpretationCapabilityStateValue(str, Enum):
+    ENABLED = "enabled"
+    KNOWN_DISABLED = "known_but_disabled"
+    UNKNOWN = "unknown"
+    UNAVAILABLE = "unavailable"
+
+
+class PromptInterpretationCapabilityState(BaseModel):
+    state: str
+    term: Optional[str] = None
+    alternative: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class PromptInterpretationTarget(BaseModel):
+    id: Optional[str] = None
+    key: Optional[str] = None
+    label: Optional[str] = None
+    reference: Optional[str] = None
+    status: Optional[str] = None
+
+
+class PromptInterpretationAction(BaseModel):
+    verb: str
+    label: str
+
+
+class PromptInterpretationField(BaseModel):
+    name: str
+    value: Any = None
+    kind: str = "field"
+    state: str = "resolved"
+
+
+class PromptInterpretationSpan(BaseModel):
+    kind: str
+    text: str
+    start: int
+    end: int
+    state: str = "recognized"
+
+
+class PromptInterpretation(BaseModel):
+    intent_family: str
+    intent_type: str
+    target_entity: Optional[PromptInterpretationTarget] = None
+    target_record: Optional[PromptInterpretationTarget] = None
+    target_work_item: Optional[PromptInterpretationTarget] = None
+    target_run: Optional[PromptInterpretationTarget] = None
+    action: PromptInterpretationAction
+    fields: List[PromptInterpretationField] = Field(default_factory=list)
+    execution_mode: str
+    confidence: float = 0.0
+    needs_clarification: bool = False
+    capability_state: PromptInterpretationCapabilityState = Field(
+        default_factory=lambda: PromptInterpretationCapabilityState(state=PromptInterpretationCapabilityStateValue.UNKNOWN.value)
+    )
+    clarification_reason: Optional[str] = None
+    clarification_options: List[ClarificationOption] = Field(default_factory=list)
+    resolution_notes: List[str] = Field(default_factory=list)
+    missing_fields: List[str] = Field(default_factory=list)
+    recognized_spans: List[PromptInterpretationSpan] = Field(default_factory=list)

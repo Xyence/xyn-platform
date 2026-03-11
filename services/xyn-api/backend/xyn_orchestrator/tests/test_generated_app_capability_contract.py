@@ -989,3 +989,68 @@ class GeneratedAppCapabilityContractTests(TestCase):
                 )
                 self.assertEqual(applied.status_code, 200, applied.content.decode())
                 self.assertIn(summary, applied.json().get("summary", ""))
+
+    @mock.patch("xyn_orchestrator.xyn_api._intent_engine_enabled", return_value=True)
+    def test_intent_apply_generated_crud_blocks_unsupported_declared_entity(self, _intent_enabled):
+        self._bind_generated_artifact(include_interfaces=False, package_version="0.0.1-dev")
+        self._ensure_runtime()
+
+        with mock.patch("xyn_orchestrator.xyn_api.requests.request") as runtime_request:
+            response = self.client.post(
+                "/xyn/api/xyn/intent/apply",
+                data=json.dumps(
+                    {
+                        "action_type": "CreateDraft",
+                        "artifact_type": "Workspace",
+                        "payload": {
+                            "__operation": "execute_generated_app_crud",
+                            "workspace_id": str(self.workspace.id),
+                            "raw_prompt": "create interface gi0/1 on router-1",
+                        },
+                    }
+                ),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 409, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "UnsupportedIntent")
+        self.assertEqual(((payload.get("prompt_interpretation") or {}).get("capability_state") or {}).get("state"), "known_but_disabled")
+        runtime_request.assert_not_called()
+
+    @mock.patch("xyn_orchestrator.xyn_api._intent_engine_enabled", return_value=True)
+    def test_intent_apply_generated_crud_blocks_clarification_required_prompts(self, _intent_enabled):
+        self._bind_generated_artifact(include_interfaces=False, package_version="0.0.1-dev")
+        self._ensure_runtime()
+
+        def runtime_side_effect(*args, **kwargs):
+            method = kwargs.get("method")
+            url = kwargs.get("url", "")
+            if method == "GET" and url.endswith("/devices"):
+                return _FakeResponse(body={"items": [{"id": "dev-1", "name": "router-01"}, {"id": "dev-2", "name": "router-02"}]})
+            raise AssertionError(f"Unexpected runtime request: {method} {url}")
+
+        with mock.patch("xyn_orchestrator.xyn_api.requests.request", side_effect=runtime_side_effect) as runtime_request:
+            response = self.client.post(
+                "/xyn/api/xyn/intent/apply",
+                data=json.dumps(
+                    {
+                        "action_type": "CreateDraft",
+                        "artifact_type": "Workspace",
+                        "payload": {
+                            "__operation": "execute_generated_app_crud",
+                            "workspace_id": str(self.workspace.id),
+                            "raw_prompt": "delete device router",
+                        },
+                    }
+                ),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 409, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("status"), "IntentClarificationRequired")
+        self.assertTrue((payload.get("intent") or {}).get("needs_clarification"))
+        self.assertEqual((payload.get("prompt_interpretation") or {}).get("execution_mode"), "awaiting_clarification")
+        self.assertEqual(runtime_request.call_count, 1)
+        self.assertEqual(runtime_request.call_args.kwargs.get("method"), "GET")

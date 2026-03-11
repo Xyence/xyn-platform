@@ -219,6 +219,18 @@ from .intent_engine import (
 from .intent_engine.patch_service import apply_context_pack_patch as intent_apply_context_pack_patch
 from .intent_engine.patch_service import to_internal_format as intent_to_internal_format
 from .intent_engine.telemetry import increment as intent_telemetry_increment
+from .intent_engine.types import (
+    ClarificationReason,
+    IntentEnvelope,
+    PromptInterpretation,
+    PromptInterpretationAction,
+    PromptInterpretationCapabilityState,
+    PromptInterpretationCapabilityStateValue,
+    PromptInterpretationExecutionMode,
+    PromptInterpretationField,
+    PromptInterpretationSpan,
+    PromptInterpretationTarget,
+)
 
 PLATFORM_ROLE_IDS = {"platform_owner", "platform_admin", "platform_architect", "platform_operator", "app_user"}
 PREVIEW_SESSION_KEY = "xyn.preview.v1"
@@ -332,11 +344,190 @@ def _intent_contract_registry() -> DraftIntakeContractRegistry:
     return DraftIntakeContractRegistry(category_options_provider=_intent_category_options)
 
 
-def _intent_engine() -> IntentResolutionEngine:
+def _intent_dev_task_candidates(identity: UserIdentity, query: str, workspace_id: str) -> List[Dict[str, Any]]:
+    search = str(query or "").strip()
+    qs = DevTask.objects.all().order_by("-updated_at", "-created_at")
+    if workspace_id:
+        qs = qs.filter(models.Q(runtime_workspace_id=workspace_id) | models.Q(runtime_workspace_id__isnull=True))
+    lowered = search.lower()
+    if search:
+        qs = qs.filter(
+            models.Q(title__icontains=search)
+            | models.Q(work_item_id__icontains=search)
+            | models.Q(task_type__icontains=search)
+            | models.Q(last_error__icontains=search)
+        )
+    elif "failure" in lowered or "error" in lowered:
+        qs = qs.filter(status="failed")
+    rows = []
+    for task in qs[:5]:
+        rows.append(
+            {
+                "id": str(task.id),
+                "label": task.title,
+                "kind": "dev_task",
+                "status": task.status,
+                "task_type": task.task_type,
+                "work_item_id": task.work_item_id,
+                "runtime_run_id": str(task.runtime_run_id) if task.runtime_run_id else None,
+                "workspace_id": str(task.runtime_workspace_id) if task.runtime_workspace_id else "",
+            }
+        )
+    return rows
+
+
+def _intent_runtime_run_candidates(identity: UserIdentity, query: str, workspace_id: str) -> List[Dict[str, Any]]:
+    search = str(query or "").strip()
+    qs = DevTask.objects.exclude(runtime_run_id__isnull=True).order_by("-updated_at", "-created_at")
+    if workspace_id:
+        qs = qs.filter(runtime_workspace_id=workspace_id)
+    lowered = search.lower()
+    if search and search not in {"it", "the run", "the work"}:
+        qs = qs.filter(
+            models.Q(title__icontains=search)
+            | models.Q(work_item_id__icontains=search)
+            | models.Q(last_error__icontains=search)
+        )
+    elif "failure" in lowered or "error" in lowered:
+        qs = qs.filter(status="failed")
+    rows = []
+    for task in qs[:5]:
+        rows.append(
+            {
+                "id": str(task.runtime_run_id),
+                "label": task.title,
+                "kind": "runtime_run",
+                "status": task.status,
+                "run_id": str(task.runtime_run_id),
+                "work_item_id": task.work_item_id,
+                "workspace_id": str(task.runtime_workspace_id) if task.runtime_workspace_id else "",
+            }
+        )
+    return rows
+
+
+def _intent_explicit_entity_reference(message: str) -> str:
+    text = str(message or "").strip().lower()
+    for token in ("devices", "device", "locations", "location", "interfaces", "interface"):
+        if re.search(rf"\b{re.escape(token)}\b", text):
+            return token
+    return ""
+
+
+def _intent_generated_app_operation_lookup(
+    *,
+    message: str,
+    workspace: Optional[Workspace],
+    capability_manifest: Optional[Dict[str, Any]],
+    generated_artifact_issue: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not workspace or not _looks_like_generated_crud_prompt(message):
+        return None
+    manifest = capability_manifest if isinstance(capability_manifest, dict) else {}
+    if generated_artifact_issue:
+        return {
+            "intent_type": "unsupported_declared_entity",
+            "resolved_subject": {"entity_key": _intent_explicit_entity_reference(message)},
+            "action_payload": {"alternative": "propose_app_evolution"},
+            "confidence": 0.72,
+            "resolution_notes": ["generated app contract is unavailable for the installed artifact"],
+        }
+    runtime_target_record = _workspace_runtime_target(workspace, "net-inventory")
+    if not runtime_target_record or not manifest:
+        return {
+            "intent_type": "unsupported_declared_entity",
+            "resolved_subject": {"entity_key": _intent_explicit_entity_reference(message)},
+            "action_payload": {"alternative": "propose_app_evolution"},
+            "confidence": 0.62,
+            "resolution_notes": ["generated app runtime or capability manifest is unavailable"],
+        }
+    command_entry = _manifest_command_entry(manifest, message)
+    if isinstance(command_entry, dict):
+        command_key = str(command_entry.get("key") or command_entry.get("prompt") or "").strip()
+        entity_key = str(command_entry.get("entity_key") or _intent_explicit_entity_reference(message)).strip()
+        if command_key:
+            return {
+                "intent_type": "list_records",
+                "resolved_subject": {"entity_key": entity_key, "command_key": command_key},
+                "action_payload": {"command_key": command_key, "prompt": message, "mode": "declared_command"},
+                "confidence": 0.88,
+                "resolution_notes": ["resolved against declared generated app command"],
+            }
+    structured = _resolve_generated_entity_operation_with_runtime(
+        prompt=message,
+        capability_manifest=manifest,
+        runtime_base_url=str(runtime_target_record.get("runtime_base_url") or ""),
+        workspace=workspace,
+    )
+    if structured:
+        operation = str(structured.get("operation") or "").strip()
+        intent_type = {
+            "create": "create_record",
+            "update": "update_record",
+            "delete": "delete_record",
+            "list": "list_records",
+            "get": "get_record",
+        }.get(operation, "unsupported_intent")
+        return {
+            "intent_type": intent_type,
+            "resolved_subject": {
+                "entity_key": str(structured.get("entity_key") or "").strip(),
+                "command_key": str(structured.get("command_key") or "").strip(),
+            },
+            "action_payload": _normalized_generated_operation(structured),
+            "confidence": 0.9,
+            "resolution_notes": ["resolved against installed capability manifest"],
+        }
+    explicit_entity = _intent_explicit_entity_reference(message)
+    if explicit_entity:
+        return {
+            "intent_type": "unsupported_declared_entity",
+            "resolved_subject": {"entity_key": explicit_entity},
+            "action_payload": {"alternative": "propose_app_evolution"},
+            "confidence": 0.7,
+            "resolution_notes": [f"{explicit_entity} is not declared in the installed capability manifest"],
+        }
+    return None
+
+
+def _intent_engine(identity: Optional[UserIdentity] = None, workspace: Optional[Workspace] = None) -> IntentResolutionEngine:
     return IntentResolutionEngine(
         proposal_provider=LlmIntentProposalProvider(),
         contracts=_intent_contract_registry(),
         context_pack_target_lookup=_lookup_context_pack_artifact_for_intent,
+        work_item_lookup=(
+            (lambda query, workspace_id: _intent_dev_task_candidates(identity, query, workspace_id))
+            if identity is not None
+            else None
+        ),
+        run_lookup=(
+            (lambda query, workspace_id: _intent_runtime_run_candidates(identity, query, workspace_id))
+            if identity is not None
+            else None
+        ),
+        capability_manifest_lookup=(
+            (
+                lambda workspace_id: (
+                    _workspace_installed_capability_manifest(resolved_workspace, "net-inventory")
+                    if (resolved_workspace := _resolve_workspace_for_identity(identity, workspace_id))
+                    else None
+                )
+            )
+            if identity is not None
+            else None
+        ),
+        app_operation_lookup=(
+            (
+                lambda message, manifest: _intent_generated_app_operation_lookup(
+                    message=message,
+                    workspace=workspace or (_resolve_workspace_for_identity(identity, str((manifest or {}).get("workspace_id") or "")) if identity is not None else None),
+                    capability_manifest=manifest,
+                    generated_artifact_issue=_workspace_generated_artifact_issue(workspace, "net-inventory") if workspace else None,
+                )
+            )
+            if workspace is not None
+            else None
+        ),
     )
 
 
@@ -354,6 +545,199 @@ def _intent_context_pack_audit(force_refresh: bool = False) -> Dict[str, Any]:
             "context_pack_version": "",
             "context_pack_hash": "",
         }
+
+
+def _interpretation_field_list(action_payload: Dict[str, Any]) -> List[PromptInterpretationField]:
+    fields: List[PromptInterpretationField] = []
+    payload_fields = action_payload.get("fields") if isinstance(action_payload.get("fields"), dict) else {}
+    for name, value in payload_fields.items():
+        fields.append(PromptInterpretationField(name=str(name), value=value, kind="field", state="resolved"))
+    field_mutations = action_payload.get("field_mutations") if isinstance(action_payload.get("field_mutations"), dict) else {}
+    for name, value in field_mutations.items():
+        fields.append(PromptInterpretationField(name=str(name), value=value, kind="mutation", state="resolved"))
+    for name in action_payload.get("missing_fields") if isinstance(action_payload.get("missing_fields"), list) else []:
+        text = str(name).strip()
+        if text:
+            fields.append(PromptInterpretationField(name=text, value=None, kind="field", state="missing"))
+    return fields
+
+
+def _find_prompt_span(message: str, candidate: str, *, kind: str, state: str = "recognized") -> Optional[PromptInterpretationSpan]:
+    text = str(message or "")
+    token = str(candidate or "").strip()
+    if not text or not token:
+        return None
+    match = re.search(re.escape(token), text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return PromptInterpretationSpan(kind=kind, text=text[match.start():match.end()], start=match.start(), end=match.end(), state=state)
+
+
+def _prompt_interpretation_from_intent(
+    *,
+    message: str,
+    intent_payload: Dict[str, Any],
+    resolution_status: str,
+    summary: str,
+) -> Dict[str, Any]:
+    intent = IntentEnvelope.model_validate(intent_payload if isinstance(intent_payload, dict) else {})
+    resolved_subject = intent.resolved_subject if isinstance(intent.resolved_subject, dict) else {}
+    action_payload = intent.action_payload if isinstance(intent.action_payload, dict) else {}
+    action_map = {
+        "create_record": ("create", "Create record"),
+        "update_record": ("update", "Update record"),
+        "delete_record": ("delete", "Delete record"),
+        "list_records": ("show", "List records"),
+        "get_record": ("show", "Get record"),
+        "create_work_item": ("create", "Create work item"),
+        "continue_work_item": ("continue", "Continue work item"),
+        "create_and_dispatch_run": ("dispatch", "Create and dispatch run"),
+        "run_validation": ("validate", "Run validation"),
+        "investigate_issue": ("investigate", "Investigate issue"),
+        "summarize_run": ("summarize", "Summarize run"),
+        "show_status": ("show", "Show status"),
+        "retry_run": ("retry", "Retry run"),
+        "pause_or_hold": ("pause", "Pause or hold"),
+        "request_review": ("review", "Request review"),
+        "unsupported_declared_entity": ("unsupported", "Unsupported declared entity"),
+        "unsupported_intent": ("unsupported", "Unsupported intent"),
+    }
+    verb, label = action_map.get(intent.intent_type, ("resolve", intent.intent_type.replace("_", " ").strip() or "Resolve"))
+
+    entity_key = str(
+        resolved_subject.get("entity_key")
+        or action_payload.get("entity_key")
+        or ""
+    ).strip()
+    record_reference = str(
+        action_payload.get("target_reference")
+        or resolved_subject.get("reference")
+        or ""
+    ).strip()
+    target_entity = (
+        PromptInterpretationTarget(key=entity_key, label=entity_key.replace("_", " ").strip() or entity_key)
+        if entity_key
+        else None
+    )
+    target_record = (
+        PromptInterpretationTarget(
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or "") or None,
+            reference=record_reference or None,
+        )
+        if record_reference or resolved_subject.get("id") or resolved_subject.get("label")
+        else None
+    )
+    target_work_item = (
+        PromptInterpretationTarget(
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or resolved_subject.get("work_item_id") or "") or None,
+            reference=str(resolved_subject.get("work_item_id") or "") or None,
+            status=str(resolved_subject.get("status") or "") or None,
+        )
+        if intent.intent_family == "development_work" and (resolved_subject.get("work_item_id") or resolved_subject.get("label") or resolved_subject.get("id"))
+        else None
+    )
+    target_run = (
+        PromptInterpretationTarget(
+            id=str(resolved_subject.get("run_id") or resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or resolved_subject.get("run_id") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            status=str(resolved_subject.get("status") or "") or None,
+        )
+        if intent.intent_family == "run_supervision" or resolved_subject.get("run_id")
+        else None
+    )
+
+    if intent.needs_clarification:
+        execution_mode = PromptInterpretationExecutionMode.AWAITING_CLARIFICATION.value
+    elif intent.intent_type == "request_review":
+        execution_mode = PromptInterpretationExecutionMode.AWAITING_REVIEW.value
+    elif intent.intent_type == "create_work_item":
+        execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
+    elif intent.intent_type == "continue_work_item":
+        execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CONTINUATION.value
+    elif intent.intent_type in {"create_and_dispatch_run", "run_validation", "investigate_issue", "retry_run"}:
+        execution_mode = PromptInterpretationExecutionMode.QUEUED_RUN.value
+    elif intent.intent_type in {"unsupported_declared_entity", "unsupported_intent"}:
+        execution_mode = PromptInterpretationExecutionMode.BLOCKED.value
+    else:
+        execution_mode = PromptInterpretationExecutionMode.IMMEDIATE_EXECUTION.value
+
+    capability_state = PromptInterpretationCapabilityState(
+        state=PromptInterpretationCapabilityStateValue.ENABLED.value if entity_key else PromptInterpretationCapabilityStateValue.UNKNOWN.value
+    )
+    if intent.intent_type == "unsupported_declared_entity":
+        capability_state = PromptInterpretationCapabilityState(
+            state=PromptInterpretationCapabilityStateValue.KNOWN_DISABLED.value,
+            term=entity_key or str(resolved_subject.get("entity_key") or "") or None,
+            alternative=str(action_payload.get("alternative") or "") or None,
+            reason=str((intent.resolution_notes or [""])[0] or summary or "") or None,
+        )
+    elif resolution_status == "UnsupportedIntent":
+        capability_state = PromptInterpretationCapabilityState(
+            state=PromptInterpretationCapabilityStateValue.UNKNOWN.value,
+            reason=summary or None,
+        )
+
+    recognized_spans: List[PromptInterpretationSpan] = []
+    for candidate in {
+        "create": r"\b(create|add)\b",
+        "update": r"\b(update|change|rename)\b",
+        "delete": r"\b(delete|remove)\b",
+        "show": r"\b(show|list|get|summarize|retry|rerun|pause|hold|review|investigate)\b",
+        "continue": r"\b(continue|resume|implement|start)\b",
+        "validate": r"\b(run|execute)\s+tests?\b",
+    }.values():
+        match = re.search(candidate, message, flags=re.IGNORECASE)
+        if match:
+            recognized_spans.append(
+                PromptInterpretationSpan(kind="action", text=message[match.start():match.end()], start=match.start(), end=match.end())
+            )
+            break
+    for span in [
+        _find_prompt_span(message, target_entity.key if target_entity else "", kind="entity", state=capability_state.state),
+        _find_prompt_span(message, target_entity.label if target_entity else "", kind="entity", state=capability_state.state),
+        _find_prompt_span(message, target_record.reference if target_record else "", kind="record", state="resolved"),
+        _find_prompt_span(message, target_work_item.label if target_work_item else "", kind="work_item", state="resolved"),
+        _find_prompt_span(message, target_run.label if target_run else "", kind="run", state="resolved"),
+    ]:
+        if span:
+            recognized_spans.append(span)
+    for field in _interpretation_field_list(action_payload):
+        if isinstance(field.value, str):
+            span = _find_prompt_span(message, field.value, kind="field_value", state=field.state)
+            if span:
+                recognized_spans.append(span)
+    deduped_spans: List[PromptInterpretationSpan] = []
+    seen_spans: Set[Tuple[str, int, int]] = set()
+    for span in sorted(recognized_spans, key=lambda item: (item.start, item.end, item.kind)):
+        key = (span.kind, span.start, span.end)
+        if key in seen_spans:
+            continue
+        seen_spans.add(key)
+        deduped_spans.append(span)
+
+    interpretation = PromptInterpretation(
+        intent_family=intent.intent_family,
+        intent_type=intent.intent_type,
+        target_entity=target_entity,
+        target_record=target_record,
+        target_work_item=target_work_item,
+        target_run=target_run,
+        action=PromptInterpretationAction(verb=verb, label=label),
+        fields=_interpretation_field_list(action_payload),
+        execution_mode=execution_mode,
+        confidence=float(intent.confidence or 0.0),
+        needs_clarification=bool(intent.needs_clarification),
+        capability_state=capability_state,
+        clarification_reason=intent.clarification_reason,
+        clarification_options=intent.clarification_options,
+        resolution_notes=intent.resolution_notes,
+        missing_fields=[field.name for field in _interpretation_field_list(action_payload) if field.state == "missing"],
+        recognized_spans=deduped_spans,
+    )
+    return interpretation.model_dump(mode="json")
 
 
 def _audit_intent_event(
@@ -391,7 +775,11 @@ def _log_prompt_activity(
     error: str = "",
     trace: Optional[List[Dict[str, Any]]] = None,
     structured_operation: Optional[Dict[str, Any]] = None,
+    prompt_interpretation: Optional[Dict[str, Any]] = None,
 ) -> None:
+    # Epic D trace coverage is asserted at this logging seam. End-to-end persistence
+    # through the full activity-store test path remains separately blocked by the
+    # unrelated Django test DB trigger issue.
     AuditLog.objects.create(
         message="prompt_submission",
         metadata_json={
@@ -407,6 +795,7 @@ def _log_prompt_activity(
             "error": str(error or ""),
             "trace": [item for item in (trace or []) if isinstance(item, dict)],
             "structured_operation": structured_operation if isinstance(structured_operation, dict) else {},
+            "prompt_interpretation": prompt_interpretation if isinstance(prompt_interpretation, dict) else {},
         },
     )
 
@@ -18710,6 +19099,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "method not allowed"}, status=405)
     payload = _parse_json(request)
     message = str(payload.get("message") or "").strip()
+    preview_mode = bool(payload.get("preview"))
     if not message:
         return JsonResponse({"error": "message is required"}, status=400)
 
@@ -18718,16 +19108,19 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     context_artifact_id = str(context_payload.get("artifact_id") or "").strip()
     context_artifact_type = str(context_payload.get("artifact_type") or "").strip()
     request_id = str(uuid.uuid4())
-    _log_prompt_activity(
-        request_id=request_id,
-        identity=identity,
-        status="queued",
-        prompt=message,
-        request_type="intent.resolve",
-        workspace_id=context_workspace_id,
-        summary="Prompt accepted for intent resolution.",
-    )
+    if not preview_mode:
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="queued",
+            prompt=message,
+            request_type="intent.resolve",
+            workspace_id=context_workspace_id,
+            summary="Prompt accepted for intent resolution.",
+        )
 
+    # Preserved legacy non-Epic-D branch: app-builder prompts still create draft
+    # payloads directly and are intentionally outside the v1 Epic D families.
     app_builder_request = _match_app_builder_command(message)
     if app_builder_request:
         operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
@@ -18752,26 +19145,165 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 "timestamp": timezone.now().isoformat(),
             },
         }
-        _audit_intent_event(
-            message="intent.resolve",
-            identity=identity,
-            request_id=request_id,
-            artifact_id=None,
-            proposal={"action_type": "CreateDraft", "artifact_type": "Workspace", "operation": "create_app_intent_draft", "prompt": message},
-            resolution=response_payload,
-        )
-        _log_prompt_activity(
-            request_id=request_id,
-            identity=identity,
-            status="completed",
-            prompt=message,
-            request_type="intent.resolve",
-            workspace_id=str(operator_workspace.id),
-            summary=response_payload["summary"],
-        )
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=None,
+                proposal={"action_type": "CreateDraft", "artifact_type": "Workspace", "operation": "create_app_intent_draft", "prompt": message},
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="completed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=str(operator_workspace.id),
+                summary=response_payload["summary"],
+            )
         return JsonResponse(response_payload)
 
     operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
+    epic_d_engine = _intent_engine(identity=identity, workspace=operator_workspace)
+    epic_d_intent = epic_d_engine.resolve_intent(
+        user_message=message,
+        context=ResolutionContext(
+            artifact=None,
+            workspace_id=str(operator_workspace.id) if operator_workspace else context_workspace_id,
+            user_identity_id=str(identity.id),
+        ),
+    )
+    epic_d_payload = epic_d_intent.model_dump(mode="json")
+    prompt_interpretation = _prompt_interpretation_from_intent(
+        message=message,
+        intent_payload=epic_d_payload,
+        resolution_status="IntentClarificationRequired" if epic_d_intent.needs_clarification else "IntentResolved",
+        summary=str((epic_d_intent.resolution_notes or [""])[0] or ""),
+    )
+    epic_d_trace = [{"step": "intent_resolved", "intent": epic_d_payload}]
+    # Epic D is authoritative only for the supported v1 families:
+    # development_work, app_operation, and run_supervision. Everything below this
+    # branch that does not return here is preserved legacy routing.
+    if epic_d_intent.needs_clarification or str(epic_d_intent.intent_type or "") != "unsupported_intent":
+        if str(epic_d_intent.intent_family or "") == "app_operation" and str(epic_d_intent.intent_type or "") in {
+            "create_record",
+            "update_record",
+            "delete_record",
+            "list_records",
+            "get_record",
+        }:
+            if not operator_workspace:
+                response_payload = {
+                    "status": "UnsupportedIntent",
+                    "summary": "Workspace context is required for generated app operations.",
+                    "intent": epic_d_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+                if not preview_mode:
+                    _audit_intent_event(
+                        message="intent.resolve",
+                        identity=identity,
+                        request_id=request_id,
+                        artifact_id=None,
+                        proposal={"epic_d_intent": epic_d_payload, "prompt": message},
+                        resolution=response_payload,
+                    )
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=message,
+                        request_type="intent.resolve",
+                        workspace_id=context_workspace_id,
+                        summary=response_payload["summary"],
+                        error="missing workspace context",
+                        trace=epic_d_trace,
+                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                        prompt_interpretation=prompt_interpretation,
+                    )
+                return JsonResponse(response_payload, status=400)
+            response_payload = {
+                "status": "DraftReady",
+                "action_type": "CreateDraft",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": f"Will execute generated app {epic_d_payload.get('intent_type')} intent.",
+                "draft_payload": {
+                    "__operation": "execute_generated_app_crud",
+                    "workspace_id": str(operator_workspace.id),
+                    "raw_prompt": message,
+                    "structured_operation": epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                },
+                "intent": epic_d_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "next_actions": [{"label": "Execute generated app command", "action": "CreateDraft"}],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+            if not preview_mode:
+                _audit_intent_event(
+                    message="intent.resolve",
+                    identity=identity,
+                    request_id=request_id,
+                    artifact_id=None,
+                    proposal={"epic_d_intent": epic_d_payload, "prompt": message},
+                    resolution=response_payload,
+                )
+                _log_prompt_activity(
+                    request_id=request_id,
+                    identity=identity,
+                    status="completed",
+                    prompt=message,
+                    request_type="intent.resolve",
+                    workspace_id=str(operator_workspace.id),
+                    summary=response_payload["summary"],
+                    trace=epic_d_trace,
+                    structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                    prompt_interpretation=prompt_interpretation,
+                )
+            return JsonResponse(response_payload)
+        response_payload = {
+            "status": "IntentClarificationRequired" if epic_d_intent.needs_clarification else "IntentResolved",
+            "summary": (
+                str((epic_d_intent.resolution_notes or ["clarification required"])[0])
+                if epic_d_intent.needs_clarification
+                else str((epic_d_intent.resolution_notes or ["Intent resolved."])[0])
+            ),
+            "intent": epic_d_payload,
+            "prompt_interpretation": prompt_interpretation,
+            "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+        }
+        if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity":
+            response_payload["status"] = "UnsupportedIntent"
+            response_payload["summary"] = str((epic_d_intent.resolution_notes or ["Requested entity is not declared in the installed capability manifest."])[0])
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=None,
+                proposal={"epic_d_intent": epic_d_payload, "prompt": message},
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="failed" if response_payload["status"] in {"UnsupportedIntent"} else "completed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=str(operator_workspace.id) if operator_workspace else context_workspace_id,
+                summary=str(response_payload.get("summary") or ""),
+                error=str(epic_d_intent.clarification_reason or "") if epic_d_intent.needs_clarification else "",
+                trace=epic_d_trace,
+                structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                prompt_interpretation=prompt_interpretation,
+            )
+        return JsonResponse(response_payload)
+
+    # Preserved legacy generated-app and draft-routing behavior below this point.
+    # These flows intentionally remain outside Epic D until they are migrated.
     generated_runtime_target = _workspace_runtime_target(operator_workspace, "net-inventory") if operator_workspace else None
     generated_artifact_issue = _workspace_generated_artifact_issue(operator_workspace, "net-inventory") if operator_workspace else None
     generated_capability_manifest = _workspace_installed_capability_manifest(operator_workspace, "net-inventory") if operator_workspace else None
@@ -18788,20 +19320,21 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 "timestamp": timezone.now().isoformat(),
             },
         }
-        _log_prompt_activity(
-            request_id=request_id,
-            identity=identity,
-            status="failed",
-            prompt=message,
-            request_type="intent.resolve",
-            workspace_id=str(operator_workspace.id),
-            summary=response_payload["summary"],
-            error=str(generated_artifact_issue.get("reason") or "invalid_generated_artifact_contract"),
-            trace=[
-                _generated_trace_step("user_command", source="agent", prompt=message),
-                _generated_trace_step("invalid_generated_artifact_contract", **generated_artifact_issue),
-            ],
-        )
+        if not preview_mode:
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="failed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=str(operator_workspace.id),
+                summary=response_payload["summary"],
+                error=str(generated_artifact_issue.get("reason") or "invalid_generated_artifact_contract"),
+                trace=[
+                    _generated_trace_step("user_command", source="agent", prompt=message),
+                    _generated_trace_step("invalid_generated_artifact_contract", **generated_artifact_issue),
+                ],
+            )
         return JsonResponse(response_payload, status=409)
     generated_structured = (
         _resolve_generated_entity_operation_with_runtime(
@@ -18850,25 +19383,26 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 "timestamp": timezone.now().isoformat(),
             },
         }
-        _audit_intent_event(
-            message="intent.resolve",
-            identity=identity,
-            request_id=request_id,
-            artifact_id=str(generated_artifact.id) if generated_artifact else None,
-            proposal={"action_type": "CreateDraft", "artifact_type": "Workspace", "operation": "execute_generated_app_crud", "prompt": message},
-            resolution=response_payload,
-        )
-        _log_prompt_activity(
-            request_id=request_id,
-            identity=identity,
-            status="completed",
-            prompt=message,
-            request_type="intent.resolve",
-            workspace_id=str(operator_workspace.id),
-            summary=response_payload["summary"],
-            trace=trace,
-            structured_operation=normalized,
-        )
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=str(generated_artifact.id) if generated_artifact else None,
+                proposal={"action_type": "CreateDraft", "artifact_type": "Workspace", "operation": "execute_generated_app_crud", "prompt": message},
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="completed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=str(operator_workspace.id),
+                summary=response_payload["summary"],
+                trace=trace,
+                structured_operation=normalized,
+            )
         return JsonResponse(response_payload)
 
     generated_app_evolution = _match_generated_app_evolution_command(message, operator_workspace) if operator_workspace else None
@@ -18896,29 +19430,30 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 "timestamp": timezone.now().isoformat(),
             },
         }
-        _audit_intent_event(
-            message="intent.resolve",
-            identity=identity,
-            request_id=request_id,
-            artifact_id=str((generated_app_evolution.get("revision_anchor") or {}).get("artifact_id") or ""),
-            proposal={
-                "action_type": "CreateDraft",
-                "artifact_type": "Workspace",
-                "operation": "evolve_app_intent_draft",
-                "prompt": message,
-                "revision_anchor": generated_app_evolution.get("revision_anchor") if isinstance(generated_app_evolution.get("revision_anchor"), dict) else {},
-            },
-            resolution=response_payload,
-        )
-        _log_prompt_activity(
-            request_id=request_id,
-            identity=identity,
-            status="completed",
-            prompt=message,
-            request_type="intent.resolve",
-            workspace_id=str(operator_workspace.id),
-            summary=response_payload["summary"],
-        )
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=str((generated_app_evolution.get("revision_anchor") or {}).get("artifact_id") or ""),
+                proposal={
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "operation": "evolve_app_intent_draft",
+                    "prompt": message,
+                    "revision_anchor": generated_app_evolution.get("revision_anchor") if isinstance(generated_app_evolution.get("revision_anchor"), dict) else {},
+                },
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="completed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=str(operator_workspace.id),
+                summary=response_payload["summary"],
+            )
         return JsonResponse(response_payload)
 
     remote_provision_request = _match_provision_xyn_remote_command(message)
@@ -19138,24 +19673,25 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             "ValidationError": "resolve_validation_error",
         }.get(str(result.get("status") or ""), "resolve_success")
     )
-    _audit_intent_event(
-        message="intent.resolve",
-        identity=identity,
-        request_id=request_id,
-        artifact_id=str(context_artifact.id) if context_artifact else None,
-        proposal=proposal,
-        resolution=result,
-    )
-    _log_prompt_activity(
-        request_id=request_id,
-        identity=identity,
-        status="failed" if str(result.get("status") or "") in {"UnsupportedIntent", "ValidationError"} else "completed",
-        prompt=message,
-        request_type="intent.resolve",
-        workspace_id=context_workspace_id,
-        summary=str(result.get("summary") or ""),
-        error=str((result.get("validation_errors") or [""])[0] or "") if str(result.get("status") or "") in {"UnsupportedIntent", "ValidationError"} else "",
-    )
+    if not preview_mode:
+        _audit_intent_event(
+            message="intent.resolve",
+            identity=identity,
+            request_id=request_id,
+            artifact_id=str(context_artifact.id) if context_artifact else None,
+            proposal=proposal,
+            resolution=result,
+        )
+        _log_prompt_activity(
+            request_id=request_id,
+            identity=identity,
+            status="failed" if str(result.get("status") or "") in {"UnsupportedIntent", "ValidationError"} else "completed",
+            prompt=message,
+            request_type="intent.resolve",
+            workspace_id=context_workspace_id,
+            summary=str(result.get("summary") or ""),
+            error=str((result.get("validation_errors") or [""])[0] or "") if str(result.get("status") or "") in {"UnsupportedIntent", "ValidationError"} else "",
+        )
     return JsonResponse(result)
 
 
@@ -19216,6 +19752,102 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                 generated_artifact_issue = _workspace_generated_artifact_issue(workspace, "net-inventory")
                 capability_manifest = _workspace_installed_capability_manifest(workspace, "net-inventory")
                 raw_prompt = str(body_payload.get("raw_prompt") or payload.get("message") or "").strip()
+                epic_d_intent = _intent_engine(identity=identity, workspace=workspace).resolve_intent(
+                    user_message=raw_prompt,
+                    context=ResolutionContext(
+                        artifact=None,
+                        workspace_id=str(workspace.id),
+                        user_identity_id=str(identity.id),
+                    ),
+                )
+                epic_d_payload = epic_d_intent.model_dump(mode="json")
+                prompt_interpretation = _prompt_interpretation_from_intent(
+                    message=raw_prompt,
+                    intent_payload=epic_d_payload,
+                    resolution_status=(
+                        "UnsupportedIntent"
+                        if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity"
+                        else "IntentClarificationRequired"
+                        if epic_d_intent.needs_clarification
+                        else "IntentResolved"
+                    ),
+                    summary=str((epic_d_intent.resolution_notes or [""])[0] or ""),
+                )
+                if epic_d_intent.needs_clarification:
+                    result_payload = {
+                        "status": "IntentClarificationRequired",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": str((epic_d_intent.resolution_notes or ["clarification required"])[0]),
+                        "intent": epic_d_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=result_payload["summary"],
+                        error=str(epic_d_intent.clarification_reason or "clarification required"),
+                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
+                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                        prompt_interpretation=prompt_interpretation,
+                    )
+                    return JsonResponse(result_payload, status=409)
+                if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity":
+                    result_payload = {
+                        "status": "UnsupportedIntent",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": str((epic_d_intent.resolution_notes or ["Requested entity is not declared in the installed capability manifest."])[0]),
+                        "intent": epic_d_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=result_payload["summary"],
+                        error="unsupported declared entity",
+                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
+                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                        prompt_interpretation=prompt_interpretation,
+                    )
+                    return JsonResponse(result_payload, status=409)
+                if (
+                    str(epic_d_intent.intent_family or "") != "app_operation"
+                    or str(epic_d_intent.intent_type or "") not in {"create_record", "update_record", "delete_record", "list_records", "get_record"}
+                ):
+                    result_payload = {
+                        "status": "UnsupportedIntent",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": "Prompt is not executable as a generated app operation.",
+                        "intent": epic_d_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=result_payload["summary"],
+                        error="unsupported generated app operation",
+                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
+                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                        prompt_interpretation=prompt_interpretation,
+                    )
+                    return JsonResponse(result_payload, status=400)
                 if runtime_target_record and generated_artifact_issue:
                     _log_prompt_activity(
                         request_id=request_id,
@@ -19307,6 +19939,58 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         },
                         status=502,
                     )
+                disambiguation = (
+                    (result.get("meta") or {}).get("disambiguation")
+                    if isinstance(result, dict) and isinstance(result.get("meta"), dict)
+                    else None
+                )
+                if isinstance(disambiguation, dict):
+                    clarification_intent = dict(epic_d_payload)
+                    clarification_intent["needs_clarification"] = True
+                    clarification_intent["clarification_reason"] = "ambiguous_target"
+                    clarification_intent["clarification_options"] = [
+                        {
+                            "id": str(index),
+                            "label": str(match),
+                            "kind": str(disambiguation.get("entity_key") or ""),
+                            "payload": {},
+                        }
+                        for index, match in enumerate(disambiguation.get("matches") if isinstance(disambiguation.get("matches"), list) else [], start=1)
+                    ]
+                    clarification_prompt_interpretation = dict(prompt_interpretation)
+                    clarification_prompt_interpretation["needs_clarification"] = True
+                    clarification_prompt_interpretation["execution_mode"] = "awaiting_clarification"
+                    clarification_prompt_interpretation["clarification_reason"] = "ambiguous_target"
+                    clarification_prompt_interpretation["clarification_options"] = clarification_intent["clarification_options"]
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=str(result.get("text") or "Clarification required."),
+                        error="ambiguous target",
+                        trace=trace,
+                        structured_operation=normalized,
+                        prompt_interpretation=clarification_prompt_interpretation,
+                    )
+                    return JsonResponse(
+                        {
+                            "status": "IntentClarificationRequired",
+                            "artifact_type": "Workspace",
+                            "artifact_id": None,
+                            "summary": str(result.get("text") or "Clarification required."),
+                            "intent": clarification_intent,
+                            "prompt_interpretation": clarification_prompt_interpretation,
+                            "result": result,
+                            "structured_operation": normalized,
+                            "operation_result": False,
+                            "next_actions": [],
+                            "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                        },
+                        status=409,
+                    )
                 summary = str(result.get("text") or "Generated app operation complete.")
                 _log_prompt_activity(
                     request_id=request_id,
@@ -19318,6 +20002,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     summary=summary,
                     trace=trace,
                     structured_operation=normalized,
+                    prompt_interpretation=prompt_interpretation,
                 )
                 generated_artifact = _installed_generated_artifact(workspace, "net-inventory")
                 return JsonResponse(
@@ -19328,6 +20013,8 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         "artifact_id": None,
                         "summary": summary,
                         "result": result,
+                        "intent": epic_d_payload,
+                        "prompt_interpretation": prompt_interpretation,
                         "structured_operation": normalized,
                         "operation_result": True,
                         "next_actions": [],
@@ -19501,6 +20188,7 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
                     "error": str(meta.get("error") or ""),
                     "trace": meta.get("trace") if isinstance(meta.get("trace"), list) else [],
                     "structured_operation": meta.get("structured_operation") if isinstance(meta.get("structured_operation"), dict) else {},
+                    "prompt_interpretation": meta.get("prompt_interpretation") if isinstance(meta.get("prompt_interpretation"), dict) else {},
                     "source": "audit_log",
                 }
             )

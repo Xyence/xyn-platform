@@ -1,4 +1,5 @@
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import type { ReactNode } from "react";
 
 type Props = {
   contextLine: string;
@@ -12,6 +13,7 @@ type Props = {
   canSubmit: boolean;
   textareaRef: React.RefObject<HTMLTextAreaElement>;
   pendingCloseBlock: boolean;
+  interpretationContent?: ReactNode;
 };
 
 export default function ConsolePromptCard({
@@ -26,6 +28,7 @@ export default function ConsolePromptCard({
   canSubmit,
   textareaRef,
   pendingCloseBlock,
+  interpretationContent,
 }: Props) {
   return (
     <section className="xyn-console-prompt-card" aria-label="Xyn prompt">
@@ -58,6 +61,8 @@ export default function ConsolePromptCard({
           </button>
         </div>
       </div>
+
+      {interpretationContent}
 
       {processing ? (
         <div className="xyn-console-prompt-glass" role="status" aria-live="assertive">

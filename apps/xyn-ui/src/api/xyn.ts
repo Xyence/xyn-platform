@@ -279,6 +279,7 @@ export async function resolveXynIntent(payload: {
   message: string;
   context?: { artifact_id?: string | null; artifact_type?: string | null; workspace_id?: string | null };
   snapshot?: Record<string, unknown>;
+  preview?: boolean;
 }): Promise<XynIntentResolutionResult> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/xyn/intent/resolve`, {
@@ -288,6 +289,14 @@ export async function resolveXynIntent(payload: {
     body: JSON.stringify(payload),
   });
   return handle<XynIntentResolutionResult>(response);
+}
+
+export async function previewXynIntent(payload: {
+  message: string;
+  context?: { artifact_id?: string | null; artifact_type?: string | null; workspace_id?: string | null };
+  snapshot?: Record<string, unknown>;
+}): Promise<XynIntentResolutionResult> {
+  return resolveXynIntent({ ...payload, preview: true });
 }
 
 export async function applyXynIntent(payload: {

@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { MemoryRouter } from "react-router-dom";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import XynConsoleNode from "./XynConsoleNode";
@@ -8,6 +8,7 @@ import { XynConsoleProvider, useXynConsole } from "../../state/xynConsoleStore";
 
 const apiMocks = vi.hoisted(() => ({
   resolveXynIntent: vi.fn(),
+  previewXynIntent: vi.fn(),
   applyXynIntent: vi.fn(),
   getXynIntentOptions: vi.fn(),
   getRecentArtifacts: vi.fn(),
@@ -16,6 +17,7 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("../../../api/xyn", () => ({
   resolveXynIntent: apiMocks.resolveXynIntent,
+  previewXynIntent: apiMocks.previewXynIntent,
   applyXynIntent: apiMocks.applyXynIntent,
   getXynIntentOptions: apiMocks.getXynIntentOptions,
   getRecentArtifacts: apiMocks.getRecentArtifacts,
@@ -135,6 +137,13 @@ describe("XynConsole", () => {
       rows: [],
       text: "",
     });
+    apiMocks.previewXynIntent.mockResolvedValue({
+      status: "UnsupportedIntent",
+      action_type: "ValidateDraft",
+      artifact_type: null,
+      artifact_id: null,
+      summary: "No preview available.",
+    });
   });
 
   it("opens with Cmd/Ctrl+K and focuses input", async () => {
@@ -147,7 +156,7 @@ describe("XynConsole", () => {
 
   it("opens from a pointer interaction on the floating palette button", async () => {
     renderConsole();
-    fireEvent.mouseDown(screen.getByRole("button", { name: "Xyn (⌘K / Ctrl+K)" }));
+    await userEvent.click(screen.getByRole("button", { name: "Xyn (⌘K / Ctrl+K)" }));
     const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
     await waitFor(() => expect(input).toHaveFocus());
     expect(screen.getByRole("dialog", { name: "Xyn Console" })).toBeInTheDocument();
@@ -616,4 +625,186 @@ describe("XynConsole", () => {
       )
     );
   });
+
+  it("renders backend-derived prompt interpretation preview while typing", async () => {
+    apiMocks.previewXynIntent.mockResolvedValue({
+      status: "IntentResolved",
+      action_type: "ValidateDraft",
+      artifact_type: null,
+      artifact_id: null,
+      summary: "resolved against installed capability manifest",
+      prompt_interpretation: {
+        intent_family: "app_operation",
+        intent_type: "create_record",
+        target_entity: { key: "devices", label: "devices" },
+        target_record: { reference: "r1" },
+        action: { verb: "create", label: "Create record" },
+        fields: [{ name: "name", value: "r1", kind: "field", state: "resolved" }],
+        execution_mode: "immediate_execution",
+        confidence: 0.93,
+        needs_clarification: false,
+        capability_state: { state: "enabled" },
+        clarification_options: [],
+        resolution_notes: ["resolved against installed capability manifest"],
+        missing_fields: [],
+        recognized_spans: [{ kind: "action", text: "create", start: 0, end: 6, state: "recognized" }],
+      },
+    });
+
+    renderConsoleAt("/w/ws-1/workbench");
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await userEvent.type(input, "create a device called r1");
+
+    await screen.findByText("Prompt interpretation");
+    await screen.findByText("Immediate execution");
+    await waitFor(() => expect(screen.getAllByText("Create record").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("devices").length).toBeGreaterThan(0));
+  });
+
+  it("shows known-but-disabled capability state in the prompt interpretation preview", async () => {
+    apiMocks.previewXynIntent.mockResolvedValue({
+      status: "UnsupportedIntent",
+      action_type: "ValidateDraft",
+      artifact_type: null,
+      artifact_id: null,
+      summary: "interface is not declared in the installed capability manifest",
+      prompt_interpretation: {
+        intent_family: "app_operation",
+        intent_type: "unsupported_declared_entity",
+        target_entity: { key: "interface", label: "interface" },
+        action: { verb: "unsupported", label: "Unsupported declared entity" },
+        fields: [],
+        execution_mode: "blocked",
+        confidence: 0.72,
+        needs_clarification: false,
+        capability_state: {
+          state: "known_but_disabled",
+          term: "interface",
+          alternative: "propose_app_evolution",
+          reason: "interface is not declared in the installed capability manifest",
+        },
+        clarification_options: [],
+        resolution_notes: ["interface is not declared in the installed capability manifest"],
+        missing_fields: [],
+        recognized_spans: [{ kind: "entity", text: "interface", start: 7, end: 16, state: "known_but_disabled" }],
+      },
+    });
+
+    renderConsoleAt("/w/ws-1/workbench");
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await userEvent.type(input, "create interface gi0/1");
+
+    await screen.findByText("Known but disabled");
+    await screen.findByText(/propose_app_evolution/i);
+  });
+
+  it("renders development-work interpretation preview before dispatch", async () => {
+    apiMocks.previewXynIntent.mockResolvedValue({
+      status: "IntentResolved",
+      action_type: "ValidateDraft",
+      artifact_type: null,
+      artifact_id: null,
+      summary: "queued run against Epic D work item",
+      prompt_interpretation: {
+        intent_family: "development_work",
+        intent_type: "create_and_dispatch_run",
+        target_work_item: { reference: "epic-d", label: "Epic D" },
+        action: { verb: "dispatch", label: "Create and dispatch run" },
+        fields: [],
+        execution_mode: "queued_run",
+        confidence: 0.91,
+        needs_clarification: false,
+        capability_state: { state: "enabled" },
+        clarification_options: [],
+        resolution_notes: ["reused existing work item"],
+        missing_fields: [],
+        recognized_spans: [{ kind: "action", text: "continue", start: 0, end: 8, state: "recognized" }],
+      },
+    });
+
+    renderConsoleAt("/w/ws-1/workbench");
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await userEvent.type(input, "continue Epic D implementation");
+
+    await screen.findByText("Prompt interpretation");
+    await screen.findByText("Queued run");
+    await waitFor(() => expect(screen.getAllByText("Create and dispatch run").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("Epic D").length).toBeGreaterThan(0));
+  });
+
+  it("renders run-supervision interpretation preview before action", async () => {
+    apiMocks.previewXynIntent.mockResolvedValue({
+      status: "IntentResolved",
+      action_type: "ValidateDraft",
+      artifact_type: null,
+      artifact_id: null,
+      summary: "pause current run and await review",
+      prompt_interpretation: {
+        intent_family: "run_supervision",
+        intent_type: "pause_or_hold",
+        target_run: { id: "run-9", label: "run-9", status: "running" },
+        action: { verb: "pause", label: "Pause or hold" },
+        fields: [],
+        execution_mode: "awaiting_review",
+        confidence: 0.87,
+        needs_clarification: false,
+        capability_state: { state: "unknown" },
+        clarification_options: [],
+        resolution_notes: ["review required before continuing"],
+        missing_fields: [],
+        recognized_spans: [{ kind: "action", text: "pause", start: 0, end: 5, state: "recognized" }],
+      },
+    });
+
+    renderConsoleAt("/w/ws-1/workbench");
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await userEvent.type(input, "pause here and wait for review");
+
+    await screen.findByText("Prompt interpretation");
+    await screen.findByText("Awaiting review");
+    await waitFor(() => expect(screen.getAllByText("Pause or hold").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("run-9").length).toBeGreaterThan(0));
+  });
+
+  it("blocks submit when backend interpretation requires clarification", async () => {
+    apiMocks.previewXynIntent.mockResolvedValue({
+      status: "IntentClarificationRequired",
+      action_type: "ValidateDraft",
+      artifact_type: null,
+      artifact_id: null,
+      summary: "generic continue request matched multiple work items",
+      prompt_interpretation: {
+        intent_family: "development_work",
+        intent_type: "continue_work_item",
+        action: { verb: "continue", label: "Continue work item" },
+        fields: [],
+        execution_mode: "awaiting_clarification",
+        confidence: 0.42,
+        needs_clarification: true,
+        capability_state: { state: "unknown" },
+        clarification_reason: "ambiguous_target",
+        clarification_options: [
+          { id: "task-1", label: "Epic D", kind: "dev_task", payload: {} },
+          { id: "task-2", label: "Epic E", kind: "dev_task", payload: {} },
+        ],
+        resolution_notes: ["generic continue request matched multiple work items"],
+        missing_fields: [],
+        recognized_spans: [{ kind: "action", text: "continue", start: 0, end: 8, state: "recognized" }],
+      },
+    });
+
+    renderConsoleAt("/w/ws-1/workbench");
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await userEvent.type(input, "continue the work");
+
+    await screen.findByText("Clarification required");
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
+    expect(apiMocks.resolveXynIntent).not.toHaveBeenCalled();
+  });
+
 });

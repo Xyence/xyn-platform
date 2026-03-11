@@ -1982,6 +1982,7 @@ export type AiActivityEntry = {
   artifact_title?: string;
   trace?: Array<Record<string, unknown>>;
   structured_operation?: Record<string, unknown>;
+  prompt_interpretation?: PromptInterpretation;
   source?: "audit_log" | "artifact_event" | "app_job" | "runtime_event";
 };
 
@@ -2667,7 +2668,14 @@ export type AccessRoleDetailResponse = {
 };
 
 export type XynIntentActionType = "CreateDraft" | "ProposePatch" | "ShowOptions" | "ValidateDraft" | "ApplyPatch";
-export type XynIntentStatus = "DraftReady" | "MissingFields" | "ProposedPatch" | "ValidationError" | "UnsupportedIntent";
+export type XynIntentStatus =
+  | "DraftReady"
+  | "MissingFields"
+  | "ProposedPatch"
+  | "ValidationError"
+  | "UnsupportedIntent"
+  | "IntentResolved"
+  | "IntentClarificationRequired";
 
 export type XynIntentMissingField = {
   field: string;
@@ -2681,13 +2689,84 @@ export type XynIntentPatchChange = {
   to?: unknown;
 };
 
+export type PromptInterpretationTarget = {
+  id?: string | null;
+  key?: string | null;
+  label?: string | null;
+  reference?: string | null;
+  status?: string | null;
+};
+
+export type PromptInterpretationAction = {
+  verb: string;
+  label: string;
+};
+
+export type PromptInterpretationField = {
+  name: string;
+  value?: unknown;
+  kind?: string;
+  state?: string;
+};
+
+export type PromptInterpretationCapabilityState = {
+  state: "enabled" | "known_but_disabled" | "unknown" | "unavailable" | string;
+  term?: string | null;
+  alternative?: string | null;
+  reason?: string | null;
+};
+
+export type PromptInterpretationSpan = {
+  kind: string;
+  text: string;
+  start: number;
+  end: number;
+  state?: string;
+};
+
+export type PromptInterpretationClarificationOption = {
+  id: string;
+  label: string;
+  kind?: string;
+  payload?: Record<string, unknown>;
+};
+
+export type PromptInterpretation = {
+  intent_family: string;
+  intent_type: string;
+  target_entity?: PromptInterpretationTarget | null;
+  target_record?: PromptInterpretationTarget | null;
+  target_work_item?: PromptInterpretationTarget | null;
+  target_run?: PromptInterpretationTarget | null;
+  action: PromptInterpretationAction;
+  fields: PromptInterpretationField[];
+  execution_mode:
+    | "immediate_execution"
+    | "queued_run"
+    | "work_item_creation"
+    | "work_item_continuation"
+    | "awaiting_clarification"
+    | "awaiting_review"
+    | "blocked"
+    | string;
+  confidence: number;
+  needs_clarification: boolean;
+  capability_state: PromptInterpretationCapabilityState;
+  clarification_reason?: string | null;
+  clarification_options: PromptInterpretationClarificationOption[];
+  resolution_notes: string[];
+  missing_fields: string[];
+  recognized_spans: PromptInterpretationSpan[];
+};
+
 export type XynIntentResolutionResult = {
   status: XynIntentStatus;
-  action_type: XynIntentActionType;
+  action_type?: XynIntentActionType;
   artifact_type: string | null;
   artifact_id: string | null;
   summary: string;
   structured_operation?: Record<string, unknown>;
+  prompt_interpretation?: PromptInterpretation;
   operation_result?: boolean;
   missing_fields?: XynIntentMissingField[];
   options?: unknown[];

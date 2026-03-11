@@ -75,6 +75,22 @@ describe("AgentActivityDrawer runtime activity", () => {
           source: "runtime_event",
           trace: [],
           structured_operation: { run_id: "run-1", step_key: "inspect_repository" },
+          prompt_interpretation: {
+            intent_family: "development_work",
+            intent_type: "create_and_dispatch_run",
+            action: { verb: "dispatch", label: "Create and dispatch run" },
+            fields: [],
+            execution_mode: "queued_run",
+            confidence: 0.9,
+            needs_clarification: false,
+            capability_state: { state: "enabled" },
+            clarification_options: [],
+            resolution_notes: ["reused existing work item"],
+            missing_fields: [],
+            recognized_spans: [],
+            target_work_item: { label: "Epic D", reference: "epic-d" },
+            target_run: { id: "run-1", label: "run-1" },
+          },
         },
       ],
     });
@@ -84,6 +100,111 @@ describe("AgentActivityDrawer runtime activity", () => {
     await waitFor(() => expect(apiMocks.listAiActivity).toHaveBeenCalled());
     expect(screen.getByText("Run step completed: inspect repository")).toBeInTheDocument();
     expect(screen.getByText(/runtime\.run/)).toBeInTheDocument();
+    expect(screen.getByText(/Create and dispatch run · Epic D · work item epic-d · run run-1 · queued run/i)).toBeInTheDocument();
+  });
+
+  it("renders compact app-operation interpretation details with key fields", async () => {
+    apiMocks.listAiActivity.mockResolvedValue({
+      items: [
+        {
+          id: "runtime-event:2",
+          event_type: "intent.apply",
+          status: "succeeded",
+          summary: "Created 1 device: router-1",
+          created_at: "2026-03-11T10:00:00Z",
+          actor_id: null,
+          agent_slug: "xyn",
+          provider: "",
+          model_name: "",
+          artifact_id: null,
+          artifact_type: "workspace",
+          artifact_title: "",
+          request_type: "intent.apply",
+          prompt: "create a device called router-1",
+          workspace_id: "ws-1",
+          draft_id: null,
+          job_id: null,
+          error: "",
+          source: "audit",
+          trace: [],
+          structured_operation: { entity_key: "devices", operation: "create" },
+          prompt_interpretation: {
+            intent_family: "app_operation",
+            intent_type: "create_record",
+            action: { verb: "create", label: "Create record" },
+            fields: [
+              { name: "name", value: "router-1", kind: "field", state: "resolved" },
+              { name: "status", value: "online", kind: "field", state: "resolved" },
+            ],
+            execution_mode: "immediate_execution",
+            confidence: 0.9,
+            needs_clarification: false,
+            capability_state: { state: "enabled" },
+            clarification_options: [],
+            resolution_notes: [],
+            missing_fields: [],
+            recognized_spans: [],
+            target_entity: { label: "devices" },
+            target_record: { reference: "router-1" },
+          },
+        },
+      ],
+    });
+
+    render(<AgentActivityDrawer open onClose={() => {}} workspaceId="ws-1" />);
+
+    await waitFor(() => expect(apiMocks.listAiActivity).toHaveBeenCalled());
+    expect(screen.getByText(/Create record · devices · router-1 · name=router-1, status=online · immediate execution/i)).toBeInTheDocument();
+  });
+
+  it("renders run-supervision interpretation details compactly", async () => {
+    apiMocks.listAiActivity.mockResolvedValue({
+      items: [
+        {
+          id: "runtime-event:3",
+          event_type: "intent.resolve",
+          status: "succeeded",
+          summary: "failure status requested",
+          created_at: "2026-03-11T10:00:00Z",
+          actor_id: null,
+          agent_slug: "xyn",
+          provider: "",
+          model_name: "",
+          artifact_id: null,
+          artifact_type: "workspace",
+          artifact_title: "",
+          request_type: "intent.resolve",
+          prompt: "show me what failed",
+          workspace_id: "ws-1",
+          draft_id: null,
+          job_id: null,
+          error: "",
+          source: "audit",
+          trace: [],
+          structured_operation: {},
+          prompt_interpretation: {
+            intent_family: "run_supervision",
+            intent_type: "show_status",
+            action: { verb: "show", label: "Show status" },
+            fields: [],
+            execution_mode: "immediate_execution",
+            confidence: 0.86,
+            needs_clarification: false,
+            capability_state: { state: "unknown" },
+            clarification_options: [],
+            resolution_notes: ["failure status requested"],
+            missing_fields: [],
+            recognized_spans: [],
+            target_run: { id: "run-9", label: "run-9", status: "failed" },
+          },
+        },
+      ],
+    });
+
+    render(<AgentActivityDrawer open onClose={() => {}} workspaceId="ws-1" />);
+
+    await waitFor(() => expect(apiMocks.listAiActivity).toHaveBeenCalled());
+    expect(screen.getByText(/Show status · run-9 · run run-9 · immediate execution/i)).toBeInTheDocument();
   });
 
   it("appends live streamed runtime activity and de-duplicates reconnect replay", async () => {
