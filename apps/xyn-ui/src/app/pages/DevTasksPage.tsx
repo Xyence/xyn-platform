@@ -283,7 +283,9 @@ export default function DevTasksPage() {
                 </div>
                 <div>
                   <div className="label">Result run</div>
-                  {selected.result_run ? (
+                  {selected.runtime_run_id ? (
+                    <span className="muted">{selected.runtime_run_id}</span>
+                  ) : selected.result_run ? (
                     <a className="link" href={`/app/runs?run=${selected.result_run}`}>
                       {selected.result_run}
                     </a>

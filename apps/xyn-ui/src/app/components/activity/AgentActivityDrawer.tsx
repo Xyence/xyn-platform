@@ -3,6 +3,7 @@ import { Bot, RefreshCw, X } from "lucide-react";
 import { listAiActivity, listAppJobs } from "../../../api/xyn";
 import type { AiActivityEntry, AppJob } from "../../../api/types";
 import { useOperations } from "../../state/operationRegistry";
+import { runtimeEventToActivityEntry, subscribeRuntimeEventStream, upsertActivityEntry } from "../../utils/runtimeEventStream";
 
 type Props = {
   open: boolean;
@@ -59,6 +60,7 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [artifactOnly, setArtifactOnly] = useState(Boolean(artifactId));
+  const [degradedMode, setDegradedMode] = useState(false);
   const { operations } = useOperations();
 
   useEffect(() => {
@@ -100,10 +102,24 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
   }, [open, workspaceId, artifactId, artifactOnly]);
 
   useEffect(() => {
-    if (!open) return;
-    const interval = window.setInterval(() => void load(), 5000);
+    if (!open || !workspaceId || artifactOnly) return;
+    const subscription = subscribeRuntimeEventStream({
+      workspaceId,
+      onOpen: () => setDegradedMode(false),
+      onError: () => setDegradedMode(true),
+      onEvent: (event) => {
+        setDegradedMode(false);
+        setItems((current) => upsertActivityEntry(current, runtimeEventToActivityEntry(event)));
+      },
+    });
+    return () => subscription.close();
+  }, [open, workspaceId, artifactOnly]);
+
+  useEffect(() => {
+    if (!open || !degradedMode) return;
+    const interval = window.setInterval(() => void load(), 30000);
     return () => window.clearInterval(interval);
-  }, [open, workspaceId, artifactId, artifactOnly]);
+  }, [open, degradedMode, workspaceId, artifactId, artifactOnly]);
 
   const badgeCount = useMemo(() => items.filter((item) => item.status === "running").length, [items]);
   const runningOps = useMemo(() => operations.filter((entry) => entry.status === "running"), [operations]);
@@ -133,6 +149,7 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
           </button>
         </div>
         <div className="notification-list">
+          {degradedMode ? <p className="muted small">Live runtime stream unavailable. Falling back to periodic refresh.</p> : null}
           {runningOps.length > 0 && (
             <section className="notification-item running-ops-card" aria-label="Currently running operations">
               <div className="notification-text">

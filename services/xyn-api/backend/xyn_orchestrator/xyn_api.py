@@ -15,7 +15,7 @@ import fnmatch
 from functools import wraps
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit, quote, unquote
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Set, Tuple
+from typing import Any, Dict, Optional, List, Set, Tuple, TypedDict
 
 import requests
 import boto3
@@ -25,7 +25,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import models, transaction
-from django.http import HttpRequest, JsonResponse, HttpResponse
+from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -144,6 +144,7 @@ from .deployments import (
     maybe_trigger_rollback,
     load_release_plan_json,
 )
+from .worker_tasks import _download_artifact_json
 from .oidc import (
     app_client_to_payload,
     generate_pkce_pair,
@@ -16088,6 +16089,335 @@ def _proxy_seed_workspace_request(
     return JsonResponse(payload_json, safe=not isinstance(payload_json, list), status=response.status_code)
 
 
+RUNTIME_ACTIVE_STATUSES = {"queued", "running"}
+RUNTIME_TERMINAL_STATUSES = {"completed", "failed", "blocked", "cancelled"}
+
+
+class RuntimeStreamEnvelope(TypedDict):
+    event_id: str
+    event_type: str
+    created_at: str
+    workspace_id: Optional[str]
+    run_id: Optional[str]
+    work_item_id: Optional[str]
+    worker_type: Optional[str]
+    status: Optional[str]
+    title: str
+    message: str
+    payload: Dict[str, Any]
+
+
+def _parse_iso_datetime(value: Any) -> Optional[dt.datetime]:
+    if not value:
+        return None
+    if isinstance(value, dt.datetime):
+        return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+    parsed = parse_datetime(str(value))
+    if parsed is None:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def _runtime_elapsed_seconds(run_payload: Dict[str, Any], *, now: Optional[dt.datetime] = None) -> Optional[int]:
+    started_at = _parse_iso_datetime(run_payload.get("started_at"))
+    if started_at is None:
+        return None
+    completed_at = _parse_iso_datetime(run_payload.get("completed_at")) or now or timezone.now()
+    return max(0, int((completed_at - started_at).total_seconds()))
+
+
+def _runtime_heartbeat_freshness(run_payload: Dict[str, Any], *, now: Optional[dt.datetime] = None, stale_after_seconds: int = 30) -> str:
+    heartbeat_at = _parse_iso_datetime(run_payload.get("heartbeat_at"))
+    if heartbeat_at is None:
+        return "missing"
+    current = now or timezone.now()
+    return "fresh" if (current - heartbeat_at).total_seconds() <= stale_after_seconds else "stale"
+
+
+def _runtime_run_belongs_to_workspace(run_payload: Dict[str, Any], workspace: Workspace) -> bool:
+    prompt_payload = run_payload.get("prompt_payload") if isinstance(run_payload.get("prompt_payload"), dict) else {}
+    target = prompt_payload.get("target") if isinstance(prompt_payload.get("target"), dict) else {}
+    workspace_id = str(target.get("workspace_id") or "").strip()
+    return workspace_id == str(workspace.id)
+
+
+def _runtime_run_summary_payload(run_payload: Dict[str, Any], *, now: Optional[dt.datetime] = None) -> Dict[str, Any]:
+    prompt_payload = run_payload.get("prompt_payload") if isinstance(run_payload.get("prompt_payload"), dict) else {}
+    target = prompt_payload.get("target") if isinstance(prompt_payload.get("target"), dict) else {}
+    return {
+        "id": str(run_payload.get("run_id") or run_payload.get("id") or ""),
+        "run_id": str(run_payload.get("run_id") or run_payload.get("id") or ""),
+        "work_item_id": run_payload.get("work_item_id"),
+        "worker_type": run_payload.get("worker_type"),
+        "worker_id": run_payload.get("worker_id"),
+        "status": str(run_payload.get("status") or ""),
+        "summary": run_payload.get("summary"),
+        "created_at": run_payload.get("created_at"),
+        "started_at": run_payload.get("started_at"),
+        "completed_at": run_payload.get("completed_at"),
+        "heartbeat_at": run_payload.get("heartbeat_at"),
+        "queued_at": run_payload.get("queued_at"),
+        "elapsed_time_seconds": _runtime_elapsed_seconds(run_payload, now=now),
+        "heartbeat_freshness": _runtime_heartbeat_freshness(run_payload, now=now),
+        "target": {
+            "repo": target.get("repo"),
+            "branch": target.get("branch"),
+            "workspace_id": target.get("workspace_id"),
+            "artifact_id": target.get("artifact_id"),
+        },
+        "failure_reason": run_payload.get("failure_reason"),
+        "escalation_reason": run_payload.get("escalation_reason"),
+    }
+
+
+def _runtime_run_detail_payload(
+    run_payload: Dict[str, Any],
+    *,
+    steps: List[Dict[str, Any]],
+    artifacts: List[Dict[str, Any]],
+    now: Optional[dt.datetime] = None,
+) -> Dict[str, Any]:
+    prompt_payload = run_payload.get("prompt_payload") if isinstance(run_payload.get("prompt_payload"), dict) else {}
+    target = prompt_payload.get("target") if isinstance(prompt_payload.get("target"), dict) else {}
+    prompt = prompt_payload.get("prompt") if isinstance(prompt_payload.get("prompt"), dict) else {}
+    policy = run_payload.get("execution_policy") if isinstance(run_payload.get("execution_policy"), dict) else {}
+    return {
+        **_runtime_run_summary_payload(run_payload, now=now),
+        "prompt": {"title": prompt.get("title"), "body": prompt.get("body")},
+        "policy": {
+            "auto_continue": bool(policy.get("auto_continue")),
+            "max_retries": int(policy.get("max_retries") or 0),
+            "require_human_review_on_failure": bool(policy.get("require_human_review_on_failure")),
+            "timeout_seconds": policy.get("timeout_seconds"),
+        },
+        "target": {
+            "repo": target.get("repo"),
+            "branch": target.get("branch"),
+            "workspace_id": target.get("workspace_id"),
+            "artifact_id": target.get("artifact_id"),
+        },
+        "steps": [
+            {
+                "id": str(step.get("step_id") or step.get("id") or ""),
+                "step_key": step.get("step_key") or step.get("name"),
+                "label": step.get("label") or step.get("name"),
+                "status": step.get("status"),
+                "summary": step.get("summary"),
+                "sequence_no": step.get("sequence_no"),
+                "started_at": step.get("started_at"),
+                "completed_at": step.get("completed_at"),
+            }
+            for step in sorted(steps, key=lambda item: (int(item.get("sequence_no") or 0), str(item.get("started_at") or "")))
+        ],
+        "artifacts": [
+            {
+                "id": str(artifact.get("artifact_id") or artifact.get("id") or ""),
+                "artifact_type": artifact.get("artifact_type") or artifact.get("kind"),
+                "label": artifact.get("label") or artifact.get("name"),
+                "uri": artifact.get("uri"),
+                "created_at": artifact.get("created_at"),
+                "metadata": artifact.get("metadata") or {},
+            }
+            for artifact in artifacts
+        ],
+    }
+
+
+def _runtime_activity_item_from_event(event_payload: Dict[str, Any]) -> Dict[str, Any]:
+    envelope = _runtime_stream_envelope_from_event(event_payload)
+    payload = envelope["payload"] if isinstance(envelope.get("payload"), dict) else {}
+    return {
+        "id": f"runtime-event:{envelope['event_id']}",
+        "event_type": envelope["event_type"],
+        "status": "succeeded" if envelope["event_type"] == "run.completed" else "failed" if envelope["event_type"] in {"run.failed", "run.blocked"} else "running",
+        "summary": envelope["message"] or envelope["title"],
+        "created_at": envelope["created_at"],
+        "actor_id": None,
+        "agent_slug": envelope.get("worker_type") or "codex_local",
+        "provider": "",
+        "model_name": "",
+        "artifact_id": envelope.get("run_id") or None,
+        "artifact_type": "runtime_run",
+        "artifact_title": str(payload.get("repo") or ""),
+        "request_type": "runtime.run",
+        "prompt": "",
+        "workspace_id": envelope.get("workspace_id"),
+        "draft_id": None,
+        "job_id": None,
+        "error": str(payload.get("failure_reason") or payload.get("escalation_reason") or ""),
+        "trace": [],
+        "structured_operation": {
+            "run_id": envelope.get("run_id"),
+            "worker_type": envelope.get("worker_type"),
+            "step_key": payload.get("step_key"),
+            "artifact_type": payload.get("artifact_type"),
+        },
+        "source": "runtime_event",
+    }
+
+
+def _runtime_stream_envelope_from_event(event_payload: Dict[str, Any]) -> RuntimeStreamEnvelope:
+    event_name = str(event_payload.get("event_name") or "")
+    data = event_payload.get("data") if isinstance(event_payload.get("data"), dict) else {}
+    run_id = str(event_payload.get("run_id") or data.get("run_id") or "") or None
+    created_at = str(event_payload.get("occurred_at") or timezone.now().isoformat())
+    failure_reason = str(data.get("failure_reason") or "").strip()
+    escalation_reason = str(data.get("escalation_reason") or "").strip()
+    label = str(data.get("label") or data.get("step_key") or "").strip()
+    if event_name == "run.started":
+        status = "running"
+        title = f"Run started · {run_id or 'run'}"
+        message = title
+    elif event_name == "run.step.completed":
+        status = "running"
+        title = f"Run step completed: {label or 'step'}"
+        message = title
+    elif event_name == "run.step.started":
+        status = "running"
+        title = f"Run step started: {label or 'step'}"
+        message = title
+    elif event_name == "run.completed":
+        status = "succeeded"
+        title = f"Run completed · {run_id or 'run'}"
+        message = title
+    elif event_name == "run.blocked":
+        status = "failed"
+        title = "Run blocked"
+        message = f"Run blocked: {escalation_reason or failure_reason or 'review required'}"
+    elif event_name == "run.failed":
+        status = "failed"
+        title = "Run failed"
+        message = f"Run failed: {failure_reason or 'unexpected_error'}"
+    elif event_name == "run.artifact.created":
+        status = "running"
+        title = "Run artifact created"
+        message = f"Run artifact created: {data.get('artifact_type') or 'artifact'}"
+    elif event_name == "run.heartbeat":
+        status = "running"
+        title = "Run heartbeat"
+        message = f"Heartbeat received for {run_id or 'run'}"
+    else:
+        status = str(data.get("status") or "").strip() or None
+        title = event_name or "Runtime event"
+        message = title
+    return {
+        "event_id": str(event_payload.get("event_id") or event_payload.get("id") or ""),
+        "event_type": event_name,
+        "created_at": created_at,
+        "workspace_id": str(data.get("workspace_id") or "") or None,
+        "run_id": run_id,
+        "work_item_id": str(data.get("work_item_id") or "") or None,
+        "worker_type": str(data.get("worker_type") or "") or None,
+        "status": status,
+        "title": title,
+        "message": message,
+        "payload": dict(data),
+    }
+
+
+def _list_runtime_activity_entries(workspace: Workspace, *, limit: int) -> List[Dict[str, Any]]:
+    try:
+        response = _seed_api_request(
+            method="GET",
+            path="/api/v1/events",
+            workspace_slug="",
+            payload=None,
+            timeout=15,
+        )
+    except requests.RequestException:
+        return []
+    if response.status_code >= 400:
+        return []
+    try:
+        payload = response.json() if response.content else {}
+    except ValueError:
+        return []
+    items = payload.get("items") if isinstance(payload, dict) else []
+    if not isinstance(items, list):
+        return []
+    activity_items: List[Dict[str, Any]] = []
+    for event_payload in items:
+        if not isinstance(event_payload, dict):
+            continue
+        event_name = str(event_payload.get("event_name") or "")
+        if not event_name.startswith("run."):
+            continue
+        data = event_payload.get("data") if isinstance(event_payload.get("data"), dict) else {}
+        if str(data.get("workspace_id") or "") != str(workspace.id):
+            continue
+        activity_items.append(_runtime_activity_item_from_event(event_payload))
+        if len(activity_items) >= limit:
+            break
+    return activity_items
+
+
+def _runtime_stream_query(workspace: Workspace, *, last_event_id: str = "", since: str = "") -> Dict[str, str]:
+    params = {
+        "workspace_id": str(workspace.id),
+        "runtime_only": "true",
+    }
+    if last_event_id:
+        params["last_event_id"] = last_event_id
+    if since:
+        params["since"] = since
+    return params
+
+
+def _seed_runtime_stream_request(*, workspace: Workspace, last_event_id: str = "", since: str = ""):
+    base_url = _seed_api_base_url()
+    response = requests.get(
+        f"{base_url}/api/v1/events/stream",
+        params=_runtime_stream_query(workspace, last_event_id=last_event_id, since=since),
+        timeout=(5, 65),
+        stream=True,
+        headers={"Accept": "text/event-stream"},
+    )
+    response.raise_for_status()
+    return response
+
+
+def _iter_sse_messages(response) -> Any:
+    event_name = ""
+    event_id = ""
+    data_lines: List[str] = []
+    for raw_line in response.iter_lines(decode_unicode=True):
+        if raw_line is None:
+            continue
+        line = str(raw_line)
+        if not line:
+            if data_lines:
+                payload_text = "\n".join(data_lines)
+                try:
+                    payload = json.loads(payload_text)
+                except ValueError:
+                    payload = {}
+                if isinstance(payload, dict):
+                    if event_id and "id" not in payload:
+                        payload["id"] = event_id
+                    yield {"event": event_name or payload.get("event_name") or "message", "id": event_id, "data": payload}
+            event_name = ""
+            event_id = ""
+            data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event_name = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("id:"):
+            event_id = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.split(":", 1)[1].lstrip())
+
+
+def _serialize_runtime_stream_sse(envelope: RuntimeStreamEnvelope) -> str:
+    return (
+        f"id: {envelope['event_id']}\n"
+        f"event: {envelope['event_type']}\n"
+        f"data: {json.dumps(envelope, default=str)}\n\n"
+    )
+
 def _normalize_palette_prompt(prompt: str) -> str:
     key = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
     if key.startswith("create location"):
@@ -19239,8 +19569,53 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
             if len(items) >= limit:
                 break
 
+    if workspace_id and len(items) < limit:
+        workspace = _resolve_workspace_for_identity(identity, workspace_id)
+        if workspace:
+            items.extend(_list_runtime_activity_entries(workspace, limit=max(1, limit - len(items))))
+
     items.sort(key=lambda entry: str(entry.get("created_at") or ""), reverse=True)
     return JsonResponse({"items": items[:limit]})
+
+
+@csrf_exempt
+def ai_activity_stream(request: HttpRequest) -> HttpResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace = _resolve_workspace_for_identity(identity, workspace_id)
+    if not workspace:
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    last_event_id = str(request.GET.get("last_event_id") or request.headers.get("Last-Event-ID") or "").strip()
+    since = str(request.GET.get("since") or "").strip()
+
+    def stream():
+        try:
+            upstream = _seed_runtime_stream_request(workspace=workspace, last_event_id=last_event_id, since=since)
+        except requests.RequestException as exc:
+            yield f"event: stream.error\ndata: {json.dumps({'message': 'failed to reach xyn-core', 'details': exc.__class__.__name__})}\n\n"
+            return
+        with upstream:
+            for message in _iter_sse_messages(upstream):
+                payload = message.get("data") if isinstance(message.get("data"), dict) else {}
+                if not payload:
+                    continue
+                envelope = _runtime_stream_envelope_from_event(payload)
+                if envelope.get("workspace_id") != str(workspace.id):
+                    continue
+                yield _serialize_runtime_stream_sse(envelope)
+
+    response = StreamingHttpResponse(stream(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
 
 
 @csrf_exempt
@@ -22705,6 +23080,378 @@ def run_commands(request: HttpRequest, run_id: str) -> JsonResponse:
     return JsonResponse({"commands": commands})
 
 
+@login_required
+def runtime_runs_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_ref = str(request.GET.get("workspace_id") or request.GET.get("workspace") or "").strip()
+    workspace = _resolve_workspace_for_identity(identity, workspace_ref)
+    if not workspace:
+        return JsonResponse({"error": "workspace context is required"}, status=400)
+    status_filter = str(request.GET.get("status") or "").strip().lower()
+    try:
+        response = _seed_api_request(method="GET", path="/api/v1/runs", timeout=20)
+    except requests.RequestException as exc:
+        return JsonResponse({"error": "failed to reach xyn-core", "details": exc.__class__.__name__}, status=502)
+    if response.status_code >= 400:
+        return JsonResponse({"error": "runtime runs unavailable"}, status=502)
+    try:
+        payload = response.json() if response.content else {}
+    except ValueError:
+        return JsonResponse({"error": "invalid runtime runs response"}, status=502)
+    items = payload.get("items") if isinstance(payload, dict) else []
+    now = timezone.now()
+    runs = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if not _runtime_run_belongs_to_workspace(item, workspace):
+            continue
+        if status_filter and str(item.get("status") or "").strip().lower() != status_filter:
+            continue
+        runs.append(_runtime_run_summary_payload(item, now=now))
+    runs.sort(key=lambda item: str(item.get("started_at") or item.get("created_at") or ""), reverse=True)
+    return JsonResponse({"runs": runs})
+
+
+@login_required
+def runtime_run_detail(request: HttpRequest, run_id: uuid.UUID) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_ref = str(request.GET.get("workspace_id") or request.GET.get("workspace") or "").strip()
+    workspace = _resolve_workspace_for_identity(identity, workspace_ref)
+    if not workspace:
+        return JsonResponse({"error": "workspace context is required"}, status=400)
+    try:
+        run_response = _seed_api_request(method="GET", path=f"/api/v1/runs/{run_id}", timeout=20)
+        steps_response = _seed_api_request(method="GET", path=f"/api/v1/runs/{run_id}/steps", timeout=20)
+        artifacts_response = _seed_api_request(method="GET", path=f"/api/v1/runs/{run_id}/artifacts", timeout=20)
+    except requests.RequestException as exc:
+        return JsonResponse({"error": "failed to reach xyn-core", "details": exc.__class__.__name__}, status=502)
+    if run_response.status_code == 404:
+        return JsonResponse({"error": "run not found"}, status=404)
+    if run_response.status_code >= 400 or steps_response.status_code >= 400 or artifacts_response.status_code >= 400:
+        return JsonResponse({"error": "runtime run detail unavailable"}, status=502)
+    try:
+        run_payload = run_response.json() if run_response.content else {}
+        steps_payload = steps_response.json() if steps_response.content else []
+        artifacts_payload = artifacts_response.json() if artifacts_response.content else []
+    except ValueError:
+        return JsonResponse({"error": "invalid runtime run response"}, status=502)
+    if not isinstance(run_payload, dict) or not _runtime_run_belongs_to_workspace(run_payload, workspace):
+        return JsonResponse({"error": "run not found"}, status=404)
+    detail = _runtime_run_detail_payload(
+        run_payload,
+        steps=steps_payload if isinstance(steps_payload, list) else [],
+        artifacts=artifacts_payload if isinstance(artifacts_payload, list) else [],
+        now=timezone.now(),
+    )
+    return JsonResponse(detail)
+
+
+EPIC_C_DEV_TASK_TYPES = {"codegen"}
+RUNTIME_DEV_TASK_ACTIVE_STATUSES = {"queued", "running"}
+
+
+def _dev_task_uses_epic_c_runtime(task: DevTask) -> bool:
+    return str(task.task_type or "").strip().lower() in EPIC_C_DEV_TASK_TYPES
+
+
+def _dev_task_runtime_workspace(identity: UserIdentity, task: DevTask, request: Optional[HttpRequest] = None) -> Optional[Workspace]:
+    if task.runtime_workspace_id:
+        return _resolve_workspace_for_identity(identity, str(task.runtime_workspace_id))
+    workspace_ref = ""
+    if request is not None:
+        workspace_ref = str(request.GET.get("workspace_id") or request.GET.get("workspace") or "").strip()
+    return _resolve_workspace_for_identity(identity, workspace_ref)
+
+
+def _runtime_repo_candidates_from_target(target: Dict[str, Any]) -> List[str]:
+    candidates: List[str] = []
+    name = str(target.get("name") or "").strip()
+    url = str(target.get("url") or "").strip().lower()
+    if name in {"xyn", "xyn-platform"}:
+        candidates.append(name)
+    if "xyn-platform" in url and "xyn-platform" not in candidates:
+        candidates.append("xyn-platform")
+    if re.search(r"(^|/|:)xyn(?:\\.git)?$", url) and "xyn" not in candidates:
+        candidates.append("xyn")
+    return candidates
+
+
+def _load_dev_task_runtime_source(task: DevTask) -> Dict[str, Any]:
+    if not task.source_run_id or not task.input_artifact_key:
+        raise ValueError("dev task is missing source run context required for runtime submission")
+    plan_json = _download_artifact_json(str(task.source_run_id), task.input_artifact_key)
+    if not plan_json:
+        raise ValueError(f"{task.input_artifact_key} not found for dev task source run")
+    work_item_id = str(task.work_item_id or "").strip()
+    if not work_item_id:
+        raise ValueError("dev task is missing work_item_id")
+    work_item = None
+    for item in plan_json.get("work_items", []):
+        if str(item.get("id") or "").strip() == work_item_id:
+            work_item = item
+            break
+    if not isinstance(work_item, dict):
+        raise ValueError(f"work_item_id not found in source plan: {work_item_id}")
+    repo_targets = work_item.get("repo_targets") if isinstance(work_item.get("repo_targets"), list) else []
+    repo_candidates: List[Tuple[str, str]] = []
+    for target in repo_targets:
+        if not isinstance(target, dict):
+            continue
+        branch = str(target.get("ref") or "").strip() or "develop"
+        for candidate in _runtime_repo_candidates_from_target(target):
+            repo_candidates.append((candidate, branch))
+    unique_candidates = {(repo, branch) for repo, branch in repo_candidates}
+    if not unique_candidates:
+        raise ValueError("unable to resolve a canonical runtime target repo from work item repo_targets")
+    repo_names = {repo for repo, _branch in unique_candidates}
+    if len(repo_names) > 1:
+        raise ValueError(f"multiple runtime target repos found for work item: {sorted(repo_names)}")
+    repo_name = next(iter(repo_names))
+    branch = next(branch for repo, branch in unique_candidates if repo == repo_name)
+    return {
+        "plan_json": plan_json,
+        "work_item": work_item,
+        "target_repo": repo_name,
+        "target_branch": branch,
+    }
+
+
+def _build_dev_task_runtime_prompt(task: DevTask, work_item: Dict[str, Any]) -> Dict[str, str]:
+    title = str(task.title or work_item.get("title") or task.work_item_id or f"Dev task {task.id}").strip()
+    body_lines: List[str] = []
+    description = str(work_item.get("description") or work_item.get("summary") or "").strip()
+    if description:
+        body_lines.append(description)
+    acceptance = work_item.get("acceptance_criteria") if isinstance(work_item.get("acceptance_criteria"), list) else []
+    if acceptance:
+        body_lines.append("Acceptance criteria:")
+        body_lines.extend(f"- {str(item).strip()}" for item in acceptance if str(item).strip())
+    verify_rows = work_item.get("verify") if isinstance(work_item.get("verify"), list) else []
+    if verify_rows:
+        body_lines.append("Validation commands:")
+        body_lines.extend(
+            f"- {str(row.get('command') or '').strip()}"
+            for row in verify_rows
+            if isinstance(row, dict) and str(row.get("command") or "").strip()
+        )
+    if not body_lines:
+        body_lines.append(title)
+    return {"title": title, "body": "\n".join(body_lines).strip()}
+
+
+def _build_dev_task_runtime_payload(task: DevTask, workspace: Workspace) -> Dict[str, Any]:
+    source = _load_dev_task_runtime_source(task)
+    work_item = source["work_item"]
+    prompt = _build_dev_task_runtime_prompt(task, work_item)
+    requested_outputs = ["patch", "log", "summary"]
+    verify_rows = work_item.get("verify") if isinstance(work_item.get("verify"), list) else []
+    if verify_rows and "report" not in requested_outputs:
+        requested_outputs.append("report")
+    try:
+        timeout_seconds = int(os.environ.get("XYN_DEV_TASK_RUNTIME_TIMEOUT_SECONDS", "1800") or "1800")
+    except ValueError:
+        timeout_seconds = 1800
+    attachments = []
+    if task.source_run_id and task.input_artifact_key:
+        attachments.append(
+            {
+                "kind": "plan",
+                "uri": f"xyn://runs/{task.source_run_id}/artifacts/{task.input_artifact_key}",
+                "label": task.input_artifact_key,
+            }
+        )
+    return {
+        "schema_version": "v1",
+        "run_id": str(uuid.uuid4()),
+        "work_item_id": str(task.work_item_id or f"dev-task:{task.id}"),
+        "worker_type": "codex_local",
+        "target": {
+            "repo": source["target_repo"],
+            "branch": source["target_branch"],
+            "workspace_id": str(workspace.id),
+            "artifact_id": None,
+        },
+        "prompt": prompt,
+        "context": {
+            "epic_id": "epic_c",
+            "attachments": attachments,
+            "metadata": {
+                "source": "dev_task",
+                "dev_task_id": str(task.id),
+                "task_type": str(task.task_type or ""),
+                "source_entity_type": str(task.source_entity_type or ""),
+                "source_entity_id": str(task.source_entity_id or ""),
+            },
+        },
+        "policy": {
+            "auto_continue": True,
+            "max_retries": max(int(task.max_attempts or 0) - 1, 0),
+            "require_human_review_on_failure": True,
+            "timeout_seconds": timeout_seconds,
+        },
+        "requested_outputs": requested_outputs,
+    }
+
+
+def _fetch_runtime_run_payload(run_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    try:
+        response = _seed_api_request(method="GET", path=f"/api/v1/runs/{run_id}", timeout=20)
+    except requests.RequestException:
+        return None
+    if response.status_code == 404 or response.status_code >= 400:
+        return None
+    try:
+        payload = response.json() if response.content else {}
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _fetch_runtime_run_detail_payload(run_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    try:
+        run_response = _seed_api_request(method="GET", path=f"/api/v1/runs/{run_id}", timeout=20)
+        steps_response = _seed_api_request(method="GET", path=f"/api/v1/runs/{run_id}/steps", timeout=20)
+        artifacts_response = _seed_api_request(method="GET", path=f"/api/v1/runs/{run_id}/artifacts", timeout=20)
+    except requests.RequestException:
+        return None
+    if run_response.status_code == 404 or run_response.status_code >= 400 or steps_response.status_code >= 400 or artifacts_response.status_code >= 400:
+        return None
+    try:
+        run_payload = run_response.json() if run_response.content else {}
+        steps_payload = steps_response.json() if steps_response.content else []
+        artifacts_payload = artifacts_response.json() if artifacts_response.content else []
+    except ValueError:
+        return None
+    if not isinstance(run_payload, dict):
+        return None
+    return _runtime_run_detail_payload(
+        run_payload,
+        steps=steps_payload if isinstance(steps_payload, list) else [],
+        artifacts=artifacts_payload if isinstance(artifacts_payload, list) else [],
+        now=timezone.now(),
+    )
+
+
+def _project_runtime_status_to_task(task: DevTask) -> Optional[Dict[str, Any]]:
+    if not task.runtime_run_id:
+        return None
+    detail = _fetch_runtime_run_detail_payload(task.runtime_run_id)
+    if not detail:
+        return None
+    runtime_status = str(detail.get("status") or "").strip() or task.status
+    failure_reason = str(detail.get("failure_reason") or "").strip()
+    escalation_reason = str(detail.get("escalation_reason") or "").strip()
+    status_changed = task.status != runtime_status
+    last_error = escalation_reason or failure_reason
+    last_error_changed = (task.last_error or "") != last_error
+    if status_changed or last_error_changed:
+        task.status = runtime_status
+        task.last_error = last_error
+        update_fields = ["status", "last_error", "updated_at"]
+        task.save(update_fields=update_fields)
+    return detail
+
+
+def _serialize_runtime_run_for_dev_task(detail: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": str(detail.get("run_id") or detail.get("id") or ""),
+        "status": detail.get("status"),
+        "summary": detail.get("summary"),
+        "error": detail.get("failure_reason") or detail.get("escalation_reason"),
+        "log_text": "",
+        "started_at": detail.get("started_at"),
+        "finished_at": detail.get("completed_at"),
+        "failure_reason": detail.get("failure_reason"),
+        "escalation_reason": detail.get("escalation_reason"),
+    }
+
+
+def _serialize_runtime_artifacts_for_dev_task(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows = detail.get("artifacts") if isinstance(detail.get("artifacts"), list) else []
+    artifacts: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        uri = str(row.get("uri") or "").strip()
+        artifacts.append(
+            {
+                "id": str(row.get("id") or ""),
+                "name": str(row.get("label") or row.get("artifact_type") or "artifact"),
+                "kind": row.get("artifact_type"),
+                "url": uri if uri.startswith("http://") or uri.startswith("https://") else None,
+                "metadata": {**(row.get("metadata") or {}), "uri": uri},
+                "created_at": row.get("created_at"),
+            }
+        )
+    return artifacts
+
+
+def _serialize_dev_task_summary(task: DevTask, *, runtime_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    detail = runtime_detail or _project_runtime_status_to_task(task)
+    status = str((detail or {}).get("status") or task.status)
+    return {
+        "id": str(task.id),
+        "title": task.title,
+        "task_type": task.task_type,
+        "status": status,
+        "priority": task.priority,
+        "attempts": task.attempts,
+        "max_attempts": task.max_attempts,
+        "locked_by": task.locked_by,
+        "locked_at": task.locked_at,
+        "source_entity_type": task.source_entity_type,
+        "source_entity_id": str(task.source_entity_id),
+        "source_run": str(task.source_run_id) if task.source_run_id else None,
+        "result_run": str(task.result_run_id) if task.result_run_id and not task.runtime_run_id else None,
+        "runtime_run_id": str(task.runtime_run_id) if task.runtime_run_id else None,
+        "runtime_workspace_id": str(task.runtime_workspace_id) if task.runtime_workspace_id else None,
+        "work_item_id": task.work_item_id,
+        "context_purpose": task.context_purpose,
+        "target_instance_id": str(task.target_instance_id) if task.target_instance_id else None,
+        "force": task.force,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -> Dict[str, Any]:
+    payload = _build_dev_task_runtime_payload(task, workspace)
+    response = _seed_api_request(method="POST", path="/api/v1/runtime/runs", payload=payload, timeout=30)
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        raise RuntimeError("unexpected xyn-core response")
+    body = response.json() if response.content else {}
+    if response.status_code >= 400:
+        message = body.get("detail") if isinstance(body, dict) else None
+        raise RuntimeError(str(message or "runtime submission failed"))
+    runtime_run_id = body.get("id") if isinstance(body, dict) else None
+    task.runtime_run_id = runtime_run_id or payload["run_id"]
+    task.runtime_workspace_id = workspace.id
+    task.status = "queued"
+    task.last_error = ""
+    task.locked_by = ""
+    task.locked_at = None
+    task.updated_by = user
+    task.save(
+        update_fields=[
+            "runtime_run_id",
+            "runtime_workspace_id",
+            "status",
+            "last_error",
+            "locked_by",
+            "locked_at",
+            "updated_by",
+            "updated_at",
+        ]
+    )
+    return {"run_id": str(task.runtime_run_id), "status": task.status}
+
+
 @csrf_exempt
 @login_required
 def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
@@ -22749,8 +23496,7 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
             dev_task.context_packs.add(*packs)
         return JsonResponse({"id": str(dev_task.id)})
     qs = DevTask.objects.all()
-    if status := request.GET.get("status"):
-        qs = qs.filter(status=status)
+    status_filter = str(request.GET.get("status") or "").strip().lower()
     if task_type := request.GET.get("task_type"):
         qs = qs.filter(task_type=task_type)
     if source_entity_type := request.GET.get("source_entity_type"):
@@ -22766,30 +23512,12 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
             | models.Q(work_item_id__icontains=query)
             | models.Q(last_error__icontains=query)
         )
-    data = [
-        {
-            "id": str(task.id),
-            "title": task.title,
-            "task_type": task.task_type,
-            "status": task.status,
-            "priority": task.priority,
-            "attempts": task.attempts,
-            "max_attempts": task.max_attempts,
-            "locked_by": task.locked_by,
-            "locked_at": task.locked_at,
-            "source_entity_type": task.source_entity_type,
-            "source_entity_id": str(task.source_entity_id),
-            "source_run": str(task.source_run_id) if task.source_run_id else None,
-            "result_run": str(task.result_run_id) if task.result_run_id else None,
-            "work_item_id": task.work_item_id,
-            "context_purpose": task.context_purpose,
-            "target_instance_id": str(task.target_instance_id) if task.target_instance_id else None,
-            "force": task.force,
-            "created_at": task.created_at,
-            "updated_at": task.updated_at,
-        }
-        for task in qs.order_by("-created_at")
-    ]
+    data = []
+    for task in qs.order_by("-created_at"):
+        row = _serialize_dev_task_summary(task)
+        if status_filter and str(row.get("status") or "").strip().lower() != status_filter:
+            continue
+        data.append(row)
     return _paginate(request, data, "dev_tasks")
 
 
@@ -22802,7 +23530,12 @@ def dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse:
     run_payload = None
     artifacts_payload = []
     commands_payload = []
-    if result_run:
+    runtime_detail = _project_runtime_status_to_task(task)
+    if runtime_detail:
+        run_payload = _serialize_runtime_run_for_dev_task(runtime_detail)
+        artifacts_payload = _serialize_runtime_artifacts_for_dev_task(runtime_detail)
+        commands_payload = []
+    elif result_run:
         run_payload = {
             "id": str(result_run.id),
             "status": result_run.status,
@@ -22844,7 +23577,7 @@ def dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse:
             "id": str(task.id),
             "title": task.title,
             "task_type": task.task_type,
-            "status": task.status,
+            "status": str((runtime_detail or {}).get("status") or task.status),
             "priority": task.priority,
             "attempts": task.attempts,
             "max_attempts": task.max_attempts,
@@ -22853,10 +23586,12 @@ def dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse:
             "source_entity_type": task.source_entity_type,
             "source_entity_id": str(task.source_entity_id),
             "source_run": str(task.source_run_id) if task.source_run_id else None,
-            "result_run": str(task.result_run_id) if task.result_run_id else None,
+            "result_run": str(task.result_run_id) if task.result_run_id and not task.runtime_run_id else None,
+            "runtime_run_id": str(task.runtime_run_id) if task.runtime_run_id else None,
+            "runtime_workspace_id": str(task.runtime_workspace_id) if task.runtime_workspace_id else None,
             "input_artifact_key": task.input_artifact_key,
             "work_item_id": task.work_item_id,
-            "last_error": task.last_error,
+            "last_error": str((runtime_detail or {}).get("failure_reason") or (runtime_detail or {}).get("escalation_reason") or task.last_error or ""),
             "context_purpose": task.context_purpose,
             "target_instance_id": str(task.target_instance_id) if task.target_instance_id else None,
             "force": task.force,
@@ -22886,7 +23621,28 @@ def dev_task_run(request: HttpRequest, task_id: str) -> JsonResponse:
         return staff_error
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
     task = get_object_or_404(DevTask, id=task_id)
+    if _dev_task_uses_epic_c_runtime(task):
+        runtime_detail = _project_runtime_status_to_task(task)
+        if runtime_detail and str(runtime_detail.get("status") or "").strip().lower() in RUNTIME_DEV_TASK_ACTIVE_STATUSES and task.runtime_run_id:
+            return JsonResponse({"run_id": str(task.runtime_run_id), "status": str(runtime_detail.get("status") or task.status)})
+        workspace = _dev_task_runtime_workspace(identity, task, request=request)
+        if not workspace:
+            return JsonResponse({"error": "workspace context is required for Epic C runtime submission"}, status=400)
+        try:
+            result = _submit_dev_task_runtime_run(task, workspace=workspace, user=request.user)
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=409)
+        except RuntimeError as exc:
+            task.status = "failed"
+            task.last_error = str(exc)
+            task.updated_by = request.user
+            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+            return JsonResponse({"error": str(exc)}, status=502)
+        return JsonResponse(result)
     if task.status == "running":
         return JsonResponse({"error": "Task already running"}, status=409)
     if task.task_type == "deploy_release_plan" and not task.target_instance_id:
@@ -22926,7 +23682,29 @@ def dev_task_retry(request: HttpRequest, task_id: str) -> JsonResponse:
         return staff_error
     if request.method != "POST":
         return JsonResponse({"error": "POST required"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
     task = get_object_or_404(DevTask, id=task_id)
+    if _dev_task_uses_epic_c_runtime(task):
+        runtime_detail = _project_runtime_status_to_task(task)
+        current_status = str((runtime_detail or {}).get("status") or task.status).strip().lower()
+        if current_status not in {"failed", "blocked", "canceled", "completed"}:
+            return JsonResponse({"error": "Task not retryable"}, status=409)
+        workspace = _dev_task_runtime_workspace(identity, task, request=request)
+        if not workspace:
+            return JsonResponse({"error": "workspace context is required for Epic C runtime submission"}, status=400)
+        try:
+            result = _submit_dev_task_runtime_run(task, workspace=workspace, user=request.user)
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=409)
+        except RuntimeError as exc:
+            task.status = "failed"
+            task.last_error = str(exc)
+            task.updated_by = request.user
+            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+            return JsonResponse({"error": str(exc)}, status=502)
+        return JsonResponse(result)
     if task.status not in {"failed", "canceled"}:
         return JsonResponse({"error": "Task not retryable"}, status=409)
     task.status = "queued"
@@ -22977,20 +23755,7 @@ def blueprint_dev_tasks(request: HttpRequest, blueprint_id: str) -> JsonResponse
     tasks = DevTask.objects.filter(source_entity_type="blueprint", source_entity_id=blueprint_id).order_by(
         "-created_at"
     )
-    data = [
-        {
-            "id": str(task.id),
-            "title": task.title,
-            "task_type": task.task_type,
-            "status": task.status,
-            "priority": task.priority,
-            "attempts": task.attempts,
-            "max_attempts": task.max_attempts,
-            "result_run": str(task.result_run_id) if task.result_run_id else None,
-            "created_at": task.created_at,
-        }
-        for task in tasks
-    ]
+    data = [_serialize_dev_task_summary(task) for task in tasks]
     return JsonResponse({"dev_tasks": data})
 
 

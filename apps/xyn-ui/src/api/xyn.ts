@@ -36,6 +36,8 @@ import type {
   RunDetail,
   RunListResponse,
   RunLogResponse,
+  RuntimeRunDetail,
+  RuntimeRunListResponse,
   ContextPackCreatePayload,
   ContextPackDetail,
   ContextPackListResponse,
@@ -4049,6 +4051,28 @@ export async function getRunCanvasApi(id: string): Promise<RunDetail> {
     credentials: "include",
   });
   return handle<RunDetail>(response);
+}
+
+export async function listRuntimeRunsCanvasApi(
+  workspaceId: string,
+  status?: string
+): Promise<RuntimeRunListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/api/runtime/runs`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (status) {
+    url.searchParams.set("status", status);
+  }
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<RuntimeRunListResponse>(response);
+}
+
+export async function getRuntimeRunCanvasApi(workspaceId: string, id: string): Promise<RuntimeRunDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/api/runtime/runs/${id}`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<RuntimeRunDetail>(response);
 }
 
 export async function getRunLogs(id: string): Promise<RunLogResponse> {

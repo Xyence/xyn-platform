@@ -2168,6 +2168,8 @@ class DevTask(models.Model):
     result_run = models.ForeignKey(
         Run, null=True, blank=True, on_delete=models.SET_NULL, related_name="dev_tasks_result"
     )
+    runtime_run_id = models.UUIDField(null=True, blank=True)
+    runtime_workspace_id = models.UUIDField(null=True, blank=True)
     last_error = models.TextField(blank=True)
     context_purpose = models.CharField(max_length=20, default="any")
     context_packs = models.ManyToManyField(ContextPack, blank=True, related_name="dev_tasks")

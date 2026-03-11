@@ -1982,7 +1982,7 @@ export type AiActivityEntry = {
   artifact_title?: string;
   trace?: Array<Record<string, unknown>>;
   structured_operation?: Record<string, unknown>;
-  source?: "audit_log" | "artifact_event" | "app_job";
+  source?: "audit_log" | "artifact_event" | "app_job" | "runtime_event";
 };
 
 export type WorkspaceMembershipSummary = {
@@ -2087,6 +2087,84 @@ export type RunCommandExecution = {
   stderr?: string;
 };
 
+export type RuntimeRunStep = {
+  id: string;
+  step_key: string;
+  label: string;
+  status: string;
+  summary?: string | null;
+  sequence_no: number;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
+export type RuntimeRunArtifact = {
+  id: string;
+  artifact_type: string;
+  label: string;
+  uri?: string | null;
+  created_at?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type RuntimeRunSummary = {
+  id: string;
+  run_id: string;
+  work_item_id?: string | null;
+  worker_type?: string | null;
+  worker_id?: string | null;
+  status: string;
+  summary?: string | null;
+  created_at?: string | null;
+  queued_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  heartbeat_at?: string | null;
+  elapsed_time_seconds?: number | null;
+  heartbeat_freshness?: "fresh" | "stale" | "missing" | string;
+  target: {
+    repo?: string | null;
+    branch?: string | null;
+    workspace_id?: string | null;
+    artifact_id?: string | null;
+  };
+  failure_reason?: string | null;
+  escalation_reason?: string | null;
+};
+
+export type RuntimeRunDetail = RuntimeRunSummary & {
+  prompt: {
+    title?: string | null;
+    body?: string | null;
+  };
+  policy: {
+    auto_continue: boolean;
+    max_retries: number;
+    require_human_review_on_failure: boolean;
+    timeout_seconds?: number | null;
+  };
+  steps: RuntimeRunStep[];
+  artifacts: RuntimeRunArtifact[];
+};
+
+export type RuntimeRunListResponse = {
+  runs: RuntimeRunSummary[];
+};
+
+export type RuntimeStreamEvent = {
+  event_id: string;
+  event_type: string;
+  created_at: string;
+  workspace_id?: string | null;
+  run_id?: string | null;
+  work_item_id?: string | null;
+  worker_type?: string | null;
+  status?: string | null;
+  title: string;
+  message: string;
+  payload: Record<string, unknown>;
+};
+
 export type DevTaskSummary = {
   id: string;
   title: string;
@@ -2101,6 +2179,8 @@ export type DevTaskSummary = {
   source_entity_id?: string;
   source_run?: string | null;
   result_run?: string | null;
+  runtime_run_id?: string | null;
+  runtime_workspace_id?: string | null;
   context_purpose?: string;
   target_instance_id?: string | null;
   force?: boolean;
@@ -2124,6 +2204,8 @@ export type DevTaskDetail = DevTaskSummary & {
     summary?: string;
     error?: string;
     log_text?: string;
+    failure_reason?: string | null;
+    escalation_reason?: string | null;
     started_at?: string | null;
     finished_at?: string | null;
   } | null;
