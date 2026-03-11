@@ -94,6 +94,12 @@ function activityStatusForEvent(event: RuntimeStreamEvent): "running" | "succeed
 }
 
 export function runtimeEventToActivityEntry(event: RuntimeStreamEvent): AiActivityEntry {
+  const messageType =
+    event.event_type === "run.failed" || event.event_type === "run.blocked"
+      ? "escalation"
+      : event.event_type === "run.completed"
+        ? "execution_summary"
+        : "system_runtime";
   return {
     id: `runtime-event:${event.event_id}`,
     event_type: event.event_type,
@@ -119,6 +125,26 @@ export function runtimeEventToActivityEntry(event: RuntimeStreamEvent): AiActivi
       worker_type: event.worker_type,
       step_key: event.payload?.step_key,
       artifact_type: event.payload?.artifact_type,
+    },
+    conversation_message: {
+      message_type: messageType,
+      title: event.title,
+      body: event.message,
+      status: event.status || null,
+      reason: String(event.payload?.failure_reason || event.payload?.escalation_reason || "") || null,
+      options:
+        event.event_type === "run.blocked"
+          ? ["continue run", "summarize run", "show artifacts"]
+          : event.event_type === "run.failed"
+            ? ["retry run", "show logs", "show artifacts"]
+            : [],
+      refs: {
+        run_id: event.run_id || null,
+        work_item_id: event.work_item_id || null,
+        step_key: String(event.payload?.step_key || "") || null,
+        artifact_type: String(event.payload?.artifact_type || "") || null,
+        artifact_uri: String(event.payload?.uri || "") || null,
+      },
     },
     source: "runtime_event",
   };
@@ -167,6 +193,11 @@ function inferRunSummaryFromEvent(event: RuntimeStreamEvent): RuntimeRunSummary 
 }
 
 function updateRunSummary(base: RuntimeRunSummary, event: RuntimeStreamEvent): RuntimeRunSummary {
+  const baseTerminal = new Set(["succeeded", "failed", "blocked", "completed"]).has(String(base.status || "").toLowerCase());
+  const nonTerminalEvent = new Set(["run.started", "run.heartbeat", "run.step.started", "run.step.completed"]).has(event.event_type);
+  if (baseTerminal && nonTerminalEvent) {
+    return base;
+  }
   const next = { ...base };
   if (event.work_item_id) next.work_item_id = event.work_item_id;
   if (event.worker_type) next.worker_type = event.worker_type;
@@ -237,6 +268,11 @@ function upsertRunArtifact(artifacts: RuntimeRunArtifact[], artifact: RuntimeRun
 
 export function applyRuntimeEventToRunDetail(detail: RuntimeRunDetail, event: RuntimeStreamEvent): RuntimeRunDetail {
   if (!event.run_id || detail.id !== event.run_id) return detail;
+  const detailTerminal = new Set(["succeeded", "failed", "blocked", "completed"]).has(String(detail.status || "").toLowerCase());
+  const nonTerminalEvent = new Set(["run.started", "run.heartbeat", "run.step.started", "run.step.completed"]).has(event.event_type);
+  if (detailTerminal && nonTerminalEvent) {
+    return detail;
+  }
   let next: RuntimeRunDetail = { ...detail, ...refreshRuntimeRunSummary(updateRunSummary(detail, event)) };
   if (event.event_type === "run.step.started" || event.event_type === "run.step.completed") {
     const step: RuntimeRunStep = {

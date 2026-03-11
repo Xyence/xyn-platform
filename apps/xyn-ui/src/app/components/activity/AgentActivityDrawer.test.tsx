@@ -73,6 +73,12 @@ describe("AgentActivityDrawer runtime activity", () => {
           job_id: null,
           error: "",
           source: "runtime_event",
+          conversation_message: {
+            message_type: "system_runtime",
+            title: "Run step completed: inspect repository",
+            body: "Run step completed: inspect repository",
+            refs: { run_id: "run-1", work_item_id: "wi-1", step_key: "inspect_repository" },
+          },
           trace: [],
           structured_operation: { run_id: "run-1", step_key: "inspect_repository" },
           prompt_interpretation: {
@@ -98,9 +104,11 @@ describe("AgentActivityDrawer runtime activity", () => {
     render(<AgentActivityDrawer open onClose={() => {}} workspaceId="ws-1" />);
 
     await waitFor(() => expect(apiMocks.listAiActivity).toHaveBeenCalled());
-    expect(screen.getByText("Run step completed: inspect repository")).toBeInTheDocument();
+    expect(screen.getAllByText("Run step completed: inspect repository").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/runtime\.run/)).toBeInTheDocument();
+    expect(screen.getByText(/run run-1 · work item wi-1 · step inspect_repository/i)).toBeInTheDocument();
     expect(screen.getByText(/Create and dispatch run · Epic D · work item epic-d · run run-1 · queued run/i)).toBeInTheDocument();
+    expect(document.querySelectorAll(".notification-item.system-runtime-message")).toHaveLength(1);
   });
 
   it("renders compact app-operation interpretation details with key fields", async () => {
@@ -233,8 +241,8 @@ describe("AgentActivityDrawer runtime activity", () => {
       streamMocks.emit(event);
     });
 
-    await waitFor(() => expect(screen.getByText("Run completed · run-1")).toBeInTheDocument());
-    expect(screen.getAllByText("Run completed · run-1")).toHaveLength(1);
+    await waitFor(() => expect(screen.getByText(/run run-1 · work item wi-1/i)).toBeInTheDocument());
+    expect(document.querySelectorAll(".notification-item.system-runtime-message")).toHaveLength(1);
   });
 
   it("falls back to periodic refresh when the stream degrades", async () => {
@@ -259,4 +267,79 @@ describe("AgentActivityDrawer runtime activity", () => {
       clearIntervalSpy.mockRestore();
     }
   }, 10000);
+
+  it("renders escalation and execution summary conversation messages compactly", async () => {
+    apiMocks.listAiActivity.mockResolvedValue({
+      items: [
+        {
+          id: "runtime-event:4",
+          event_type: "run.failed",
+          status: "failed",
+          summary: "Run failed",
+          created_at: "2026-03-11T10:00:00Z",
+          actor_id: null,
+          agent_slug: "codex_local",
+          provider: "",
+          model_name: "",
+          artifact_id: "run-1",
+          artifact_type: "runtime_run",
+          artifact_title: "xyn-platform",
+          request_type: "runtime.run",
+          prompt: "",
+          workspace_id: "ws-1",
+          draft_id: null,
+          job_id: null,
+          error: "tests_failed",
+          source: "runtime_event",
+          conversation_message: {
+            message_type: "escalation",
+            title: "Run failed",
+            body: "Run failed: tests_failed",
+            reason: "tests_failed",
+            options: ["retry run", "show logs", "show artifacts"],
+            refs: { run_id: "run-1", work_item_id: "wi-1" },
+          },
+          trace: [],
+          structured_operation: { run_id: "run-1" },
+        },
+        {
+          id: "runtime-event:5",
+          event_type: "run.completed",
+          status: "succeeded",
+          summary: "Run completed · run-2",
+          created_at: "2026-03-11T10:01:00Z",
+          actor_id: null,
+          agent_slug: "codex_local",
+          provider: "",
+          model_name: "",
+          artifact_id: "run-2",
+          artifact_type: "runtime_run",
+          artifact_title: "xyn-platform",
+          request_type: "runtime.run",
+          prompt: "",
+          workspace_id: "ws-1",
+          draft_id: null,
+          job_id: null,
+          error: "",
+          source: "runtime_event",
+          conversation_message: {
+            message_type: "execution_summary",
+            title: "Run completed · run-2",
+            body: "Run completed · run-2",
+            options: [],
+            refs: { run_id: "run-2", work_item_id: "wi-2" },
+          },
+          trace: [],
+          structured_operation: { run_id: "run-2" },
+        },
+      ],
+    });
+
+    render(<AgentActivityDrawer open onClose={() => {}} workspaceId="ws-1" />);
+
+    await waitFor(() => expect(apiMocks.listAiActivity).toHaveBeenCalled());
+    expect(screen.getByText(/Run failed: tests_failed/)).toBeInTheDocument();
+    expect(screen.getByText(/retry run · show logs · show artifacts/i)).toBeInTheDocument();
+    expect(screen.getByText(/run run-2 · work item wi-2/i)).toBeInTheDocument();
+  });
 });

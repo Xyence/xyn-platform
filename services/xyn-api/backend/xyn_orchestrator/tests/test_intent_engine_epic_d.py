@@ -1,5 +1,6 @@
 import json
 import unittest
+import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -8,7 +9,7 @@ from django.test import RequestFactory
 from xyn_orchestrator import xyn_api as intent_api
 from xyn_orchestrator.intent_engine.contracts import DraftIntakeContractRegistry
 from xyn_orchestrator.intent_engine.engine import IntentResolutionEngine, ResolutionContext
-from xyn_orchestrator.intent_engine.types import ClarificationReason, IntentEnvelope, IntentFamily, IntentType
+from xyn_orchestrator.intent_engine.types import ClarificationReason, ConversationExecutionContext, IntentEnvelope, IntentFamily, IntentType
 
 
 class _FakeProvider:
@@ -167,6 +168,191 @@ class EpicDIntentEngineTests(unittest.TestCase):
         )
         self.assertEqual(envelope.intent_type, IntentType.RETRY_RUN.value)
         self.assertEnvelopeStable(envelope)
+
+    def test_continue_run_resolves(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            run_lookup=lambda query, workspace_id: [{"id": "run-1", "label": "Epic D run", "kind": "runtime_run", "run_id": "run-1"}],
+        )
+        envelope = engine.resolve_intent(
+            user_message="continue the run",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.CONTINUE_RUN.value)
+        self.assertEqual(envelope.resolved_subject.get("run_id"), "run-1")
+        self.assertEnvelopeStable(envelope)
+
+    def test_show_logs_resolves_to_run_supervision_status_view(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            run_lookup=lambda query, workspace_id: [{"id": "run-1", "label": "Epic D run", "kind": "runtime_run", "run_id": "run-1"}],
+        )
+        envelope = engine.resolve_intent(
+            user_message="show logs",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_STATUS.value)
+        self.assertEqual(envelope.action_payload.get("detail_view"), "logs")
+        self.assertEnvelopeStable(envelope)
+
+    def test_show_artifacts_resolves_to_run_supervision_status_view(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            run_lookup=lambda query, workspace_id: [{"id": "run-1", "label": "Epic D run", "kind": "runtime_run", "run_id": "run-1"}],
+        )
+        envelope = engine.resolve_intent(
+            user_message="show artifacts",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_STATUS.value)
+        self.assertEqual(envelope.action_payload.get("detail_view"), "artifacts")
+        self.assertEnvelopeStable(envelope)
+
+    def test_worker_mention_is_attached_to_dispatch_run_intent(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            work_item_lookup=lambda query, workspace_id: [
+                {"id": "task-1", "label": "Epic D", "kind": "dev_task", "work_item_id": "epic-d"}
+            ],
+        )
+        envelope = engine.resolve_intent(
+            user_message="continue Epic D implementation",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                worker_mention_token="@codex",
+                requested_worker_type="codex_local",
+                requested_worker_id="worker-1",
+                requested_worker_status="idle",
+                requested_worker_capabilities=["repo_modification", "test_execution"],
+            ),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.CREATE_AND_DISPATCH_RUN.value)
+        self.assertEqual(envelope.action_payload.get("worker_type"), "codex_local")
+        self.assertEqual(envelope.target_context.get("requested_worker_id"), "worker-1")
+        self.assertIn("worker mention resolved to codex_local", envelope.resolution_notes)
+
+    def test_worker_mention_error_blocks_resolution_safely(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="run the relevant tests",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                worker_mention_token="@unknown",
+                worker_mention_error="Unknown worker mention @unknown.",
+            ),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.UNSUPPORTED_INTENT.value)
+        self.assertEqual(envelope.action_payload.get("worker_mention_token"), "@unknown")
+        self.assertIn("Unknown worker mention", " ".join(envelope.resolution_notes))
+
+    def test_non_executable_email_like_string_does_not_parse_as_worker_mention(self):
+        parsed = intent_api._parse_worker_mention("email me at foo@codex.com")
+        self.assertEqual(parsed, {"clean_message": "email me at foo@codex.com"})
+
+    def test_worker_mention_with_parentheses_parses_safely(self):
+        with patch.object(
+            intent_api,
+            "_runtime_worker_directory",
+            return_value=[{"worker_id": "worker-1", "worker_type": "codex_local", "status": "idle", "capabilities": []}],
+        ):
+            parsed = intent_api._parse_worker_mention("(@codex) run tests")
+        self.assertEqual(parsed.get("worker_type"), "codex_local")
+        self.assertEqual(parsed.get("clean_message"), "run tests")
+
+    def test_unknown_worker_mention_degrades_safely(self):
+        parsed = intent_api._parse_worker_mention("@codexx run tests")
+        self.assertEqual(parsed.get("mention_token"), "@codexx")
+        self.assertIn("Unknown worker mention", str(parsed.get("error") or ""))
+
+    def test_multiple_mentions_use_only_the_leading_worker_token(self):
+        with patch.object(
+            intent_api,
+            "_runtime_worker_directory",
+            return_value=[{"worker_id": "worker-1", "worker_type": "codex_local", "status": "idle", "capabilities": []}],
+        ):
+            parsed = intent_api._parse_worker_mention("@codex run tests with @repo_inspector later")
+        self.assertEqual(parsed.get("worker_type"), "codex_local")
+        self.assertIn("@repo_inspector", str(parsed.get("clean_message") or ""))
+
+    def test_generic_continue_uses_conversation_context_work_item(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            work_item_lookup=lambda query, workspace_id: [
+                {"id": "task-1", "label": "Epic D", "kind": "dev_task", "work_item_id": "epic-d"}
+            ] if query in {"epic-d", ""} else [],
+        )
+        envelope = engine.resolve_intent(
+            user_message="continue the work",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(current_work_item_id="epic-d"),
+            ),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.CONTINUE_WORK_ITEM.value)
+        self.assertEqual(envelope.resolved_subject.get("work_item_id"), "epic-d")
+
+    def test_explicit_work_item_reference_beats_conversation_context(self):
+        captured = {}
+
+        def lookup(query, workspace_id):
+            captured["query"] = query
+            if query == "epic-x":
+                return [{"id": "task-2", "label": "Epic X", "kind": "dev_task", "work_item_id": "epic-x"}]
+            if query == "epic-d":
+                return [{"id": "task-1", "label": "Epic D", "kind": "dev_task", "work_item_id": "epic-d"}]
+            return []
+
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            work_item_lookup=lookup,
+        )
+        envelope = engine.resolve_intent(
+            user_message="continue work item epic-x",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(current_work_item_id="epic-d"),
+            ),
+        )
+        self.assertEqual(captured["query"], "epic-x")
+        self.assertEqual(envelope.resolved_subject.get("work_item_id"), "epic-x")
+        self.assertNotIn("context_work_item", " ".join(envelope.resolution_notes))
+
+    def test_explicit_run_reference_beats_conversation_context(self):
+        captured = {}
+
+        def run_lookup(query, workspace_id):
+            captured["query"] = query
+            if query == "123":
+                return [{"id": "run-123", "label": "run-123", "kind": "runtime_run", "run_id": "run-123"}]
+            if query == "run-456":
+                return [{"id": "run-456", "label": "run-456", "kind": "runtime_run", "run_id": "run-456"}]
+            return []
+
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            run_lookup=run_lookup,
+        )
+        envelope = engine.resolve_intent(
+            user_message="pause run 123",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(current_run_id="run-456"),
+            ),
+        )
+        self.assertEqual(captured["query"], "123")
+        self.assertEqual(envelope.intent_type, IntentType.PAUSE_OR_HOLD.value)
+        self.assertEqual(envelope.resolved_subject.get("run_id"), "run-123")
+        self.assertNotIn("context_run", " ".join(envelope.resolution_notes))
 
     def test_development_resolution_has_priority_over_app_operation(self):
         engine = IntentResolutionEngine(
@@ -457,10 +643,51 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
             response = intent_api.xyn_intent_resolve(request)
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(payload["status"], "DraftReady")
         self.assertEqual((payload.get("intent") or {}).get("intent_type"), IntentType.CREATE_AND_DISPATCH_RUN.value)
         self.assertEqual(((payload.get("prompt_interpretation") or {}).get("execution_mode")), "queued_run")
+        self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "dispatch_run")
+        self.assertEqual(((payload.get("draft_payload") or {}).get("__operation")), "execute_conversation_action")
         self.assertTrue(any(any(step.get("step") == "intent_resolved" for step in (call.get("trace") or [])) for call in logger_calls))
+
+    def test_resolve_route_parses_worker_mentions_through_epic_d(self):
+        captured = {}
+        envelope = IntentEnvelope(
+            intent_family=IntentFamily.DEVELOPMENT_WORK.value,
+            intent_type=IntentType.CREATE_AND_DISPATCH_RUN.value,
+            target_context={"workspace_id": "ws-1", "requested_worker_type": "codex_local"},
+            resolved_subject={"work_item_id": "epic-d"},
+            action_payload={"reference": "Epic D", "worker_type": "codex_local"},
+            policy={},
+            confidence=0.9,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["reused existing work item", "worker mention resolved to codex_local"],
+        )
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"@codex continue Epic D implementation","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        def _resolve_with_capture(**kwargs):
+            captured["context"] = kwargs.get("context")
+            return envelope
+
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_runtime_worker_directory", return_value=[{"worker_id": "worker-1", "worker_type": "codex_local", "status": "idle", "capabilities": ["repo_modification", "test_execution"]}]), \
+            patch.object(intent_api, "_intent_engine", return_value=SimpleNamespace(resolve_intent=_resolve_with_capture)), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(getattr(captured.get("context"), "requested_worker_type", ""), "codex_local")
+        self.assertEqual(getattr(captured.get("context"), "worker_mention_token", ""), "@codex")
+        self.assertEqual((payload.get("intent") or {}).get("action_payload", {}).get("worker_type"), "codex_local")
+        self.assertEqual(((payload.get("conversation_action") or {}).get("target_object") or {}).get("workspace_id"), "ws-1")
 
     def test_resolve_route_preserves_draft_ready_for_app_operation_and_attaches_intent(self):
         envelope = IntentEnvelope(
@@ -493,6 +720,7 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual(payload["status"], "DraftReady")
         self.assertEqual((payload.get("intent") or {}).get("intent_type"), IntentType.CREATE_RECORD.value)
         self.assertEqual(((payload.get("prompt_interpretation") or {}).get("target_entity") or {}).get("key"), "devices")
+        self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "execute_entity_operation")
         self.assertEqual(((payload.get("draft_payload") or {}).get("structured_operation") or {}).get("operation"), "create")
 
     def test_resolve_route_returns_machine_readable_unsupported_for_undeclared_entity(self):
@@ -556,9 +784,43 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
             response = intent_api.xyn_intent_resolve(request)
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(payload["status"], "DraftReady")
         self.assertEqual(((payload.get("prompt_interpretation") or {}).get("target_run") or {}).get("id"), "run-1")
         self.assertEqual((payload.get("prompt_interpretation") or {}).get("execution_mode"), "immediate_execution")
+        self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "show_status")
+        self.assertEqual(((payload.get("draft_payload") or {}).get("__operation")), "execute_conversation_action")
+
+    def test_resolve_route_returns_draft_ready_for_development_dispatch(self):
+        envelope = IntentEnvelope(
+            intent_family=IntentFamily.DEVELOPMENT_WORK.value,
+            intent_type=IntentType.CREATE_AND_DISPATCH_RUN.value,
+            target_context={"workspace_id": "ws-1"},
+            resolved_subject={"id": "task-1", "label": "Epic D", "work_item_id": "epic-d"},
+            action_payload={"reference": "Epic D", "work_item_action": "continue"},
+            policy={"run_tests": True},
+            confidence=0.91,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["reused existing work item"],
+        )
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"continue Epic D implementation","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_intent_engine", return_value=SimpleNamespace(resolve_intent=lambda **kwargs: envelope)), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "dispatch_run")
+        self.assertEqual(((payload.get("draft_payload") or {}).get("__operation")), "execute_conversation_action")
 
     def test_prompt_interpretation_mapper_builds_machine_readable_fields(self):
         interpretation = intent_api._prompt_interpretation_from_intent(
@@ -584,6 +846,142 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual(interpretation["execution_mode"], "immediate_execution")
         self.assertTrue(any(field.get("name") == "name" for field in interpretation["fields"]))
         self.assertTrue(any(span.get("kind") == "action" for span in interpretation["recognized_spans"]))
+
+    def test_conversation_action_mapper_builds_dispatch_run_for_development_intent(self):
+        action = intent_api._conversation_action_from_intent(
+            source_message_id="msg-1",
+            intent_payload=IntentEnvelope(
+                intent_family=IntentFamily.DEVELOPMENT_WORK.value,
+                intent_type=IntentType.CREATE_AND_DISPATCH_RUN.value,
+                target_context={"workspace_id": "ws-1"},
+                resolved_subject={"id": "task-1", "label": "Epic D", "work_item_id": "epic-d"},
+                action_payload={"reference": "Epic D", "work_item_action": "continue"},
+                policy={"run_tests": True},
+                confidence=0.93,
+                needs_clarification=False,
+                clarification_reason=None,
+                clarification_options=[],
+                resolution_notes=["reused existing work item"],
+            ).model_dump(mode="json"),
+            prompt_interpretation={
+                "intent_family": IntentFamily.DEVELOPMENT_WORK.value,
+                "intent_type": IntentType.CREATE_AND_DISPATCH_RUN.value,
+                "action": {"verb": "dispatch", "label": "Create and dispatch run"},
+                "fields": [],
+                "execution_mode": "queued_run",
+                "confidence": 0.93,
+                "needs_clarification": False,
+                "capability_state": {"state": "unknown"},
+                "clarification_options": [],
+                "resolution_notes": ["reused existing work item"],
+                "missing_fields": [],
+                "recognized_spans": [],
+                "target_work_item": {"id": "task-1", "label": "Epic D", "reference": "epic-d"},
+            },
+        )
+        self.assertEqual(action["action_type"], "dispatch_run")
+        self.assertEqual((action.get("target_object") or {}).get("kind"), "work_item")
+        self.assertEqual(action["execution_mode"], "queued_run")
+
+    def test_conversation_action_mapper_returns_none_for_clarification(self):
+        action = intent_api._conversation_action_from_intent(
+            source_message_id="msg-1",
+            intent_payload=IntentEnvelope(
+                intent_family=IntentFamily.RUN_SUPERVISION.value,
+                intent_type=IntentType.RETRY_RUN.value,
+                target_context={"workspace_id": "ws-1"},
+                resolved_subject={},
+                action_payload={"reference": "it"},
+                policy={},
+                confidence=0.4,
+                needs_clarification=True,
+                clarification_reason=ClarificationReason.AMBIGUOUS_TARGET.value,
+                clarification_options=[],
+                resolution_notes=["retry target is ambiguous"],
+            ).model_dump(mode="json"),
+            prompt_interpretation=None,
+        )
+        self.assertIsNone(action)
+
+    def test_prompt_activity_mapper_builds_execution_summary_message(self):
+        message = intent_api._conversation_message_from_prompt_activity(
+            {
+                "structured_operation": {"run_id": "run-1", "work_item_id": "epic-d"},
+                "prompt_interpretation": {"target_work_item": {"reference": "epic-d"}},
+                "conversation_action": {"action_type": "dispatch_run"},
+            },
+            status="succeeded",
+            summary="Queued runtime run run-1 for work item epic-d.",
+        )
+        self.assertEqual(message["message_type"], "execution_summary")
+        self.assertEqual((message.get("refs") or {}).get("run_id"), "run-1")
+
+    def test_prompt_activity_mapper_builds_escalation_message(self):
+        message = intent_api._conversation_message_from_prompt_activity(
+            {
+                "error": "clarification required",
+                "prompt_interpretation": {
+                    "needs_clarification": True,
+                    "clarification_options": [{"label": "Epic D", "action": "select"}],
+                },
+            },
+            status="failed",
+            summary="Clarification required.",
+        )
+        self.assertEqual(message["message_type"], "escalation")
+        self.assertIn("Epic D", message.get("options") or [])
+
+    def test_execute_conversation_action_without_run_returns_clarification(self):
+        response = intent_api._execute_conversation_action(
+            identity=SimpleNamespace(id="user-1"),
+            user=SimpleNamespace(id="user-1"),
+            workspace=SimpleNamespace(id="ws-1"),
+            action={
+                "action_type": "pause_run",
+                "target_object": {"kind": "run"},
+                "payload": {},
+            },
+            prompt="pause the run",
+            request_id="req-1",
+            intent_payload={"intent_type": "pause_or_hold"},
+            prompt_interpretation={"intent_type": "pause_or_hold"},
+        )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(payload["status"], "IntentClarificationRequired")
+
+    def test_execute_conversation_action_show_logs_filters_log_artifacts(self):
+        run_id = str(uuid.uuid4())
+        with patch.object(
+            intent_api,
+            "_fetch_runtime_run_detail_payload",
+            return_value={
+                "id": run_id,
+                "summary": "done",
+                "status": "completed",
+                "artifacts": [
+                    {"artifact_type": "log", "label": "build log"},
+                    {"artifact_type": "summary", "label": "summary"},
+                ],
+            },
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "show_status",
+                    "target_object": {"kind": "run", "id": run_id},
+                    "payload": {"action_payload": {"detail_view": "logs"}},
+                },
+                prompt="show logs",
+                request_id="req-1",
+                intent_payload={"intent_type": "show_status"},
+                prompt_interpretation={"intent_type": "show_status"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len((payload.get("result") or {}).get("logs") or []), 1)
 
     def test_resolve_route_preserves_legacy_app_builder_flow_without_epic_d_intent(self):
         request = self.factory.post(
@@ -658,4 +1056,93 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["status"], "UnsupportedIntent")
         self.assertNotIn("intent", payload)
+
+    def test_apply_route_executes_conversation_action(self):
+        workspace = SimpleNamespace(id="ws-1")
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": {
+                        "__operation": "execute_conversation_action",
+                        "workspace_id": "ws-1",
+                        "raw_prompt": "continue Epic D implementation",
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        request.user = SimpleNamespace(id="user-1")
+        envelope = IntentEnvelope(
+            intent_family=IntentFamily.DEVELOPMENT_WORK.value,
+            intent_type=IntentType.CREATE_AND_DISPATCH_RUN.value,
+            target_context={"workspace_id": "ws-1"},
+            resolved_subject={"id": "task-1", "label": "Epic D", "work_item_id": "epic-d"},
+            action_payload={"reference": "Epic D"},
+            policy={},
+            confidence=0.9,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["reused existing work item"],
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=workspace), \
+            patch.object(intent_api, "_parse_worker_mention", return_value={"clean_message": "continue Epic D implementation"}), \
+            patch.object(intent_api, "_conversation_execution_context", return_value=ConversationExecutionContext()), \
+            patch.object(intent_api, "_intent_engine", return_value=SimpleNamespace(resolve_intent=lambda **kwargs: envelope)), \
+            patch.object(intent_api, "_execute_conversation_action", return_value=intent_api.JsonResponse({"status": "DraftReady", "summary": "Queued runtime run run-1.", "operation_result": True}, status=200)), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_apply(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary"], "Queued runtime run run-1.")
         self.assertNotEqual(payload["status"], "IntentResolved")
+
+    def test_apply_route_returns_validation_error_when_run_control_fails(self):
+        workspace = SimpleNamespace(id="ws-1")
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": {
+                        "__operation": "execute_conversation_action",
+                        "workspace_id": "ws-1",
+                        "raw_prompt": "continue the run",
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        request.user = SimpleNamespace(id="user-1")
+        envelope = IntentEnvelope(
+            intent_family=IntentFamily.RUN_SUPERVISION.value,
+            intent_type=IntentType.CONTINUE_RUN.value,
+            target_context={"workspace_id": "ws-1"},
+            resolved_subject={"run_id": "run-1", "label": "run-1"},
+            action_payload={"reference": "run-1"},
+            policy={},
+            confidence=0.9,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["continue requested"],
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=workspace), \
+            patch.object(intent_api, "_parse_worker_mention", return_value={"clean_message": "continue the run"}), \
+            patch.object(intent_api, "_conversation_execution_context", return_value=ConversationExecutionContext(current_run_id="run-1")), \
+            patch.object(intent_api, "_intent_engine", return_value=SimpleNamespace(resolve_intent=lambda **kwargs: envelope)), \
+            patch.object(intent_api, "_execute_conversation_action", side_effect=RuntimeError("Run is not blocked")), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_apply(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(payload["status"], "ValidationError")
+        self.assertIn("Run is not blocked", " ".join(payload.get("validation_errors") or []))

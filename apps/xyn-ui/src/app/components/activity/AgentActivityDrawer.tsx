@@ -75,6 +75,19 @@ function interpretationSummary(item: AiActivityEntry): string {
   return parts.join(" · ");
 }
 
+function conversationRuntimeSummary(item: AiActivityEntry): string {
+  const message = item.conversation_message;
+  if (!message) return "";
+  const refs = message.refs || {};
+  const parts = [
+    refs.run_id ? `run ${refs.run_id}` : "",
+    refs.work_item_id ? `work item ${refs.work_item_id}` : "",
+    refs.step_key ? `step ${refs.step_key}` : "",
+    refs.artifact_type ? `artifact ${refs.artifact_type}` : "",
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
 export default function AgentActivityDrawer({ open, onClose, workspaceId, artifactId }: Props) {
   const [items, setItems] = useState<AiActivityEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -186,19 +199,38 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
           {error && <p className="muted">{error}</p>}
           {!loading && !error && items.length === 0 && <p className="muted">No agent activity yet.</p>}
           {items.map((item) => (
-            <article key={item.id} className="notification-item">
+            <article
+              key={item.id}
+              className={`notification-item ${
+                item.conversation_message?.message_type === "system_runtime"
+                  ? "system-runtime-message"
+                  : item.conversation_message?.message_type === "escalation"
+                    ? "system-runtime-message escalation-message"
+                    : item.conversation_message?.message_type === "execution_summary"
+                      ? "system-runtime-message execution-summary-message"
+                      : ""
+              }`}
+            >
               <span className={`notification-icon ${item.status === "failed" ? "error" : item.status === "succeeded" ? "success" : "info"}`}>
                 <Bot size={15} />
               </span>
               <div className="notification-text">
                 <strong>{item.summary || item.event_type}</strong>
                 {item.prompt ? <span className="muted small">{item.prompt}</span> : null}
+                {item.conversation_message?.body ? (
+                  <span className="muted small">{item.conversation_message.body}</span>
+                ) : null}
+                {item.conversation_message?.reason ? <span className="muted small">{item.conversation_message.reason}</span> : null}
+                {(item.conversation_message?.options || []).length ? (
+                  <span className="muted small">{(item.conversation_message?.options || []).join(" · ")}</span>
+                ) : null}
                 <span className="muted small">
                   {item.request_type || item.provider || item.model_name || item.agent_slug
                     ? [item.request_type, item.provider, item.model_name, item.agent_slug].filter(Boolean).join(" · ")
                     : "activity"}
                 </span>
                 {interpretationSummary(item) ? <span className="muted small">{interpretationSummary(item)}</span> : null}
+                {conversationRuntimeSummary(item) ? <span className="muted small">{conversationRuntimeSummary(item)}</span> : null}
                 <span className="muted small">
                   {item.artifact_type || "artifact"} {item.artifact_id || "—"} · {item.status} · {relativeTime(item.created_at)}
                   {item.draft_id ? ` · draft ${item.draft_id}` : ""}

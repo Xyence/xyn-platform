@@ -1983,6 +1983,8 @@ export type AiActivityEntry = {
   trace?: Array<Record<string, unknown>>;
   structured_operation?: Record<string, unknown>;
   prompt_interpretation?: PromptInterpretation;
+  conversation_action?: ConversationAction;
+  conversation_message?: ConversationMessage;
   source?: "audit_log" | "artifact_event" | "app_job" | "runtime_event";
 };
 
@@ -2759,6 +2761,51 @@ export type PromptInterpretation = {
   recognized_spans: PromptInterpretationSpan[];
 };
 
+export type ConversationActionTarget = {
+  kind: string;
+  id?: string | null;
+  key?: string | null;
+  label?: string | null;
+  reference?: string | null;
+  workspace_id?: string | null;
+};
+
+export type ConversationAction = {
+  action_type:
+    | "create_work_item"
+    | "continue_work_item"
+    | "dispatch_run"
+    | "execute_entity_operation"
+    | "continue_run"
+    | "retry_run"
+    | "summarize_run"
+    | "show_status"
+    | "pause_run"
+    | "request_review"
+    | string;
+  source_message_id: string;
+  intent_type: string;
+  target_object: ConversationActionTarget;
+  execution_mode: string;
+  payload: Record<string, unknown>;
+};
+
+export type ConversationMessage = {
+  message_type: "conversation_turn" | "system_runtime" | "escalation" | "execution_summary" | string;
+  title: string;
+  body?: string;
+  status?: string | null;
+  reason?: string | null;
+  options?: string[];
+  refs?: {
+    run_id?: string | null;
+    work_item_id?: string | null;
+    step_key?: string | null;
+    artifact_type?: string | null;
+    artifact_uri?: string | null;
+  };
+};
+
 export type XynIntentResolutionResult = {
   status: XynIntentStatus;
   action_type?: XynIntentActionType;
@@ -2767,6 +2814,7 @@ export type XynIntentResolutionResult = {
   summary: string;
   structured_operation?: Record<string, unknown>;
   prompt_interpretation?: PromptInterpretation;
+  conversation_action?: ConversationAction;
   operation_result?: boolean;
   missing_fields?: XynIntentMissingField[];
   options?: unknown[];

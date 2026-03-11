@@ -15,6 +15,7 @@ from .types import (
     ALLOWED_ARTIFACT_TYPES,
     ClarificationOption,
     ClarificationReason,
+    ConversationExecutionContext,
     IntentEnvelope,
     IntentFamily,
     IntentType,
@@ -27,6 +28,13 @@ class ResolutionContext:
     artifact: Optional[Artifact] = None
     workspace_id: str = ""
     user_identity_id: str = ""
+    worker_mention_token: str = ""
+    requested_worker_type: str = ""
+    requested_worker_id: str = ""
+    requested_worker_status: str = ""
+    requested_worker_capabilities: List[str] | None = None
+    worker_mention_error: str = ""
+    conversation_context: ConversationExecutionContext | None = None
 
 
 class IntentResolutionEngine:
@@ -48,6 +56,45 @@ class IntentResolutionEngine:
         self.run_lookup = run_lookup
         self.capability_manifest_lookup = capability_manifest_lookup
         self.app_operation_lookup = app_operation_lookup
+
+    @staticmethod
+    def _apply_worker_request(envelope: IntentEnvelope, context: ResolutionContext) -> IntentEnvelope:
+        worker_type = str(context.requested_worker_type or "").strip()
+        if not worker_type:
+            return envelope
+        target_context = dict(envelope.target_context or {})
+        action_payload = dict(envelope.action_payload or {})
+        resolved_subject = dict(envelope.resolved_subject or {})
+        resolution_notes = list(envelope.resolution_notes or [])
+        target_context.update(
+            {
+                "requested_worker_type": worker_type,
+                "requested_worker_id": str(context.requested_worker_id or "") or None,
+                "worker_mention_token": str(context.worker_mention_token or "") or None,
+            }
+        )
+        action_payload.update(
+            {
+                "worker_type": worker_type,
+                "worker_id": str(context.requested_worker_id or "") or None,
+                "worker_mention_token": str(context.worker_mention_token or "") or None,
+            }
+        )
+        if context.requested_worker_capabilities:
+            action_payload["worker_capabilities"] = list(context.requested_worker_capabilities)
+        if context.requested_worker_status:
+            resolved_subject.setdefault("worker_status", str(context.requested_worker_status or ""))
+        mention_note = f"worker mention resolved to {worker_type}"
+        if mention_note not in resolution_notes:
+            resolution_notes.append(mention_note)
+        return envelope.model_copy(
+            update={
+                "target_context": target_context,
+                "action_payload": action_payload,
+                "resolved_subject": resolved_subject,
+                "resolution_notes": resolution_notes,
+            }
+        )
 
     @staticmethod
     def _intent_envelope(
@@ -108,6 +155,9 @@ class IntentResolutionEngine:
     @classmethod
     def _extract_work_reference(cls, message: str) -> str:
         text = str(message or "").strip()
+        work_item_match = re.search(r"\b(?:work\s+item|item)\s+([A-Za-z0-9._:-]+)\b", text, flags=re.IGNORECASE)
+        if work_item_match:
+            return cls._clean_reference(work_item_match.group(1))
         epic_match = re.search(r"\b(Epic\s+[A-Z0-9-]+)\b", text, flags=re.IGNORECASE)
         if epic_match:
             return cls._clean_reference(epic_match.group(1))
@@ -120,6 +170,17 @@ class IntentResolutionEngine:
             if match:
                 return cls._clean_reference(match.group(1))
         return ""
+
+    @classmethod
+    def _extract_run_reference(cls, message: str) -> str:
+        text = str(message or "").strip()
+        match = re.search(r"\b(?:run|execution)\s+([A-Za-z0-9._:-]+)\b", text, flags=re.IGNORECASE)
+        if not match:
+            return ""
+        candidate = cls._clean_reference(match.group(1))
+        if candidate.lower() in {"the", "current", "last", "logs", "artifacts", "failed"}:
+            return ""
+        return candidate
 
     @staticmethod
     def _clarification_from_candidates(
@@ -161,11 +222,24 @@ class IntentResolutionEngine:
         workspace_id = str(context.workspace_id or "").strip()
         policy = self._extract_policy(text)
         work_reference = self._extract_work_reference(text)
+        run_reference = self._extract_run_reference(text)
         notes: List[str] = []
+        conversation_context = context.conversation_context or ConversationExecutionContext()
         if work_reference:
             notes.append(f"work_reference={work_reference}")
+        if run_reference:
+            notes.append(f"run_reference={run_reference}")
         work_candidates = self.work_item_lookup(work_reference or text, workspace_id) if callable(self.work_item_lookup) else []
-        run_candidates = self.run_lookup(work_reference or text, workspace_id) if callable(self.run_lookup) else []
+        run_candidates = self.run_lookup(run_reference or work_reference or text, workspace_id) if callable(self.run_lookup) else []
+
+        if not work_reference and not work_candidates and conversation_context.current_work_item_id:
+            work_candidates = self.work_item_lookup(str(conversation_context.current_work_item_id), workspace_id) if callable(self.work_item_lookup) else []
+            if work_candidates:
+                notes.append(f"context_work_item={conversation_context.current_work_item_id}")
+        if not run_reference and not work_reference and not run_candidates and conversation_context.current_run_id:
+            run_candidates = self.run_lookup(str(conversation_context.current_run_id), workspace_id) if callable(self.run_lookup) else []
+            if run_candidates:
+                notes.append(f"context_run={conversation_context.current_run_id}")
 
         if re.search(r"\b(request review|review this|await review|wait for review)\b", lowered) and not re.search(r"\b(pause|hold)\b", lowered):
             return self._intent_envelope(
@@ -173,7 +247,7 @@ class IntentResolutionEngine:
                 intent_type=IntentType.REQUEST_REVIEW,
                 target_context={"workspace_id": workspace_id},
                 resolved_subject=run_candidates[0] if len(run_candidates) == 1 else {},
-                action_payload={"reference": work_reference or text},
+                action_payload={"reference": run_reference or work_reference or text},
                 policy=policy,
                 confidence=0.9,
                 needs_clarification=len(run_candidates) > 1,
@@ -212,10 +286,43 @@ class IntentResolutionEngine:
                 intent_type=IntentType.PAUSE_OR_HOLD,
                 target_context={"workspace_id": workspace_id},
                 resolved_subject=run_candidates[0] if len(run_candidates) == 1 else {},
-                action_payload={"reference": work_reference or text},
+                action_payload={"reference": run_reference or work_reference or text},
                 policy=policy,
                 confidence=0.86,
                 resolution_notes=notes or ["pause requested"],
+            )
+
+        if re.search(r"\b(continue|resume)\b.*\b(?:run|execution)\b|\bcontinue the run\b", lowered):
+            if not run_candidates and re.search(r"\b(it|the run|execution)\b", lowered):
+                return self._intent_envelope(
+                    intent_family=IntentFamily.RUN_SUPERVISION,
+                    intent_type=IntentType.CONTINUE_RUN,
+                    target_context={"workspace_id": workspace_id},
+                    policy=policy,
+                    confidence=0.4,
+                    needs_clarification=True,
+                    clarification_reason=ClarificationReason.AMBIGUOUS_TARGET,
+                    clarification_options=[],
+                    resolution_notes=["continue target is ambiguous"],
+                )
+            if len(run_candidates) > 1:
+                return self._clarification_from_candidates(
+                    family=IntentFamily.RUN_SUPERVISION,
+                    intent_type=IntentType.CONTINUE_RUN,
+                    target_context={"workspace_id": workspace_id},
+                    policy=policy,
+                    candidates=run_candidates,
+                    notes=notes or ["multiple run candidates matched continue request"],
+                )
+            return self._intent_envelope(
+                intent_family=IntentFamily.RUN_SUPERVISION,
+                intent_type=IntentType.CONTINUE_RUN,
+                target_context={"workspace_id": workspace_id},
+                resolved_subject=run_candidates[0] if len(run_candidates) == 1 else {},
+                action_payload={"reference": run_reference or work_reference or text},
+                policy=policy,
+                confidence=0.86,
+                resolution_notes=notes or ["continue requested"],
             )
 
         if re.search(r"\b(retry|rerun)\b", lowered):
@@ -245,7 +352,7 @@ class IntentResolutionEngine:
                 intent_type=IntentType.RETRY_RUN,
                 target_context={"workspace_id": workspace_id},
                 resolved_subject=run_candidates[0] if len(run_candidates) == 1 else {},
-                action_payload={"reference": work_reference or text},
+                action_payload={"reference": run_reference or work_reference or text},
                 policy=policy,
                 confidence=0.88,
                 resolution_notes=notes or ["retry requested"],
@@ -272,6 +379,48 @@ class IntentResolutionEngine:
                 resolution_notes=notes or ["status requested"],
             )
 
+        if re.search(r"\b(show|open)\s+logs?\b", lowered):
+            if len(run_candidates) > 1:
+                return self._clarification_from_candidates(
+                    family=IntentFamily.RUN_SUPERVISION,
+                    intent_type=IntentType.SHOW_STATUS,
+                    target_context={"workspace_id": workspace_id},
+                    policy=policy,
+                    candidates=run_candidates,
+                    notes=notes or ["multiple run candidates matched logs request"],
+                )
+            return self._intent_envelope(
+                intent_family=IntentFamily.RUN_SUPERVISION,
+                intent_type=IntentType.SHOW_STATUS,
+                target_context={"workspace_id": workspace_id},
+                resolved_subject=run_candidates[0] if len(run_candidates) == 1 else {},
+                action_payload={"reference": run_reference or work_reference or text, "detail_view": "logs"},
+                policy=policy,
+                confidence=0.84,
+                resolution_notes=notes or ["logs requested"],
+            )
+
+        if re.search(r"\b(show|open)\s+artifacts?\b", lowered):
+            if len(run_candidates) > 1:
+                return self._clarification_from_candidates(
+                    family=IntentFamily.RUN_SUPERVISION,
+                    intent_type=IntentType.SHOW_STATUS,
+                    target_context={"workspace_id": workspace_id},
+                    policy=policy,
+                    candidates=run_candidates,
+                    notes=notes or ["multiple run candidates matched artifacts request"],
+                )
+            return self._intent_envelope(
+                intent_family=IntentFamily.RUN_SUPERVISION,
+                intent_type=IntentType.SHOW_STATUS,
+                target_context={"workspace_id": workspace_id},
+                resolved_subject=run_candidates[0] if len(run_candidates) == 1 else {},
+                action_payload={"reference": run_reference or work_reference or text, "detail_view": "artifacts"},
+                policy=policy,
+                confidence=0.84,
+                resolution_notes=notes or ["artifacts requested"],
+            )
+
         if re.search(r"\b(show me what failed|what failed|show failures?)\b", lowered):
             if len(run_candidates) > 1:
                 return self._clarification_from_candidates(
@@ -287,7 +436,7 @@ class IntentResolutionEngine:
                 intent_type=IntentType.SHOW_STATUS,
                 target_context={"workspace_id": workspace_id},
                 resolved_subject=run_candidates[0] if len(run_candidates) == 1 else {},
-                action_payload={"reference": work_reference or text, "status_filter": "failed"},
+                action_payload={"reference": run_reference or work_reference or text, "status_filter": "failed"},
                 policy=policy,
                 confidence=0.86,
                 resolution_notes=notes or ["failure status requested"],
@@ -308,7 +457,7 @@ class IntentResolutionEngine:
                 intent_type=IntentType.SUMMARIZE_RUN,
                 target_context={"workspace_id": workspace_id},
                 resolved_subject=run_candidates[0] if len(run_candidates) == 1 else {},
-                action_payload={"reference": work_reference or text},
+                action_payload={"reference": run_reference or work_reference or text},
                 policy=policy,
                 confidence=0.82,
                 resolution_notes=notes or ["summary requested"],
@@ -329,7 +478,7 @@ class IntentResolutionEngine:
                 intent_type=IntentType.INVESTIGATE_ISSUE,
                 target_context={"workspace_id": workspace_id},
                 resolved_subject=run_candidates[0] if len(run_candidates) == 1 else {},
-                action_payload={"reference": work_reference or text},
+                action_payload={"reference": run_reference or work_reference or text},
                 policy=policy,
                 confidence=0.88,
                 resolution_notes=notes or ["investigation requested"],
@@ -518,15 +667,28 @@ class IntentResolutionEngine:
         )
 
     def resolve_intent(self, *, user_message: str, context: ResolutionContext) -> IntentEnvelope:
+        if str(context.worker_mention_error or "").strip():
+            return self._intent_envelope(
+                intent_family=IntentFamily.DEVELOPMENT_WORK,
+                intent_type=IntentType.UNSUPPORTED_INTENT,
+                target_context={"workspace_id": str(context.workspace_id or "").strip()},
+                action_payload={
+                    "worker_mention_token": str(context.worker_mention_token or "").strip(),
+                    "error": str(context.worker_mention_error or "").strip(),
+                },
+                confidence=0.0,
+                resolution_notes=[str(context.worker_mention_error or "").strip()],
+            )
         development = self._resolve_development_intent(message=user_message, context=context)
         app_operation = self._resolve_app_operation_intent(message=user_message, context=context)
-        return development or app_operation or self._intent_envelope(
+        envelope = development or app_operation or self._intent_envelope(
             intent_family=IntentFamily.DEVELOPMENT_WORK,
             intent_type=IntentType.UNSUPPORTED_INTENT,
             target_context={"workspace_id": str(context.workspace_id or "").strip()},
             confidence=0.0,
             resolution_notes=["no Epic D resolver matched the message"],
         )
+        return self._apply_worker_request(envelope, context)
 
     def _base_result(self, *, action_type: str, artifact_type: Optional[str], request_id: str, confidence: float, llm_model: str) -> ResolutionResult:
         return {

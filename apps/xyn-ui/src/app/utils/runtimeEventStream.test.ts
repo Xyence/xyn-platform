@@ -140,4 +140,89 @@ describe("runtimeEventStream helpers", () => {
     expect(deduped).toHaveLength(2);
     expect(deduped[0].summary).toBe("Run completed · run-1");
   });
+
+  it("maps failed and completed runtime events to escalation and execution summary messages", () => {
+    const failed = runtimeEventToActivityEntry({
+      event_id: "evt-fail",
+      event_type: "run.failed",
+      created_at: "2026-03-11T10:00:00Z",
+      workspace_id: "ws-1",
+      run_id: "run-1",
+      work_item_id: "wi-1",
+      worker_type: "codex_local",
+      status: "failed",
+      title: "Run failed",
+      message: "Run failed: tests_failed",
+      payload: { failure_reason: "tests_failed" },
+    });
+    const completed = runtimeEventToActivityEntry({
+      event_id: "evt-complete",
+      event_type: "run.completed",
+      created_at: "2026-03-11T10:01:00Z",
+      workspace_id: "ws-1",
+      run_id: "run-1",
+      work_item_id: "wi-1",
+      worker_type: "codex_local",
+      status: "succeeded",
+      title: "Run completed · run-1",
+      message: "Run completed · run-1",
+      payload: {},
+    });
+
+    expect(failed.conversation_message?.message_type).toBe("escalation");
+    expect(failed.conversation_message?.reason).toBe("tests_failed");
+    expect(failed.conversation_message?.options).toContain("retry run");
+    expect(completed.conversation_message?.message_type).toBe("execution_summary");
+  });
+
+  it("does not let stale non-terminal events overwrite terminal run state", () => {
+    const runs: RuntimeRunSummary[] = [
+      {
+        id: "run-1",
+        run_id: "run-1",
+        work_item_id: "wi-1",
+        worker_type: "codex_local",
+        worker_id: "worker-1",
+        status: "succeeded",
+        summary: "Run completed",
+        created_at: "2026-03-11T10:00:00Z",
+        queued_at: null,
+        started_at: "2026-03-11T10:00:05Z",
+        completed_at: "2026-03-11T10:02:00Z",
+        heartbeat_at: "2026-03-11T10:01:59Z",
+        elapsed_time_seconds: 115,
+        heartbeat_freshness: "fresh",
+        target: { repo: "xyn", branch: "develop", workspace_id: "ws-1", artifact_id: null },
+      },
+    ];
+    const staleEvent: RuntimeStreamEvent = {
+      event_id: "evt-late",
+      event_type: "run.step.completed",
+      created_at: "2026-03-11T10:01:30Z",
+      workspace_id: "ws-1",
+      run_id: "run-1",
+      work_item_id: "wi-1",
+      worker_type: "codex_local",
+      status: "running",
+      title: "Run step completed",
+      message: "Run step completed",
+      payload: { step_id: "step-1", step_key: "execute_codex", label: "Execute codex", sequence_no: 3, status: "completed" },
+    };
+
+    const nextRuns = applyRuntimeEventToRuns(runs, staleEvent);
+    expect(nextRuns[0].status).toBe("succeeded");
+
+    const detail: RuntimeRunDetail = {
+      ...runs[0],
+      failure_reason: null,
+      escalation_reason: null,
+      prompt: { title: "Run", body: "Run" },
+      policy: { auto_continue: true, max_retries: 1, require_human_review_on_failure: false, timeout_seconds: 1800 },
+      steps: [],
+      artifacts: [],
+    };
+    const nextDetail = applyRuntimeEventToRunDetail(detail, staleEvent);
+    expect(nextDetail.status).toBe("succeeded");
+    expect(nextDetail.steps).toHaveLength(0);
+  });
 });

@@ -78,6 +78,7 @@ class IntentType(str, Enum):
     INVESTIGATE_ISSUE = "investigate_issue"
     SUMMARIZE_RUN = "summarize_run"
     SHOW_STATUS = "show_status"
+    CONTINUE_RUN = "continue_run"
     RETRY_RUN = "retry_run"
     PAUSE_OR_HOLD = "pause_or_hold"
     REQUEST_REVIEW = "request_review"
@@ -185,3 +186,47 @@ class PromptInterpretation(BaseModel):
     resolution_notes: List[str] = Field(default_factory=list)
     missing_fields: List[str] = Field(default_factory=list)
     recognized_spans: List[PromptInterpretationSpan] = Field(default_factory=list)
+
+
+class ConversationActionType(str, Enum):
+    CREATE_WORK_ITEM = "create_work_item"
+    CONTINUE_WORK_ITEM = "continue_work_item"
+    DISPATCH_RUN = "dispatch_run"
+    EXECUTE_ENTITY_OPERATION = "execute_entity_operation"
+    CONTINUE_RUN = "continue_run"
+    RETRY_RUN = "retry_run"
+    SUMMARIZE_RUN = "summarize_run"
+    SHOW_STATUS = "show_status"
+    PAUSE_RUN = "pause_run"
+    REQUEST_REVIEW = "request_review"
+
+
+class ConversationActionTarget(BaseModel):
+    kind: str
+    id: Optional[str] = None
+    key: Optional[str] = None
+    label: Optional[str] = None
+    reference: Optional[str] = None
+    workspace_id: Optional[str] = None
+
+
+class ConversationAction(BaseModel):
+    action_type: str
+    source_message_id: str
+    intent_type: str
+    target_object: ConversationActionTarget
+    execution_mode: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ConversationContextEntity(BaseModel):
+    entity_key: Optional[str] = None
+    reference: Optional[str] = None
+    label: Optional[str] = None
+
+
+class ConversationExecutionContext(BaseModel):
+    current_work_item_id: Optional[str] = None
+    current_run_id: Optional[str] = None
+    active_epic: Optional[str] = None
+    recent_entities: List[ConversationContextEntity] = Field(default_factory=list)

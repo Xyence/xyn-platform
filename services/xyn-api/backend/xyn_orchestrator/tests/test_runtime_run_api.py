@@ -164,6 +164,8 @@ class RuntimeRunApiTests(SimpleTestCase):
 
         self.assertEqual(completed["status"], "succeeded")
         self.assertIn("Run completed", completed["summary"])
+        self.assertEqual((completed.get("conversation_message") or {}).get("message_type"), "execution_summary")
+        self.assertEqual((((completed.get("conversation_message") or {}).get("refs") or {}).get("run_id")), "run-1")
         self.assertEqual(failed["status"], "failed")
         self.assertIn("worker_unresponsive", failed["summary"])
         self.assertEqual(blocked["status"], "failed")

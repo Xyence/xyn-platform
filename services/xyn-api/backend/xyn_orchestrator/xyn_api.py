@@ -221,7 +221,13 @@ from .intent_engine.patch_service import to_internal_format as intent_to_interna
 from .intent_engine.telemetry import increment as intent_telemetry_increment
 from .intent_engine.types import (
     ClarificationReason,
+    ConversationAction,
+    ConversationContextEntity,
+    ConversationExecutionContext,
+    ConversationActionTarget,
+    ConversationActionType,
     IntentEnvelope,
+    IntentType,
     PromptInterpretation,
     PromptInterpretationAction,
     PromptInterpretationCapabilityState,
@@ -347,7 +353,9 @@ def _intent_contract_registry() -> DraftIntakeContractRegistry:
 def _intent_dev_task_candidates(identity: UserIdentity, query: str, workspace_id: str) -> List[Dict[str, Any]]:
     search = str(query or "").strip()
     qs = DevTask.objects.all().order_by("-updated_at", "-created_at")
-    if workspace_id:
+    dev_task_fields = {field.name for field in DevTask._meta.get_fields()}
+    has_runtime_workspace = "runtime_workspace_id" in dev_task_fields
+    if workspace_id and has_runtime_workspace:
         qs = qs.filter(models.Q(runtime_workspace_id=workspace_id) | models.Q(runtime_workspace_id__isnull=True))
     lowered = search.lower()
     if search:
@@ -370,7 +378,7 @@ def _intent_dev_task_candidates(identity: UserIdentity, query: str, workspace_id
                 "task_type": task.task_type,
                 "work_item_id": task.work_item_id,
                 "runtime_run_id": str(task.runtime_run_id) if task.runtime_run_id else None,
-                "workspace_id": str(task.runtime_workspace_id) if task.runtime_workspace_id else "",
+                "workspace_id": str(getattr(task, "runtime_workspace_id", "") or ""),
             }
         )
     return rows
@@ -378,8 +386,14 @@ def _intent_dev_task_candidates(identity: UserIdentity, query: str, workspace_id
 
 def _intent_runtime_run_candidates(identity: UserIdentity, query: str, workspace_id: str) -> List[Dict[str, Any]]:
     search = str(query or "").strip()
-    qs = DevTask.objects.exclude(runtime_run_id__isnull=True).order_by("-updated_at", "-created_at")
-    if workspace_id:
+    dev_task_fields = {field.name for field in DevTask._meta.get_fields()}
+    has_runtime_workspace = "runtime_workspace_id" in dev_task_fields
+    has_runtime_run = "runtime_run_id" in dev_task_fields
+    if has_runtime_run:
+        qs = DevTask.objects.exclude(runtime_run_id__isnull=True).order_by("-updated_at", "-created_at")
+    else:
+        qs = DevTask.objects.none()
+    if workspace_id and has_runtime_workspace:
         qs = qs.filter(runtime_workspace_id=workspace_id)
     lowered = search.lower()
     if search and search not in {"it", "the run", "the work"}:
@@ -400,10 +414,62 @@ def _intent_runtime_run_candidates(identity: UserIdentity, query: str, workspace
                 "status": task.status,
                 "run_id": str(task.runtime_run_id),
                 "work_item_id": task.work_item_id,
-                "workspace_id": str(task.runtime_workspace_id) if task.runtime_workspace_id else "",
+                "workspace_id": str(getattr(task, "runtime_workspace_id", "") or ""),
             }
         )
     return rows
+
+
+def _conversation_execution_context(identity: UserIdentity, workspace_id: str) -> ConversationExecutionContext:
+    current_work_item_id: Optional[str] = None
+    current_run_id: Optional[str] = None
+    active_epic: Optional[str] = None
+    recent_entities: List[ConversationContextEntity] = []
+
+    work_candidates = _intent_dev_task_candidates(identity, "", workspace_id)
+    if work_candidates:
+        current_work_item_id = str(work_candidates[0].get("work_item_id") or work_candidates[0].get("id") or "") or None
+        title = str(work_candidates[0].get("label") or "")
+        epic_match = re.search(r"\b(Epic\s+[A-Z0-9-]+)\b", title, flags=re.IGNORECASE)
+        if epic_match:
+            active_epic = str(epic_match.group(1) or "").strip()
+
+    run_candidates = _intent_runtime_run_candidates(identity, "", workspace_id)
+    if run_candidates:
+        current_run_id = str(run_candidates[0].get("run_id") or run_candidates[0].get("id") or "") or None
+
+    audit_qs = (
+        AuditLog.objects.filter(message="prompt_submission")
+        .order_by("-created_at")[:25]
+    )
+    for entry in audit_qs:
+        meta = entry.metadata_json if isinstance(entry.metadata_json, dict) else {}
+        if str(meta.get("workspace_id") or "") != workspace_id:
+            continue
+        interpretation = meta.get("prompt_interpretation") if isinstance(meta.get("prompt_interpretation"), dict) else {}
+        entity = interpretation.get("target_entity") if isinstance(interpretation.get("target_entity"), dict) else {}
+        record = interpretation.get("target_record") if isinstance(interpretation.get("target_record"), dict) else {}
+        entity_key = str(entity.get("key") or "").strip()
+        reference = str(record.get("reference") or "").strip()
+        label = str(record.get("label") or entity.get("label") or "").strip()
+        if not entity_key and not reference and not label:
+            continue
+        row = ConversationContextEntity(
+            entity_key=entity_key or None,
+            reference=reference or None,
+            label=label or None,
+        )
+        if row not in recent_entities:
+            recent_entities.append(row)
+        if len(recent_entities) >= 5:
+            break
+
+    return ConversationExecutionContext(
+        current_work_item_id=current_work_item_id,
+        current_run_id=current_run_id,
+        active_epic=active_epic,
+        recent_entities=recent_entities,
+    )
 
 
 def _intent_explicit_entity_reference(message: str) -> str:
@@ -488,6 +554,76 @@ def _intent_generated_app_operation_lookup(
             "resolution_notes": [f"{explicit_entity} is not declared in the installed capability manifest"],
         }
     return None
+
+
+WORKER_MENTION_ALIASES: Dict[str, Dict[str, str]] = {
+    "codex": {"worker_type": "codex_local", "label": "Codex local"},
+    "test_runner": {"worker_type": "codex_local", "label": "Test runner"},
+    "repo_inspector": {"worker_type": "codex_local", "label": "Repo inspector"},
+}
+
+
+def _runtime_worker_directory() -> List[Dict[str, Any]]:
+    try:
+        response = _seed_api_request(method="GET", path="/api/v1/ops/workers", timeout=20)
+    except requests.RequestException:
+        return []
+    if response.status_code >= 400:
+        return []
+    try:
+        body = response.json() if response.content else {}
+    except ValueError:
+        return []
+    workers = body.get("workers") if isinstance(body, dict) else []
+    return [item for item in workers if isinstance(item, dict)]
+
+
+def _parse_worker_mention(message: str) -> Dict[str, Any]:
+    text = str(message or "")
+    match = re.match(r"^\s*(?:[\(\[]\s*)?@([a-zA-Z0-9_-]+)\b(?:\s*[\)\]])?", text)
+    if not match:
+        return {"clean_message": text}
+    alias = str(match.group(1) or "").strip().lower()
+    clean_message = text[: match.start()] + text[match.end():]
+    clean_message = re.sub(r"^\s*[:,-]?\s*", "", clean_message).strip()
+    alias_record = WORKER_MENTION_ALIASES.get(alias)
+    if alias_record is None:
+        return {
+            "mention_token": f"@{alias}",
+            "clean_message": clean_message,
+            "error": f"Unknown worker mention @{alias}.",
+        }
+    worker_type = str(alias_record.get("worker_type") or "").strip()
+    workers = [item for item in _runtime_worker_directory() if str(item.get("worker_type") or "").strip() == worker_type]
+    preferred = next((item for item in workers if str(item.get("status") or "").strip().lower() in {"idle", "busy"}), None)
+    fallback = workers[0] if workers else None
+    selected = preferred or fallback
+    if not selected:
+        return {
+            "mention_token": f"@{alias}",
+            "clean_message": clean_message,
+            "worker_type": worker_type,
+            "error": f"Worker @{alias} is not currently registered.",
+        }
+    status = str(selected.get("status") or "").strip().lower()
+    if status not in {"idle", "busy"}:
+        return {
+            "mention_token": f"@{alias}",
+            "clean_message": clean_message,
+            "worker_type": worker_type,
+            "worker_id": str(selected.get("worker_id") or "") or None,
+            "status": status or None,
+            "capabilities": selected.get("capabilities") if isinstance(selected.get("capabilities"), list) else [],
+            "error": f"Worker @{alias} is currently {status or 'unavailable'}.",
+        }
+    return {
+        "mention_token": f"@{alias}",
+        "clean_message": clean_message,
+        "worker_type": worker_type,
+        "worker_id": str(selected.get("worker_id") or "") or None,
+        "status": status,
+        "capabilities": selected.get("capabilities") if isinstance(selected.get("capabilities"), list) else [],
+    }
 
 
 def _intent_engine(identity: Optional[UserIdentity] = None, workspace: Optional[Workspace] = None) -> IntentResolutionEngine:
@@ -596,6 +732,7 @@ def _prompt_interpretation_from_intent(
         "investigate_issue": ("investigate", "Investigate issue"),
         "summarize_run": ("summarize", "Summarize run"),
         "show_status": ("show", "Show status"),
+        "continue_run": ("continue", "Continue run"),
         "retry_run": ("retry", "Retry run"),
         "pause_or_hold": ("pause", "Pause or hold"),
         "request_review": ("review", "Request review"),
@@ -657,7 +794,7 @@ def _prompt_interpretation_from_intent(
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
     elif intent.intent_type == "continue_work_item":
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CONTINUATION.value
-    elif intent.intent_type in {"create_and_dispatch_run", "run_validation", "investigate_issue", "retry_run"}:
+    elif intent.intent_type in {"create_and_dispatch_run", "run_validation", "investigate_issue", "retry_run", "continue_run"}:
         execution_mode = PromptInterpretationExecutionMode.QUEUED_RUN.value
     elif intent.intent_type in {"unsupported_declared_entity", "unsupported_intent"}:
         execution_mode = PromptInterpretationExecutionMode.BLOCKED.value
@@ -740,6 +877,116 @@ def _prompt_interpretation_from_intent(
     return interpretation.model_dump(mode="json")
 
 
+def _conversation_action_from_intent(
+    *,
+    source_message_id: str,
+    intent_payload: Dict[str, Any],
+    prompt_interpretation: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    if not source_message_id:
+        return None
+    intent = IntentEnvelope.model_validate(intent_payload if isinstance(intent_payload, dict) else {})
+    interpretation = (
+        PromptInterpretation.model_validate(prompt_interpretation)
+        if isinstance(prompt_interpretation, dict) and prompt_interpretation
+        else None
+    )
+    if intent.needs_clarification or str(intent.intent_type or "") in {"unsupported_intent", "unsupported_declared_entity"}:
+        return None
+
+    action_payload = intent.action_payload if isinstance(intent.action_payload, dict) else {}
+    resolved_subject = intent.resolved_subject if isinstance(intent.resolved_subject, dict) else {}
+    target_context = intent.target_context if isinstance(intent.target_context, dict) else {}
+
+    action_type: Optional[str] = None
+    target = ConversationActionTarget(kind="unknown")
+    if intent.intent_family == "app_operation":
+        action_type = ConversationActionType.EXECUTE_ENTITY_OPERATION.value
+        target = ConversationActionTarget(
+            kind="entity_operation",
+            id=str(resolved_subject.get("id") or "") or None,
+            key=str(resolved_subject.get("entity_key") or action_payload.get("entity_key") or "") or None,
+            label=(
+                str(
+                    ((prompt_interpretation or {}).get("target_entity") or {}).get("label")
+                    or resolved_subject.get("entity_key")
+                    or action_payload.get("entity_key")
+                    or ""
+                )
+                or None
+            ),
+            reference=str(action_payload.get("target_reference") or resolved_subject.get("reference") or "") or None,
+            workspace_id=str(target_context.get("workspace_id") or "") or None,
+        )
+    elif intent.intent_family == "development_work":
+        if intent.intent_type in {IntentType.CREATE_WORK_ITEM.value, IntentType.CONTINUE_WORK_ITEM.value}:
+            action_type = (
+                ConversationActionType.CREATE_WORK_ITEM.value
+                if intent.intent_type == IntentType.CREATE_WORK_ITEM.value
+                else ConversationActionType.CONTINUE_WORK_ITEM.value
+            )
+            target = ConversationActionTarget(
+                kind="work_item",
+                id=str(resolved_subject.get("id") or "") or None,
+                label=str(resolved_subject.get("label") or resolved_subject.get("work_item_id") or "") or None,
+                reference=str(resolved_subject.get("work_item_id") or action_payload.get("reference") or "") or None,
+                workspace_id=str(target_context.get("workspace_id") or "") or None,
+            )
+        elif intent.intent_type in {
+            IntentType.CREATE_AND_DISPATCH_RUN.value,
+            IntentType.RUN_VALIDATION.value,
+            IntentType.INVESTIGATE_ISSUE.value,
+        }:
+            action_type = ConversationActionType.DISPATCH_RUN.value
+            target = ConversationActionTarget(
+                kind="work_item",
+                id=str(resolved_subject.get("id") or "") or None,
+                label=str(resolved_subject.get("label") or resolved_subject.get("work_item_id") or "") or None,
+                reference=str(resolved_subject.get("work_item_id") or action_payload.get("reference") or "") or None,
+                workspace_id=str(target_context.get("workspace_id") or "") or None,
+            )
+    elif intent.intent_family == "run_supervision":
+        action_type_map = {
+            IntentType.RETRY_RUN.value: ConversationActionType.RETRY_RUN.value,
+            IntentType.SUMMARIZE_RUN.value: ConversationActionType.SUMMARIZE_RUN.value,
+            IntentType.SHOW_STATUS.value: ConversationActionType.SHOW_STATUS.value,
+            IntentType.CONTINUE_RUN.value: ConversationActionType.CONTINUE_RUN.value,
+            IntentType.PAUSE_OR_HOLD.value: ConversationActionType.PAUSE_RUN.value,
+            IntentType.REQUEST_REVIEW.value: ConversationActionType.REQUEST_REVIEW.value,
+        }
+        action_type = action_type_map.get(intent.intent_type)
+        target = ConversationActionTarget(
+            kind="run",
+            id=str(resolved_subject.get("run_id") or resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or resolved_subject.get("run_id") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            workspace_id=str(target_context.get("workspace_id") or "") or None,
+        )
+
+    if not action_type:
+        return None
+
+    action = ConversationAction(
+        action_type=action_type,
+        source_message_id=source_message_id,
+        intent_type=intent.intent_type,
+        target_object=target,
+        execution_mode=(
+            interpretation.execution_mode
+            if interpretation is not None
+            else PromptInterpretationExecutionMode.BLOCKED.value
+        ),
+        payload={
+            "intent_family": intent.intent_family,
+            "target_context": target_context,
+            "resolved_subject": resolved_subject,
+            "action_payload": action_payload,
+            "policy": intent.policy if isinstance(intent.policy, dict) else {},
+        },
+    )
+    return action.model_dump(mode="json")
+
+
 def _audit_intent_event(
     *,
     message: str,
@@ -776,6 +1023,7 @@ def _log_prompt_activity(
     trace: Optional[List[Dict[str, Any]]] = None,
     structured_operation: Optional[Dict[str, Any]] = None,
     prompt_interpretation: Optional[Dict[str, Any]] = None,
+    conversation_action: Optional[Dict[str, Any]] = None,
 ) -> None:
     # Epic D trace coverage is asserted at this logging seam. End-to-end persistence
     # through the full activity-store test path remains separately blocked by the
@@ -796,6 +1044,7 @@ def _log_prompt_activity(
             "trace": [item for item in (trace or []) if isinstance(item, dict)],
             "structured_operation": structured_operation if isinstance(structured_operation, dict) else {},
             "prompt_interpretation": prompt_interpretation if isinstance(prompt_interpretation, dict) else {},
+            "conversation_action": conversation_action if isinstance(conversation_action, dict) else {},
         },
     )
 
@@ -16615,6 +16864,16 @@ def _runtime_run_detail_payload(
 def _runtime_activity_item_from_event(event_payload: Dict[str, Any]) -> Dict[str, Any]:
     envelope = _runtime_stream_envelope_from_event(event_payload)
     payload = envelope["payload"] if isinstance(envelope.get("payload"), dict) else {}
+    message_type = "system_runtime"
+    options: List[str] = []
+    if envelope["event_type"] == "run.blocked":
+        message_type = "escalation"
+        options = ["continue run", "summarize run", "show artifacts"]
+    elif envelope["event_type"] == "run.failed":
+        message_type = "escalation"
+        options = ["retry run", "show logs", "show artifacts"]
+    elif envelope["event_type"] == "run.completed":
+        message_type = "execution_summary"
     return {
         "id": f"runtime-event:{envelope['event_id']}",
         "event_type": envelope["event_type"],
@@ -16641,7 +16900,64 @@ def _runtime_activity_item_from_event(event_payload: Dict[str, Any]) -> Dict[str
             "step_key": payload.get("step_key"),
             "artifact_type": payload.get("artifact_type"),
         },
+        "conversation_message": {
+            "message_type": message_type,
+            "title": envelope["title"],
+            "body": envelope["message"],
+            "status": envelope.get("status"),
+            "reason": str(payload.get("failure_reason") or payload.get("escalation_reason") or "") or None,
+            "options": options,
+            "refs": {
+                "run_id": envelope.get("run_id"),
+                "work_item_id": envelope.get("work_item_id"),
+                "step_key": payload.get("step_key"),
+                "artifact_type": payload.get("artifact_type"),
+                "artifact_uri": payload.get("uri"),
+            },
+        },
         "source": "runtime_event",
+    }
+
+
+def _conversation_message_from_prompt_activity(meta: Dict[str, Any], *, status: str, summary: str) -> Optional[Dict[str, Any]]:
+    interpretation = meta.get("prompt_interpretation") if isinstance(meta.get("prompt_interpretation"), dict) else {}
+    action = meta.get("conversation_action") if isinstance(meta.get("conversation_action"), dict) else {}
+    if not interpretation and not action:
+        return None
+    refs = {
+        "run_id": (
+            str(((meta.get("structured_operation") or {}) if isinstance(meta.get("structured_operation"), dict) else {}).get("run_id") or "")
+            or str((((interpretation.get("target_run") or {}) if isinstance(interpretation.get("target_run"), dict) else {}).get("id") or ""))
+            or None
+        ),
+        "work_item_id": (
+            str(((meta.get("structured_operation") or {}) if isinstance(meta.get("structured_operation"), dict) else {}).get("work_item_id") or "")
+            or str((((interpretation.get("target_work_item") or {}) if isinstance(interpretation.get("target_work_item"), dict) else {}).get("reference") or ""))
+            or None
+        ),
+    }
+    if str(status or "").strip().lower() == "failed":
+        return {
+            "message_type": "escalation",
+            "title": summary or "Execution blocked",
+            "body": str(meta.get("error") or summary or ""),
+            "status": "failed",
+            "reason": str(meta.get("error") or "") or None,
+            "options": (
+                [str(option.get("label") or option.get("action") or "").strip() for option in interpretation.get("clarification_options", []) if isinstance(option, dict)]
+                if interpretation.get("needs_clarification")
+                else ["retry", "show logs", "show artifacts"] if refs.get("run_id") else ["modify prompt", "retry"]
+            ),
+            "refs": refs,
+        }
+    return {
+        "message_type": "execution_summary",
+        "title": summary or "Execution complete",
+        "body": summary or "",
+        "status": status,
+        "reason": None,
+        "options": [],
+        "refs": refs,
     }
 
 
@@ -19166,13 +19482,26 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         return JsonResponse(response_payload)
 
     operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
+    worker_mention = _parse_worker_mention(message)
+    resolved_message = str(worker_mention.get("clean_message") or message).strip() or message
     epic_d_engine = _intent_engine(identity=identity, workspace=operator_workspace)
     epic_d_intent = epic_d_engine.resolve_intent(
-        user_message=message,
+        user_message=resolved_message,
         context=ResolutionContext(
             artifact=None,
             workspace_id=str(operator_workspace.id) if operator_workspace else context_workspace_id,
             user_identity_id=str(identity.id),
+            worker_mention_token=str(worker_mention.get("mention_token") or ""),
+            requested_worker_type=str(worker_mention.get("worker_type") or ""),
+            requested_worker_id=str(worker_mention.get("worker_id") or ""),
+            requested_worker_status=str(worker_mention.get("status") or ""),
+            requested_worker_capabilities=worker_mention.get("capabilities") if isinstance(worker_mention.get("capabilities"), list) else [],
+            worker_mention_error=str(worker_mention.get("error") or ""),
+            conversation_context=(
+                _conversation_execution_context(identity, str(operator_workspace.id))
+                if operator_workspace
+                else None
+            ),
         ),
     )
     epic_d_payload = epic_d_intent.model_dump(mode="json")
@@ -19181,6 +19510,11 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         intent_payload=epic_d_payload,
         resolution_status="IntentClarificationRequired" if epic_d_intent.needs_clarification else "IntentResolved",
         summary=str((epic_d_intent.resolution_notes or [""])[0] or ""),
+    )
+    conversation_action = _conversation_action_from_intent(
+        source_message_id=request_id,
+        intent_payload=epic_d_payload,
+        prompt_interpretation=prompt_interpretation,
     )
     epic_d_trace = [{"step": "intent_resolved", "intent": epic_d_payload}]
     # Epic D is authoritative only for the supported v1 families:
@@ -19200,6 +19534,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                     "summary": "Workspace context is required for generated app operations.",
                     "intent": epic_d_payload,
                     "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": conversation_action,
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
                 if not preview_mode:
@@ -19223,6 +19558,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                         trace=epic_d_trace,
                         structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                         prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
                     )
                 return JsonResponse(response_payload, status=400)
             response_payload = {
@@ -19239,6 +19575,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 },
                 "intent": epic_d_payload,
                 "prompt_interpretation": prompt_interpretation,
+                "conversation_action": conversation_action,
                 "next_actions": [{"label": "Execute generated app command", "action": "CreateDraft"}],
                 "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
             }
@@ -19262,6 +19599,54 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                     trace=epic_d_trace,
                     structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                     prompt_interpretation=prompt_interpretation,
+                    conversation_action=conversation_action,
+                )
+            return JsonResponse(response_payload)
+        if conversation_action:
+            response_payload = {
+                "status": "DraftReady",
+                "action_type": "CreateDraft",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": (
+                    str((epic_d_intent.resolution_notes or ["Ready to execute conversation action."])[0])
+                    or "Ready to execute conversation action."
+                ),
+                "draft_payload": {
+                    "__operation": "execute_conversation_action",
+                    "workspace_id": str(operator_workspace.id) if operator_workspace else context_workspace_id,
+                    "raw_prompt": message,
+                    "intent": epic_d_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": conversation_action,
+                },
+                "intent": epic_d_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": conversation_action,
+                "next_actions": [{"label": "Execute conversation action", "action": "CreateDraft"}],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+            if not preview_mode:
+                _audit_intent_event(
+                    message="intent.resolve",
+                    identity=identity,
+                    request_id=request_id,
+                    artifact_id=None,
+                    proposal={"epic_d_intent": epic_d_payload, "prompt": message},
+                    resolution=response_payload,
+                )
+                _log_prompt_activity(
+                    request_id=request_id,
+                    identity=identity,
+                    status="completed",
+                    prompt=message,
+                    request_type="intent.resolve",
+                    workspace_id=str(operator_workspace.id) if operator_workspace else context_workspace_id,
+                    summary=response_payload["summary"],
+                    trace=epic_d_trace,
+                    structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                    prompt_interpretation=prompt_interpretation,
+                    conversation_action=conversation_action,
                 )
             return JsonResponse(response_payload)
         response_payload = {
@@ -19273,6 +19658,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             ),
             "intent": epic_d_payload,
             "prompt_interpretation": prompt_interpretation,
+            "conversation_action": conversation_action,
             "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
         }
         if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity":
@@ -19299,6 +19685,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 trace=epic_d_trace,
                 structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                 prompt_interpretation=prompt_interpretation,
+                conversation_action=conversation_action,
             )
         return JsonResponse(response_payload)
 
@@ -19744,6 +20131,152 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                 return _intent_apply_open_ems_panel(identity=identity, payload=body_payload, request_id=request_id)
             if operation == "open_artifact_panel":
                 return _intent_apply_open_artifact_panel(identity=identity, payload=body_payload, request_id=request_id)
+            if operation == "execute_conversation_action":
+                workspace = _resolve_workspace_for_identity(identity, str(body_payload.get("workspace_id") or "").strip())
+                if not workspace:
+                    return JsonResponse({"error": "workspace context is required for conversation actions"}, status=400)
+                raw_prompt = str(body_payload.get("raw_prompt") or payload.get("message") or "").strip()
+                worker_mention = _parse_worker_mention(raw_prompt)
+                resolved_message = str(worker_mention.get("clean_message") or raw_prompt).strip() or raw_prompt
+                epic_d_intent = _intent_engine(identity=identity, workspace=workspace).resolve_intent(
+                    user_message=resolved_message,
+                    context=ResolutionContext(
+                        artifact=None,
+                        workspace_id=str(workspace.id),
+                        user_identity_id=str(identity.id),
+                        worker_mention_token=str(worker_mention.get("mention_token") or ""),
+                        requested_worker_type=str(worker_mention.get("worker_type") or ""),
+                        requested_worker_id=str(worker_mention.get("worker_id") or ""),
+                        requested_worker_status=str(worker_mention.get("status") or ""),
+                        requested_worker_capabilities=worker_mention.get("capabilities") if isinstance(worker_mention.get("capabilities"), list) else [],
+                        worker_mention_error=str(worker_mention.get("error") or ""),
+                        conversation_context=_conversation_execution_context(identity, str(workspace.id)),
+                    ),
+                )
+                epic_d_payload = epic_d_intent.model_dump(mode="json")
+                prompt_interpretation = _prompt_interpretation_from_intent(
+                    message=raw_prompt,
+                    intent_payload=epic_d_payload,
+                    resolution_status=(
+                        "UnsupportedIntent"
+                        if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity"
+                        else "IntentClarificationRequired"
+                        if epic_d_intent.needs_clarification
+                        else "IntentResolved"
+                    ),
+                    summary=str((epic_d_intent.resolution_notes or [""])[0] or ""),
+                )
+                conversation_action = _conversation_action_from_intent(
+                    source_message_id=request_id,
+                    intent_payload=epic_d_payload,
+                    prompt_interpretation=prompt_interpretation,
+                )
+                if epic_d_intent.needs_clarification:
+                    result_payload = {
+                        "status": "IntentClarificationRequired",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": str((epic_d_intent.resolution_notes or ["clarification required"])[0]),
+                        "intent": epic_d_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": conversation_action,
+                        "operation_result": False,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=result_payload["summary"],
+                        error=str(epic_d_intent.clarification_reason or "clarification required"),
+                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
+                        prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
+                    )
+                    return JsonResponse(result_payload, status=409)
+                if str(epic_d_intent.intent_type or "") in {"unsupported_declared_entity", "unsupported_intent"} or not conversation_action:
+                    result_payload = {
+                        "status": "UnsupportedIntent",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": str((epic_d_intent.resolution_notes or ["Conversation action is not supported."])[0]),
+                        "intent": epic_d_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": conversation_action,
+                        "operation_result": False,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=result_payload["summary"],
+                        error="unsupported conversation action",
+                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
+                        prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
+                    )
+                    return JsonResponse(result_payload, status=409)
+                try:
+                    response = _execute_conversation_action(
+                        identity=identity,
+                        user=request.user,
+                        workspace=workspace,
+                        action=conversation_action,
+                        prompt=raw_prompt,
+                        request_id=request_id,
+                        intent_payload=epic_d_payload,
+                        prompt_interpretation=prompt_interpretation,
+                    )
+                except RuntimeError as exc:
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary="Conversation action failed.",
+                        error=str(exc),
+                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}, {"step": "conversation_action_failed", "error": str(exc)}],
+                        prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
+                    )
+                    return JsonResponse(
+                        {
+                            "status": "ValidationError",
+                            "artifact_type": "Workspace",
+                            "artifact_id": None,
+                            "summary": "Conversation action failed.",
+                            "validation_errors": [str(exc)],
+                            "intent": epic_d_payload,
+                            "prompt_interpretation": prompt_interpretation,
+                            "conversation_action": conversation_action,
+                            "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                        },
+                        status=502,
+                    )
+                result_body = json.loads(response.content.decode("utf-8")) if response.content else {}
+                _log_prompt_activity(
+                    request_id=request_id,
+                    identity=identity,
+                    status="completed" if response.status_code < 400 else "failed",
+                    prompt=raw_prompt,
+                    request_type="intent.apply",
+                    workspace_id=str(workspace.id),
+                    summary=str(result_body.get("summary") or "Conversation action complete."),
+                    trace=[{"step": "intent_resolved", "intent": epic_d_payload}, {"step": "conversation_action_executed", "action": conversation_action}],
+                    structured_operation=result_body.get("result") if isinstance(result_body.get("result"), dict) else {},
+                    prompt_interpretation=prompt_interpretation,
+                    conversation_action=conversation_action,
+                )
+                return response
             if operation == "execute_generated_app_crud":
                 workspace = _resolve_workspace_for_identity(identity, str(body_payload.get("workspace_id") or "").strip())
                 if not workspace:
@@ -19773,6 +20306,11 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     ),
                     summary=str((epic_d_intent.resolution_notes or [""])[0] or ""),
                 )
+                conversation_action = _conversation_action_from_intent(
+                    source_message_id=request_id,
+                    intent_payload=epic_d_payload,
+                    prompt_interpretation=prompt_interpretation,
+                )
                 if epic_d_intent.needs_clarification:
                     result_payload = {
                         "status": "IntentClarificationRequired",
@@ -19781,6 +20319,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         "summary": str((epic_d_intent.resolution_notes or ["clarification required"])[0]),
                         "intent": epic_d_payload,
                         "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": conversation_action,
                         "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                     }
                     _log_prompt_activity(
@@ -19795,6 +20334,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
                         structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                         prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
                     )
                     return JsonResponse(result_payload, status=409)
                 if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity":
@@ -19805,6 +20345,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         "summary": str((epic_d_intent.resolution_notes or ["Requested entity is not declared in the installed capability manifest."])[0]),
                         "intent": epic_d_payload,
                         "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": conversation_action,
                         "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                     }
                     _log_prompt_activity(
@@ -19819,6 +20360,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
                         structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                         prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
                     )
                     return JsonResponse(result_payload, status=409)
                 if (
@@ -19832,6 +20374,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         "summary": "Prompt is not executable as a generated app operation.",
                         "intent": epic_d_payload,
                         "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": conversation_action,
                         "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                     }
                     _log_prompt_activity(
@@ -19846,6 +20389,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
                         structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                         prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
                     )
                     return JsonResponse(result_payload, status=400)
                 if runtime_target_record and generated_artifact_issue:
@@ -19974,6 +20518,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         trace=trace,
                         structured_operation=normalized,
                         prompt_interpretation=clarification_prompt_interpretation,
+                        conversation_action=conversation_action,
                     )
                     return JsonResponse(
                         {
@@ -19983,6 +20528,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                             "summary": str(result.get("text") or "Clarification required."),
                             "intent": clarification_intent,
                             "prompt_interpretation": clarification_prompt_interpretation,
+                            "conversation_action": conversation_action,
                             "result": result,
                             "structured_operation": normalized,
                             "operation_result": False,
@@ -20003,6 +20549,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     trace=trace,
                     structured_operation=normalized,
                     prompt_interpretation=prompt_interpretation,
+                    conversation_action=conversation_action,
                 )
                 generated_artifact = _installed_generated_artifact(workspace, "net-inventory")
                 return JsonResponse(
@@ -20015,6 +20562,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         "result": result,
                         "intent": epic_d_payload,
                         "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": conversation_action,
                         "structured_operation": normalized,
                         "operation_result": True,
                         "next_actions": [],
@@ -20189,6 +20737,8 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
                     "trace": meta.get("trace") if isinstance(meta.get("trace"), list) else [],
                     "structured_operation": meta.get("structured_operation") if isinstance(meta.get("structured_operation"), dict) else {},
                     "prompt_interpretation": meta.get("prompt_interpretation") if isinstance(meta.get("prompt_interpretation"), dict) else {},
+                    "conversation_action": meta.get("conversation_action") if isinstance(meta.get("conversation_action"), dict) else {},
+                    "conversation_message": _conversation_message_from_prompt_activity(meta, status=status, summary=summary),
                     "source": "audit_log",
                 }
             )
@@ -24107,6 +24657,213 @@ def _serialize_dev_task_summary(task: DevTask, *, runtime_detail: Optional[Dict[
     }
 
 
+def _execute_conversation_action(
+    *,
+    identity: UserIdentity,
+    user,
+    workspace: Workspace,
+    action: Dict[str, Any],
+    prompt: str,
+    request_id: str,
+    intent_payload: Dict[str, Any],
+    prompt_interpretation: Dict[str, Any],
+) -> JsonResponse:
+    action_type = str(action.get("action_type") or "").strip()
+    target = action.get("target_object") if isinstance(action.get("target_object"), dict) else {}
+
+    if action_type in {
+        ConversationActionType.CREATE_WORK_ITEM.value,
+        ConversationActionType.CONTINUE_WORK_ITEM.value,
+        ConversationActionType.DISPATCH_RUN.value,
+    }:
+        task = _ensure_conversation_dev_task(workspace=workspace, action=action, prompt=prompt, user=user)
+        detail = _serialize_dev_task_summary(task)
+        if action_type == ConversationActionType.DISPATCH_RUN.value:
+            result = _submit_conversation_runtime_run(task=task, workspace=workspace, action=action, prompt=prompt, user=user)
+            detail = _serialize_dev_task_summary(task, runtime_detail=_project_runtime_status_to_task(task))
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Queued runtime run {result.get('run_id')} for work item {result.get('work_item_id')}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {
+                        "work_item": detail,
+                        "run_id": result.get("run_id"),
+                        "work_item_id": result.get("work_item_id"),
+                    },
+                    "next_actions": [],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        return JsonResponse(
+            {
+                "status": "DraftReady",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": (
+                    f"Continuing work item {detail.get('work_item_id') or detail.get('title')}."
+                    if action_type == ConversationActionType.CONTINUE_WORK_ITEM.value
+                    else f"Created work item {detail.get('work_item_id') or detail.get('title')}."
+                ),
+                "intent": intent_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": action,
+                "operation_result": True,
+                "result": {"work_item": detail},
+                "next_actions": [],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+        )
+
+    run_id = str(target.get("id") or "").strip()
+    if not run_id:
+        return JsonResponse(
+            {
+                "status": "IntentClarificationRequired",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": "No run could be resolved from the conversation context.",
+                "intent": intent_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": action,
+                "operation_result": False,
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            },
+            status=409,
+        )
+
+    if action_type == ConversationActionType.PAUSE_RUN.value:
+        runtime = _runtime_run_control("POST", f"/api/v1/runs/{run_id}/pause")
+        return JsonResponse(
+            {
+                "status": "DraftReady",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": f"Pause requested for run {run_id}.",
+                "intent": intent_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": action,
+                "operation_result": True,
+                "result": {"run": runtime},
+                "next_actions": [],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+        )
+    if action_type == ConversationActionType.CONTINUE_RUN.value:
+        runtime = _runtime_run_control("POST", f"/api/v1/runs/{run_id}/continue")
+        return JsonResponse(
+            {
+                "status": "DraftReady",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": f"Re-queued run {run_id}.",
+                "intent": intent_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": action,
+                "operation_result": True,
+                "result": {"run": runtime},
+                "next_actions": [],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+        )
+    if action_type == ConversationActionType.RETRY_RUN.value:
+        base_run = _fetch_runtime_run_payload(uuid.UUID(run_id))
+        if not base_run:
+            raise RuntimeError("runtime run not found")
+        payload = base_run.get("prompt_payload") if isinstance(base_run.get("prompt_payload"), dict) else {}
+        if not payload:
+            raise RuntimeError("runtime prompt payload unavailable")
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        action_policy = (
+            ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("policy")
+            if isinstance((action.get("payload") or {}), dict)
+            else {}
+        )
+        if isinstance(action_policy, dict):
+            policy.update(
+                {
+                    "auto_continue": bool(action_policy.get("auto_continue", policy.get("auto_continue"))),
+                    "require_human_review_on_failure": bool(
+                        action_policy.get("require_human_review_on_failure", policy.get("require_human_review_on_failure", True))
+                    ),
+                }
+            )
+        payload["policy"] = policy
+        payload["run_id"] = str(uuid.uuid4())
+        runtime = _seed_api_request(method="POST", path="/api/v1/runtime/runs", payload=payload, timeout=30)
+        body = runtime.json() if runtime.content else {}
+        if runtime.status_code >= 400:
+            raise RuntimeError(str((body or {}).get("detail") or "runtime retry failed"))
+        return JsonResponse(
+            {
+                "status": "DraftReady",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": f"Queued retry run {str((body or {}).get('id') or payload['run_id'])}.",
+                "intent": intent_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": action,
+                "operation_result": True,
+                "result": {"run": body},
+                "next_actions": [],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+        )
+    if action_type in {ConversationActionType.SHOW_STATUS.value, ConversationActionType.SUMMARIZE_RUN.value, ConversationActionType.REQUEST_REVIEW.value}:
+        detail = _fetch_runtime_run_detail_payload(uuid.UUID(run_id))
+        if not detail:
+            raise RuntimeError("runtime run detail unavailable")
+        action_payload = ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("action_payload")
+        action_payload = action_payload if isinstance(action_payload, dict) else {}
+        detail_view = str(action_payload.get("detail_view") or "").strip().lower()
+        result: Dict[str, Any] = {"run": detail}
+        summary = str(detail.get("summary") or f"Run {run_id} is {detail.get('status') or 'unknown'}.")
+        if detail_view == "logs":
+            artifacts = detail.get("artifacts") if isinstance(detail.get("artifacts"), list) else []
+            result["logs"] = [row for row in artifacts if isinstance(row, dict) and str(row.get("artifact_type") or "") == "log"]
+            summary = f"Found {len(result['logs'])} log artifact(s) for run {run_id}."
+        elif detail_view == "artifacts":
+            result["artifacts"] = detail.get("artifacts") if isinstance(detail.get("artifacts"), list) else []
+            summary = f"Found {len(result['artifacts'])} artifact(s) for run {run_id}."
+        elif action_type == ConversationActionType.REQUEST_REVIEW.value:
+            summary = f"Run {run_id} is ready for review."
+        return JsonResponse(
+            {
+                "status": "DraftReady",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": summary,
+                "intent": intent_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": action,
+                "operation_result": True,
+                "result": result,
+                "next_actions": [],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+        )
+
+    return JsonResponse(
+        {
+            "status": "UnsupportedIntent",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": "Conversation action is not supported.",
+            "intent": intent_payload,
+            "prompt_interpretation": prompt_interpretation,
+            "conversation_action": action,
+            "operation_result": False,
+            "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+        },
+        status=400,
+    )
+
+
 def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -> Dict[str, Any]:
     payload = _build_dev_task_runtime_payload(task, workspace)
     response = _seed_api_request(method="POST", path="/api/v1/runtime/runs", payload=payload, timeout=30)
@@ -24138,6 +24895,144 @@ def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -
         ]
     )
     return {"run_id": str(task.runtime_run_id), "status": task.status}
+
+
+def _conversation_default_repo(prompt: str) -> str:
+    text = str(prompt or "").strip().lower()
+    if "xyn-platform" in text:
+        return "xyn-platform"
+    if re.search(r"\bxyn[- ]core\b|\bcore repo\b", text):
+        return "xyn"
+    return str(os.environ.get("XYN_CONVERSATION_DEFAULT_RUNTIME_REPO") or "xyn-platform").strip() or "xyn-platform"
+
+
+def _conversation_default_branch() -> str:
+    return str(os.environ.get("XYN_CONVERSATION_DEFAULT_RUNTIME_BRANCH") or "develop").strip() or "develop"
+
+
+def _conversation_work_item_id(reference: str) -> str:
+    token = slugify(str(reference or "").strip())[:60]
+    if token:
+        return token
+    return f"conversation-{uuid.uuid4().hex[:10]}"
+
+
+def _find_conversation_dev_task(workspace: Workspace, action: Dict[str, Any]) -> Optional[DevTask]:
+    target = action.get("target_object") if isinstance(action.get("target_object"), dict) else {}
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    reference = str(target.get("reference") or "") or str(((payload.get("action_payload") or {}) if isinstance(payload.get("action_payload"), dict) else {}).get("reference") or "")
+    task_id = str(target.get("id") or "").strip()
+    if task_id:
+        task = DevTask.objects.filter(id=task_id).first()
+        if task:
+            return task
+    work_item_id = _conversation_work_item_id(reference) if reference else ""
+    if work_item_id:
+        task = DevTask.objects.filter(runtime_workspace_id=workspace.id, work_item_id=work_item_id).order_by("-updated_at", "-created_at").first()
+        if task:
+            return task
+    return None
+
+
+def _ensure_conversation_dev_task(*, workspace: Workspace, action: Dict[str, Any], prompt: str, user) -> DevTask:
+    existing = _find_conversation_dev_task(workspace, action)
+    if existing:
+        return existing
+    target = action.get("target_object") if isinstance(action.get("target_object"), dict) else {}
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    action_payload = payload.get("action_payload") if isinstance(payload.get("action_payload"), dict) else {}
+    reference = str(target.get("reference") or action_payload.get("reference") or prompt).strip()
+    title = str(target.get("label") or reference or prompt).strip() or "Conversation work item"
+    return DevTask.objects.create(
+        title=title[:240],
+        task_type="codegen",
+        status="queued",
+        max_attempts=2,
+        source_entity_type="conversation",
+        source_entity_id=uuid.uuid4(),
+        work_item_id=_conversation_work_item_id(reference),
+        context_purpose="conversation",
+        runtime_workspace_id=workspace.id,
+        created_by=user,
+        updated_by=user,
+    )
+
+
+def _conversation_runtime_payload(*, task: DevTask, workspace: Workspace, action: Dict[str, Any], prompt: str) -> Dict[str, Any]:
+    payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+    policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+    action_payload = payload.get("action_payload") if isinstance(payload.get("action_payload"), dict) else {}
+    requested_outputs = ["patch", "log", "summary"]
+    if bool(policy.get("run_tests")) and "report" not in requested_outputs:
+        requested_outputs.append("report")
+    try:
+        timeout_seconds = int(os.environ.get("XYN_CONVERSATION_RUNTIME_TIMEOUT_SECONDS", "1800") or "1800")
+    except ValueError:
+        timeout_seconds = 1800
+    prompt_title = str(task.title or "Conversation run").strip() or "Conversation run"
+    prompt_body = str(prompt or prompt_title).strip() or prompt_title
+    return {
+        "schema_version": "v1",
+        "run_id": str(uuid.uuid4()),
+        "work_item_id": str(task.work_item_id or f"conversation:{task.id}"),
+        "worker_type": str(action_payload.get("worker_type") or "codex_local"),
+        "target": {
+            "repo": str(action_payload.get("target_repo") or _conversation_default_repo(prompt)),
+            "branch": str(action_payload.get("target_branch") or _conversation_default_branch()),
+            "workspace_id": str(workspace.id),
+            "artifact_id": None,
+        },
+        "prompt": {
+            "title": prompt_title,
+            "body": prompt_body,
+        },
+        "context": {
+            "epic_id": (
+                str(re.sub(r"[^a-z0-9]+", "_", (re.search(r"\bEpic\s+([A-Z0-9-]+)\b", prompt, flags=re.IGNORECASE) or [None, ""]).group(1)).lower()).strip("_")
+                if re.search(r"\bEpic\s+([A-Z0-9-]+)\b", prompt, flags=re.IGNORECASE)
+                else None
+            ),
+            "attachments": [],
+            "metadata": {
+                "source": "conversation",
+                "dev_task_id": str(task.id),
+                "task_type": str(task.task_type or ""),
+            },
+        },
+        "policy": {
+            "auto_continue": bool(policy.get("auto_continue")),
+            "max_retries": 1,
+            "require_human_review_on_failure": bool(policy.get("require_human_review_on_failure", True)),
+            "timeout_seconds": timeout_seconds,
+        },
+        "requested_outputs": requested_outputs,
+    }
+
+
+def _submit_conversation_runtime_run(*, task: DevTask, workspace: Workspace, action: Dict[str, Any], prompt: str, user) -> Dict[str, Any]:
+    payload = _conversation_runtime_payload(task=task, workspace=workspace, action=action, prompt=prompt)
+    response = _seed_api_request(method="POST", path="/api/v1/runtime/runs", payload=payload, timeout=30)
+    body = response.json() if response.content else {}
+    if response.status_code >= 400:
+        message = body.get("detail") if isinstance(body, dict) else None
+        raise RuntimeError(str(message or "runtime submission failed"))
+    runtime_run_id = body.get("id") if isinstance(body, dict) else None
+    task.runtime_run_id = runtime_run_id or payload["run_id"]
+    task.runtime_workspace_id = workspace.id
+    task.status = "queued"
+    task.last_error = ""
+    task.updated_by = user
+    task.save(update_fields=["runtime_run_id", "runtime_workspace_id", "status", "last_error", "updated_by", "updated_at"])
+    return {"run_id": str(task.runtime_run_id), "work_item_id": str(task.work_item_id), "status": task.status}
+
+
+def _runtime_run_control(method: str, path: str, *, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    response = _seed_api_request(method=method, path=path, payload=payload or None, timeout=30)
+    body = response.json() if response.content else {}
+    if response.status_code >= 400:
+        message = body.get("detail") if isinstance(body, dict) else None
+        raise RuntimeError(str(message or "runtime control request failed"))
+    return body if isinstance(body, dict) else {}
 
 
 @csrf_exempt
