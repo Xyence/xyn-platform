@@ -2605,6 +2605,8 @@ export type XynIntentResolutionResult = {
   artifact_type: string | null;
   artifact_id: string | null;
   summary: string;
+  structured_operation?: Record<string, unknown>;
+  operation_result?: boolean;
   missing_fields?: XynIntentMissingField[];
   options?: unknown[];
   proposed_patch?: {

@@ -4,6 +4,7 @@ import {
   emitEntityChange,
   inferEntityChangeFromDraftPayload,
   inferEntityChangeFromPrompt,
+  inferEntityChangeFromResolution,
   inferEntityListPrompt,
   XYN_ENTITY_CHANGE_EVENT,
 } from "./entityChangeEvents";
@@ -42,6 +43,24 @@ describe("entityChangeEvents", () => {
     ).toEqual({
       entityKey: "devices",
       operation: "update",
+      source: "agent",
+    });
+  });
+
+  it("infers agent CRUD changes from operation results", () => {
+    expect(
+      inferEntityChangeFromResolution({
+        status: "DraftReady",
+        action_type: "CreateDraft",
+        artifact_type: "Workspace",
+        artifact_id: null,
+        summary: "Deleted 1 location: St. Louis",
+        structured_operation: { operation: "delete", entity_key: "locations" },
+        operation_result: true,
+      })
+    ).toEqual({
+      entityKey: "locations",
+      operation: "delete",
       source: "agent",
     });
   });

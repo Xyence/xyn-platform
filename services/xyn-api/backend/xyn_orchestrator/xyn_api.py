@@ -15390,6 +15390,7 @@ def app_palette_execute(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "not authenticated"}, status=401)
     workspace_ref = str(
         request.GET.get("workspace_id")
+        or request.GET.get("workspace_slug")
         or request.GET.get("workspace")
         or request.GET.get("operator_workspace_id")
         or request.headers.get("X-Workspace-Id")
@@ -15980,12 +15981,18 @@ def _match_app_builder_command(message: str) -> Optional[Dict[str, Any]]:
 def _resolve_workspace_for_identity(identity: UserIdentity, workspace_id: str) -> Optional[Workspace]:
     requested = str(workspace_id or "").strip()
     if requested:
-        membership = WorkspaceMembership.objects.select_related("workspace").filter(
-            user_identity=identity,
-            workspace_id=requested,
-        ).first()
-        if membership:
-            return membership.workspace
+        requested_uuid: Optional[uuid.UUID] = None
+        try:
+            requested_uuid = uuid.UUID(requested)
+        except (TypeError, ValueError, AttributeError):
+            requested_uuid = None
+        if requested_uuid is not None:
+            membership = WorkspaceMembership.objects.select_related("workspace").filter(
+                user_identity=identity,
+                workspace_id=requested_uuid,
+            ).first()
+            if membership:
+                return membership.workspace
         membership = WorkspaceMembership.objects.select_related("workspace").filter(
             user_identity=identity,
             workspace__slug=requested,
@@ -15993,9 +16000,10 @@ def _resolve_workspace_for_identity(identity: UserIdentity, workspace_id: str) -
         if membership:
             return membership.workspace
         if _is_platform_admin(identity):
-            workspace = Workspace.objects.filter(id=requested).first()
-            if workspace:
-                return workspace
+            if requested_uuid is not None:
+                workspace = Workspace.objects.filter(id=requested_uuid).first()
+                if workspace:
+                    return workspace
             return Workspace.objects.filter(slug=requested).first()
         return None
     fallback = WorkspaceMembership.objects.select_related("workspace").filter(user_identity=identity).order_by("workspace__name").first()
@@ -18987,9 +18995,12 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         "status": "DraftReady",
                         "action_type": "CreateDraft",
                         "artifact_type": "Workspace",
-                        "artifact_id": str(generated_artifact.id) if generated_artifact else None,
+                        "artifact_id": None,
                         "summary": summary,
                         "result": result,
+                        "structured_operation": normalized,
+                        "operation_result": True,
+                        "next_actions": [],
                         "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                     }
                 )

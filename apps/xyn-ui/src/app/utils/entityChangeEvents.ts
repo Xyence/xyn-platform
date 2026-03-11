@@ -1,3 +1,5 @@
+import type { XynIntentResolutionResult } from "../../api/types";
+
 export type EntityChangeOperation = "create" | "update" | "delete";
 
 export type EntityChangeDetail = {
@@ -60,6 +62,19 @@ export function inferEntityChangeFromDraftPayload(payload: Record<string, unknow
   if (String(payload.__operation || "").trim() !== "execute_generated_app_crud") return null;
   const structured = payload.structured_operation;
   if (!structured || typeof structured !== "object") return null;
+  const operation = String((structured as Record<string, unknown>).operation || "").trim().toLowerCase();
+  const entityKey = normalizeEntityKey((structured as Record<string, unknown>).entity_key);
+  if (!entityKey) return null;
+  if (operation === "create" || operation === "update" || operation === "delete") {
+    return { entityKey, operation, source: "agent" };
+  }
+  return null;
+}
+
+export function inferEntityChangeFromResolution(result: XynIntentResolutionResult | null | undefined): EntityChangeDetail | null {
+  if (!result || typeof result !== "object") return null;
+  const structured = result.structured_operation;
+  if (!structured || typeof structured !== "object") return inferEntityChangeFromDraftPayload(result.draft_payload);
   const operation = String((structured as Record<string, unknown>).operation || "").trim().toLowerCase();
   const entityKey = normalizeEntityKey((structured as Record<string, unknown>).entity_key);
   if (!entityKey) return null;

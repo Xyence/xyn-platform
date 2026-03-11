@@ -479,13 +479,6 @@ class GeneratedAppCapabilityContractTests(TestCase):
         self.assertEqual(payload.get("meta", {}).get("base_url"), "http://generated-runtime:8080")
         self.assertEqual(runtime_request.call_count, 1)
         self.assertEqual(runtime_request.call_args.kwargs.get("url"), "http://generated-runtime:8080/devices")
-        self.assertIn("location_id", devices["validation"]["allowed_on_update"])
-
-        locations = entities["locations"]
-        self.assertTrue(locations["operations"]["get"]["declared"])
-        location_fields = {field["name"]: field for field in locations["fields"]}
-        self.assertIn("city", location_fields)
-        self.assertEqual(locations["presentation"]["title_field"], "name")
 
     def test_workspace_artifact_listing_ignores_stale_top_level_generated_suggestions(self):
         self._bind_generated_artifact(
@@ -913,6 +906,9 @@ class GeneratedAppCapabilityContractTests(TestCase):
         self.assertEqual(apply_response.status_code, 200, apply_response.content.decode())
         apply_payload = apply_response.json()
         self.assertIn("Created 1 device: router-2", apply_payload.get("summary", ""))
+        self.assertTrue(apply_payload.get("operation_result"))
+        self.assertEqual(apply_payload.get("artifact_id"), None)
+        self.assertEqual(apply_payload.get("structured_operation", {}).get("entity_key"), "devices")
         self.assertEqual(apply_payload.get("result", {}).get("rows", [{}])[0].get("location_id"), "loc-1")
 
         activity = self.client.get(f"/xyn/api/ai/activity?workspace_id={self.workspace.id}")

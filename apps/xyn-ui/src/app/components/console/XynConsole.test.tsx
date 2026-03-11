@@ -11,6 +11,7 @@ const apiMocks = vi.hoisted(() => ({
   applyXynIntent: vi.fn(),
   getXynIntentOptions: vi.fn(),
   getRecentArtifacts: vi.fn(),
+  executeAppPalettePrompt: vi.fn(),
 }));
 
 vi.mock("../../../api/xyn", () => ({
@@ -18,6 +19,7 @@ vi.mock("../../../api/xyn", () => ({
   applyXynIntent: apiMocks.applyXynIntent,
   getXynIntentOptions: apiMocks.getXynIntentOptions,
   getRecentArtifacts: apiMocks.getRecentArtifacts,
+  executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
 }));
 
 function renderConsole() {
@@ -126,6 +128,12 @@ describe("XynConsole", () => {
           route: "/app/artifacts/a-1",
         },
       ],
+    });
+    apiMocks.executeAppPalettePrompt.mockResolvedValue({
+      kind: "table",
+      columns: [],
+      rows: [],
+      text: "",
     });
   });
 
@@ -294,6 +302,7 @@ describe("XynConsole", () => {
     await screen.findByText("App intent draft created and submitted for processing.");
     await waitFor(() => expect(input.value).toBe(""));
   });
+
 
   it("shows options and injects selected value", async () => {
     apiMocks.resolveXynIntent.mockResolvedValue({

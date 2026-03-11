@@ -109,8 +109,9 @@ function isExplicitPaletteCommand(input: string): boolean {
   return /^(show|list)\s+devices(\s+by\s+status)?$/i.test(String(input || "").trim())
     || /^(show|list)\s+interfaces(\s+by\s+status)?$/i.test(String(input || "").trim())
     || /^(show|list)\s+locations$/i.test(String(input || "").trim())
-    || /^create\s+device(\b.*)?$/i.test(String(input || "").trim())
-    || /^create\s+location(\b.*)?$/i.test(String(input || "").trim());
+    || /^(create|update|rename|delete)\s+device(\b.*)?$/i.test(String(input || "").trim())
+    || /^(create|update|rename|delete)\s+location(\b.*)?$/i.test(String(input || "").trim())
+    || /^(create|update|rename|delete)\s+interface(\b.*)?$/i.test(String(input || "").trim());
 }
 
 function explicitAppBuilderArtifactKind(input: string): string {
@@ -973,9 +974,10 @@ function ResolutionCard({
   const location = useLocation();
   const workspaceMatch = String(location.pathname || "").match(/^\/w\/([^/]+)(?:\/|$)/);
   const workspaceId = workspaceMatch?.[1] ? decodeURIComponent(workspaceMatch[1]) : "";
-  const canCreate = resolution.status === "DraftReady" && resolution.action_type === "CreateDraft" && !!resolution.draft_payload;
+  const isGeneratedCrudResult = Boolean(resolution.operation_result) || Boolean(resolution.structured_operation && !resolution.draft_payload);
+  const canCreate = !isGeneratedCrudResult && resolution.status === "DraftReady" && resolution.action_type === "CreateDraft" && !!resolution.draft_payload;
   const canOpen = Boolean(resolution.artifact_id);
-  const showRevise = resolution.status !== "UnsupportedIntent";
+  const showRevise = !isGeneratedCrudResult && resolution.status !== "UnsupportedIntent";
   const deepLinks = (resolution.next_actions || []).filter(
     (item) => item.action === "OpenPath" && typeof item.path === "string" && item.path.startsWith("/")
   );
@@ -1219,7 +1221,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
         : normalized.startsWith("create interface") || normalized.startsWith("update interface") || normalized.startsWith("rename interface") || normalized.startsWith("delete interface")
           ? "show interfaces"
           : "";
-    if (!refreshPrompt || result.kind !== "table") return result;
+    if (!refreshPrompt) return result;
     try {
       const refreshed = await executeAppPalettePrompt(workspaceId, { prompt: refreshPrompt });
       if (refreshed.kind !== "table") return result;
@@ -1536,7 +1538,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
         const result = await executeAppPalettePrompt(workspaceId, { prompt });
         const panelResult = await refreshPaletteResultAfterCreate(workspaceId, prompt, result);
         const entityChange = inferEntityChangeFromPrompt(prompt);
-        if (entityChange && panelResult.kind === "table") {
+        if (entityChange) {
           emitEntityChange(entityChange);
         }
         onOpenPanel("palette_result", { prompt, result: panelResult });
