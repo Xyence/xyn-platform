@@ -43,6 +43,8 @@ import type {
   WorkItemListResponse,
   CoordinationThreadDetail,
   CoordinationThreadListResponse,
+  GoalDetail,
+  GoalListResponse,
   WorkQueueResponse,
   ContextPackCreatePayload,
   ContextPackDetail,
@@ -4192,6 +4194,66 @@ export async function getWorkItem(id: string): Promise<WorkItemDetail> {
     credentials: "include",
   });
   return handle<WorkItemDetail>(response);
+}
+
+export async function listGoals(workspaceId: string, planningStatus?: string): Promise<GoalListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/goals`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (planningStatus) url.searchParams.set("planning_status", planningStatus);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<GoalListResponse>(response);
+}
+
+export async function createGoal(payload: Record<string, unknown>): Promise<GoalDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/goals`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<GoalDetail>(response);
+}
+
+export async function getGoal(id: string): Promise<GoalDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/goals/${id}`, {
+    credentials: "include",
+  });
+  return handle<GoalDetail>(response);
+}
+
+export async function updateGoal(id: string, payload: Record<string, unknown>): Promise<GoalDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/goals/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<GoalDetail>(response);
+}
+
+export async function decomposeGoal(id: string): Promise<{ goal: GoalDetail; threads: CoordinationThreadDetail[]; work_items: WorkItemDetail[]; planning_output: Record<string, unknown> }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/goals/${id}/decompose`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ goal: GoalDetail; threads: CoordinationThreadDetail[]; work_items: WorkItemDetail[]; planning_output: Record<string, unknown> }>(response);
+}
+
+export async function reviewGoal(id: string, reviewAction: string): Promise<{ status: string; goal: GoalDetail; queue_seed?: Record<string, unknown> }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/goals/${id}/review`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify({ review_action: reviewAction }),
+  });
+  return handle<{ status: string; goal: GoalDetail; queue_seed?: Record<string, unknown> }>(response);
 }
 
 export async function listCoordinationThreads(workspaceId: string, status?: string): Promise<CoordinationThreadListResponse> {

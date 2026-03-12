@@ -2194,6 +2194,11 @@ export type DevTaskSummary = {
   target_repo?: string | null;
   target_branch?: string | null;
   execution_policy?: Record<string, unknown>;
+  thread_id?: string | null;
+  thread_title?: string | null;
+  goal_id?: string | null;
+  goal_title?: string | null;
+  dependency_work_item_ids?: string[];
   task_type: string;
   status: string;
   priority: number;
@@ -2250,6 +2255,12 @@ export type DevTaskDetail = DevTaskSummary & {
     status: string;
     priority: string;
   } | null;
+  goal_detail?: {
+    id: string;
+    title: string;
+    planning_status?: string;
+    priority?: string;
+  } | null;
   force?: boolean;
 };
 
@@ -2270,6 +2281,8 @@ export type CoordinationThreadSummary = {
   work_in_progress_limit: number;
   execution_policy: Record<string, unknown>;
   source_conversation_id?: string | null;
+  goal_id?: string | null;
+  goal_title?: string | null;
   queued_work_items: number;
   running_work_items: number;
   awaiting_review_work_items: number;
@@ -2296,6 +2309,41 @@ export type CoordinationThreadDetail = CoordinationThreadSummary & {
 };
 
 export type CoordinationThreadListResponse = PaginatedResponse<CoordinationThreadSummary, "threads">;
+
+export type GoalSummary = {
+  id: string;
+  workspace_id: string;
+  title: string;
+  description: string;
+  source_conversation_id?: string | null;
+  requested_by?: string | null;
+  goal_type: string;
+  planning_status: "proposed" | "decomposed" | "in_progress" | "completed" | "canceled" | string;
+  priority: "critical" | "high" | "normal" | "low" | string;
+  planning_summary: string;
+  resolution_notes: string[];
+  thread_count: number;
+  work_item_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GoalRecommendation = {
+  goal_id: string;
+  thread_id?: string | null;
+  thread_title: string;
+  work_item_id?: string | null;
+  work_item_title: string;
+  summary: string;
+};
+
+export type GoalDetail = GoalSummary & {
+  threads: CoordinationThreadSummary[];
+  work_items: WorkItemSummary[];
+  recommendation?: GoalRecommendation | null;
+};
+
+export type GoalListResponse = PaginatedResponse<GoalSummary, "goals">;
 
 export type WorkQueueItem = {
   thread_id: string;

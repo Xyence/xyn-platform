@@ -7,6 +7,8 @@ import { emitEntityChange } from "../../utils/entityChangeEvents";
 
 const apiMocks = vi.hoisted(() => ({
   executeAppPalettePrompt: vi.fn(),
+  listGoals: vi.fn(),
+  getGoal: vi.fn(),
   listCoordinationThreads: vi.fn(),
   getCoordinationThread: vi.fn(),
   getWorkQueue: vi.fn(),
@@ -40,6 +42,8 @@ vi.mock("../../../api/xyn", async () => {
   return {
     ...actual,
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
+    listGoals: apiMocks.listGoals,
+    getGoal: apiMocks.getGoal,
     listCoordinationThreads: apiMocks.listCoordinationThreads,
     getCoordinationThread: apiMocks.getCoordinationThread,
     getWorkQueue: apiMocks.getWorkQueue,
@@ -161,6 +165,121 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(apiMocks.getWorkQueue).toHaveBeenCalledWith("ws-1"));
     await waitFor(() => expect(screen.getAllByText("Runtime Refactor")).toHaveLength(2));
     expect(screen.getByText("wi-1")).toBeInTheDocument();
+  });
+
+  it("loads durable goals and opens goal detail targets", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.listGoals.mockResolvedValue({
+      count: 1,
+      next: null,
+      prev: null,
+      goals: [
+        {
+          id: "goal-1",
+          workspace_id: "ws-1",
+          title: "AI Real Estate Deal Finder",
+          description: "Build a deal finder using listings and comps.",
+          goal_type: "build_system",
+          planning_status: "decomposed",
+          priority: "high",
+          planning_summary: "Start with listing ingestion and property CRUD.",
+          resolution_notes: ["Bias toward MVP-first slices."],
+          thread_count: 2,
+          work_item_count: 3,
+          created_at: "2026-03-12T10:00:00Z",
+          updated_at: "2026-03-12T10:00:00Z",
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "goal-list", panel_type: "table", instance_key: "goal-list", key: "goal_list", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.listGoals).toHaveBeenCalledWith("ws-1"));
+    await waitFor(() => expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument());
+  });
+
+  it("loads durable goal detail with threads, work items, and recommendation", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getGoal.mockResolvedValue({
+      id: "goal-1",
+      workspace_id: "ws-1",
+      title: "AI Real Estate Deal Finder",
+      description: "Build a deal finder using listings and comps.",
+      goal_type: "build_system",
+      planning_status: "in_progress",
+      priority: "high",
+      planning_summary: "Start with listing ingestion and property CRUD.",
+      resolution_notes: ["Bias toward MVP-first slices."],
+      thread_count: 2,
+      work_item_count: 3,
+      created_at: "2026-03-12T10:00:00Z",
+      updated_at: "2026-03-12T10:00:00Z",
+      threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          title: "Listing Data Ingestion",
+          description: "",
+          priority: "high",
+          status: "active",
+          domain: "data",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          queued_work_items: 1,
+          running_work_items: 0,
+          awaiting_review_work_items: 0,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-12T10:00:00Z",
+          updated_at: "2026-03-12T10:00:00Z",
+        },
+      ],
+      work_items: [
+        {
+          id: "task-1",
+          work_item_id: "goal-wi-1",
+          title: "Identify the first listing source and capture the ingestion contract",
+          status: "queued",
+          target_repo: "xyn-platform",
+          task_type: "codegen",
+          priority: 100,
+          attempts: 0,
+          max_attempts: 3,
+        },
+      ],
+      recommendation: {
+        goal_id: "goal-1",
+        thread_id: "thread-1",
+        thread_title: "Listing Data Ingestion",
+        work_item_id: "task-1",
+        work_item_title: "Identify the first listing source and capture the ingestion contract",
+        summary: "Queue the next smallest slice from Listing Data Ingestion.",
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "goal-detail", panel_type: "detail", instance_key: "goal:goal-1", key: "goal_detail", params: { goal_id: "goal-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getGoal).toHaveBeenCalledWith("goal-1"));
+    await waitFor(() => expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument());
+    expect(screen.getByText("Listing Data Ingestion")).toBeInTheDocument();
+    expect(screen.getByText("Queue the next smallest slice from Listing Data Ingestion.")).toBeInTheDocument();
   });
 
   it("loads XCO thread detail with work item, run, artifact, and timeline navigation", async () => {
@@ -490,7 +609,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getRuntimeRunCanvasApi).toHaveBeenCalledWith("ws-1", "run-2"));
-    expect(screen.getByText("contract ambiguity")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("contract ambiguity")).toBeInTheDocument());
     expect(screen.getByText("Inspect repository")).toBeInTheDocument();
     expect(screen.getByText("Final summary")).toBeInTheDocument();
   });

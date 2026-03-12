@@ -181,6 +181,38 @@ class EpicDIntentEngineTests(unittest.TestCase):
         self.assertEqual(envelope.action_payload.get("priority"), "critical")
         self.assertEnvelopeStable(envelope)
 
+    def test_create_goal_resolves_for_real_estate_build_request(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="Build the AI real estate deal finder application",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.CREATE_GOAL.value)
+        self.assertEqual(envelope.action_payload.get("goal_type"), "build_system")
+        self.assertIn("real estate deal finder", str(envelope.action_payload.get("title") or "").lower())
+        self.assertEnvelopeStable(envelope)
+
+    def test_decompose_goal_uses_active_goal_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="break this goal into implementation threads",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(active_goal_id="goal-1"),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.DECOMPOSE_GOAL.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "goal-1")
+        self.assertEnvelopeStable(envelope)
+
     def test_artifact_panel_matcher_accepts_natural_list_phrase(self):
         self.assertEqual(
             intent_api._match_artifact_panel_command("show me a list of artifacts"),
@@ -862,6 +894,40 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "list_threads")
         self.assertEqual(((payload.get("conversation_action") or {}).get("thread_id")), "thread-1")
 
+    def test_resolve_route_returns_goal_intent_and_prompt_interpretation(self):
+        envelope = IntentEnvelope(
+            intent_family=IntentFamily.GOAL_PLANNING.value,
+            intent_type=IntentType.CREATE_GOAL.value,
+            target_context={"workspace_id": "ws-1"},
+            resolved_subject={},
+            action_payload={"title": "AI Real Estate Deal Finder", "goal_type": "build_system"},
+            policy={},
+            confidence=0.93,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["creating a new goal and decomposition plan"],
+        )
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"Build the AI real estate deal finder application","context":{"workspace_id":"ws-1","thread_id":"thread-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_intent_engine", return_value=SimpleNamespace(resolve_intent=lambda **kwargs: envelope)), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual((payload.get("intent") or {}).get("intent_type"), IntentType.CREATE_GOAL.value)
+        self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "create_goal")
+        self.assertEqual(((payload.get("conversation_action") or {}).get("thread_id")), "thread-1")
+        self.assertEqual(((payload.get("prompt_interpretation") or {}).get("target_goal") or {}).get("label"), "AI Real Estate Deal Finder")
+
     def test_resolve_route_parses_worker_mentions_through_epic_d(self):
         captured = {}
         envelope = IntentEnvelope(
@@ -1477,6 +1543,44 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         panel_keys = [entry.get("panel_key") for entry in (payload.get("next_actions") or [])]
         self.assertIn("work_item_detail", panel_keys)
         self.assertIn("run_detail", panel_keys)
+
+    def test_execute_conversation_action_create_goal_returns_goal_panel_action(self):
+        goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder", refresh_from_db=lambda: None)
+        detail = {
+            "id": "goal-1",
+            "title": "AI Real Estate Deal Finder",
+            "planning_status": "decomposed",
+            "threads": [],
+            "work_items": [],
+            "planning_summary": "Start with listing ingestion and property CRUD.",
+        }
+        with patch.object(intent_api.Goal.objects, "create", return_value=goal), patch.object(
+            intent_api,
+            "decompose_goal",
+            return_value=SimpleNamespace(model_dump=lambda mode="json": {"goal_id": "goal-1"}),
+        ), patch.object(intent_api, "persist_goal_plan"), patch.object(
+            intent_api, "_serialize_goal_detail", return_value=detail
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "create_goal",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {"title": "AI Real Estate Deal Finder", "goal_type": "build_system"}},
+                    "target_object": {"workspace_id": "ws-1"},
+                },
+                prompt="Build the AI real estate deal finder application",
+                request_id="req-1",
+                intent_payload={"intent_type": "create_goal"},
+                prompt_interpretation={"intent_type": "create_goal"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual((payload.get("result") or {}).get("goal", {}).get("id"), "goal-1")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "goal_detail")
 
     def test_resolve_route_preserves_legacy_app_builder_flow_without_epic_d_intent(self):
         request = self.factory.post(

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   executeAppPalettePrompt,
+  getGoal,
   getArtifactConsoleDetailBySlug,
   getArtifactConsoleFilesBySlug,
   getCoordinationThread,
@@ -12,6 +13,7 @@ import {
   getRuntimeRunCanvasApi,
   getWorkItem,
   getWorkQueue,
+  listGoals,
   listCoordinationThreads,
   listWorkItems,
   listAppBuilderArtifacts,
@@ -31,6 +33,8 @@ import type {
   CanvasTableResponse,
   CoordinationThreadDetail,
   CoordinationThreadSummary,
+  GoalDetail,
+  GoalSummary,
   LocalProvisionResponse,
   RuntimeRunDetail,
   RuntimeRunArtifactContent,
@@ -54,6 +58,8 @@ import { toWorkspacePath } from "../../routing/workspaceRouting";
 
 export type ConsolePanelKey =
   | "platform_settings"
+  | "goal_list"
+  | "goal_detail"
   | "workspaces"
   | "thread_list"
   | "thread_detail"
@@ -721,6 +727,210 @@ function WorkItemsPanel({
         // selection is informational only for now
       }}
     />
+  );
+}
+
+function GoalListPanel({
+  workspaceId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  workspaceId: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [goals, setGoals] = useState<GoalSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await listGoals(workspaceId);
+        if (!active) return;
+        setGoals(next.goals || []);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load goals");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    onTitleChange?.("Goals");
+  }, [onTitleChange]);
+
+  if (loading) return <p className="muted">Loading goals…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  return (
+    <section className="card">
+      <div className="canvas-table-wrap">
+        <table className="canvas-table">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Status</th>
+              <th>Priority</th>
+              <th>Threads</th>
+              <th>Work Items</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {goals.map((goal) => (
+              <tr key={goal.id}>
+                <td>{goal.title}</td>
+                <td>{goal.planning_status}</td>
+                <td>{goal.priority}</td>
+                <td>{goal.thread_count}</td>
+                <td>{goal.work_item_count}</td>
+                <td>
+                  <button type="button" className="ghost sm" onClick={() => onOpenPanel("goal_detail", { goal_id: goal.id })}>
+                    Open
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {!goals.length ? (
+              <tr>
+                <td colSpan={6} className="muted">No goals found.</td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function GoalDetailPanel({
+  goalId,
+  workspaceId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  goalId: string;
+  workspaceId: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [payload, setPayload] = useState<GoalDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getGoal(goalId);
+        if (!active) return;
+        setPayload(next);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load goal");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [goalId]);
+
+  useEffect(() => {
+    onTitleChange?.(payload?.title || "Goal");
+  }, [onTitleChange, payload?.title]);
+
+  if (loading) return <p className="muted">Loading goal…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Goal not found.</p>;
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="detail-grid">
+          <div><div className="field-label">Title</div><div className="field-value">{payload.title}</div></div>
+          <div><div className="field-label">Status</div><div className="field-value">{payload.planning_status}</div></div>
+          <div><div className="field-label">Priority</div><div className="field-value">{payload.priority}</div></div>
+          <div><div className="field-label">Workspace</div><div className="field-value">{workspaceId}</div></div>
+          <div><div className="field-label">Goal Type</div><div className="field-value">{payload.goal_type}</div></div>
+          <div><div className="field-label">Conversation</div><div className="field-value">{payload.source_conversation_id || "—"}</div></div>
+        </div>
+        {payload.description ? <p className="muted" style={{ marginTop: 12 }}>{payload.description}</p> : null}
+        {payload.planning_summary ? <InlineMessage tone="info" title="Planning Summary" body={payload.planning_summary} /> : null}
+      </section>
+      <section className="card">
+        <div className="card-header"><div><p className="muted">Threads</p></div></div>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Priority</th>
+                <th>Queued</th>
+                <th>Running</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payload.threads.map((thread) => (
+                <tr key={thread.id}>
+                  <td>{thread.title}</td>
+                  <td>{thread.status}</td>
+                  <td>{thread.priority}</td>
+                  <td>{thread.queued_work_items}</td>
+                  <td>{thread.running_work_items}</td>
+                  <td><button type="button" className="ghost sm" onClick={() => onOpenPanel("thread_detail", { thread_id: thread.id })}>Thread</button></td>
+                </tr>
+              ))}
+              {!payload.threads.length ? <tr><td colSpan={6} className="muted">No threads planned yet.</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="card">
+        <div className="card-header"><div><p className="muted">Work Items</p></div></div>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Thread</th>
+                <th>Repo</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payload.work_items.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.title}</td>
+                  <td>{item.status}</td>
+                  <td>{item.thread_title || "—"}</td>
+                  <td>{item.target_repo || "—"}</td>
+                  <td><button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>Work Item</button></td>
+                </tr>
+              ))}
+              {!payload.work_items.length ? <tr><td colSpan={5} className="muted">No work items planned yet.</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {payload.recommendation?.summary ? (
+        <section className="card">
+          <InlineMessage tone="info" title="Recommended Next Slice" body={payload.recommendation.summary} />
+        </section>
+      ) : null}
+    </div>
   );
 }
 
@@ -2133,6 +2343,8 @@ function LocalProvisionResultPanel({ payload }: { payload?: LocalProvisionRespon
 const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   platform_settings: "Platform Settings",
   workspaces: "Workspaces",
+  goal_list: "Goals",
+  goal_detail: "Goal",
   thread_list: "Threads",
   thread_detail: "Thread",
   runs: "Runs",
@@ -2307,6 +2519,21 @@ export default function WorkbenchPanelHost({
             }
             openPanel("record_detail", { ...target, row }, { open_in: "new_panel", return_to_panel_id: panel.panel_id });
           }}
+        />
+      );
+    }
+
+    if (panel.key === "goal_list") {
+      return <GoalListPanel workspaceId={workspaceId} onOpenPanel={openPanel} onTitleChange={setResolvedTitle} />;
+    }
+
+    if (panel.key === "goal_detail") {
+      return (
+        <GoalDetailPanel
+          goalId={String(panel.params?.goal_id || "")}
+          workspaceId={workspaceId}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
         />
       );
     }

@@ -60,6 +60,8 @@ export const DEFAULT_STACK_IDS: Record<PanelAffinity, string> = {
 export const FRIENDLY_PANEL_TITLES: Record<string, string> = {
   platform_settings: "Platform Settings",
   workspaces: "Workspaces",
+  goal_list: "Goals",
+  goal_detail: "Goal",
   thread_list: "Threads",
   thread_detail: "Thread",
   runs: "Active Runs",
@@ -91,6 +93,8 @@ export const FRIENDLY_PANEL_TITLES: Record<string, string> = {
 const AFFINITY_RULES: Record<string, PanelAffinity> = {
   conversation: "conversation",
   palette_result: "conversation",
+  goal_list: "operations",
+  goal_detail: "operations",
   thread_list: "operations",
   thread_detail: "operations",
   runs: "operations",

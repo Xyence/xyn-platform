@@ -64,6 +64,7 @@ from .models import (
     CoordinationEvent,
     CoordinationThread,
     DevTask,
+    Goal,
     Environment,
     EnvironmentAppState,
     Module,
@@ -138,6 +139,15 @@ from .xco import (
     record_thread_event,
     transition_thread_status,
     valid_thread_transition,
+)
+from .goal_planning import (
+    GoalPlanningOutput,
+    decompose_goal,
+    infer_goal_type,
+    persist_goal_plan,
+    recommend_next_slice,
+    serialize_goal_summary,
+    valid_goal_transition,
 )
 from .artifact_packages import (
     ArtifactPackageValidationError,
@@ -469,7 +479,35 @@ def _intent_thread_candidates(identity: UserIdentity, query: str, workspace_id: 
     return rows
 
 
+def _intent_goal_candidates(identity: UserIdentity, query: str, workspace_id: str) -> List[Dict[str, Any]]:
+    search = str(query or "").strip()
+    workspace = _resolve_workspace_for_identity(identity, workspace_id) if workspace_id else None
+    qs = Goal.objects.all().order_by("-updated_at", "-created_at")
+    if workspace is not None:
+        qs = qs.filter(workspace=workspace)
+    if search and search.lower() not in {"this goal", "the goal", "goal", "plan"}:
+        qs = qs.filter(
+            models.Q(title__icontains=search)
+            | models.Q(description__icontains=search)
+            | models.Q(goal_type__icontains=search)
+        )
+    rows = []
+    for goal in qs[:5]:
+        rows.append(
+            {
+                "id": str(goal.id),
+                "label": goal.title,
+                "kind": "goal",
+                "planning_status": goal.planning_status,
+                "priority": goal.priority,
+                "workspace_id": str(goal.workspace_id),
+            }
+        )
+    return rows
+
+
 def _conversation_execution_context(identity: UserIdentity, workspace_id: str, thread_id: str = "") -> ConversationExecutionContext:
+    active_goal_id: Optional[str] = None
     active_coordination_thread_id: Optional[str] = None
     current_work_item_id: Optional[str] = None
     current_run_id: Optional[str] = None
@@ -486,6 +524,8 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
     if thread_token:
         task_qs = task_qs.filter(source_conversation_id=thread_token)
     for task in task_qs[:10]:
+        if not active_goal_id and getattr(task, "goal_id", None):
+            active_goal_id = str(task.goal_id)
         if not active_coordination_thread_id and task.coordination_thread_id:
             active_coordination_thread_id = str(task.coordination_thread_id)
         detail = _project_runtime_status_to_task(task)
@@ -518,6 +558,14 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
         if thread_token and str(meta.get("thread_id") or "").strip() != thread_token:
             continue
         conversation_action = meta.get("conversation_action") if isinstance(meta.get("conversation_action"), dict) else {}
+        interpretation = meta.get("prompt_interpretation") if isinstance(meta.get("prompt_interpretation"), dict) else {}
+        if not active_goal_id:
+            active_goal_id = (
+                str(meta.get("goal_id") or "").strip()
+                or str(((conversation_action.get("target_object") or {}) if isinstance(conversation_action.get("target_object"), dict) else {}).get("id") or "").strip()
+                or str(((interpretation.get("target_goal") or {}) if isinstance(interpretation.get("target_goal"), dict) else {}).get("id") or "").strip()
+                or None
+            )
         if not current_work_item_id:
             current_work_item_id = (
                 str(((conversation_action.get("target_object") or {}) if isinstance(conversation_action.get("target_object"), dict) else {}).get("reference") or "").strip()
@@ -530,7 +578,6 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
                 or str(((meta.get("structured_operation") or {}) if isinstance(meta.get("structured_operation"), dict) else {}).get("run_id") or "").strip()
                 or None
             )
-        interpretation = meta.get("prompt_interpretation") if isinstance(meta.get("prompt_interpretation"), dict) else {}
         if not active_epic:
             work_target = interpretation.get("target_work_item") if isinstance(interpretation.get("target_work_item"), dict) else {}
             title = str(work_target.get("label") or work_target.get("reference") or "").strip()
@@ -556,6 +603,7 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
 
     return ConversationExecutionContext(
         thread_id=thread_token or None,
+        active_goal_id=active_goal_id,
         active_coordination_thread_id=active_coordination_thread_id,
         current_work_item_id=current_work_item_id,
         current_run_id=current_run_id,
@@ -739,6 +787,11 @@ def _intent_engine(identity: Optional[UserIdentity] = None, workspace: Optional[
             if identity is not None
             else None
         ),
+        goal_lookup=(
+            (lambda query, workspace_id: _intent_goal_candidates(identity, query, workspace_id))
+            if identity is not None
+            else None
+        ),
         capability_manifest_lookup=(
             (
                 lambda workspace_id: (
@@ -840,11 +893,31 @@ def _prompt_interpretation_from_intent(
         "pause_thread": ("pause", "Pause thread"),
         "resume_thread": ("continue", "Resume thread"),
         "prioritize_thread": ("prioritize", "Prioritize thread"),
+        "create_goal": ("create", "Create goal"),
+        "decompose_goal": ("plan", "Decompose goal"),
+        "summarize_plan": ("show", "Summarize plan"),
+        "queue_first_slice": ("queue", "Queue first slice"),
+        "list_goals": ("show", "List goals"),
+        "show_goal": ("show", "Show goal"),
+        "approve_plan": ("approve", "Approve plan"),
+        "defer_execution": ("defer", "Defer execution"),
+        "adjust_plan": ("adjust", "Adjust plan"),
+        "recommend_next_slice": ("recommend", "Recommend next slice"),
         "unsupported_declared_entity": ("unsupported", "Unsupported declared entity"),
         "unsupported_intent": ("unsupported", "Unsupported intent"),
     }
     verb, label = action_map.get(intent.intent_type, ("resolve", intent.intent_type.replace("_", " ").strip() or "Resolve"))
 
+    target_goal = (
+        PromptInterpretationTarget(
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or action_payload.get("title") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            status=str(resolved_subject.get("planning_status") or "") or None,
+        )
+        if intent.intent_family == "goal_planning" and (resolved_subject.get("id") or resolved_subject.get("label") or action_payload.get("title") or action_payload.get("reference"))
+        else None
+    )
     entity_key = str(
         resolved_subject.get("entity_key")
         or action_payload.get("entity_key")
@@ -910,8 +983,10 @@ def _prompt_interpretation_from_intent(
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CONTINUATION.value
     elif intent.intent_type in {"create_and_dispatch_run", "run_validation", "investigate_issue", "retry_run", "continue_run"}:
         execution_mode = PromptInterpretationExecutionMode.QUEUED_RUN.value
-    elif intent.intent_type in {"create_thread"}:
+    elif intent.intent_type in {"create_thread", "create_goal"}:
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
+    elif intent.intent_type in {"decompose_goal", "approve_plan", "queue_first_slice"}:
+        execution_mode = PromptInterpretationExecutionMode.AWAITING_REVIEW.value
     elif intent.intent_type in {"unsupported_declared_entity", "unsupported_intent"}:
         execution_mode = PromptInterpretationExecutionMode.BLOCKED.value
     else:
@@ -974,6 +1049,7 @@ def _prompt_interpretation_from_intent(
     interpretation = PromptInterpretation(
         intent_family=intent.intent_family,
         intent_type=intent.intent_type,
+        target_goal=target_goal,
         target_entity=target_entity,
         target_record=target_record,
         target_thread=target_thread,
@@ -1094,6 +1170,27 @@ def _conversation_action_from_intent(
             kind="coordination_thread",
             id=str(resolved_subject.get("id") or "") or None,
             label=str(resolved_subject.get("label") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            workspace_id=str(target_context.get("workspace_id") or "") or None,
+        )
+    elif intent.intent_family == "goal_planning":
+        action_map = {
+            IntentType.CREATE_GOAL.value: ConversationActionType.CREATE_GOAL.value,
+            IntentType.DECOMPOSE_GOAL.value: ConversationActionType.DECOMPOSE_GOAL.value,
+            IntentType.SUMMARIZE_PLAN.value: ConversationActionType.SUMMARIZE_PLAN.value,
+            IntentType.QUEUE_FIRST_SLICE.value: ConversationActionType.QUEUE_FIRST_SLICE.value,
+            IntentType.LIST_GOALS.value: ConversationActionType.LIST_GOALS.value,
+            IntentType.SHOW_GOAL.value: ConversationActionType.SHOW_GOAL.value,
+            IntentType.APPROVE_PLAN.value: ConversationActionType.APPROVE_PLAN.value,
+            IntentType.DEFER_EXECUTION.value: ConversationActionType.DEFER_EXECUTION.value,
+            IntentType.ADJUST_PLAN.value: ConversationActionType.ADJUST_PLAN.value,
+            IntentType.RECOMMEND_NEXT_SLICE.value: ConversationActionType.RECOMMEND_NEXT_SLICE.value,
+        }
+        action_type = action_map.get(intent.intent_type)
+        target = ConversationActionTarget(
+            kind="goal",
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or action_payload.get("title") or "") or None,
             reference=str(action_payload.get("reference") or "") or None,
             workspace_id=str(target_context.get("workspace_id") or "") or None,
         )
@@ -20822,6 +20919,20 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         status=502,
                     )
                 result_body = json.loads(response.content.decode("utf-8")) if response.content else {}
+                logged_conversation_action = conversation_action
+                result_goal = ((result_body.get("result") or {}) if isinstance(result_body.get("result"), dict) else {}).get("goal")
+                if isinstance(logged_conversation_action, dict) and isinstance(result_goal, dict):
+                    target_object = logged_conversation_action.get("target_object") if isinstance(logged_conversation_action.get("target_object"), dict) else {}
+                    if not str(target_object.get("id") or "").strip():
+                        logged_conversation_action = {
+                            **logged_conversation_action,
+                            "target_object": {
+                                **target_object,
+                                "id": str(result_goal.get("id") or "").strip() or None,
+                                "label": str(result_goal.get("title") or target_object.get("label") or "").strip() or None,
+                                "workspace_id": str(result_goal.get("workspace_id") or target_object.get("workspace_id") or "").strip() or None,
+                            },
+                        }
                 _log_prompt_activity(
                     request_id=request_id,
                     identity=identity,
@@ -20833,7 +20944,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     trace=[{"step": "intent_resolved", "intent": epic_d_payload}, {"step": "conversation_action_executed", "action": conversation_action}],
                     structured_operation=result_body.get("result") if isinstance(result_body.get("result"), dict) else {},
                     prompt_interpretation=prompt_interpretation,
-                    conversation_action=conversation_action,
+                    conversation_action=logged_conversation_action,
                     thread_id=thread_id,
                 )
                 return response
@@ -25327,6 +25438,8 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "execution_policy": task.execution_policy or {},
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
+        "goal_id": str(task.goal_id) if task.goal_id else None,
+        "goal_title": str(task.goal.title) if task.goal_id else None,
         "dependency_work_item_ids": task.dependency_work_item_ids if isinstance(task.dependency_work_item_ids, list) else [],
         "task_type": task.task_type,
         "status": status,
@@ -25351,6 +25464,27 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
 
 def _serialize_dev_task_summary(task: DevTask, *, runtime_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return _serialize_work_item_summary(task, runtime_detail=runtime_detail)
+
+
+def _serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
+    return serialize_goal_summary(goal)
+
+
+def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
+    recommendation = recommend_next_slice(goal)
+    return {
+        **_serialize_goal_summary(goal),
+        "threads": [_coordination_thread_summary(thread) for thread in goal.threads.all().order_by("created_at", "id")],
+        "work_items": [_serialize_work_item_summary(task) for task in goal.work_items.all().order_by("priority", "created_at", "id")],
+        "recommendation": {
+            "goal_id": recommendation.goal_id,
+            "thread_id": recommendation.thread_id,
+            "thread_title": recommendation.thread_title,
+            "work_item_id": recommendation.work_item_id,
+            "work_item_title": recommendation.work_item_title,
+            "summary": recommendation.summary,
+        },
+    }
 
 
 def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
@@ -25415,6 +25549,7 @@ def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
             for pack in task.context_packs.all()
         ],
         "thread_detail": _coordination_thread_summary(task.coordination_thread) if task.coordination_thread_id else None,
+        "goal_detail": _serialize_goal_summary(task.goal) if task.goal_id else None,
         "result_run_detail": run_payload,
         "result_run_artifacts": artifacts_payload,
         "result_run_commands": commands_payload,
@@ -25662,6 +25797,185 @@ def _execute_conversation_action(
                 "result": {"thread": _coordination_thread_detail(thread)},
                 "next_actions": [
                     {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
+                ],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+        )
+
+    if action_type in {
+        ConversationActionType.CREATE_GOAL.value,
+        ConversationActionType.DECOMPOSE_GOAL.value,
+        ConversationActionType.SUMMARIZE_PLAN.value,
+        ConversationActionType.QUEUE_FIRST_SLICE.value,
+        ConversationActionType.LIST_GOALS.value,
+        ConversationActionType.SHOW_GOAL.value,
+        ConversationActionType.APPROVE_PLAN.value,
+        ConversationActionType.DEFER_EXECUTION.value,
+        ConversationActionType.ADJUST_PLAN.value,
+        ConversationActionType.RECOMMEND_NEXT_SLICE.value,
+    }:
+        action_payload = ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("action_payload")
+        action_payload = action_payload if isinstance(action_payload, dict) else {}
+        goal_id = str(target.get("id") or "").strip()
+        goal: Optional[Goal] = None
+        if goal_id:
+            goal = Goal.objects.filter(id=goal_id, workspace=workspace).first()
+        if action_type == ConversationActionType.LIST_GOALS.value:
+            goals = [_serialize_goal_summary(item) for item in Goal.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100]]
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Found {len(goals)} goal(s).",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"goals": goals},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "goal_list", "label": "Open Goals", "params": {"workspace_id": str(workspace.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.CREATE_GOAL.value:
+            title = str(action_payload.get("title") or target.get("label") or prompt).strip() or "New Goal"
+            description = str(action_payload.get("description") or prompt).strip()
+            goal = Goal.objects.create(
+                workspace=workspace,
+                title=title[:240],
+                description=description,
+                source_conversation_id=str(action.get("thread_id") or "").strip(),
+                requested_by=identity,
+                goal_type=str(action_payload.get("goal_type") or infer_goal_type(title, description)).strip() or "build_system",
+                planning_status="proposed",
+                priority=str(action_payload.get("priority") or "high").strip() or "high",
+            )
+            plan = decompose_goal(goal)
+            persist_goal_plan(goal, plan, user=user)
+            goal.refresh_from_db()
+            detail = _serialize_goal_detail(goal)
+            action = {
+                **action,
+                "target_object": {
+                    **target,
+                    "id": str(goal.id),
+                    "label": goal.title,
+                    "workspace_id": str(workspace.id),
+                },
+            }
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Created goal {goal.title} and decomposed it into reviewable threads and work items.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"goal": detail},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if goal is None:
+            return JsonResponse(
+                {
+                    "status": "IntentClarificationRequired",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": "No goal could be resolved from the conversation context.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": False,
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                },
+                status=409,
+            )
+        if action_type == ConversationActionType.DECOMPOSE_GOAL.value:
+            plan = decompose_goal(goal)
+            persist_goal_plan(goal, plan, user=user)
+            goal.refresh_from_db()
+            summary = f"Decomposed goal {goal.title} into reviewable threads and work items."
+        elif action_type == ConversationActionType.SUMMARIZE_PLAN.value:
+            summary = serialize_goal_summary(goal).get("planning_summary") or f"Showing plan summary for {goal.title}."
+        elif action_type == ConversationActionType.APPROVE_PLAN.value:
+            if not valid_goal_transition(goal.planning_status, "in_progress"):
+                return JsonResponse({"status": "ValidationError", "summary": f"Goal {goal.title} cannot transition to in_progress from {goal.planning_status}."}, status=409)
+            goal.planning_status = "in_progress"
+            goal.save(update_fields=["planning_status", "updated_at"])
+            summary = f"Approved plan for {goal.title}."
+        elif action_type == ConversationActionType.DEFER_EXECUTION.value:
+            summary = f"Deferred execution for {goal.title}."
+        elif action_type == ConversationActionType.ADJUST_PLAN.value:
+            if not valid_goal_transition(goal.planning_status, "proposed"):
+                return JsonResponse({"status": "ValidationError", "summary": f"Goal {goal.title} cannot transition to proposed from {goal.planning_status}."}, status=409)
+            goal.planning_status = "proposed"
+            goal.save(update_fields=["planning_status", "updated_at"])
+            summary = f"Marked {goal.title} for plan adjustment."
+        elif action_type == ConversationActionType.QUEUE_FIRST_SLICE.value:
+            seeded = _activate_goal_first_slice(goal)
+            goal.refresh_from_db()
+            detail = _serialize_goal_detail(goal)
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Queued the first executable slice for {goal.title}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"goal": detail, "queue_seed": seeded},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}},
+                        {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(seeded.get("thread_id") or "")}},
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        elif action_type == ConversationActionType.RECOMMEND_NEXT_SLICE.value:
+            recommendation = recommend_next_slice(goal)
+            detail = _serialize_goal_detail(goal)
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": recommendation.summary,
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"goal": detail, "recommendation": recommendation.__dict__},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        else:
+            summary = f"Showing goal {goal.title}."
+        detail = _serialize_goal_detail(goal)
+        return JsonResponse(
+            {
+                "status": "DraftReady",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": summary,
+                "intent": intent_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": action,
+                "operation_result": True,
+                "result": {"goal": detail},
+                "next_actions": [
+                    {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
                 ],
                 "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
             }
@@ -26147,6 +26461,49 @@ def _coordination_thread_queryset(identity: UserIdentity, workspace_id: str):
     return workspace, CoordinationThread.objects.filter(workspace=workspace).select_related("owner").prefetch_related("work_items", "events")
 
 
+def _goal_queryset(identity: UserIdentity, workspace_id: str):
+    workspace = _resolve_workspace_for_identity(identity, workspace_id)
+    if not workspace:
+        raise PermissionDenied("workspace not accessible")
+    return workspace, Goal.objects.filter(workspace=workspace).select_related("requested_by").prefetch_related("threads__work_items", "work_items")
+
+
+def _activate_goal_first_slice(goal: Goal) -> Dict[str, Optional[str]]:
+    threads = list(goal.threads.all().order_by("created_at", "id"))
+    if not threads:
+        raise RuntimeError("goal has no planned threads")
+    work_item_id_to_task = {str(task.work_item_id or task.id): task for task in goal.work_items.all().select_related("coordination_thread")}
+    queue = derive_work_queue(
+        threads=threads,
+        status_lookup=lambda task: _thread_status_for_task(task),
+        task_lookup=lambda work_item_id: work_item_id_to_task.get(str(work_item_id)),
+    )
+    selected_task: Optional[DevTask] = None
+    if queue:
+        selected_task = work_item_id_to_task.get(str(queue[0].work_item_id)) or DevTask.objects.filter(id=queue[0].task_id).first()
+    if selected_task is None:
+        selected_task = goal.work_items.filter(status="queued").select_related("coordination_thread").order_by("priority", "created_at", "id").first()
+    if selected_task is None or selected_task.coordination_thread is None:
+        raise RuntimeError("goal has no queue-ready work item")
+    selected_thread = selected_task.coordination_thread
+    for thread in threads:
+        if thread.id == selected_thread.id:
+            if thread.status != "active":
+                transition_thread_status(thread, "active", work_item=selected_task, payload={"reason": "goal_queue_first_slice"})
+        elif thread.status not in {"completed", "archived"}:
+            if thread.status != "queued":
+                thread.status = "queued"
+                thread.save(update_fields=["status", "updated_at"])
+    if goal.planning_status != "in_progress":
+        goal.planning_status = "in_progress"
+        goal.save(update_fields=["planning_status", "updated_at"])
+    return {
+        "thread_id": str(selected_thread.id),
+        "work_item_id": str(selected_task.id),
+        "work_item_reference": str(selected_task.work_item_id or selected_task.id),
+    }
+
+
 def _coordination_task_lookup_factory(workspace_id: str):
     cache: Dict[str, Optional[DevTask]] = {}
 
@@ -26187,6 +26544,150 @@ def _update_thread_status_from_tasks(thread: CoordinationThread) -> None:
         return
     if thread.status == "paused" and policy.get("auto_resume") and not any(status == "awaiting_review" for status in statuses):
         transition_thread_status(thread, "active", payload={"reason": "auto_resume"})
+
+
+@csrf_exempt
+@login_required
+def goals_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        if not workspace_id or not title:
+            return JsonResponse({"error": "workspace_id and title are required"}, status=400)
+        workspace, _ = _goal_queryset(identity, workspace_id)
+        goal = Goal.objects.create(
+            workspace=workspace,
+            title=title[:240],
+            description=str(payload.get("description") or "").strip(),
+            source_conversation_id=str(payload.get("source_conversation_id") or "").strip(),
+            requested_by=identity,
+            goal_type=str(payload.get("goal_type") or infer_goal_type(title, str(payload.get("description") or ""))).strip() or "build_system",
+            planning_status=str(payload.get("planning_status") or "proposed").strip() or "proposed",
+            priority=str(payload.get("priority") or "normal").strip() or "normal",
+            planning_summary=str(payload.get("planning_summary") or "").strip(),
+            resolution_notes_json=payload.get("resolution_notes") if isinstance(payload.get("resolution_notes"), list) else [],
+        )
+        return JsonResponse(_serialize_goal_detail(goal), status=201)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    _, qs = _goal_queryset(identity, workspace_id)
+    planning_status = str(request.GET.get("planning_status") or "").strip().lower()
+    if planning_status:
+        qs = qs.filter(planning_status=planning_status)
+    goal_type = str(request.GET.get("goal_type") or "").strip().lower()
+    if goal_type:
+        qs = qs.filter(goal_type=goal_type)
+    rows = [_serialize_goal_summary(goal) for goal in qs.order_by("-updated_at", "-created_at")]
+    return _paginate(request, rows, "goals")
+
+
+@csrf_exempt
+@login_required
+def goal_detail(request: HttpRequest, goal_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    goal = get_object_or_404(Goal.objects.select_related("workspace", "requested_by").prefetch_related("threads__work_items", "work_items"), id=goal_id)
+    if not _workspace_membership(identity, str(goal.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        return JsonResponse(_serialize_goal_detail(goal))
+    if request.method not in {"PATCH", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    update_fields: List[str] = []
+    if "title" in payload:
+        goal.title = str(payload.get("title") or "").strip()[:240]
+        update_fields.append("title")
+    if "description" in payload:
+        goal.description = str(payload.get("description") or "").strip()
+        update_fields.append("description")
+    if "priority" in payload:
+        goal.priority = str(payload.get("priority") or "normal").strip().lower() or "normal"
+        update_fields.append("priority")
+    if "planning_status" in payload:
+        next_status = str(payload.get("planning_status") or "").strip().lower()
+        if not valid_goal_transition(goal.planning_status, next_status):
+            return JsonResponse({"error": f"invalid goal planning_status transition: {goal.planning_status} -> {next_status}"}, status=409)
+        goal.planning_status = next_status
+        update_fields.append("planning_status")
+    if "planning_summary" in payload:
+        goal.planning_summary = str(payload.get("planning_summary") or "").strip()
+        update_fields.append("planning_summary")
+    if "resolution_notes" in payload:
+        notes = payload.get("resolution_notes")
+        if notes is not None and not isinstance(notes, list):
+            return JsonResponse({"error": "resolution_notes must be a list"}, status=400)
+        goal.resolution_notes_json = notes or []
+        update_fields.append("resolution_notes_json")
+    if update_fields:
+        goal.save(update_fields=[*update_fields, "updated_at"])
+    return JsonResponse(_serialize_goal_detail(goal))
+
+
+@csrf_exempt
+@login_required
+def goal_decompose(request: HttpRequest, goal_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    goal = get_object_or_404(Goal.objects.select_related("workspace", "requested_by").prefetch_related("threads__work_items", "work_items"), id=goal_id)
+    if not _workspace_membership(identity, str(goal.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    plan = decompose_goal(goal)
+    persisted = persist_goal_plan(goal, plan, user=request.user)
+    goal.refresh_from_db()
+    return JsonResponse(
+        {
+            "goal": _serialize_goal_detail(goal),
+            "threads": [_coordination_thread_summary(thread) for thread in persisted.get("threads", [])],
+            "work_items": [_serialize_work_item_summary(task) for task in persisted.get("work_items", [])],
+            "planning_output": plan.model_dump(mode="json"),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def goal_review(request: HttpRequest, goal_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    goal = get_object_or_404(Goal.objects.select_related("workspace", "requested_by").prefetch_related("threads__work_items", "work_items"), id=goal_id)
+    if not _workspace_membership(identity, str(goal.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    review_action = str(payload.get("review_action") or "").strip().lower()
+    if review_action == "approve_plan":
+        if not valid_goal_transition(goal.planning_status, "in_progress"):
+            return JsonResponse({"error": f"invalid goal planning_status transition: {goal.planning_status} -> in_progress"}, status=409)
+        goal.planning_status = "in_progress"
+        goal.save(update_fields=["planning_status", "updated_at"])
+        result = {"status": "approved", "goal": _serialize_goal_detail(goal)}
+    elif review_action == "defer_execution":
+        result = {"status": "deferred", "goal": _serialize_goal_detail(goal)}
+    elif review_action == "adjust_plan":
+        if not valid_goal_transition(goal.planning_status, "proposed"):
+            return JsonResponse({"error": f"invalid goal planning_status transition: {goal.planning_status} -> proposed"}, status=409)
+        goal.planning_status = "proposed"
+        goal.save(update_fields=["planning_status", "updated_at"])
+        result = {"status": "adjustment_requested", "goal": _serialize_goal_detail(goal)}
+    elif review_action == "queue_first_slice":
+        seeded = _activate_goal_first_slice(goal)
+        goal.refresh_from_db()
+        result = {"status": "queued_first_slice", "goal": _serialize_goal_detail(goal), "queue_seed": seeded}
+    else:
+        return JsonResponse({"error": "review_action must be approve_plan, defer_execution, adjust_plan, or queue_first_slice"}, status=400)
+    return JsonResponse(result)
 
 
 @csrf_exempt
@@ -26782,6 +27283,8 @@ def _coordination_thread_summary(thread: CoordinationThread) -> Dict[str, Any]:
     return {
         "id": str(thread.id),
         "workspace_id": str(thread.workspace_id),
+        "goal_id": str(thread.goal_id) if thread.goal_id else None,
+        "goal_title": str(thread.goal.title) if thread.goal_id else None,
         "title": thread.title,
         "description": thread.description or "",
         "owner": str(thread.owner_id) if thread.owner_id else None,

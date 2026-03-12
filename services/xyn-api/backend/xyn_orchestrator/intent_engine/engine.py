@@ -47,6 +47,7 @@ class IntentResolutionEngine:
         work_item_lookup: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
         run_lookup: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
         thread_lookup: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
+        goal_lookup: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
         capability_manifest_lookup: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
         app_operation_lookup: Optional[Callable[[str, Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     ):
@@ -56,6 +57,7 @@ class IntentResolutionEngine:
         self.work_item_lookup = work_item_lookup
         self.run_lookup = run_lookup
         self.thread_lookup = thread_lookup
+        self.goal_lookup = goal_lookup
         self.capability_manifest_lookup = capability_manifest_lookup
         self.app_operation_lookup = app_operation_lookup
 
@@ -702,6 +704,135 @@ class IntentResolutionEngine:
             resolution_notes=notes or [f"{intent_type.value} requested"],
         )
 
+    @classmethod
+    def _extract_goal_reference(cls, message: str) -> str:
+        text = str(message or "").strip()
+        for pattern in (
+            r"^\s*(?:build|start|create)\s+(?:the\s+)?(.+?)\s+(?:application|system|project)\s*$",
+            r"^\s*(?:create|make|start)\s+(?:a\s+)?plan\s+for\s+(.+)$",
+            r"^\s*break\s+(?:this\s+goal|the\s+goal|(.+?))\s+into\s+implementation\s+threads\s*$",
+            r"^\s*what\s+should\s+we\s+build\s+first\s+for\s+(.+)$",
+        ):
+            match = re.match(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return cls._clean_reference(match.group(1) or "")
+        if re.search(r"\bgoal\s+([A-Za-z0-9._:-]+(?:\s+[A-Za-z0-9._:-]+)*)\b", text, flags=re.IGNORECASE):
+            match = re.search(r"\bgoal\s+([A-Za-z0-9._:-]+(?:\s+[A-Za-z0-9._:-]+)*)\b", text, flags=re.IGNORECASE)
+            if match:
+                return cls._clean_reference(match.group(1))
+        return ""
+
+    def _resolve_goal_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        if not re.search(r"\b(goal|plan|project|application|system)\b", lowered):
+            return None
+        workspace_id = str(context.workspace_id or "").strip()
+        conversation_context = context.conversation_context or ConversationExecutionContext()
+        reference = self._extract_goal_reference(text)
+        notes: List[str] = []
+        candidates = self.goal_lookup(reference or text, workspace_id) if callable(self.goal_lookup) else []
+        if not reference and not candidates and conversation_context.active_goal_id:
+            candidates = self.goal_lookup(str(conversation_context.active_goal_id), workspace_id) if callable(self.goal_lookup) else []
+            if candidates:
+                notes.append(f"context_goal={conversation_context.active_goal_id}")
+
+        if re.search(r"\b(list|show)\s+(?:active\s+)?goals\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.LIST_GOALS,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text},
+                confidence=0.92,
+                resolution_notes=notes or ["list goals requested"],
+            )
+        if re.search(r"\b(what should we build first|what should we implement next|smallest next slice|which thread should we queue first)\b", lowered):
+            resolved = candidates[0] if len(candidates) == 1 else ({"id": str(conversation_context.active_goal_id)} if conversation_context.active_goal_id else {})
+            if len(candidates) > 1:
+                return self._clarification_from_candidates(
+                    family=IntentFamily.GOAL_PLANNING,
+                    intent_type=IntentType.RECOMMEND_NEXT_SLICE,
+                    target_context={"workspace_id": workspace_id},
+                    policy={},
+                    candidates=candidates,
+                    notes=notes or ["goal reference is ambiguous"],
+                )
+            if not resolved:
+                return self._intent_envelope(
+                    intent_family=IntentFamily.GOAL_PLANNING,
+                    intent_type=IntentType.RECOMMEND_NEXT_SLICE,
+                    target_context={"workspace_id": workspace_id},
+                    confidence=0.45,
+                    needs_clarification=True,
+                    clarification_reason=ClarificationReason.MISSING_TARGET,
+                    resolution_notes=notes or ["goal reference missing"],
+                )
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.RECOMMEND_NEXT_SLICE,
+                target_context={"workspace_id": workspace_id},
+                resolved_subject=resolved,
+                action_payload={"reference": reference or text},
+                confidence=0.83,
+                resolution_notes=notes or ["recommend next slice requested"],
+            )
+        if re.search(r"\b(approve plan|approve this plan)\b", lowered):
+            intent_type = IntentType.APPROVE_PLAN
+        elif re.search(r"\b(defer execution|not yet|hold this plan)\b", lowered):
+            intent_type = IntentType.DEFER_EXECUTION
+        elif re.search(r"\b(adjust plan|revise plan)\b", lowered):
+            intent_type = IntentType.ADJUST_PLAN
+        elif re.search(r"\b(queue first slice|begin with only first thread|begin with the first thread)\b", lowered):
+            intent_type = IntentType.QUEUE_FIRST_SLICE
+        elif re.search(r"\b(break .* into implementation threads|decompose|create a plan for)\b", lowered):
+            intent_type = IntentType.DECOMPOSE_GOAL
+        elif re.search(r"\b(show plan|summarize plan|show goal|goal progress)\b", lowered):
+            intent_type = IntentType.SUMMARIZE_PLAN if "plan" in lowered else IntentType.SHOW_GOAL
+        elif re.search(r"\b(build|start|create)\b", lowered) and re.search(r"\b(application|system|project)\b", lowered):
+            intent_type = IntentType.CREATE_GOAL
+        else:
+            return None
+        if intent_type == IntentType.CREATE_GOAL:
+            title = reference or self._clean_reference(text)
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=intent_type,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"title": title or text, "description": text, "goal_type": "build_system", "reference": title or text},
+                confidence=0.84,
+                resolution_notes=notes or ["create goal requested"],
+            )
+        if len(candidates) > 1:
+            return self._clarification_from_candidates(
+                family=IntentFamily.GOAL_PLANNING,
+                intent_type=intent_type,
+                target_context={"workspace_id": workspace_id},
+                policy={},
+                candidates=candidates,
+                notes=notes or ["goal reference is ambiguous"],
+            )
+        resolved = candidates[0] if candidates else ({"id": str(conversation_context.active_goal_id)} if conversation_context.active_goal_id else {})
+        if not resolved:
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=intent_type,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text},
+                confidence=0.48,
+                needs_clarification=True,
+                clarification_reason=ClarificationReason.MISSING_TARGET,
+                resolution_notes=notes or ["goal reference missing"],
+            )
+        return self._intent_envelope(
+            intent_family=IntentFamily.GOAL_PLANNING,
+            intent_type=intent_type,
+            target_context={"workspace_id": workspace_id},
+            resolved_subject=resolved,
+            action_payload={"reference": reference or text},
+            confidence=0.82,
+            resolution_notes=notes or [f"{intent_type.value} requested"],
+        )
+
     def _resolve_app_operation_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
         workspace_id = str(context.workspace_id or "").strip()
         if not workspace_id or not callable(self.capability_manifest_lookup):
@@ -788,10 +919,11 @@ class IntentResolutionEngine:
                 confidence=0.0,
                 resolution_notes=[str(context.worker_mention_error or "").strip()],
             )
+        goal_planning = self._resolve_goal_intent(message=user_message, context=context)
         thread_coordination = self._resolve_thread_intent(message=user_message, context=context)
         development = self._resolve_development_intent(message=user_message, context=context)
         app_operation = self._resolve_app_operation_intent(message=user_message, context=context)
-        envelope = thread_coordination or development or app_operation or self._intent_envelope(
+        envelope = goal_planning or thread_coordination or development or app_operation or self._intent_envelope(
             intent_family=IntentFamily.DEVELOPMENT_WORK,
             intent_type=IntentType.UNSUPPORTED_INTENT,
             target_context={"workspace_id": str(context.workspace_id or "").strip()},

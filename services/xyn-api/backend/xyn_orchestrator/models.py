@@ -2168,6 +2168,7 @@ class DevTask(models.Model):
     target_repo = models.CharField(max_length=120, blank=True)
     target_branch = models.CharField(max_length=120, blank=True)
     execution_policy = models.JSONField(null=True, blank=True)
+    goal = models.ForeignKey("Goal", null=True, blank=True, on_delete=models.SET_NULL, related_name="work_items")
     coordination_thread = models.ForeignKey(
         "CoordinationThread", null=True, blank=True, on_delete=models.SET_NULL, related_name="work_items"
     )
@@ -2642,6 +2643,7 @@ class CoordinationThread(models.Model):
     title = models.CharField(max_length=240)
     description = models.TextField(blank=True)
     workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="coordination_threads")
+    goal = models.ForeignKey("Goal", null=True, blank=True, on_delete=models.SET_NULL, related_name="threads")
     owner = models.ForeignKey(
         "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="coordination_threads"
     )
@@ -2675,3 +2677,47 @@ class CoordinationEvent(models.Model):
 
     def __str__(self) -> str:
         return f"{self.thread_id}:{self.event_type}"
+
+
+class Goal(models.Model):
+    STATUS_CHOICES = [
+        ("proposed", "Proposed"),
+        ("decomposed", "Decomposed"),
+        ("in_progress", "In Progress"),
+        ("completed", "Completed"),
+        ("canceled", "Canceled"),
+    ]
+    TYPE_CHOICES = [
+        ("build_system", "Build System"),
+        ("extend_system", "Extend System"),
+        ("investigate_problem", "Investigate Problem"),
+        ("stabilize_system", "Stabilize System"),
+    ]
+    PRIORITY_CHOICES = [
+        ("critical", "Critical"),
+        ("high", "High"),
+        ("normal", "Normal"),
+        ("low", "Low"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="goals")
+    title = models.CharField(max_length=240)
+    description = models.TextField(blank=True)
+    source_conversation_id = models.CharField(max_length=120, blank=True)
+    requested_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="requested_goals"
+    )
+    goal_type = models.CharField(max_length=40, choices=TYPE_CHOICES, default="build_system")
+    planning_status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="proposed")
+    priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default="normal")
+    planning_summary = models.TextField(blank=True)
+    resolution_notes_json = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+
+    def __str__(self) -> str:
+        return self.title

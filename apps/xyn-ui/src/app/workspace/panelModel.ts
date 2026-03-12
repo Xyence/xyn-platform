@@ -1,5 +1,7 @@
 export const PANEL_TYPES = [
   "conversation",
+  "goal_list",
+  "goal_detail",
   "thread_list",
   "thread_detail",
   "run_detail",
@@ -16,6 +18,7 @@ export type PanelType = (typeof PANEL_TYPES)[number];
 
 export const PANEL_OBJECT_TYPES = [
   "conversation",
+  "goal",
   "thread",
   "run",
   "work_item",
@@ -65,6 +68,8 @@ type PanelIdentityRule = {
 
 const PANEL_IDENTITY_RULES: Record<PanelType, PanelIdentityRule> = {
   conversation: { object_type: "conversation", requires_thread: true },
+  goal_list: { object_type: "workspace", requires_thread: false },
+  goal_detail: { object_type: "goal", requires_thread: false },
   thread_list: { object_type: "workspace", requires_thread: false },
   thread_detail: { object_type: "thread", requires_thread: false },
   run_detail: { object_type: "run", requires_thread: false },

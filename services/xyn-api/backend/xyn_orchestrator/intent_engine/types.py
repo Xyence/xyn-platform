@@ -64,6 +64,7 @@ class IntentFamily(str, Enum):
     DEVELOPMENT_WORK = "development_work"
     RUN_SUPERVISION = "run_supervision"
     THREAD_COORDINATION = "thread_coordination"
+    GOAL_PLANNING = "goal_planning"
 
 
 class IntentType(str, Enum):
@@ -89,6 +90,16 @@ class IntentType(str, Enum):
     PAUSE_THREAD = "pause_thread"
     RESUME_THREAD = "resume_thread"
     PRIORITIZE_THREAD = "prioritize_thread"
+    CREATE_GOAL = "create_goal"
+    DECOMPOSE_GOAL = "decompose_goal"
+    SUMMARIZE_PLAN = "summarize_plan"
+    QUEUE_FIRST_SLICE = "queue_first_slice"
+    LIST_GOALS = "list_goals"
+    SHOW_GOAL = "show_goal"
+    APPROVE_PLAN = "approve_plan"
+    DEFER_EXECUTION = "defer_execution"
+    ADJUST_PLAN = "adjust_plan"
+    RECOMMEND_NEXT_SLICE = "recommend_next_slice"
     UNSUPPORTED_DECLARED_ENTITY = "unsupported_declared_entity"
     UNSUPPORTED_INTENT = "unsupported_intent"
 
@@ -176,6 +187,7 @@ class PromptInterpretationSpan(BaseModel):
 class PromptInterpretation(BaseModel):
     intent_family: str
     intent_type: str
+    target_goal: Optional[PromptInterpretationTarget] = None
     target_entity: Optional[PromptInterpretationTarget] = None
     target_record: Optional[PromptInterpretationTarget] = None
     target_thread: Optional[PromptInterpretationTarget] = None
@@ -213,6 +225,16 @@ class ConversationActionType(str, Enum):
     PAUSE_THREAD = "pause_thread"
     RESUME_THREAD = "resume_thread"
     PRIORITIZE_THREAD = "prioritize_thread"
+    CREATE_GOAL = "create_goal"
+    DECOMPOSE_GOAL = "decompose_goal"
+    SUMMARIZE_PLAN = "summarize_plan"
+    QUEUE_FIRST_SLICE = "queue_first_slice"
+    LIST_GOALS = "list_goals"
+    SHOW_GOAL = "show_goal"
+    APPROVE_PLAN = "approve_plan"
+    DEFER_EXECUTION = "defer_execution"
+    ADJUST_PLAN = "adjust_plan"
+    RECOMMEND_NEXT_SLICE = "recommend_next_slice"
 
 
 class ConversationActionTarget(BaseModel):
@@ -249,6 +271,7 @@ class ConversationContextArtifact(BaseModel):
 
 class ConversationExecutionContext(BaseModel):
     thread_id: Optional[str] = None
+    active_goal_id: Optional[str] = None
     active_coordination_thread_id: Optional[str] = None
     current_work_item_id: Optional[str] = None
     current_run_id: Optional[str] = None

@@ -50,6 +50,8 @@ describe("workspacePresentationPolicy", () => {
     expect(panelAffinityForKey("palette_result")).toBe("conversation");
     expect(friendlyTitleForKey("thread_detail")).toBe("Thread");
     expect(panelAffinityForKey("thread_list")).toBe("operations");
+    expect(friendlyTitleForKey("goal_detail")).toBe("Goal");
+    expect(panelAffinityForKey("goal_list")).toBe("operations");
   });
 
   it("routes new panels into the focused compatible stack when available", () => {
