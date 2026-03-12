@@ -167,6 +167,44 @@ class EpicDIntentEngineTests(unittest.TestCase):
     def test_core_surface_matcher_does_not_trap_broader_platform_help_requests(self):
         self.assertIsNone(intent_api._match_core_surface_command("help me understand how platform settings work"))
 
+    def test_legacy_article_intake_extracts_title_from_with_the_title_phrase(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        result, _proposal = engine.resolve(
+            message='create an article about whales with the title "whales" in the demo category',
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(result["status"], "DraftReady")
+        self.assertEqual((result.get("draft_payload") or {}).get("title"), "whales")
+        self.assertEqual((result.get("draft_payload") or {}).get("category"), "demo")
+
+    def test_legacy_article_intake_extracts_title_from_titled_phrase(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        result, _proposal = engine.resolve(
+            message='create an article about whales titled "whales" in the demo category',
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(result["status"], "DraftReady")
+        self.assertEqual((result.get("draft_payload") or {}).get("title"), "whales")
+        self.assertEqual((result.get("draft_payload") or {}).get("category"), "demo")
+
+    def test_legacy_article_intake_without_title_still_reports_missing_title(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        result, _proposal = engine.resolve(
+            message="create an article about whales in the demo category",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(result["status"], "MissingFields")
+        self.assertEqual([row.get("field") for row in (result.get("missing_fields") or [])], ["title"])
+
     def test_pause_on_ambiguity_policy_populates(self):
         engine = IntentResolutionEngine(
             proposal_provider=_FakeProvider(),
@@ -1279,6 +1317,52 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual(payload["action_type"], "CreateDraft")
         self.assertEqual(payload["artifact_type"], "ArticleDraft")
         self.assertEqual(mock_engine.call_count, 2)
+
+    def test_resolve_route_preserved_legacy_article_intake_extracts_title_fields(self):
+        epic_d_unsupported = IntentEnvelope(
+            intent_family=IntentFamily.DEVELOPMENT_WORK.value,
+            intent_type=IntentType.UNSUPPORTED_INTENT.value,
+            target_context={"workspace_id": "ws-1"},
+            resolved_subject={},
+            action_payload={},
+            policy={},
+            confidence=0.0,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["no Epic D resolver matched the message"],
+        )
+        legacy_engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"create an article about whales with the title \\"whales\\" in the demo category","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_workspace_runtime_target", return_value=None), \
+            patch.object(intent_api, "_workspace_generated_artifact_issue", return_value=None), \
+            patch.object(intent_api, "_workspace_installed_capability_manifest", return_value=None), \
+            patch.object(intent_api, "_match_generated_app_evolution_command", return_value=None), \
+            patch.object(intent_api, "_match_provision_xyn_remote_command", return_value=None), \
+            patch.object(intent_api, "_match_install_xyn_instance_command", return_value=None), \
+            patch.object(intent_api, "_match_create_ems_instance_command", return_value=None), \
+            patch.object(intent_api, "_match_ems_panel_command", return_value=None), \
+            patch.object(intent_api, "_match_artifact_panel_command", return_value=None), \
+            patch.object(intent_api, "_match_deploy_ems_customer_command", return_value=None), \
+            patch.object(intent_api, "_intent_engine", side_effect=[SimpleNamespace(resolve_intent=lambda **kwargs: epic_d_unsupported), legacy_engine]), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual((payload.get("draft_payload") or {}).get("title"), "whales")
+        self.assertEqual((payload.get("draft_payload") or {}).get("category"), "demo")
 
     def test_apply_route_executes_conversation_action(self):
         workspace = SimpleNamespace(id="ws-1")

@@ -35,9 +35,33 @@ class DraftIntakeContract:
             if not title_match:
                 title_match = re.search(r"\btitle\b\s*(?:is|:)\s*([^\n.;]+)", raw_message, flags=re.IGNORECASE)
             if not title_match:
+                title_match = re.search(r"\bwith\s+(?:the\s+)?title\s*[\"']([^\"']+)[\"']", raw_message, flags=re.IGNORECASE)
+            if not title_match:
+                title_match = re.search(
+                    r"\bwith\s+(?:the\s+)?title\s+(.+?)(?=\s+\b(?:in|under|for)\b(?:\s+the)?\s+[a-z0-9_-]+\s+category\b|[.;]|$)",
+                    raw_message,
+                    flags=re.IGNORECASE,
+                )
+            if not title_match:
                 title_match = re.search(r"\btitle\s+it(?:\s+as)?\s*[\"']([^\"']+)[\"']", raw_message, flags=re.IGNORECASE)
             if not title_match:
                 title_match = re.search(r"\btitle\s+it(?:\s+as)?\s*([^\n.;]+)", raw_message, flags=re.IGNORECASE)
+            if not title_match:
+                title_match = re.search(r"\btitled\s*[\"']([^\"']+)[\"']", raw_message, flags=re.IGNORECASE)
+            if not title_match:
+                title_match = re.search(
+                    r"\btitled\s+(.+?)(?=\s+\b(?:in|under|for)\b(?:\s+the)?\s+[a-z0-9_-]+\s+category\b|[.;]|$)",
+                    raw_message,
+                    flags=re.IGNORECASE,
+                )
+            if not title_match:
+                title_match = re.search(r"\bnamed\s*[\"']([^\"']+)[\"']", raw_message, flags=re.IGNORECASE)
+            if not title_match:
+                title_match = re.search(
+                    r"\bnamed\s+(.+?)(?=\s+\b(?:in|under|for)\b(?:\s+the)?\s+[a-z0-9_-]+\s+category\b|[.;]|$)",
+                    raw_message,
+                    flags=re.IGNORECASE,
+                )
             if not title_match:
                 title_match = re.search(r"\bcall\s+it\s*[\"']([^\"']+)[\"']", raw_message, flags=re.IGNORECASE)
             if not title_match:
