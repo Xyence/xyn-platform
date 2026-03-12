@@ -132,6 +132,37 @@ describe("resolvePanelCommand", () => {
       panelKey: "artifact_list",
       params: {},
     });
+    expect(resolvePanelCommand("show me artifacts created yesterday")).toEqual({
+      panelKey: "artifact_list",
+      params: {
+        query: {
+          entity: "artifacts",
+          filters: [
+            { field: "created_at", op: "gte", value: "day-start:-1" },
+            { field: "created_at", op: "lt", value: "day-start:0" },
+          ],
+          sort: [{ field: "created_at", dir: "desc" }],
+          limit: 50,
+          offset: 0,
+        },
+      },
+    });
+    expect(resolvePanelCommand("show me the artifacts created two days ago")).toEqual({
+      panelKey: "artifact_list",
+      params: {
+        query: {
+          entity: "artifacts",
+          filters: [
+            { field: "created_at", op: "gte", value: "day-start:-2" },
+            { field: "created_at", op: "lt", value: "day-start:-1" },
+          ],
+          sort: [{ field: "created_at", dir: "desc" }],
+          limit: 50,
+          offset: 0,
+        },
+      },
+    });
+    expect(resolvePanelCommand("show me artifacts with status draft")).toBeNull();
     expect(resolvePanelCommand("summarize artifact changes from the last run")).toBeNull();
   });
 

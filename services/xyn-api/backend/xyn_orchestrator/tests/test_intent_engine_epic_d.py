@@ -1,6 +1,7 @@
 import json
 import unittest
 import uuid
+import datetime as dt
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -145,8 +146,56 @@ class EpicDIntentEngineTests(unittest.TestCase):
             ("artifact_list", {}),
         )
 
+    def test_artifact_panel_matcher_extracts_supported_created_day_filters(self):
+        self.assertEqual(
+            intent_api._match_artifact_panel_command("show me artifacts created yesterday"),
+            (
+                "artifact_list",
+                {
+                    "query": {
+                        "entity": "artifacts",
+                        "filters": [
+                            {"field": "created_at", "op": "gte", "value": "day-start:-1"},
+                            {"field": "created_at", "op": "lt", "value": "day-start:0"},
+                        ],
+                        "sort": [{"field": "created_at", "dir": "desc"}],
+                        "limit": 50,
+                        "offset": 0,
+                    }
+                },
+            ),
+        )
+        self.assertEqual(
+            intent_api._match_artifact_panel_command("show me the artifacts created two days ago"),
+            (
+                "artifact_list",
+                {
+                    "query": {
+                        "entity": "artifacts",
+                        "filters": [
+                            {"field": "created_at", "op": "gte", "value": "day-start:-2"},
+                            {"field": "created_at", "op": "lt", "value": "day-start:-1"},
+                        ],
+                        "sort": [{"field": "created_at", "dir": "desc"}],
+                        "limit": 50,
+                        "offset": 0,
+                    }
+                },
+            ),
+        )
+
     def test_artifact_panel_matcher_does_not_trap_broader_semantic_requests(self):
         self.assertIsNone(intent_api._match_artifact_panel_command("summarize artifact changes from the last run"))
+
+    def test_artifact_panel_matcher_marks_unsupported_filter_semantics(self):
+        self.assertEqual(
+            intent_api._unsupported_artifact_filter_reason("show me artifacts with status draft"),
+            "Artifact list filters currently support only created today, created yesterday, or created two days ago.",
+        )
+        self.assertEqual(
+            intent_api._unsupported_artifact_filter_reason("show me artifacts created three weeks ago"),
+            "Artifact list filters currently support only created today, created yesterday, or created two days ago.",
+        )
 
     def test_core_surface_matcher_accepts_natural_platform_settings_phrase(self):
         self.assertEqual(
@@ -840,6 +889,48 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual(((payload.get("next_actions") or [])[0] or {}).get("panel_key"), "artifact_list")
         self.assertNotEqual(payload["status"], "DraftReady")
 
+    def test_resolve_route_returns_direct_panel_intent_for_supported_artifact_created_filter(self):
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"show me artifacts created yesterday","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        action = ((payload.get("next_actions") or [])[0] or {})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(action.get("action"), "OpenPanel")
+        self.assertEqual(action.get("panel_key"), "artifact_list")
+        self.assertEqual(((action.get("params") or {}).get("query") or {}).get("filters"), [
+            {"field": "created_at", "op": "gte", "value": "day-start:-1"},
+            {"field": "created_at", "op": "lt", "value": "day-start:0"},
+        ])
+        self.assertNotEqual(payload["status"], "DraftReady")
+
+    def test_resolve_route_rejects_unsupported_artifact_filter_semantics(self):
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"show me artifacts with status draft","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "UnsupportedIntent")
+        self.assertEqual(payload["summary"], "Artifact list filters currently support only created today, created yesterday, or created two days ago.")
+        self.assertEqual(payload.get("next_actions"), [])
+
     def test_resolve_route_returns_direct_panel_intent_for_natural_platform_settings_phrase(self):
         request = self.factory.post(
             "/xyn/api/xyn/intent/resolve",
@@ -876,6 +967,45 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual(payload["status"], "IntentResolved")
         self.assertEqual(((payload.get("next_actions") or [])[0] or {}).get("panel_key"), "platform_settings")
         self.assertNotEqual(payload["status"], "DraftReady")
+
+
+class ArtifactCollectionFilterTests(unittest.TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+
+    def test_artifacts_collection_applies_created_day_window_filters(self):
+        fixed_now = dt.datetime(2026, 3, 12, 15, 0, tzinfo=dt.timezone.utc)
+        fake_rows = {
+            "art-1": {"slug": "art-1", "created_at": "2026-03-11T12:00:00Z"},
+            "art-2": {"slug": "art-2", "created_at": "2026-03-10T12:00:00Z"},
+            "art-3": {"slug": "art-3", "created_at": "2026-03-12T12:00:00Z"},
+        }
+        artifacts = [SimpleNamespace(id=slug) for slug in fake_rows]
+        manager = SimpleNamespace(select_related=lambda *args, **kwargs: SimpleNamespace(all=lambda: artifacts))
+        request = self.factory.get(
+            "/xyn/api/artifacts",
+            data={
+                "entity": "artifacts",
+                "filters": json.dumps(
+                    [
+                        {"field": "created_at", "op": "gte", "value": "day-start:-1"},
+                        {"field": "created_at", "op": "lt", "value": "day-start:0"},
+                    ]
+                ),
+                "sort": json.dumps([{"field": "created_at", "dir": "desc"}]),
+            },
+        )
+        request.user = SimpleNamespace(is_staff=True, is_authenticated=True)
+        with patch.object(intent_api, "_require_staff", return_value=None), \
+            patch.object(intent_api.Artifact, "objects", manager), \
+            patch.object(intent_api, "_dedupe_artifacts_for_dataset", side_effect=lambda rows, **kwargs: rows), \
+            patch.object(intent_api, "_artifact_table_row", side_effect=lambda artifact, **kwargs: dict(fake_rows[str(artifact.id)])), \
+            patch.object(intent_api.timezone, "now", return_value=fixed_now):
+            response = intent_api.artifacts_collection(request)
+        payload = json.loads(response.content)
+        rows = (((payload.get("dataset") or {}).get("rows")) or [])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row.get("slug") for row in rows], ["art-1"])
 
     def test_resolve_route_still_uses_epic_d_for_supported_non_deterministic_prompt(self):
         envelope = IntentEnvelope(

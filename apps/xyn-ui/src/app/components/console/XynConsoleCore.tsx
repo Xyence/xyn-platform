@@ -107,6 +107,17 @@ function defaultArtifactStructuredQuery(): ArtifactStructuredQuery {
   };
 }
 
+function artifactCreatedDayQuery(dayOffset: number): ArtifactStructuredQuery {
+  return {
+    ...defaultArtifactStructuredQuery(),
+    filters: [
+      { field: "created_at", op: "gte", value: `day-start:${dayOffset}` },
+      { field: "created_at", op: "lt", value: `day-start:${dayOffset + 1}` },
+    ],
+    sort: [{ field: "created_at", dir: "desc" }],
+  };
+}
+
 function isExplicitPaletteCommand(input: string): boolean {
   return /^(show|list)\s+devices(\s+by\s+status)?$/i.test(String(input || "").trim())
     || /^(show|list)\s+interfaces(\s+by\s+status)?$/i.test(String(input || "").trim())
@@ -146,6 +157,30 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
   }
   if (/^list\s+artifacts$/.test(normalized) || /^show\s+artifacts$/.test(normalized) || /^open\s+artifacts$/.test(normalized)) {
     return { panelKey: "artifact_list", params: {} };
+  }
+  if (/^(list|show|open)\s+artifacts\s+created\s+today$/.test(normalized)) {
+    return {
+      panelKey: "artifact_list",
+      params: {
+        query: artifactCreatedDayQuery(0),
+      },
+    };
+  }
+  if (/^(list|show|open)\s+artifacts\s+created\s+yesterday$/.test(normalized)) {
+    return {
+      panelKey: "artifact_list",
+      params: {
+        query: artifactCreatedDayQuery(-1),
+      },
+    };
+  }
+  if (/^(list|show|open)\s+artifacts\s+created\s+two\s+days\s+ago$/.test(normalized)) {
+    return {
+      panelKey: "artifact_list",
+      params: {
+        query: artifactCreatedDayQuery(-2),
+      },
+    };
   }
   if (/^list\s+workspaces$/.test(normalized)) {
     return {
@@ -260,13 +295,8 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
       },
     };
   }
-  if (/^show\s+artifacts\b/.test(normalized) && !/^show\s+artifacts$/.test(normalized)) {
-    return {
-      panelKey: "artifact_list",
-      params: {
-        query_error: "Unsupported filter field. Try: namespace, kind, updated_at, installed.",
-      },
-    };
+  if (/^(list|show|open)\s+artifacts\b/.test(normalized) && !/^(list|show|open)\s+artifacts$/.test(normalized)) {
+    return null;
   }
   match = normalized.match(/^open\s+artifact\s+([a-z0-9_.-]+)$/);
   if (match && match[1]) {

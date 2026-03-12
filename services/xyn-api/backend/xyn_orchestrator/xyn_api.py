@@ -8382,6 +8382,12 @@ def _resolve_relative_time_value(raw_value: Any) -> Optional[timezone.datetime]:
     token = str(raw_value or "").strip().lower()
     if not token:
         return None
+    day_start_match = re.match(r"^day-start:([+-]?\d+)$", token)
+    if day_start_match:
+        offset_days = int(day_start_match.group(1))
+        local_now = timezone.localtime(timezone.now())
+        local_day_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0) + timezone.timedelta(days=offset_days)
+        return local_day_start.astimezone(dt.timezone.utc)
     match = re.match(r"^now-(\d+)([mhd])$", token)
     if not match:
         parsed = parse_datetime(token)
@@ -16395,8 +16401,27 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
     lower = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", lower)
     lower = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", lower)
     lower = re.sub(r"[.!?,:;]+$", "", lower)
+
+    def _artifact_created_day_query(day_offset: int) -> Dict[str, Any]:
+        return {
+            "entity": "artifacts",
+            "filters": [
+                {"field": "created_at", "op": "gte", "value": f"day-start:{day_offset}"},
+                {"field": "created_at", "op": "lt", "value": f"day-start:{day_offset + 1}"},
+            ],
+            "sort": [{"field": "created_at", "dir": "desc"}],
+            "limit": 50,
+            "offset": 0,
+        }
+
     if re.fullmatch(r"(?:list|show|open)\s+artifacts", lower):
         return ("artifact_list", {})
+    if re.fullmatch(r"(?:list|show|open)\s+artifacts\s+created\s+today", lower):
+        return ("artifact_list", {"query": _artifact_created_day_query(0)})
+    if re.fullmatch(r"(?:list|show|open)\s+artifacts\s+created\s+yesterday", lower):
+        return ("artifact_list", {"query": _artifact_created_day_query(-1)})
+    if re.fullmatch(r"(?:list|show|open)\s+artifacts\s+created\s+two\s+days\s+ago", lower):
+        return ("artifact_list", {"query": _artifact_created_day_query(-2)})
     list_match = re.search(r"\blist\s+([a-z0-9_.-]+)\s+artifacts\b", lower)
     if list_match:
         namespace = str(list_match.group(1) or "").strip().lower()
@@ -16410,6 +16435,29 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
     files_match = re.search(r"\bedit\s+artifact\s+([a-z0-9_.-]+)\s+files\b", lower)
     if files_match:
         return ("artifact_files", {"slug": str(files_match.group(1) or "").strip()})
+    return None
+
+
+def _unsupported_artifact_filter_reason(message: str) -> Optional[str]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    lower = re.sub(r"\s+", " ", text.lower()).strip()
+    lower = re.sub(r"^(?:please[,\s]+)+", "", lower)
+    lower = re.sub(r"^(?:can|could|would)\s+you\s+", "", lower)
+    lower = re.sub(r"^take\s+me\s+to\s+", "go to ", lower)
+    lower = re.sub(r"[.!?,:;]+$", "", lower)
+    lower = re.sub(r"^show\s+me\s+(?:a\s+)?list\s+of\s+", "list ", lower)
+    lower = re.sub(r"^show\s+me\s+", "show ", lower)
+    lower = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", lower)
+    lower = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", lower)
+    lower = re.sub(r"[.!?,:;]+$", "", lower)
+    if not re.match(r"^(list|show|open)\s+artifacts\b", lower):
+        return None
+    if _match_artifact_panel_command(message):
+        return None
+    if re.search(r"\bcreated\b", lower) or re.search(r"\bwith\s+status\b", lower) or re.search(r"\bstatus\s+[a-z0-9_.-]+\b", lower) or re.search(r"\bowned\s+by\b", lower):
+        return "Artifact list filters currently support only created today, created yesterday, or created two days ago."
     return None
 
 
@@ -19744,6 +19792,50 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 request_type="intent.resolve",
                 workspace_id=context_workspace_id,
                 summary=response_payload["summary"],
+                prompt_interpretation=prompt_interpretation,
+                thread_id=context_thread_id,
+            )
+        return JsonResponse(response_payload)
+    artifact_filter_unsupported_reason = _unsupported_artifact_filter_reason(message)
+    if artifact_filter_unsupported_reason:
+        prompt_interpretation = _direct_panel_prompt_interpretation(
+            intent_type="unsupported_artifact_filter",
+            action_label="Open artifact view",
+            target_entity_key="artifacts",
+            target_entity_label="Artifacts",
+            resolution_notes=[artifact_filter_unsupported_reason],
+        )
+        response_payload = {
+            "status": "UnsupportedIntent",
+            "action_type": "ValidateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": artifact_filter_unsupported_reason,
+            "prompt_interpretation": prompt_interpretation,
+            "next_actions": [],
+            "audit": {
+                "request_id": request_id,
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=None,
+                proposal={"operation": "unsupported_artifact_filter", "prompt": message},
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="failed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=context_workspace_id,
+                summary=response_payload["summary"],
+                error=artifact_filter_unsupported_reason,
                 prompt_interpretation=prompt_interpretation,
                 thread_id=context_thread_id,
             )
