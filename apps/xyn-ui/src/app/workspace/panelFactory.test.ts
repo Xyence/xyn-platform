@@ -29,7 +29,7 @@ describe("panelFactory", () => {
       object_id: "wi-123",
       workspace_id: "ws-1",
       thread_id: "thread-1",
-      creation_source: "conversation",
+      creation_source: "conversation_action",
     });
 
     const spec = openPanel(panel);
