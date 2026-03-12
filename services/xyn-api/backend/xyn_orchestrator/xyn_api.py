@@ -16437,6 +16437,21 @@ def _match_core_surface_command(message: str) -> Optional[Tuple[str, Dict[str, A
     return None
 
 
+def _should_invoke_legacy_intake_fallback(message: str, *, has_context_artifact: bool) -> bool:
+    if has_context_artifact:
+        return True
+    prompt = str(message or "").strip().lower()
+    if not prompt:
+        return False
+    if any(token in prompt for token in ["show options", "what categories", "what formats", "available categories", "available formats"]):
+        return True
+    if re.search(r"\bcontext\s*pack\b", prompt) and re.search(r"\b(add|set|update|rewrite|change|edit|patch)\b", prompt):
+        return True
+    if re.search(r"\b(create|make|start|new|draft|write|build)\b", prompt) and re.search(r"\b(article|guide|tour|explainer|video)\b", prompt):
+        return True
+    return False
+
+
 def _direct_panel_intent_response(
     *,
     request_id: str,
@@ -17278,6 +17293,24 @@ def _looks_like_generated_crud_prompt(prompt: str) -> bool:
     return bool(
         re.search(
             r"\b(show|list|create|add|update|change|rename|delete|remove)\b.*\b(device|devices|location|locations|interface|interfaces)\b",
+            text,
+        )
+    )
+
+
+def _should_use_legacy_intake_fallback(prompt: str, *, context_artifact: Optional[Artifact]) -> bool:
+    if context_artifact is not None:
+        return True
+    text = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
+    if not text:
+        return False
+    if re.search(r"^(show options|what categories|what formats|available categories|available formats)\b", text):
+        return True
+    if "context pack" in text and re.search(r"\b(add|set|update|rewrite|change|edit|patch)\b", text):
+        return True
+    return bool(
+        re.search(
+            r"\b(create|make|start|new|draft|write|build)\b.*\b(article|guide|tour|explainer|video)\b",
             text,
         )
     )
@@ -20260,6 +20293,41 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 return JsonResponse({"error": "forbidden"}, status=403)
             if context_artifact_type and context_artifact_type not in {"ArticleDraft", "article"}:
                 return JsonResponse({"error": "unsupported artifact_type context"}, status=400)
+
+    if not _should_use_legacy_intake_fallback(message, context_artifact=context_artifact):
+        response_payload = {
+            "status": "UnsupportedIntent",
+            "summary": str((epic_d_intent.resolution_notes or ["Intent is unsupported in the current resolver scope."])[0]),
+            "intent": epic_d_payload,
+            "prompt_interpretation": prompt_interpretation,
+            "conversation_action": conversation_action,
+            "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+        }
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=str(context_artifact.id) if context_artifact else None,
+                proposal={"epic_d_intent": epic_d_payload, "prompt": message},
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="failed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=context_workspace_id,
+                summary=str(response_payload.get("summary") or ""),
+                error=str(epic_d_intent.clarification_reason or ""),
+                trace=epic_d_trace,
+                structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                prompt_interpretation=prompt_interpretation,
+                conversation_action=conversation_action,
+                thread_id=context_thread_id,
+            )
+        return JsonResponse(response_payload)
 
     engine = _intent_engine()
     result, proposal = engine.resolve(message=message, context=ResolutionContext(artifact=context_artifact))

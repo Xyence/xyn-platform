@@ -1179,7 +1179,7 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual((payload.get("draft_payload") or {}).get("__operation"), "create_app_intent_draft")
         self.assertNotIn("intent", payload)
 
-    def test_resolve_route_unmatched_request_falls_through_to_legacy_unsupported_result(self):
+    def test_resolve_route_unmatched_request_stays_on_epic_d_unsupported_boundary(self):
         epic_d_unsupported = IntentEnvelope(
             intent_family=IntentFamily.DEVELOPMENT_WORK.value,
             intent_type=IntentType.UNSUPPORTED_INTENT.value,
@@ -1192,20 +1192,6 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
             clarification_reason=None,
             clarification_options=[],
             resolution_notes=["no Epic D resolver matched the message"],
-        )
-        legacy_engine = SimpleNamespace(
-            resolve=lambda **kwargs: (
-                {
-                    "status": "UnsupportedIntent",
-                    "action_type": "ValidateDraft",
-                    "artifact_type": "ArticleDraft",
-                    "artifact_id": None,
-                    "summary": "Intent is ambiguous; provide clearer draft instructions.",
-                    "next_actions": [],
-                    "audit": {"request_id": "req-1", "timestamp": "2026-03-11T00:00:00Z"},
-                },
-                {"action_type": "ValidateDraft", "artifact_type": "ArticleDraft"},
-            )
         )
         request = self.factory.post(
             "/xyn/api/xyn/intent/resolve",
@@ -1225,14 +1211,74 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
             patch.object(intent_api, "_match_ems_panel_command", return_value=None), \
             patch.object(intent_api, "_match_artifact_panel_command", return_value=None), \
             patch.object(intent_api, "_match_deploy_ems_customer_command", return_value=None), \
-            patch.object(intent_api, "_intent_engine", side_effect=[SimpleNamespace(resolve_intent=lambda **kwargs: epic_d_unsupported), legacy_engine]), \
+            patch.object(intent_api, "_intent_engine", return_value=SimpleNamespace(resolve_intent=lambda **kwargs: epic_d_unsupported)) as mock_engine, \
             patch.object(intent_api, "_audit_intent_event"), \
             patch.object(intent_api, "_log_prompt_activity"):
             response = intent_api.xyn_intent_resolve(request)
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["status"], "UnsupportedIntent")
-        self.assertNotIn("intent", payload)
+        self.assertEqual((payload.get("intent") or {}).get("intent_type"), IntentType.UNSUPPORTED_INTENT.value)
+        self.assertEqual(payload.get("summary"), "no Epic D resolver matched the message")
+        self.assertEqual(mock_engine.call_count, 1)
+
+    def test_resolve_route_preserves_residual_legacy_intake_fallback(self):
+        epic_d_unsupported = IntentEnvelope(
+            intent_family=IntentFamily.DEVELOPMENT_WORK.value,
+            intent_type=IntentType.UNSUPPORTED_INTENT.value,
+            target_context={"workspace_id": "ws-1"},
+            resolved_subject={},
+            action_payload={},
+            policy={},
+            confidence=0.0,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["no Epic D resolver matched the message"],
+        )
+        legacy_engine = SimpleNamespace(
+            resolve=lambda **kwargs: (
+                {
+                    "status": "DraftReady",
+                    "action_type": "CreateDraft",
+                    "artifact_type": "ArticleDraft",
+                    "artifact_id": None,
+                    "summary": "Ready to draft article content.",
+                    "draft_payload": {"title": "Explainer", "format": "article"},
+                    "next_actions": [{"label": "Create draft", "action": "CreateDraft"}],
+                    "audit": {"request_id": "req-1", "timestamp": "2026-03-11T00:00:00Z"},
+                },
+                {"action_type": "CreateDraft", "artifact_type": "ArticleDraft"},
+            )
+        )
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"draft an explainer article about governance","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_workspace_runtime_target", return_value=None), \
+            patch.object(intent_api, "_workspace_generated_artifact_issue", return_value=None), \
+            patch.object(intent_api, "_workspace_installed_capability_manifest", return_value=None), \
+            patch.object(intent_api, "_match_generated_app_evolution_command", return_value=None), \
+            patch.object(intent_api, "_match_provision_xyn_remote_command", return_value=None), \
+            patch.object(intent_api, "_match_install_xyn_instance_command", return_value=None), \
+            patch.object(intent_api, "_match_create_ems_instance_command", return_value=None), \
+            patch.object(intent_api, "_match_ems_panel_command", return_value=None), \
+            patch.object(intent_api, "_match_artifact_panel_command", return_value=None), \
+            patch.object(intent_api, "_match_deploy_ems_customer_command", return_value=None), \
+            patch.object(intent_api, "_intent_engine", side_effect=[SimpleNamespace(resolve_intent=lambda **kwargs: epic_d_unsupported), legacy_engine]) as mock_engine, \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual(payload["action_type"], "CreateDraft")
+        self.assertEqual(payload["artifact_type"], "ArticleDraft")
+        self.assertEqual(mock_engine.call_count, 2)
 
     def test_apply_route_executes_conversation_action(self):
         workspace = SimpleNamespace(id="ws-1")
