@@ -46,6 +46,7 @@ class IntentResolutionEngine:
         context_pack_target_lookup=None,
         work_item_lookup: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
         run_lookup: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
+        thread_lookup: Optional[Callable[[str, str], List[Dict[str, Any]]]] = None,
         capability_manifest_lookup: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
         app_operation_lookup: Optional[Callable[[str, Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     ):
@@ -54,6 +55,7 @@ class IntentResolutionEngine:
         self.context_pack_target_lookup = context_pack_target_lookup
         self.work_item_lookup = work_item_lookup
         self.run_lookup = run_lookup
+        self.thread_lookup = thread_lookup
         self.capability_manifest_lookup = capability_manifest_lookup
         self.app_operation_lookup = app_operation_lookup
 
@@ -593,6 +595,113 @@ class IntentResolutionEngine:
             )
         return None
 
+    @classmethod
+    def _extract_thread_reference(cls, message: str) -> str:
+        text = str(message or "").strip()
+        for pattern in (
+            r"^\s*(?:pause|resume|prioritize|show)\s+(?:this\s+)?thread\b(?:\s+(.*))?$",
+            r"^\s*(?:start|create)\s+(?:a\s+new\s+)?(?:development\s+)?thread\b(?:\s+(.*))?$",
+        ):
+            match = re.match(pattern, text, flags=re.IGNORECASE)
+            if match:
+                reference = cls._clean_reference(match.group(1))
+                if reference.lower().startswith("for "):
+                    reference = cls._clean_reference(reference[4:])
+                return reference
+        match = re.search(r"\bthread\s+([A-Za-z0-9._:-]+(?:\s+[A-Za-z0-9._:-]+)*)\b", text, flags=re.IGNORECASE)
+        if match:
+            reference = cls._clean_reference(match.group(1))
+            if reference.lower().startswith("for "):
+                reference = cls._clean_reference(reference[4:])
+            return reference
+        return ""
+
+    def _resolve_thread_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        if "thread" not in lowered and not re.search(r"\blist active threads\b|\blist threads\b", lowered):
+            return None
+        workspace_id = str(context.workspace_id or "").strip()
+        conversation_context = context.conversation_context or ConversationExecutionContext()
+        reference = self._extract_thread_reference(text)
+        notes: List[str] = []
+        candidates = self.thread_lookup(reference or text, workspace_id) if callable(self.thread_lookup) else []
+        if not reference and not candidates and conversation_context.active_coordination_thread_id:
+            candidates = self.thread_lookup(str(conversation_context.active_coordination_thread_id), workspace_id) if callable(self.thread_lookup) else []
+            if candidates:
+                notes.append(f"context_thread={conversation_context.active_coordination_thread_id}")
+
+        if re.search(r"\b(list|show)\s+(?:active\s+)?threads\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.THREAD_COORDINATION,
+                intent_type=IntentType.LIST_THREADS,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text},
+                confidence=0.94,
+                resolution_notes=notes or ["list threads requested"],
+            )
+        if re.search(r"\b(create|start)\s+(?:a\s+new\s+)?(?:development\s+)?thread\b", lowered):
+            title = reference or ""
+            return self._intent_envelope(
+                intent_family=IntentFamily.THREAD_COORDINATION,
+                intent_type=IntentType.CREATE_THREAD,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"title": title or text, "reference": title or text},
+                confidence=0.9,
+                resolution_notes=notes or ["create thread requested"],
+            )
+
+        intent_type = None
+        if re.search(r"\bpause\b", lowered):
+            intent_type = IntentType.PAUSE_THREAD
+        elif re.search(r"\bresume\b", lowered):
+            intent_type = IntentType.RESUME_THREAD
+        elif re.search(r"\bpriorit", lowered):
+            intent_type = IntentType.PRIORITIZE_THREAD
+        elif re.search(r"\b(show|progress|detail)\b", lowered):
+            intent_type = IntentType.SHOW_THREAD
+        if intent_type is None:
+            return None
+        if not candidates and conversation_context.active_coordination_thread_id and not reference:
+            candidates = [{"id": str(conversation_context.active_coordination_thread_id)}]
+        if len(candidates) > 1:
+            return self._clarification_from_candidates(
+                family=IntentFamily.THREAD_COORDINATION,
+                intent_type=intent_type,
+                target_context={"workspace_id": workspace_id},
+                policy={},
+                candidates=candidates,
+                notes=notes or ["thread reference is ambiguous"],
+            )
+        if not candidates and intent_type != IntentType.CREATE_THREAD:
+            return self._intent_envelope(
+                intent_family=IntentFamily.THREAD_COORDINATION,
+                intent_type=intent_type,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text},
+                confidence=0.55,
+                needs_clarification=True,
+                clarification_reason=ClarificationReason.MISSING_TARGET,
+                resolution_notes=notes or ["thread reference missing"],
+            )
+        resolved = candidates[0] if candidates else {}
+        if not resolved and conversation_context.active_coordination_thread_id and not reference:
+            resolved = {"id": str(conversation_context.active_coordination_thread_id)}
+        action_payload: Dict[str, Any] = {"reference": reference or text}
+        if intent_type == IntentType.PRIORITIZE_THREAD:
+            priority_match = re.search(r"\b(critical|high|normal|low)\b", lowered)
+            if priority_match:
+                action_payload["priority"] = str(priority_match.group(1) or "").lower()
+        return self._intent_envelope(
+            intent_family=IntentFamily.THREAD_COORDINATION,
+            intent_type=intent_type,
+            target_context={"workspace_id": workspace_id},
+            resolved_subject=resolved,
+            action_payload=action_payload,
+            confidence=0.87,
+            resolution_notes=notes or [f"{intent_type.value} requested"],
+        )
+
     def _resolve_app_operation_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
         workspace_id = str(context.workspace_id or "").strip()
         if not workspace_id or not callable(self.capability_manifest_lookup):
@@ -679,9 +788,10 @@ class IntentResolutionEngine:
                 confidence=0.0,
                 resolution_notes=[str(context.worker_mention_error or "").strip()],
             )
+        thread_coordination = self._resolve_thread_intent(message=user_message, context=context)
         development = self._resolve_development_intent(message=user_message, context=context)
         app_operation = self._resolve_app_operation_intent(message=user_message, context=context)
-        envelope = development or app_operation or self._intent_envelope(
+        envelope = thread_coordination or development or app_operation or self._intent_envelope(
             intent_family=IntentFamily.DEVELOPMENT_WORK,
             intent_type=IntentType.UNSUPPORTED_INTENT,
             target_context={"workspace_id": str(context.workspace_id or "").strip()},

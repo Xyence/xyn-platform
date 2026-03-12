@@ -63,6 +63,7 @@ class IntentFamily(str, Enum):
     APP_OPERATION = "app_operation"
     DEVELOPMENT_WORK = "development_work"
     RUN_SUPERVISION = "run_supervision"
+    THREAD_COORDINATION = "thread_coordination"
 
 
 class IntentType(str, Enum):
@@ -82,6 +83,12 @@ class IntentType(str, Enum):
     RETRY_RUN = "retry_run"
     PAUSE_OR_HOLD = "pause_or_hold"
     REQUEST_REVIEW = "request_review"
+    CREATE_THREAD = "create_thread"
+    LIST_THREADS = "list_threads"
+    SHOW_THREAD = "show_thread"
+    PAUSE_THREAD = "pause_thread"
+    RESUME_THREAD = "resume_thread"
+    PRIORITIZE_THREAD = "prioritize_thread"
     UNSUPPORTED_DECLARED_ENTITY = "unsupported_declared_entity"
     UNSUPPORTED_INTENT = "unsupported_intent"
 
@@ -171,6 +178,7 @@ class PromptInterpretation(BaseModel):
     intent_type: str
     target_entity: Optional[PromptInterpretationTarget] = None
     target_record: Optional[PromptInterpretationTarget] = None
+    target_thread: Optional[PromptInterpretationTarget] = None
     target_work_item: Optional[PromptInterpretationTarget] = None
     target_run: Optional[PromptInterpretationTarget] = None
     action: PromptInterpretationAction
@@ -199,6 +207,12 @@ class ConversationActionType(str, Enum):
     SHOW_STATUS = "show_status"
     PAUSE_RUN = "pause_run"
     REQUEST_REVIEW = "request_review"
+    CREATE_THREAD = "create_thread"
+    LIST_THREADS = "list_threads"
+    SHOW_THREAD = "show_thread"
+    PAUSE_THREAD = "pause_thread"
+    RESUME_THREAD = "resume_thread"
+    PRIORITIZE_THREAD = "prioritize_thread"
 
 
 class ConversationActionTarget(BaseModel):
@@ -235,6 +249,7 @@ class ConversationContextArtifact(BaseModel):
 
 class ConversationExecutionContext(BaseModel):
     thread_id: Optional[str] = None
+    active_coordination_thread_id: Optional[str] = None
     current_work_item_id: Optional[str] = None
     current_run_id: Optional[str] = None
     active_epic: Optional[str] = None

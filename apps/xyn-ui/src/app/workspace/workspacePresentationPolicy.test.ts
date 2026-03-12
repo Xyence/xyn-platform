@@ -48,6 +48,8 @@ describe("workspacePresentationPolicy", () => {
     expect(friendlyTitleForKey("jobs_list")).toBe("Jobs List");
     expect(panelAffinityForKey("artifact_detail")).toBe("artifacts");
     expect(panelAffinityForKey("palette_result")).toBe("conversation");
+    expect(friendlyTitleForKey("thread_detail")).toBe("Thread");
+    expect(panelAffinityForKey("thread_list")).toBe("operations");
   });
 
   it("routes new panels into the focused compatible stack when available", () => {

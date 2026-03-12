@@ -41,6 +41,9 @@ import type {
   RuntimeRunListResponse,
   WorkItemDetail,
   WorkItemListResponse,
+  CoordinationThreadDetail,
+  CoordinationThreadListResponse,
+  WorkQueueResponse,
   ContextPackCreatePayload,
   ContextPackDetail,
   ContextPackListResponse,
@@ -4189,6 +4192,64 @@ export async function getWorkItem(id: string): Promise<WorkItemDetail> {
     credentials: "include",
   });
   return handle<WorkItemDetail>(response);
+}
+
+export async function listCoordinationThreads(workspaceId: string, status?: string): Promise<CoordinationThreadListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/threads`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (status) url.searchParams.set("status", status);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<CoordinationThreadListResponse>(response);
+}
+
+export async function createCoordinationThread(payload: Record<string, unknown>): Promise<CoordinationThreadDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/threads`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<CoordinationThreadDetail>(response);
+}
+
+export async function getCoordinationThread(id: string): Promise<CoordinationThreadDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/threads/${id}`, {
+    credentials: "include",
+  });
+  return handle<CoordinationThreadDetail>(response);
+}
+
+export async function updateCoordinationThread(id: string, payload: Record<string, unknown>): Promise<CoordinationThreadDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/threads/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<CoordinationThreadDetail>(response);
+}
+
+export async function getWorkQueue(workspaceId: string): Promise<WorkQueueResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/xco/queue`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<WorkQueueResponse>(response);
+}
+
+export async function dispatchNextWorkQueueItem(workspaceId: string): Promise<{ status: string; queue_item?: Record<string, unknown>; run_id?: string }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/xco/dispatch-next`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify({ workspace_id: workspaceId }),
+  });
+  return handle<{ status: string; queue_item?: Record<string, unknown>; run_id?: string }>(response);
 }
 
 export async function runDevTask(id: string, force = false): Promise<{ run_id: string; status: string }> {

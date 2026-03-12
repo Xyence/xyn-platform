@@ -23,6 +23,8 @@ function panelToConsoleSpec(panel: Panel, params?: Record<string, unknown>, titl
   const registered = resolvePanelComponent(panel);
   const nextParams = { ...(params || {}) };
   if (panel.panel_type === "run_detail") nextParams.run_id = panel.object_id;
+  if (panel.panel_type === "thread_detail") nextParams.thread_id = panel.object_id;
+  if (panel.panel_type === "thread_list") nextParams.workspace_id = panel.workspace_id;
   if (panel.panel_type === "work_item") nextParams.work_item_id = panel.object_id;
   if (panel.panel_type === "artifact_view" || panel.panel_type === "log_view") {
     const runtimeArtifact = parseRuntimeArtifactObjectId(panel.object_id);
@@ -51,24 +53,17 @@ function panelToConsoleSpec(panel: Panel, params?: Record<string, unknown>, titl
 }
 
 export function createWorkspacePanel(input: CreatePanelInput): Panel {
-  const object_type =
-    input.panel_type === "conversation"
-      ? "conversation"
-      : input.panel_type === "run_detail"
-        ? "run"
-        : input.panel_type === "run_list"
-          ? "workspace"
-          : input.panel_type === "work_item"
-            ? "work_item"
-            : input.panel_type === "entity_list"
-              ? "entity_collection"
-              : input.panel_type === "entity_record"
-                ? "entity_record"
-                : input.panel_type === "artifact_view"
-                  ? "artifact"
-                  : input.panel_type === "report_view"
-                    ? "report"
-                    : "log";
+  let object_type: Panel["object_type"] = "log";
+  if (input.panel_type === "conversation") object_type = "conversation";
+  else if (input.panel_type === "thread_list") object_type = "workspace";
+  else if (input.panel_type === "thread_detail") object_type = "thread";
+  else if (input.panel_type === "run_detail") object_type = "run";
+  else if (input.panel_type === "run_list") object_type = "workspace";
+  else if (input.panel_type === "work_item") object_type = "work_item";
+  else if (input.panel_type === "entity_list") object_type = "entity_collection";
+  else if (input.panel_type === "entity_record") object_type = "entity_record";
+  else if (input.panel_type === "artifact_view") object_type = "artifact";
+  else if (input.panel_type === "report_view") object_type = "report";
   return createPanel({
     panel_type: input.panel_type,
     object_type,

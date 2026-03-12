@@ -130,6 +130,57 @@ class EpicDIntentEngineTests(unittest.TestCase):
         self.assertEqual(envelope.resolved_subject.get("run_id"), "run-1")
         self.assertEnvelopeStable(envelope)
 
+    def test_start_new_development_thread_resolves_to_create_thread(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="start a new development thread for runtime refactor",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.THREAD_COORDINATION.value)
+        self.assertEqual(envelope.intent_type, IntentType.CREATE_THREAD.value)
+        self.assertEqual(envelope.action_payload.get("title"), "runtime refactor")
+        self.assertEnvelopeStable(envelope)
+
+    def test_pause_this_thread_uses_active_thread_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="pause this thread",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(
+                    active_coordination_thread_id="thread-1",
+                ),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.THREAD_COORDINATION.value)
+        self.assertEqual(envelope.intent_type, IntentType.PAUSE_THREAD.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "thread-1")
+        self.assertEnvelopeStable(envelope)
+
+    def test_prioritize_thread_reference_resolves_through_thread_lookup(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            thread_lookup=lambda query, workspace_id: [
+                {"id": "thread-2", "label": "Runtime Refactor", "kind": "coordination_thread"}
+            ],
+        )
+        envelope = engine.resolve_intent(
+            user_message="prioritize the runtime refactor thread to critical",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.THREAD_COORDINATION.value)
+        self.assertEqual(envelope.intent_type, IntentType.PRIORITIZE_THREAD.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "thread-2")
+        self.assertEqual(envelope.action_payload.get("priority"), "critical")
+        self.assertEnvelopeStable(envelope)
+
     def test_artifact_panel_matcher_accepts_natural_list_phrase(self):
         self.assertEqual(
             intent_api._match_artifact_panel_command("show me a list of artifacts"),
@@ -777,6 +828,39 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual(((payload.get("draft_payload") or {}).get("__operation")), "execute_conversation_action")
         self.assertTrue(any(call.get("thread_id") == "thread-1" for call in logger_calls))
         self.assertTrue(any(any(step.get("step") == "intent_resolved" for step in (call.get("trace") or [])) for call in logger_calls))
+
+    def test_resolve_route_returns_thread_intent_and_prompt_interpretation(self):
+        envelope = IntentEnvelope(
+            intent_family=IntentFamily.THREAD_COORDINATION.value,
+            intent_type=IntentType.LIST_THREADS.value,
+            target_context={"workspace_id": "ws-1"},
+            resolved_subject={},
+            action_payload={},
+            policy={},
+            confidence=0.92,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["listing active threads"],
+        )
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"list active threads","context":{"workspace_id":"ws-1","thread_id":"thread-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_intent_engine", return_value=SimpleNamespace(resolve_intent=lambda **kwargs: envelope)), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual((payload.get("intent") or {}).get("intent_type"), IntentType.LIST_THREADS.value)
+        self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "list_threads")
+        self.assertEqual(((payload.get("conversation_action") or {}).get("thread_id")), "thread-1")
 
     def test_resolve_route_parses_worker_mentions_through_epic_d(self):
         captured = {}

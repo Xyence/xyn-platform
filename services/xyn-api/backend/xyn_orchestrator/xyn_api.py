@@ -22,7 +22,7 @@ import boto3
 from authlib.jose import JsonWebKey, jwt
 from markdownify import markdownify as _markdownify_html
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db import models, transaction
 from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
@@ -61,6 +61,8 @@ from .models import (
     VoiceNote,
     Bundle,
     ContextPack,
+    CoordinationEvent,
+    CoordinationThread,
     DevTask,
     Environment,
     EnvironmentAppState,
@@ -127,6 +129,15 @@ from .models import (
     PlatformConfigDocument,
     Report,
     ReportAttachment,
+)
+from .xco import (
+    THREAD_PRIORITY_ORDER,
+    active_run_count,
+    derive_work_queue,
+    effective_thread_policy,
+    record_thread_event,
+    transition_thread_status,
+    valid_thread_transition,
 )
 from .artifact_packages import (
     ArtifactPackageValidationError,
@@ -431,7 +442,35 @@ def _intent_runtime_run_candidates(identity: UserIdentity, query: str, workspace
     return rows
 
 
+def _intent_thread_candidates(identity: UserIdentity, query: str, workspace_id: str) -> List[Dict[str, Any]]:
+    search = str(query or "").strip()
+    workspace = _resolve_workspace_for_identity(identity, workspace_id) if workspace_id else None
+    qs = CoordinationThread.objects.all().order_by("-updated_at", "-created_at")
+    if workspace is not None:
+        qs = qs.filter(workspace=workspace)
+    if search and search.lower() not in {"this thread", "the thread", "thread"}:
+        qs = qs.filter(
+            models.Q(title__icontains=search)
+            | models.Q(description__icontains=search)
+            | models.Q(domain__icontains=search)
+        )
+    rows = []
+    for thread in qs[:5]:
+        rows.append(
+            {
+                "id": str(thread.id),
+                "label": thread.title,
+                "kind": "coordination_thread",
+                "status": thread.status,
+                "priority": thread.priority,
+                "workspace_id": str(thread.workspace_id),
+            }
+        )
+    return rows
+
+
 def _conversation_execution_context(identity: UserIdentity, workspace_id: str, thread_id: str = "") -> ConversationExecutionContext:
+    active_coordination_thread_id: Optional[str] = None
     current_work_item_id: Optional[str] = None
     current_run_id: Optional[str] = None
     active_epic: Optional[str] = None
@@ -447,6 +486,8 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
     if thread_token:
         task_qs = task_qs.filter(source_conversation_id=thread_token)
     for task in task_qs[:10]:
+        if not active_coordination_thread_id and task.coordination_thread_id:
+            active_coordination_thread_id = str(task.coordination_thread_id)
         detail = _project_runtime_status_to_task(task)
         task_status = _canonical_work_item_status(str((detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
         if not current_work_item_id and task_status in {"queued", "running", "awaiting_review"}:
@@ -515,6 +556,7 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
 
     return ConversationExecutionContext(
         thread_id=thread_token or None,
+        active_coordination_thread_id=active_coordination_thread_id,
         current_work_item_id=current_work_item_id,
         current_run_id=current_run_id,
         active_epic=active_epic,
@@ -692,6 +734,11 @@ def _intent_engine(identity: Optional[UserIdentity] = None, workspace: Optional[
             if identity is not None
             else None
         ),
+        thread_lookup=(
+            (lambda query, workspace_id: _intent_thread_candidates(identity, query, workspace_id))
+            if identity is not None
+            else None
+        ),
         capability_manifest_lookup=(
             (
                 lambda workspace_id: (
@@ -787,6 +834,12 @@ def _prompt_interpretation_from_intent(
         "retry_run": ("retry", "Retry run"),
         "pause_or_hold": ("pause", "Pause or hold"),
         "request_review": ("review", "Request review"),
+        "create_thread": ("create", "Create thread"),
+        "list_threads": ("show", "List threads"),
+        "show_thread": ("show", "Show thread"),
+        "pause_thread": ("pause", "Pause thread"),
+        "resume_thread": ("continue", "Resume thread"),
+        "prioritize_thread": ("prioritize", "Prioritize thread"),
         "unsupported_declared_entity": ("unsupported", "Unsupported declared entity"),
         "unsupported_intent": ("unsupported", "Unsupported intent"),
     }
@@ -826,6 +879,16 @@ def _prompt_interpretation_from_intent(
         if intent.intent_family == "development_work" and (resolved_subject.get("work_item_id") or resolved_subject.get("label") or resolved_subject.get("id"))
         else None
     )
+    target_thread = (
+        PromptInterpretationTarget(
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            status=str(resolved_subject.get("status") or "") or None,
+        )
+        if intent.intent_family == "thread_coordination" and (resolved_subject.get("id") or resolved_subject.get("label") or action_payload.get("reference"))
+        else None
+    )
     target_run = (
         PromptInterpretationTarget(
             id=str(resolved_subject.get("run_id") or resolved_subject.get("id") or "") or None,
@@ -847,6 +910,8 @@ def _prompt_interpretation_from_intent(
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CONTINUATION.value
     elif intent.intent_type in {"create_and_dispatch_run", "run_validation", "investigate_issue", "retry_run", "continue_run"}:
         execution_mode = PromptInterpretationExecutionMode.QUEUED_RUN.value
+    elif intent.intent_type in {"create_thread"}:
+        execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
     elif intent.intent_type in {"unsupported_declared_entity", "unsupported_intent"}:
         execution_mode = PromptInterpretationExecutionMode.BLOCKED.value
     else:
@@ -911,6 +976,7 @@ def _prompt_interpretation_from_intent(
         intent_type=intent.intent_type,
         target_entity=target_entity,
         target_record=target_record,
+        target_thread=target_thread,
         target_work_item=target_work_item,
         target_run=target_run,
         action=PromptInterpretationAction(verb=verb, label=label),
@@ -1011,6 +1077,23 @@ def _conversation_action_from_intent(
             kind="run",
             id=str(resolved_subject.get("run_id") or resolved_subject.get("id") or "") or None,
             label=str(resolved_subject.get("label") or resolved_subject.get("run_id") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            workspace_id=str(target_context.get("workspace_id") or "") or None,
+        )
+    elif intent.intent_family == "thread_coordination":
+        action_type_map = {
+            IntentType.CREATE_THREAD.value: ConversationActionType.CREATE_THREAD.value,
+            IntentType.LIST_THREADS.value: ConversationActionType.LIST_THREADS.value,
+            IntentType.SHOW_THREAD.value: ConversationActionType.SHOW_THREAD.value,
+            IntentType.PAUSE_THREAD.value: ConversationActionType.PAUSE_THREAD.value,
+            IntentType.RESUME_THREAD.value: ConversationActionType.RESUME_THREAD.value,
+            IntentType.PRIORITIZE_THREAD.value: ConversationActionType.PRIORITIZE_THREAD.value,
+        }
+        action_type = action_type_map.get(intent.intent_type)
+        target = ConversationActionTarget(
+            kind="coordination_thread",
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or "") or None,
             reference=str(action_payload.get("reference") or "") or None,
             workspace_id=str(target_context.get("workspace_id") or "") or None,
         )
@@ -17298,6 +17381,59 @@ def _list_runtime_activity_entries(workspace: Workspace, *, limit: int, thread_i
     return activity_items
 
 
+def _coordination_activity_item_from_event(event: CoordinationEvent) -> Dict[str, Any]:
+    payload = event.payload_json if isinstance(event.payload_json, dict) else {}
+    summary = str(payload.get("reason") or payload.get("status") or event.event_type.replace("_", " ")).strip()
+    refs = {
+        "thread_id": str(event.thread_id),
+        "work_item_id": str(event.work_item.work_item_id or event.work_item_id) if event.work_item_id else None,
+        "run_id": str(event.run_id) if event.run_id else None,
+    }
+    if event.event_type in {"thread_paused", "thread_completed"}:
+        message_type = "execution_summary"
+        status = "failed" if event.event_type == "thread_paused" else "succeeded"
+    else:
+        message_type = "system_runtime"
+        status = "running"
+    return {
+        "id": f"coordination-event:{event.id}",
+        "event_type": event.event_type,
+        "status": status,
+        "summary": summary or event.event_type.replace("_", " "),
+        "created_at": event.created_at,
+        "actor_id": None,
+        "agent_slug": "xco",
+        "provider": "",
+        "model_name": "",
+        "artifact_id": str(event.thread_id),
+        "artifact_type": "coordination_thread",
+        "artifact_title": str(event.thread.title or ""),
+        "request_type": "xco.event",
+        "prompt": "",
+        "workspace_id": str(event.thread.workspace_id),
+        "thread_id": str(event.thread.source_conversation_id or "") or None,
+        "draft_id": None,
+        "job_id": None,
+        "error": "",
+        "trace": [],
+        "structured_operation": {
+            "thread_id": str(event.thread_id),
+            "work_item_id": refs["work_item_id"],
+            "run_id": refs["run_id"],
+        },
+        "conversation_message": {
+            "message_type": message_type,
+            "title": str(event.thread.title or "Thread"),
+            "body": summary or event.event_type.replace("_", " "),
+            "status": status,
+            "reason": str(payload.get("reason") or "") or None,
+            "options": [],
+            "refs": refs,
+        },
+        "source": "coordination_event",
+    }
+
+
 def _runtime_stream_query(workspace: Workspace, *, last_event_id: str = "", since: str = "") -> Dict[str, str]:
     params = {
         "workspace_id": str(workspace.id),
@@ -21256,6 +21392,19 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
         if workspace:
             items.extend(_list_runtime_activity_entries(workspace, limit=max(1, limit - len(items)), thread_id=thread_id))
 
+    if workspace_id and len(items) < limit:
+        coordination_events = (
+            CoordinationEvent.objects.filter(thread__workspace_id=workspace_id)
+            .select_related("thread", "work_item")
+            .order_by("-created_at")[:300]
+        )
+        for event in coordination_events:
+            if thread_id and str(event.thread.source_conversation_id or "") != thread_id:
+                continue
+            items.append(_coordination_activity_item_from_event(event))
+            if len(items) >= limit:
+                break
+
     items.sort(key=lambda entry: str(entry.get("created_at") or ""), reverse=True)
     return JsonResponse({"items": items[:limit]})
 
@@ -25139,6 +25288,29 @@ def _serialize_runtime_artifacts_for_dev_task(detail: Dict[str, Any]) -> List[Di
     return artifacts
 
 
+def _serialize_runtime_artifacts_for_thread(detail: Dict[str, Any], *, work_item_id: str = "") -> List[Dict[str, Any]]:
+    rows = detail.get("artifacts") if isinstance(detail.get("artifacts"), list) else []
+    artifacts: List[Dict[str, Any]] = []
+    run_id = str(detail.get("id") or detail.get("run_id") or "").strip()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        uri = str(row.get("uri") or "").strip()
+        artifacts.append(
+            {
+                "id": str(row.get("artifact_id") or row.get("id") or "").strip(),
+                "run_id": run_id or None,
+                "work_item_id": str(work_item_id or "").strip() or None,
+                "artifact_type": str(row.get("artifact_type") or row.get("kind") or "").strip() or None,
+                "label": str(row.get("label") or row.get("name") or row.get("artifact_type") or "artifact"),
+                "uri": uri or None,
+                "created_at": row.get("created_at"),
+                "metadata": row.get("metadata") if isinstance(row.get("metadata"), dict) else {},
+            }
+        )
+    return artifacts
+
+
 def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     detail = runtime_detail or _project_runtime_status_to_task(task)
     status = _canonical_work_item_status(str((detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
@@ -25153,6 +25325,9 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "target_repo": task.target_repo or None,
         "target_branch": task.target_branch or None,
         "execution_policy": task.execution_policy or {},
+        "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
+        "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
+        "dependency_work_item_ids": task.dependency_work_item_ids if isinstance(task.dependency_work_item_ids, list) else [],
         "task_type": task.task_type,
         "status": status,
         "priority": task.priority,
@@ -25239,6 +25414,7 @@ def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
             }
             for pack in task.context_packs.all()
         ],
+        "thread_detail": _coordination_thread_summary(task.coordination_thread) if task.coordination_thread_id else None,
         "result_run_detail": run_payload,
         "result_run_artifacts": artifacts_payload,
         "result_run_commands": commands_payload,
@@ -25267,6 +25443,44 @@ def _execute_conversation_action(
         task = _ensure_conversation_dev_task(workspace=workspace, action=action, prompt=prompt, user=user)
         detail = _serialize_dev_task_summary(task)
         if action_type == ConversationActionType.DISPATCH_RUN.value:
+            task_thread_id = getattr(task, "coordination_thread_id", None)
+            if task_thread_id:
+                result = _dispatch_next_queue_item(workspace=workspace, user=user, identity=identity)
+                task.refresh_from_db()
+                detail = _serialize_dev_task_summary(task, runtime_detail=_project_runtime_status_to_task(task))
+                return JsonResponse(
+                    {
+                        "status": "DraftReady",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": f"Queued runtime run {result.get('run_id')} for work item {result.get('work_item_id')} through XCO scheduling.",
+                        "intent": intent_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": action,
+                        "operation_result": True,
+                        "result": {
+                            "thread_id": result.get("thread_id"),
+                            "work_item": detail,
+                            "run_id": result.get("run_id"),
+                            "work_item_id": result.get("work_item_id"),
+                        },
+                        "next_actions": [
+                            {
+                                "action": "OpenPanel",
+                                "panel_key": "thread_detail",
+                                "label": "Open Thread",
+                                "params": {"thread_id": str(task_thread_id)},
+                            },
+                            {
+                                "action": "OpenPanel",
+                                "panel_key": "run_detail",
+                                "label": "Open Run",
+                                "params": {"run_id": str(result.get("run_id") or "")},
+                            },
+                        ],
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                )
             result = _submit_conversation_runtime_run(task=task, workspace=workspace, action=action, prompt=prompt, user=user)
             detail = _serialize_dev_task_summary(task, runtime_detail=_project_runtime_status_to_task(task))
             return JsonResponse(
@@ -25323,6 +25537,131 @@ def _execute_conversation_action(
                         "label": "Open Work Item",
                         "params": {"work_item_id": str(task.id)},
                     }
+                ],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+        )
+
+    if action_type in {
+        ConversationActionType.CREATE_THREAD.value,
+        ConversationActionType.LIST_THREADS.value,
+        ConversationActionType.SHOW_THREAD.value,
+        ConversationActionType.PAUSE_THREAD.value,
+        ConversationActionType.RESUME_THREAD.value,
+        ConversationActionType.PRIORITIZE_THREAD.value,
+    }:
+        action_payload = ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("action_payload")
+        action_payload = action_payload if isinstance(action_payload, dict) else {}
+        thread_id = str(target.get("id") or "").strip()
+        thread: Optional[CoordinationThread] = None
+        if thread_id:
+            thread = CoordinationThread.objects.filter(id=thread_id, workspace=workspace).first()
+        if action_type == ConversationActionType.CREATE_THREAD.value:
+            title = str(action_payload.get("title") or target.get("reference") or prompt).strip() or "XCO thread"
+            thread = CoordinationThread.objects.create(
+                workspace=workspace,
+                title=title[:240],
+                description=str(prompt or "").strip(),
+                owner=identity,
+                priority=str(action_payload.get("priority") or "normal").strip() or "normal",
+                status="active",
+                domain=str(action_payload.get("domain") or "development").strip(),
+                work_in_progress_limit=max(1, int(action_payload.get("max_concurrent_runs") or 1)),
+                execution_policy={
+                    "max_concurrent_runs": max(1, int(action_payload.get("max_concurrent_runs") or 1)),
+                    "pause_on_failure": bool(action_payload.get("pause_on_failure")),
+                    "auto_resume": bool(action_payload.get("auto_resume")),
+                    "review_required": bool(action_payload.get("review_required")),
+                },
+                source_conversation_id=str(action.get("thread_id") or "").strip(),
+            )
+            record_thread_event(thread=thread, event_type="thread_created", payload={"priority": thread.priority, "status": thread.status})
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Created XCO thread {thread.title}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"thread": _coordination_thread_summary(thread)},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.LIST_THREADS.value:
+            rows = [_coordination_thread_summary(item) for item in CoordinationThread.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100]]
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Found {len(rows)} XCO thread(s).",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"threads": rows},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "thread_list", "label": "Open Threads", "params": {"workspace_id": str(workspace.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if thread is None:
+            return JsonResponse(
+                {
+                    "status": "IntentClarificationRequired",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": "No XCO thread could be resolved from the conversation context.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": False,
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                },
+                status=409,
+            )
+        if action_type == ConversationActionType.PAUSE_THREAD.value:
+            transition_thread_status(thread, "paused")
+        elif action_type == ConversationActionType.RESUME_THREAD.value:
+            transition_thread_status(thread, "active")
+        elif action_type == ConversationActionType.PRIORITIZE_THREAD.value:
+            next_priority = str(action_payload.get("priority") or "high").strip().lower() or "high"
+            if next_priority not in THREAD_PRIORITY_ORDER:
+                return JsonResponse({"status": "ValidationError", "summary": "Priority must be critical, high, normal, or low."}, status=400)
+            previous_priority = thread.priority
+            thread.priority = next_priority
+            thread.save(update_fields=["priority", "updated_at"])
+            if previous_priority != next_priority:
+                record_thread_event(thread=thread, event_type="thread_priority_changed", payload={"previous_priority": previous_priority, "priority": next_priority})
+        summary = (
+            f"Paused XCO thread {thread.title}."
+            if action_type == ConversationActionType.PAUSE_THREAD.value
+            else f"Resumed XCO thread {thread.title}."
+            if action_type == ConversationActionType.RESUME_THREAD.value
+            else f"Updated XCO thread {thread.title}."
+            if action_type == ConversationActionType.PRIORITIZE_THREAD.value
+            else f"Showing XCO thread {thread.title}."
+        )
+        return JsonResponse(
+            {
+                "status": "DraftReady",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": summary,
+                "intent": intent_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": action,
+                "operation_result": True,
+                "result": {"thread": _coordination_thread_detail(thread)},
+                "next_actions": [
+                    {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
                 ],
                 "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
             }
@@ -25584,6 +25923,21 @@ def _ensure_conversation_dev_task(*, workspace: Workspace, action: Dict[str, Any
     payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
     action_payload = payload.get("action_payload") if isinstance(payload.get("action_payload"), dict) else {}
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+    conversation_thread_id = str(action.get("thread_id") or "").strip()
+    coordination_thread = None
+    coordination_thread_id = str(action_payload.get("coordination_thread_id") or action_payload.get("thread_id") or "").strip()
+    if coordination_thread_id:
+        coordination_thread = CoordinationThread.objects.filter(id=coordination_thread_id, workspace=workspace).first()
+    elif conversation_thread_id:
+        candidates = list(
+            CoordinationThread.objects.filter(
+                workspace=workspace,
+                source_conversation_id=conversation_thread_id,
+                status__in=["active", "queued", "paused"],
+            ).order_by("-updated_at", "-created_at")[:2]
+        )
+        if len(candidates) == 1:
+            coordination_thread = candidates[0]
     reference = str(target.get("reference") or action_payload.get("reference") or prompt).strip()
     title = str(target.get("label") or reference or prompt).strip() or "Conversation work item"
     return DevTask.objects.create(
@@ -25594,11 +25948,12 @@ def _ensure_conversation_dev_task(*, workspace: Workspace, action: Dict[str, Any
         max_attempts=2,
         source_entity_type="conversation",
         source_entity_id=uuid.uuid4(),
-        source_conversation_id=str(action.get("thread_id") or "").strip(),
+        source_conversation_id=conversation_thread_id,
         intent_type=str(action.get("intent_type") or "").strip(),
         target_repo=str(action_payload.get("target_repo") or _conversation_default_repo(prompt)).strip(),
         target_branch=str(action_payload.get("target_branch") or _conversation_default_branch()).strip(),
         execution_policy=policy or {},
+        coordination_thread=coordination_thread,
         work_item_id=_conversation_work_item_id(reference),
         context_purpose="conversation",
         runtime_workspace_id=workspace.id,
@@ -25711,6 +26066,9 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
             if release:
                 target_instance.desired_release = release
                 target_instance.save(update_fields=["desired_release", "updated_at"])
+        coordination_thread = None
+        if payload.get("thread_id"):
+            coordination_thread = get_object_or_404(CoordinationThread, id=payload["thread_id"])
         dev_task = DevTask.objects.create(
             title=title,
             description=payload.get("description", ""),
@@ -25725,6 +26083,8 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
             target_repo=payload.get("target_repo", ""),
             target_branch=payload.get("target_branch", ""),
             execution_policy=payload.get("execution_policy") if isinstance(payload.get("execution_policy"), dict) else None,
+            coordination_thread=coordination_thread,
+            dependency_work_item_ids=payload.get("dependency_work_item_ids") if isinstance(payload.get("dependency_work_item_ids"), list) else [],
             source_run_id=payload.get("source_run_id") or None,
             input_artifact_key=payload.get("input_artifact_key", ""),
             work_item_id=payload.get("work_item_id", ""),
@@ -25748,6 +26108,8 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
         qs = qs.filter(source_entity_id=source_entity_id)
     if runtime_workspace_id := request.GET.get("workspace_id"):
         qs = qs.filter(runtime_workspace_id=runtime_workspace_id)
+    if coordination_thread_id := request.GET.get("thread_id"):
+        qs = qs.filter(coordination_thread_id=coordination_thread_id)
     if target_instance_id := request.GET.get("target_instance_id"):
         qs = qs.filter(target_instance_id=target_instance_id)
     if query := request.GET.get("q"):
@@ -25776,6 +26138,235 @@ def work_items_collection(request: HttpRequest) -> JsonResponse:
     if isinstance(payload, dict):
         payload["work_items"] = payload.pop("dev_tasks", [])
     return JsonResponse(payload)
+
+
+def _coordination_thread_queryset(identity: UserIdentity, workspace_id: str):
+    workspace = _resolve_workspace_for_identity(identity, workspace_id)
+    if not workspace:
+        raise PermissionDenied("workspace not accessible")
+    return workspace, CoordinationThread.objects.filter(workspace=workspace).select_related("owner").prefetch_related("work_items", "events")
+
+
+def _coordination_task_lookup_factory(workspace_id: str):
+    cache: Dict[str, Optional[DevTask]] = {}
+
+    def _lookup(reference: str) -> Optional[DevTask]:
+        key = str(reference or "").strip()
+        if not key:
+            return None
+        if key not in cache:
+            cache[key] = (
+                DevTask.objects.filter(runtime_workspace_id=workspace_id).filter(
+                    Q(id=key) | Q(work_item_id=key)
+                ).order_by("-updated_at", "-created_at").first()
+            )
+        return cache[key]
+
+    return _lookup
+
+
+def _xco_status_lookup(task: DevTask) -> str:
+    return _thread_status_for_task(task)
+
+
+def _update_thread_status_from_tasks(thread: CoordinationThread) -> None:
+    policy = effective_thread_policy(thread)
+    statuses = [_thread_status_for_task(task) for task in thread.work_items.all()]
+    if thread.status == "archived":
+        return
+    if policy.get("pause_on_failure") and any(status in {"awaiting_review", "failed"} for status in statuses):
+        if thread.status != "paused":
+            transition_thread_status(thread, "paused", payload={"reason": "pause_on_failure"})
+        return
+    if statuses and all(status in {"completed", "succeeded", "canceled"} for status in statuses):
+        if thread.status not in {"completed", "archived"}:
+            transition_thread_status(thread, "completed", payload={"reason": "all_work_items_terminal"})
+        return
+    if thread.status == "queued" and policy.get("auto_resume") and any(status == "queued" for status in statuses):
+        transition_thread_status(thread, "active", payload={"reason": "auto_resume"})
+        return
+    if thread.status == "paused" and policy.get("auto_resume") and not any(status == "awaiting_review" for status in statuses):
+        transition_thread_status(thread, "active", payload={"reason": "auto_resume"})
+
+
+@csrf_exempt
+@login_required
+def threads_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        if not workspace_id or not title:
+            return JsonResponse({"error": "workspace_id and title are required"}, status=400)
+        workspace, _ = _coordination_thread_queryset(identity, workspace_id)
+        thread = CoordinationThread.objects.create(
+            workspace=workspace,
+            title=title[:240],
+            description=str(payload.get("description") or "").strip(),
+            owner=identity,
+            priority=str(payload.get("priority") or "normal").strip() or "normal",
+            status=str(payload.get("status") or "active").strip() or "active",
+            domain=str(payload.get("domain") or "").strip(),
+            work_in_progress_limit=max(1, int(payload.get("work_in_progress_limit") or 1)),
+            execution_policy=payload.get("execution_policy") if isinstance(payload.get("execution_policy"), dict) else {},
+            source_conversation_id=str(payload.get("source_conversation_id") or "").strip(),
+        )
+        record_thread_event(thread=thread, event_type="thread_created", payload={"status": thread.status, "priority": thread.priority})
+        return JsonResponse(_coordination_thread_detail(thread), status=201)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    _, qs = _coordination_thread_queryset(identity, workspace_id)
+    status_filter = str(request.GET.get("status") or "").strip().lower()
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+    priority_filter = str(request.GET.get("priority") or "").strip().lower()
+    if priority_filter:
+        qs = qs.filter(priority=priority_filter)
+    rows = []
+    for thread in qs.order_by("-updated_at", "-created_at"):
+        _update_thread_status_from_tasks(thread)
+        rows.append(_coordination_thread_summary(thread))
+    return _paginate(request, rows, "threads")
+
+
+@csrf_exempt
+@login_required
+def thread_detail(request: HttpRequest, thread_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    thread = get_object_or_404(CoordinationThread.objects.select_related("workspace", "owner").prefetch_related("work_items", "events"), id=thread_id)
+    if not _workspace_membership(identity, str(thread.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        _update_thread_status_from_tasks(thread)
+        return JsonResponse(_coordination_thread_detail(thread))
+    if request.method not in {"PATCH", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    previous_status = thread.status
+    if "status" in payload:
+        next_status = str(payload.get("status") or "").strip().lower()
+        if not valid_thread_transition(thread.status, next_status):
+            return JsonResponse({"error": f"invalid thread status transition: {thread.status} -> {next_status}"}, status=409)
+        thread.status = next_status
+    if "priority" in payload:
+        next_priority = str(payload.get("priority") or "").strip().lower()
+        if next_priority not in THREAD_PRIORITY_ORDER:
+            return JsonResponse({"error": "invalid priority"}, status=400)
+        if thread.priority != next_priority:
+            record_thread_event(thread=thread, event_type="thread_priority_changed", payload={"previous_priority": thread.priority, "priority": next_priority})
+        thread.priority = next_priority
+    if "title" in payload:
+        thread.title = str(payload.get("title") or "").strip()[:240]
+    if "description" in payload:
+        thread.description = str(payload.get("description") or "").strip()
+    if "domain" in payload:
+        thread.domain = str(payload.get("domain") or "").strip()
+    if "work_in_progress_limit" in payload:
+        thread.work_in_progress_limit = max(1, int(payload.get("work_in_progress_limit") or 1))
+    if "execution_policy" in payload and isinstance(payload.get("execution_policy"), dict):
+        thread.execution_policy = payload.get("execution_policy") or {}
+    if "source_conversation_id" in payload:
+        thread.source_conversation_id = str(payload.get("source_conversation_id") or "").strip()
+    thread.save()
+    if previous_status != thread.status:
+        record_thread_event(thread=thread, event_type=f"thread_{thread.status}", payload={"previous_status": previous_status, "status": thread.status})
+    return JsonResponse(_coordination_thread_detail(thread))
+
+
+@login_required
+def thread_timeline(request: HttpRequest, thread_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    thread = get_object_or_404(CoordinationThread.objects.select_related("workspace"), id=thread_id)
+    if not _workspace_membership(identity, str(thread.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse({"events": _coordination_thread_detail(thread).get("timeline", [])})
+
+
+@login_required
+def xco_queue_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, qs = _coordination_thread_queryset(identity, workspace_id)
+    task_lookup = _coordination_task_lookup_factory(str(workspace.id))
+    for thread in qs:
+        _update_thread_status_from_tasks(thread)
+    entries = derive_work_queue(threads=qs, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
+    items = [
+        {
+            "thread_id": entry.thread_id,
+            "work_item_id": entry.work_item_id,
+            "task_id": entry.task_id,
+            "thread_priority": entry.thread_priority,
+            "thread_title": entry.thread_title,
+        }
+        for entry in entries
+    ]
+    return JsonResponse({"workspace_id": str(workspace.id), "items": items})
+
+
+def _dispatch_next_queue_item(*, workspace: Workspace, user, identity: UserIdentity) -> Dict[str, Any]:
+    _, qs = _coordination_thread_queryset(identity, str(workspace.id))
+    task_lookup = _coordination_task_lookup_factory(str(workspace.id))
+    for thread in qs:
+        _update_thread_status_from_tasks(thread)
+    queue = derive_work_queue(threads=qs, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
+    if not queue:
+        raise RuntimeError("no eligible work items in the XCO queue")
+    next_entry = queue[0]
+    task = get_object_or_404(DevTask, id=next_entry.task_id)
+    thread = task.coordination_thread
+    if thread and thread.status == "queued":
+        transition_thread_status(thread, "active", work_item=task, payload={"reason": "dispatch"})
+    if thread:
+        record_thread_event(thread=thread, event_type="work_item_promoted", work_item=task, payload={"work_item_id": task.work_item_id or str(task.id)})
+    result = _submit_dev_task_runtime_run(task, workspace=workspace, user=user)
+    task.refresh_from_db()
+    if thread:
+        record_thread_event(
+            thread=thread,
+            event_type="run_dispatched_from_queue",
+            work_item=task,
+            run_id=str(task.runtime_run_id or ""),
+            payload={"run_id": str(task.runtime_run_id or ""), "work_item_id": task.work_item_id or str(task.id)},
+        )
+    return {
+        "thread_id": next_entry.thread_id,
+        "work_item_id": next_entry.work_item_id,
+        "task_id": next_entry.task_id,
+        "run_id": result.get("run_id"),
+    }
+
+
+@csrf_exempt
+@login_required
+def xco_dispatch_next(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, _ = _coordination_thread_queryset(identity, workspace_id)
+    try:
+        result = _dispatch_next_queue_item(workspace=workspace, user=request.user, identity=identity)
+    except RuntimeError:
+        return JsonResponse({"status": "idle", "summary": "No eligible work items in the XCO queue."})
+    return JsonResponse({"status": "dispatched", "queue_item": {"thread_id": result["thread_id"], "work_item_id": result["work_item_id"], "task_id": result["task_id"]}, "run_id": result.get("run_id")})
 
 
 @login_required
@@ -26147,12 +26738,100 @@ def _resolve_manifest_surface_path(manifest: Dict[str, Any], surface_path: str, 
         return ""
     if _manifest_ui_mount_scope(manifest) == "global":
         return normalized
-    prefix = _workspace_prefix(workspace_id)
-    if not prefix:
-        return normalized
-    if normalized.startswith("/w/"):
-        return normalized
-    return f"{prefix}{normalized}"
+    if workspace_id:
+        return to_workspace_path(workspace_id, normalized)
+    return normalized
+
+
+def _thread_status_for_task(task: DevTask) -> str:
+    detail = _project_runtime_status_to_task(task)
+    normalized = _canonical_work_item_status(str((detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
+    if task.status != normalized:
+        task.status = normalized
+        task.save(update_fields=["status", "updated_at"])
+    if task.coordination_thread_id:
+        policy = effective_thread_policy(task.coordination_thread)
+        if normalized in {"awaiting_review", "failed"} and policy.get("pause_on_failure") and task.coordination_thread.status == "active":
+            transition_thread_status(task.coordination_thread, "paused", work_item=task, run_id=str(task.runtime_run_id or ""), payload={"reason": "pause_on_failure"})
+    return normalized
+
+
+def _coordination_thread_summary(thread: CoordinationThread) -> Dict[str, Any]:
+    policy = effective_thread_policy(thread)
+    tasks = list(thread.work_items.all().order_by("-updated_at", "-created_at")[:50])
+    queued = 0
+    running = 0
+    awaiting_review = 0
+    completed = 0
+    failed = 0
+    recent_runs: List[str] = []
+    for task in tasks:
+        status = _thread_status_for_task(task)
+        if status == "queued":
+            queued += 1
+        elif status == "running":
+            running += 1
+        elif status == "awaiting_review":
+            awaiting_review += 1
+        elif status == "completed":
+            completed += 1
+        elif status in {"failed", "canceled"}:
+            failed += 1
+        if task.runtime_run_id and len(recent_runs) < 5:
+            recent_runs.append(str(task.runtime_run_id))
+    return {
+        "id": str(thread.id),
+        "workspace_id": str(thread.workspace_id),
+        "title": thread.title,
+        "description": thread.description or "",
+        "owner": str(thread.owner_id) if thread.owner_id else None,
+        "priority": thread.priority,
+        "status": thread.status,
+        "domain": thread.domain or None,
+        "work_in_progress_limit": thread.work_in_progress_limit,
+        "execution_policy": policy,
+        "source_conversation_id": thread.source_conversation_id or None,
+        "queued_work_items": queued,
+        "running_work_items": running,
+        "awaiting_review_work_items": awaiting_review,
+        "completed_work_items": completed,
+        "failed_work_items": failed,
+        "recent_run_ids": recent_runs,
+        "created_at": thread.created_at,
+        "updated_at": thread.updated_at,
+    }
+
+
+def _coordination_thread_detail(thread: CoordinationThread) -> Dict[str, Any]:
+    work_items = [_serialize_work_item_summary(task) for task in thread.work_items.all().order_by("-updated_at", "-created_at")[:100]]
+    recent_artifacts: List[Dict[str, Any]] = []
+    for task in thread.work_items.all().order_by("-updated_at", "-created_at")[:20]:
+        detail = _project_runtime_status_to_task(task)
+        if not isinstance(detail, dict):
+            continue
+        for artifact in _serialize_runtime_artifacts_for_thread(detail, work_item_id=task.work_item_id or str(task.id)):
+            recent_artifacts.append(dict(artifact))
+            if len(recent_artifacts) >= 20:
+                break
+        if len(recent_artifacts) >= 20:
+            break
+    timeline = [
+        {
+            "id": str(event.id),
+            "event_type": event.event_type,
+            "work_item_id": str(event.work_item.work_item_id or event.work_item_id) if event.work_item_id else None,
+            "run_id": str(event.run_id) if event.run_id else None,
+            "payload": event.payload_json if isinstance(event.payload_json, dict) else {},
+            "created_at": event.created_at,
+        }
+        for event in thread.events.all().order_by("-created_at")[:100]
+    ]
+    return {
+        **_coordination_thread_summary(thread),
+        "work_items": work_items,
+        "recent_artifacts": recent_artifacts,
+        "timeline": timeline,
+    }
 
 
 def _manifest_capability(manifest: Dict[str, Any]) -> Dict[str, Any]:

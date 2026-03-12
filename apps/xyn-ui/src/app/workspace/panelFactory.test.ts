@@ -38,6 +38,20 @@ describe("panelFactory", () => {
     expect(spec.params).toMatchObject({ work_item_id: "wi-123" });
   });
 
+  it("creates and restores thread detail panels through the registry path", () => {
+    const panel = createWorkspacePanel({
+      panel_type: "thread_detail",
+      object_id: "thread-123",
+      workspace_id: "ws-1",
+      creation_source: "conversation_action",
+    });
+
+    const spec = openPanel(panel);
+    expect(spec.key).toBe("thread_detail");
+    expect(spec.title).toBe("Thread");
+    expect(spec.params).toMatchObject({ thread_id: "thread-123" });
+  });
+
   it("maps runtime artifact object ids into artifact detail params", () => {
     const panel = createWorkspacePanel({
       panel_type: "artifact_view",

@@ -2168,6 +2168,10 @@ class DevTask(models.Model):
     target_repo = models.CharField(max_length=120, blank=True)
     target_branch = models.CharField(max_length=120, blank=True)
     execution_policy = models.JSONField(null=True, blank=True)
+    coordination_thread = models.ForeignKey(
+        "CoordinationThread", null=True, blank=True, on_delete=models.SET_NULL, related_name="work_items"
+    )
+    dependency_work_item_ids = models.JSONField(default=list, blank=True)
     source_run = models.ForeignKey(
         Run, null=True, blank=True, on_delete=models.SET_NULL, related_name="dev_tasks_source"
     )
@@ -2617,3 +2621,57 @@ class ReportAttachment(models.Model):
 
     def __str__(self) -> str:
         return f"{self.filename} ({self.report_id})"
+
+
+class CoordinationThread(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("queued", "Queued"),
+        ("paused", "Paused"),
+        ("completed", "Completed"),
+        ("archived", "Archived"),
+    ]
+    PRIORITY_CHOICES = [
+        ("critical", "Critical"),
+        ("high", "High"),
+        ("normal", "Normal"),
+        ("low", "Low"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=240)
+    description = models.TextField(blank=True)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="coordination_threads")
+    owner = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="coordination_threads"
+    )
+    priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default="normal")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    domain = models.CharField(max_length=80, blank=True)
+    work_in_progress_limit = models.PositiveIntegerField(default=1)
+    execution_policy = models.JSONField(default=dict, blank=True)
+    source_conversation_id = models.CharField(max_length=120, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+
+    def __str__(self) -> str:
+        return self.title
+
+
+class CoordinationEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    thread = models.ForeignKey(CoordinationThread, on_delete=models.CASCADE, related_name="events")
+    event_type = models.CharField(max_length=80)
+    work_item = models.ForeignKey("DevTask", null=True, blank=True, on_delete=models.SET_NULL, related_name="coordination_events")
+    run_id = models.UUIDField(null=True, blank=True)
+    payload_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.thread_id}:{self.event_type}"

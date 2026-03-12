@@ -3,9 +3,10 @@ import uuid
 from unittest import mock
 
 from django.http import JsonResponse
-from django.test import RequestFactory, SimpleTestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase
 
-from xyn_orchestrator.models import Workspace
+from xyn_orchestrator import xyn_api as intent_api
+from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, Workspace
 from xyn_orchestrator.xyn_api import (
     ai_activity_stream,
     _runtime_activity_item_from_event,
@@ -305,3 +306,44 @@ class RuntimeRunApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
         self.assertEqual(payload["work_items"][0]["work_item_id"], "wi-1")
+
+
+class CoordinationActivityApiTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.identity = object()
+        self.workspace = Workspace.objects.create(name="Coordination WS", slug="coordination-ws")
+        self.thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            title="Runtime Refactor",
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+
+    def test_ai_activity_includes_coordination_events(self):
+        CoordinationEvent.objects.create(
+            thread=self.thread,
+            event_type="run_dispatched_from_queue",
+            payload_json={"reason": "dispatch"},
+        )
+        request = self.factory.get("/xyn/api/ai/activity", {"workspace_id": str(self.workspace.id), "thread_id": "thread-1"})
+        request.user = mock.Mock(is_authenticated=True)
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._workspace_membership", return_value=True
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_workspace_for_identity", return_value=self.workspace
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._can_manage_ai", return_value=False
+        ):
+            response = intent_api.ai_activity(request)
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(len(payload["items"]), 1)
+        item = payload["items"][0]
+        self.assertEqual(item["source"], "coordination_event")
+        self.assertEqual(item["event_type"], "run_dispatched_from_queue")
+        self.assertEqual(item["thread_id"], "thread-1")

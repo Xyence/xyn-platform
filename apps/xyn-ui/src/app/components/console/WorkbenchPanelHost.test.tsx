@@ -7,6 +7,9 @@ import { emitEntityChange } from "../../utils/entityChangeEvents";
 
 const apiMocks = vi.hoisted(() => ({
   executeAppPalettePrompt: vi.fn(),
+  listCoordinationThreads: vi.fn(),
+  getCoordinationThread: vi.fn(),
+  getWorkQueue: vi.fn(),
   listRuntimeRunsCanvasApi: vi.fn(),
   getRuntimeRunCanvasApi: vi.fn(),
   listWorkItems: vi.fn(),
@@ -37,6 +40,9 @@ vi.mock("../../../api/xyn", async () => {
   return {
     ...actual,
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
+    listCoordinationThreads: apiMocks.listCoordinationThreads,
+    getCoordinationThread: apiMocks.getCoordinationThread,
+    getWorkQueue: apiMocks.getWorkQueue,
     listRuntimeRunsCanvasApi: apiMocks.listRuntimeRunsCanvasApi,
     getRuntimeRunCanvasApi: apiMocks.getRuntimeRunCanvasApi,
     listWorkItems: apiMocks.listWorkItems,
@@ -96,6 +102,140 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(apiMocks.listWorkItems).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByText("Implement Epic H")).toBeInTheDocument());
+  });
+
+  it("loads XCO thread summaries and derived queue data", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.listCoordinationThreads.mockResolvedValue({
+      count: 1,
+      next: null,
+      prev: null,
+      threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          title: "Runtime Refactor",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: { max_concurrent_runs: 1 },
+          source_conversation_id: "thread-conversation-1",
+          queued_work_items: 1,
+          running_work_items: 0,
+          awaiting_review_work_items: 0,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-12T10:00:00Z",
+          updated_at: "2026-03-12T10:00:00Z",
+        },
+      ],
+    });
+    apiMocks.getWorkQueue.mockResolvedValue({
+      workspace_id: "ws-1",
+      items: [
+        {
+          thread_id: "thread-1",
+          work_item_id: "wi-1",
+          task_id: "task-1",
+          thread_priority: "high",
+          thread_title: "Runtime Refactor",
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "thread-list", panel_type: "table", instance_key: "thread-list", key: "thread_list", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.listCoordinationThreads).toHaveBeenCalledWith("ws-1"));
+    await waitFor(() => expect(apiMocks.getWorkQueue).toHaveBeenCalledWith("ws-1"));
+    await waitFor(() => expect(screen.getAllByText("Runtime Refactor")).toHaveLength(2));
+    expect(screen.getByText("wi-1")).toBeInTheDocument();
+  });
+
+  it("loads XCO thread detail with work item, run, artifact, and timeline navigation", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getCoordinationThread.mockResolvedValue({
+      id: "thread-1",
+      workspace_id: "ws-1",
+      title: "Runtime Refactor",
+      description: "Refactor runtime queue handling",
+      owner: null,
+      priority: "high",
+      status: "active",
+      domain: "development",
+      work_in_progress_limit: 1,
+      execution_policy: { max_concurrent_runs: 1 },
+      source_conversation_id: "thread-conversation-1",
+      queued_work_items: 0,
+      running_work_items: 1,
+      awaiting_review_work_items: 0,
+      completed_work_items: 0,
+      failed_work_items: 0,
+      recent_run_ids: ["run-1"],
+      created_at: "2026-03-12T10:00:00Z",
+      updated_at: "2026-03-12T10:00:00Z",
+      work_items: [
+        {
+          id: "task-1",
+          work_item_id: "wi-1",
+          title: "Implement scheduler",
+          status: "running",
+          target_repo: "xyn-platform",
+          runtime_run_id: "run-1",
+          task_type: "codegen",
+          priority: 0,
+          attempts: 0,
+          max_attempts: 2,
+        },
+      ],
+      recent_artifacts: [
+        {
+          id: "artifact-1",
+          run_id: "run-1",
+          work_item_id: "wi-1",
+          artifact_type: "summary",
+          label: "Final summary",
+          uri: "artifact://runs/run-1/final_summary.md",
+          created_at: "2026-03-12T10:10:00Z",
+        },
+      ],
+      timeline: [
+        {
+          id: "evt-1",
+          event_type: "run_dispatched_from_queue",
+          work_item_id: "wi-1",
+          run_id: "run-1",
+          payload: {},
+          created_at: "2026-03-12T10:05:00Z",
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "thread-detail", panel_type: "detail", instance_key: "thread-1", key: "thread_detail", params: { thread_id: "thread-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getCoordinationThread).toHaveBeenCalledWith("thread-1"));
+    await waitFor(() => expect(screen.getByText("Implement scheduler")).toBeInTheDocument());
+    expect(screen.getByText("run_dispatched_from_queue")).toBeInTheDocument();
+    expect(screen.getByText("Final summary")).toBeInTheDocument();
   });
 
   it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {

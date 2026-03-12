@@ -4,12 +4,15 @@ import {
   executeAppPalettePrompt,
   getArtifactConsoleDetailBySlug,
   getArtifactConsoleFilesBySlug,
+  getCoordinationThread,
   getEmsDatasetSchemaTable,
   getEmsRegistrationsTimeseriesCanvasTable,
   getEmsStatusRollupCanvasTable,
   getRuntimeRunArtifactContent,
   getRuntimeRunCanvasApi,
   getWorkItem,
+  getWorkQueue,
+  listCoordinationThreads,
   listWorkItems,
   listAppBuilderArtifacts,
   listRuntimeRunsCanvasApi,
@@ -26,10 +29,13 @@ import type {
   ArtifactConsoleFileRow,
   ArtifactStructuredQuery,
   CanvasTableResponse,
+  CoordinationThreadDetail,
+  CoordinationThreadSummary,
   LocalProvisionResponse,
   RuntimeRunDetail,
   RuntimeRunArtifactContent,
   RuntimeRunSummary,
+  WorkQueueResponse,
   WorkItemDetail,
   WorkItemSummary,
   WorkspaceSummary,
@@ -49,6 +55,8 @@ import { toWorkspacePath } from "../../routing/workspaceRouting";
 export type ConsolePanelKey =
   | "platform_settings"
   | "workspaces"
+  | "thread_list"
+  | "thread_detail"
   | "runs"
   | "drafts_list"
   | "draft_detail"
@@ -716,6 +724,342 @@ function WorkItemsPanel({
   );
 }
 
+function ThreadListPanel({
+  workspaceId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  workspaceId: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [threads, setThreads] = useState<CoordinationThreadSummary[]>([]);
+  const [queue, setQueue] = useState<WorkQueueResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const [threadRows, queueRows] = await Promise.all([
+          listCoordinationThreads(workspaceId),
+          getWorkQueue(workspaceId),
+        ]);
+        if (!active) return;
+        setThreads(threadRows.threads || []);
+        setQueue(queueRows);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load threads");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    onTitleChange?.("Threads");
+  }, [onTitleChange]);
+
+  if (loading) return <p className="muted">Loading XCO threads…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <h3>Threads</h3>
+            <p className="muted">Durable lines of effort coordinated by XCO.</p>
+          </div>
+        </div>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Priority</th>
+                <th>Queued</th>
+                <th>Running</th>
+                <th>Review</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {threads.map((thread) => (
+                <tr key={thread.id}>
+                  <td>{thread.title}</td>
+                  <td>{thread.status}</td>
+                  <td>{thread.priority}</td>
+                  <td>{thread.queued_work_items}</td>
+                  <td>{thread.running_work_items}</td>
+                  <td>{thread.awaiting_review_work_items}</td>
+                  <td>
+                    <button type="button" className="ghost sm" onClick={() => onOpenPanel("thread_detail", { thread_id: thread.id })}>
+                      Open
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!threads.length ? (
+                <tr>
+                  <td colSpan={7} className="muted">
+                    No XCO threads found.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <h3>Derived Queue</h3>
+            <p className="muted">Next eligible work items in deterministic dispatch order.</p>
+          </div>
+        </div>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Thread</th>
+                <th>Priority</th>
+                <th>Work Item</th>
+                <th>Task ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(queue?.items || []).map((entry) => (
+                <tr key={`${entry.thread_id}:${entry.task_id}`}>
+                  <td>{entry.thread_title}</td>
+                  <td>{entry.thread_priority}</td>
+                  <td>{entry.work_item_id}</td>
+                  <td>{entry.task_id}</td>
+                </tr>
+              ))}
+              {!queue?.items?.length ? (
+                <tr>
+                  <td colSpan={4} className="muted">
+                    No eligible work items are currently queued.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ThreadDetailPanel({
+  threadId,
+  workspaceId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  threadId: string;
+  workspaceId: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [payload, setPayload] = useState<CoordinationThreadDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const detail = await getCoordinationThread(threadId);
+        if (!active) return;
+        setPayload(detail);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load thread");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [threadId]);
+
+  useEffect(() => {
+    onTitleChange?.(payload?.title || "Thread");
+  }, [onTitleChange, payload?.title]);
+
+  if (loading) return <p className="muted">Loading XCO thread…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Thread not found.</p>;
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="detail-grid">
+          <div><div className="field-label">Title</div><div className="field-value">{payload.title}</div></div>
+          <div><div className="field-label">Status</div><div className="field-value">{payload.status}</div></div>
+          <div><div className="field-label">Priority</div><div className="field-value">{payload.priority}</div></div>
+          <div><div className="field-label">Workspace</div><div className="field-value">{workspaceId}</div></div>
+          <div><div className="field-label">WIP limit</div><div className="field-value">{payload.work_in_progress_limit}</div></div>
+          <div><div className="field-label">Owner</div><div className="field-value">{payload.owner || "—"}</div></div>
+        </div>
+        {payload.description ? <p className="muted" style={{ marginTop: 12 }}>{payload.description}</p> : null}
+      </section>
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <h3>Work Items</h3>
+            <p className="muted">Durable work coordinated under this thread.</p>
+          </div>
+        </div>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Repo</th>
+                <th>Run</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payload.work_items.map((item) => (
+                <tr key={item.id}>
+                  <td>{item.title}</td>
+                  <td>{item.status}</td>
+                  <td>{item.target_repo || "—"}</td>
+                  <td>{item.runtime_run_id || "—"}</td>
+                  <td>
+                    <div className="inline-action-row">
+                      <button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>
+                        Work Item
+                      </button>
+                      {item.runtime_run_id ? (
+                        <button type="button" className="ghost sm" onClick={() => onOpenPanel("run_detail", { run_id: item.runtime_run_id })}>
+                          Run
+                        </button>
+                      ) : null}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {!payload.work_items.length ? (
+                <tr>
+                  <td colSpan={5} className="muted">
+                    No work items are attached to this thread yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <h3>Recent Artifacts</h3>
+            <p className="muted">Outputs produced by runs associated with this thread.</p>
+          </div>
+        </div>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Type</th>
+                <th>Run</th>
+                <th>Work Item</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payload.recent_artifacts.map((artifact) => (
+                <tr key={`${artifact.run_id || "run"}:${artifact.id}`}>
+                  <td>{artifact.label || artifact.uri || artifact.id}</td>
+                  <td>{artifact.artifact_type}</td>
+                  <td>{artifact.run_id || "—"}</td>
+                  <td>{(artifact as Record<string, unknown>).work_item_id ? String((artifact as Record<string, unknown>).work_item_id) : "—"}</td>
+                  <td>
+                    {artifact.run_id && artifact.id ? (
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        onClick={() =>
+                          onOpenPanel("artifact_detail", {
+                            runtime_run_id: artifact.run_id,
+                            runtime_artifact_id: artifact.id,
+                          })
+                        }
+                      >
+                        Artifact
+                      </button>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+              {!payload.recent_artifacts.length ? (
+                <tr>
+                  <td colSpan={5} className="muted">
+                    No artifacts have been registered for this thread yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <h3>Activity Timeline</h3>
+            <p className="muted">Coordination events emitted from durable thread state changes.</p>
+          </div>
+        </div>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Event</th>
+                <th>Run</th>
+                <th>Work Item</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payload.timeline.map((event) => (
+                <tr key={event.id}>
+                  <td>{event.event_type}</td>
+                  <td>{event.run_id || "—"}</td>
+                  <td>{event.work_item_id || "—"}</td>
+                  <td>{String(event.created_at || "")}</td>
+                </tr>
+              ))}
+              {!payload.timeline.length ? (
+                <tr>
+                  <td colSpan={4} className="muted">
+                    No coordination events recorded yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function WorkItemDetailPanel({
   workItemId,
   workspaceId,
@@ -769,6 +1113,15 @@ function WorkItemDetailPanel({
       {payload.last_error ? <InlineMessage tone="warn" title="Last error" body={payload.last_error} /> : null}
       {payload.runtime_run_id ? (
         <div className="inline-actions" style={{ marginTop: 8 }}>
+          {payload.thread_detail?.id ? (
+            <button
+              type="button"
+              className="ghost sm"
+              onClick={() => onOpenPanel("thread_detail", { thread_id: payload.thread_detail?.id })}
+            >
+              Open Thread
+            </button>
+          ) : null}
           <button
             type="button"
             className="ghost sm"
@@ -1780,6 +2133,8 @@ function LocalProvisionResultPanel({ payload }: { payload?: LocalProvisionRespon
 const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   platform_settings: "Platform Settings",
   workspaces: "Workspaces",
+  thread_list: "Threads",
+  thread_detail: "Thread",
   runs: "Runs",
   drafts_list: "Drafts",
   draft_detail: "Build Draft",
@@ -1952,6 +2307,21 @@ export default function WorkbenchPanelHost({
             }
             openPanel("record_detail", { ...target, row }, { open_in: "new_panel", return_to_panel_id: panel.panel_id });
           }}
+        />
+      );
+    }
+
+    if (panel.key === "thread_list") {
+      return <ThreadListPanel workspaceId={workspaceId} onOpenPanel={openPanel} onTitleChange={setResolvedTitle} />;
+    }
+
+    if (panel.key === "thread_detail") {
+      return (
+        <ThreadDetailPanel
+          threadId={String(panel.params?.thread_id || "")}
+          workspaceId={workspaceId}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
         />
       );
     }

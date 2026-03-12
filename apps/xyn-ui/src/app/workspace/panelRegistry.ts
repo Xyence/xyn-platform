@@ -40,6 +40,8 @@ export function validatePanelObject(input: unknown): Panel {
 
 const DEFAULT_PANEL_DEFINITIONS = [
   { panel_type: "conversation", console_key: "palette_result", title: "Conversation", affinity: panelAffinityForKey("palette_result") },
+  { panel_type: "thread_list", console_key: "thread_list", title: "Threads", affinity: panelAffinityForKey("thread_list") },
+  { panel_type: "thread_detail", console_key: "thread_detail", title: "Thread", affinity: panelAffinityForKey("thread_detail") },
   { panel_type: "run_detail", console_key: "run_detail", title: "Run Detail", affinity: panelAffinityForKey("run_detail") },
   { panel_type: "run_list", console_key: "runs", title: "Active Runs", affinity: panelAffinityForKey("runs") },
   { panel_type: "work_item", console_key: "work_item_detail", title: "Work Item", affinity: panelAffinityForKey("work_item_detail") },

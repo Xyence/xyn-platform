@@ -2104,6 +2104,8 @@ export type RuntimeRunStep = {
 
 export type RuntimeRunArtifact = {
   id: string;
+  run_id?: string | null;
+  work_item_id?: string | null;
   artifact_type: string;
   label: string;
   uri?: string | null;
@@ -2242,6 +2244,12 @@ export type DevTaskDetail = DevTaskSummary & {
     created_at?: string;
   }>;
   result_run_commands?: RunCommandExecution[];
+  thread_detail?: {
+    id: string;
+    title: string;
+    status: string;
+    priority: string;
+  } | null;
   force?: boolean;
 };
 
@@ -2249,6 +2257,58 @@ export type DevTaskListResponse = PaginatedResponse<DevTaskSummary, "dev_tasks">
 export type WorkItemSummary = DevTaskSummary;
 export type WorkItemDetail = DevTaskDetail;
 export type WorkItemListResponse = PaginatedResponse<WorkItemSummary, "work_items">;
+
+export type CoordinationThreadSummary = {
+  id: string;
+  workspace_id: string;
+  title: string;
+  description: string;
+  owner?: string | null;
+  priority: "critical" | "high" | "normal" | "low" | string;
+  status: "active" | "queued" | "paused" | "completed" | "archived" | string;
+  domain?: string | null;
+  work_in_progress_limit: number;
+  execution_policy: Record<string, unknown>;
+  source_conversation_id?: string | null;
+  queued_work_items: number;
+  running_work_items: number;
+  awaiting_review_work_items: number;
+  completed_work_items: number;
+  failed_work_items: number;
+  recent_run_ids: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type CoordinationEvent = {
+  id: string;
+  event_type: string;
+  work_item_id?: string | null;
+  run_id?: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type CoordinationThreadDetail = CoordinationThreadSummary & {
+  work_items: WorkItemSummary[];
+  recent_artifacts: RuntimeRunArtifact[];
+  timeline: CoordinationEvent[];
+};
+
+export type CoordinationThreadListResponse = PaginatedResponse<CoordinationThreadSummary, "threads">;
+
+export type WorkQueueItem = {
+  thread_id: string;
+  work_item_id: string;
+  task_id: string;
+  thread_priority: string;
+  thread_title: string;
+};
+
+export type WorkQueueResponse = {
+  workspace_id: string;
+  items: WorkQueueItem[];
+};
 
 export type DevTaskCreatePayload = {
   title: string;
@@ -2762,6 +2822,7 @@ export type PromptInterpretation = {
   intent_type: string;
   target_entity?: PromptInterpretationTarget | null;
   target_record?: PromptInterpretationTarget | null;
+  target_thread?: PromptInterpretationTarget | null;
   target_work_item?: PromptInterpretationTarget | null;
   target_run?: PromptInterpretationTarget | null;
   action: PromptInterpretationAction;
@@ -2806,6 +2867,12 @@ export type ConversationAction = {
     | "show_status"
     | "pause_run"
     | "request_review"
+    | "create_thread"
+    | "list_threads"
+    | "show_thread"
+    | "pause_thread"
+    | "resume_thread"
+    | "prioritize_thread"
     | string;
   source_message_id: string;
   thread_id?: string | null;
