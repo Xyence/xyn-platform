@@ -3552,6 +3552,53 @@ button.sm {
 }
 
 .workbench-canvas .flexlayout__layout {
+  --color-text: var(--ink);
+  --color-background: var(--card-elevated);
+  --color-base: var(--card-elevated);
+  --color-1: color-mix(in srgb, var(--surface-soft) 84%, var(--card-elevated));
+  --color-2: color-mix(in srgb, var(--surface-soft) 92%, var(--card-elevated));
+  --color-3: color-mix(in srgb, var(--surface-soft) 78%, var(--card));
+  --color-4: color-mix(in srgb, var(--border) 72%, var(--surface-soft));
+  --color-5: color-mix(in srgb, var(--border) 84%, var(--surface-soft));
+  --color-6: color-mix(in srgb, var(--border) 92%, var(--surface-soft));
+  --color-overflow: var(--muted);
+  --color-icon: var(--muted);
+  --color-tabset-background: var(--card-elevated);
+  --color-tabset-background-selected: var(--surface-soft);
+  --color-tabset-background-maximized: var(--surface-soft);
+  --color-tabset-divider-line: var(--border);
+  --color-tabset-header-background: color-mix(in srgb, var(--surface-soft) 86%, var(--card-elevated));
+  --color-tabset-header: var(--ink);
+  --color-border-tab-content: var(--border);
+  --color-border-background: var(--border);
+  --color-border-divider-line: var(--border);
+  --color-tab-content: var(--card-elevated);
+  --color-tab-selected: var(--ink);
+  --color-tab-selected-background: color-mix(in srgb, var(--surface-soft) 74%, var(--card));
+  --color-tab-unselected: var(--subtle);
+  --color-tab-unselected-background: color-mix(in srgb, var(--surface-soft) 58%, var(--card-elevated));
+  --color-tab-textbox: var(--ink);
+  --color-tab-textbox-background: var(--surface-soft);
+  --color-border-tab-selected: var(--ink);
+  --color-border-tab-selected-background: var(--surface-soft);
+  --color-border-tab-unselected: var(--muted);
+  --color-border-tab-unselected-background: color-mix(in srgb, var(--surface-soft) 64%, var(--card-elevated));
+  --color-splitter: color-mix(in srgb, var(--surface-soft) 86%, var(--card));
+  --color-splitter-hover: color-mix(in srgb, var(--surface-soft) 100%, var(--card));
+  --color-splitter-drag: color-mix(in srgb, var(--surface-soft) 100%, var(--card));
+  --color-drag-rect-border: var(--accent);
+  --color-drag-rect-background: color-mix(in srgb, var(--accent-soft) 72%, var(--card));
+  --color-drag-rect: var(--ink);
+  --color-popup-border: var(--border);
+  --color-popup-unselected: var(--ink);
+  --color-popup-unselected-background: var(--card-elevated);
+  --color-popup-selected: var(--ink);
+  --color-popup-selected-background: var(--surface-soft);
+  --color-edge-marker: var(--accent);
+  --color-edge-icon: var(--ink);
+  --color-mini-scroll-indicator: rgba(143, 161, 184, 0.42);
+  --color-mini-scroll-indicator-hovered: rgba(143, 161, 184, 0.64);
+  --color-toolbar-button-hover: color-mix(in srgb, var(--surface-soft) 100%, var(--card));
   position: relative;
   min-height: calc(100vh - 240px);
   border: 1px solid var(--border);
@@ -3560,13 +3607,36 @@ button.sm {
   background: var(--card-elevated);
 }
 
+.workbench-canvas .flexlayout__tabset,
+.workbench-canvas .flexlayout__tabset_content,
+.workbench-canvas .flexlayout__tab {
+  color: var(--ink);
+}
+
+.workbench-canvas .flexlayout__tab_button {
+  color: var(--subtle);
+}
+
 .workbench-canvas .flexlayout__tab_button--selected {
   color: var(--ink);
 }
 
+.workbench-canvas .flexlayout__tab_button_content {
+  color: inherit;
+}
+
+.workbench-canvas .flexlayout__tabset_tabbar_outer,
 .workbench-canvas .flexlayout__tabset_header,
 .workbench-canvas .flexlayout__tab_toolbar {
-  background: var(--surface-soft);
+  background: color-mix(in srgb, var(--surface-soft) 86%, var(--card-elevated));
+}
+
+.workbench-canvas .page-header h2,
+.workbench-canvas .card-header h3,
+.workbench-canvas .workspace-context-bar,
+.workbench-canvas .workspace-context-bar strong,
+.workbench-canvas .workspace-scope-pill {
+  color: var(--ink);
 }
 
 .app-breadcrumbs {
