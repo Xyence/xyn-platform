@@ -10,6 +10,7 @@ type Props = {
   onClose: () => void;
   workspaceId?: string;
   artifactId?: string;
+  threadId?: string;
 };
 
 function relativeTime(value?: string): string {
@@ -88,7 +89,7 @@ function conversationRuntimeSummary(item: AiActivityEntry): string {
   return parts.join(" · ");
 }
 
-export default function AgentActivityDrawer({ open, onClose, workspaceId, artifactId }: Props) {
+export default function AgentActivityDrawer({ open, onClose, workspaceId, artifactId, threadId }: Props) {
   const [items, setItems] = useState<AiActivityEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -111,6 +112,7 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
       const [activityResult, appJobs] = await Promise.all([
         listAiActivity({
           workspaceId,
+          threadId,
           artifactId: artifactOnly ? artifactId : undefined,
         }),
         listAppJobs(workspaceId),
@@ -132,12 +134,13 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
   useEffect(() => {
     if (!open) return;
     void load();
-  }, [open, workspaceId, artifactId, artifactOnly]);
+  }, [open, workspaceId, threadId, artifactId, artifactOnly]);
 
   useEffect(() => {
     if (!open || !workspaceId || artifactOnly) return;
     const subscription = subscribeRuntimeEventStream({
       workspaceId,
+      threadId,
       onOpen: () => setDegradedMode(false),
       onError: () => setDegradedMode(true),
       onEvent: (event) => {
@@ -146,13 +149,13 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
       },
     });
     return () => subscription.close();
-  }, [open, workspaceId, artifactOnly]);
+  }, [open, workspaceId, threadId, artifactOnly]);
 
   useEffect(() => {
     if (!open || !degradedMode) return;
     const interval = window.setInterval(() => void load(), 30000);
     return () => window.clearInterval(interval);
-  }, [open, degradedMode, workspaceId, artifactId, artifactOnly]);
+  }, [open, degradedMode, workspaceId, threadId, artifactId, artifactOnly]);
 
   const badgeCount = useMemo(() => items.filter((item) => item.status === "running").length, [items]);
   const runningOps = useMemo(() => operations.filter((entry) => entry.status === "running"), [operations]);

@@ -420,23 +420,12 @@ def _intent_runtime_run_candidates(identity: UserIdentity, query: str, workspace
     return rows
 
 
-def _conversation_execution_context(identity: UserIdentity, workspace_id: str) -> ConversationExecutionContext:
+def _conversation_execution_context(identity: UserIdentity, workspace_id: str, thread_id: str = "") -> ConversationExecutionContext:
     current_work_item_id: Optional[str] = None
     current_run_id: Optional[str] = None
     active_epic: Optional[str] = None
     recent_entities: List[ConversationContextEntity] = []
-
-    work_candidates = _intent_dev_task_candidates(identity, "", workspace_id)
-    if work_candidates:
-        current_work_item_id = str(work_candidates[0].get("work_item_id") or work_candidates[0].get("id") or "") or None
-        title = str(work_candidates[0].get("label") or "")
-        epic_match = re.search(r"\b(Epic\s+[A-Z0-9-]+)\b", title, flags=re.IGNORECASE)
-        if epic_match:
-            active_epic = str(epic_match.group(1) or "").strip()
-
-    run_candidates = _intent_runtime_run_candidates(identity, "", workspace_id)
-    if run_candidates:
-        current_run_id = str(run_candidates[0].get("run_id") or run_candidates[0].get("id") or "") or None
+    thread_token = str(thread_id or "").strip()
 
     audit_qs = (
         AuditLog.objects.filter(message="prompt_submission")
@@ -446,7 +435,28 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str) -
         meta = entry.metadata_json if isinstance(entry.metadata_json, dict) else {}
         if str(meta.get("workspace_id") or "") != workspace_id:
             continue
+        if thread_token and str(meta.get("thread_id") or "").strip() != thread_token:
+            continue
+        conversation_action = meta.get("conversation_action") if isinstance(meta.get("conversation_action"), dict) else {}
+        if not current_work_item_id:
+            current_work_item_id = (
+                str(((conversation_action.get("target_object") or {}) if isinstance(conversation_action.get("target_object"), dict) else {}).get("reference") or "").strip()
+                or str(((meta.get("structured_operation") or {}) if isinstance(meta.get("structured_operation"), dict) else {}).get("work_item_id") or "").strip()
+                or None
+            )
+        if not current_run_id:
+            current_run_id = (
+                str(((conversation_action.get("target_object") or {}) if isinstance(conversation_action.get("target_object"), dict) else {}).get("id") or "").strip()
+                or str(((meta.get("structured_operation") or {}) if isinstance(meta.get("structured_operation"), dict) else {}).get("run_id") or "").strip()
+                or None
+            )
         interpretation = meta.get("prompt_interpretation") if isinstance(meta.get("prompt_interpretation"), dict) else {}
+        if not active_epic:
+            work_target = interpretation.get("target_work_item") if isinstance(interpretation.get("target_work_item"), dict) else {}
+            title = str(work_target.get("label") or work_target.get("reference") or "").strip()
+            epic_match = re.search(r"\b(Epic\s+[A-Z0-9-]+)\b", title, flags=re.IGNORECASE)
+            if epic_match:
+                active_epic = str(epic_match.group(1) or "").strip()
         entity = interpretation.get("target_entity") if isinstance(interpretation.get("target_entity"), dict) else {}
         record = interpretation.get("target_record") if isinstance(interpretation.get("target_record"), dict) else {}
         entity_key = str(entity.get("key") or "").strip()
@@ -465,6 +475,7 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str) -
             break
 
     return ConversationExecutionContext(
+        thread_id=thread_token or None,
         current_work_item_id=current_work_item_id,
         current_run_id=current_run_id,
         active_epic=active_epic,
@@ -880,6 +891,7 @@ def _prompt_interpretation_from_intent(
 def _conversation_action_from_intent(
     *,
     source_message_id: str,
+    thread_id: str = "",
     intent_payload: Dict[str, Any],
     prompt_interpretation: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -969,6 +981,7 @@ def _conversation_action_from_intent(
     action = ConversationAction(
         action_type=action_type,
         source_message_id=source_message_id,
+        thread_id=str(thread_id or "") or None,
         intent_type=intent.intent_type,
         target_object=target,
         execution_mode=(
@@ -1016,6 +1029,7 @@ def _log_prompt_activity(
     prompt: str,
     request_type: str = "intent.resolve",
     workspace_id: str = "",
+    thread_id: str = "",
     draft_id: str = "",
     job_id: str = "",
     summary: str = "",
@@ -1037,6 +1051,7 @@ def _log_prompt_activity(
             "status": str(status or "").strip().lower() or "queued",
             "prompt": str(prompt or ""),
             "workspace_id": str(workspace_id or ""),
+            "thread_id": str(thread_id or ""),
             "draft_id": str(draft_id or ""),
             "job_id": str(job_id or ""),
             "summary": str(summary or ""),
@@ -15702,6 +15717,7 @@ def _intent_apply_create_app_intent_draft(
     payload: Dict[str, Any],
     request_id: str,
 ) -> JsonResponse:
+    thread_id = str(payload.get("thread_id") or "").strip()
     workspace = _resolve_workspace_for_identity(identity, str(payload.get("workspace_id") or payload.get("operator_workspace_id") or ""))
     if not workspace:
         return JsonResponse({"error": "workspace context is required for app builder flow"}, status=400)
@@ -15779,6 +15795,7 @@ def _intent_apply_create_app_intent_draft(
             workspace_id=str(workspace.id),
             summary="Failed to reach xyn-core draft endpoint.",
             error=exc.__class__.__name__,
+            thread_id=thread_id,
         )
         return JsonResponse({"error": "failed to create app draft", "details": exc.__class__.__name__}, status=502)
 
@@ -15792,6 +15809,7 @@ def _intent_apply_create_app_intent_draft(
             workspace_id=str(workspace.id),
             summary="xyn-core draft creation failed.",
             error=f"status={draft_response.status_code}",
+            thread_id=thread_id,
         )
         return JsonResponse(
             {
@@ -15824,6 +15842,7 @@ def _intent_apply_create_app_intent_draft(
             draft_id=draft_id,
             summary="Failed to submit app draft to xyn-core.",
             error=exc.__class__.__name__,
+            thread_id=thread_id,
         )
         return JsonResponse({"error": "draft created but submit failed", "draft_id": draft_id, "details": exc.__class__.__name__}, status=502)
     if submit_response.status_code >= 300:
@@ -15837,6 +15856,7 @@ def _intent_apply_create_app_intent_draft(
             draft_id=draft_id,
             summary="xyn-core draft submit failed.",
             error=f"status={submit_response.status_code}",
+            thread_id=thread_id,
         )
         return JsonResponse(
             {
@@ -15901,6 +15921,7 @@ def _intent_apply_create_app_intent_draft(
         draft_id=draft_id,
         job_id=job_id,
         summary="App intent draft submitted.",
+        thread_id=thread_id,
     )
     return JsonResponse(payload_response)
 
@@ -16736,6 +16757,7 @@ class RuntimeStreamEnvelope(TypedDict):
     event_type: str
     created_at: str
     workspace_id: Optional[str]
+    thread_id: Optional[str]
     run_id: Optional[str]
     work_item_id: Optional[str]
     worker_type: Optional[str]
@@ -16782,10 +16804,13 @@ def _runtime_run_belongs_to_workspace(run_payload: Dict[str, Any], workspace: Wo
 def _runtime_run_summary_payload(run_payload: Dict[str, Any], *, now: Optional[dt.datetime] = None) -> Dict[str, Any]:
     prompt_payload = run_payload.get("prompt_payload") if isinstance(run_payload.get("prompt_payload"), dict) else {}
     target = prompt_payload.get("target") if isinstance(prompt_payload.get("target"), dict) else {}
+    context = prompt_payload.get("context") if isinstance(prompt_payload.get("context"), dict) else {}
+    metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
     return {
         "id": str(run_payload.get("run_id") or run_payload.get("id") or ""),
         "run_id": str(run_payload.get("run_id") or run_payload.get("id") or ""),
         "work_item_id": run_payload.get("work_item_id"),
+        "thread_id": str(metadata.get("thread_id") or "") or None,
         "worker_type": run_payload.get("worker_type"),
         "worker_id": run_payload.get("worker_id"),
         "status": str(run_payload.get("status") or ""),
@@ -16890,6 +16915,7 @@ def _runtime_activity_item_from_event(event_payload: Dict[str, Any]) -> Dict[str
         "request_type": "runtime.run",
         "prompt": "",
         "workspace_id": envelope.get("workspace_id"),
+        "thread_id": envelope.get("thread_id"),
         "draft_id": None,
         "job_id": None,
         "error": str(payload.get("failure_reason") or payload.get("escalation_reason") or ""),
@@ -16910,6 +16936,7 @@ def _runtime_activity_item_from_event(event_payload: Dict[str, Any]) -> Dict[str
             "refs": {
                 "run_id": envelope.get("run_id"),
                 "work_item_id": envelope.get("work_item_id"),
+                "thread_id": envelope.get("thread_id"),
                 "step_key": payload.get("step_key"),
                 "artifact_type": payload.get("artifact_type"),
                 "artifact_uri": payload.get("uri"),
@@ -16935,6 +16962,7 @@ def _conversation_message_from_prompt_activity(meta: Dict[str, Any], *, status: 
             or str((((interpretation.get("target_work_item") or {}) if isinstance(interpretation.get("target_work_item"), dict) else {}).get("reference") or ""))
             or None
         ),
+        "thread_id": str(meta.get("thread_id") or "").strip() or None,
     }
     if str(status or "").strip().lower() == "failed":
         return {
@@ -17010,6 +17038,7 @@ def _runtime_stream_envelope_from_event(event_payload: Dict[str, Any]) -> Runtim
         "event_type": event_name,
         "created_at": created_at,
         "workspace_id": str(data.get("workspace_id") or "") or None,
+        "thread_id": str(data.get("thread_id") or "") or None,
         "run_id": run_id,
         "work_item_id": str(data.get("work_item_id") or "") or None,
         "worker_type": str(data.get("worker_type") or "") or None,
@@ -17020,7 +17049,7 @@ def _runtime_stream_envelope_from_event(event_payload: Dict[str, Any]) -> Runtim
     }
 
 
-def _list_runtime_activity_entries(workspace: Workspace, *, limit: int) -> List[Dict[str, Any]]:
+def _list_runtime_activity_entries(workspace: Workspace, *, limit: int, thread_id: str = "") -> List[Dict[str, Any]]:
     try:
         response = _seed_api_request(
             method="GET",
@@ -17049,6 +17078,8 @@ def _list_runtime_activity_entries(workspace: Workspace, *, limit: int) -> List[
             continue
         data = event_payload.get("data") if isinstance(event_payload.get("data"), dict) else {}
         if str(data.get("workspace_id") or "") != str(workspace.id):
+            continue
+        if thread_id and str(data.get("thread_id") or "") != thread_id:
             continue
         activity_items.append(_runtime_activity_item_from_event(event_payload))
         if len(activity_items) >= limit:
@@ -19423,6 +19454,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     context_workspace_id = str(context_payload.get("workspace_id") or "").strip()
     context_artifact_id = str(context_payload.get("artifact_id") or "").strip()
     context_artifact_type = str(context_payload.get("artifact_type") or "").strip()
+    context_thread_id = str(context_payload.get("thread_id") or "").strip()
     request_id = str(uuid.uuid4())
     if not preview_mode:
         _log_prompt_activity(
@@ -19433,6 +19465,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             request_type="intent.resolve",
             workspace_id=context_workspace_id,
             summary="Prompt accepted for intent resolution.",
+            thread_id=context_thread_id,
         )
 
     # Preserved legacy non-Epic-D branch: app-builder prompts still create draft
@@ -19454,6 +19487,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 "title": str(app_builder_request.get("title") or "New App"),
                 "raw_prompt": str(app_builder_request.get("raw_prompt") or message),
                 "initial_intent": app_builder_request.get("initial_intent") if isinstance(app_builder_request.get("initial_intent"), dict) else {},
+                "thread_id": context_thread_id or None,
             },
             "next_actions": [{"label": "Create app intent draft", "action": "CreateDraft"}],
             "audit": {
@@ -19478,6 +19512,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 request_type="intent.resolve",
                 workspace_id=str(operator_workspace.id),
                 summary=response_payload["summary"],
+                thread_id=context_thread_id,
             )
         return JsonResponse(response_payload)
 
@@ -19498,7 +19533,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             requested_worker_capabilities=worker_mention.get("capabilities") if isinstance(worker_mention.get("capabilities"), list) else [],
             worker_mention_error=str(worker_mention.get("error") or ""),
             conversation_context=(
-                _conversation_execution_context(identity, str(operator_workspace.id))
+                _conversation_execution_context(identity, str(operator_workspace.id), context_thread_id)
                 if operator_workspace
                 else None
             ),
@@ -19515,6 +19550,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         source_message_id=request_id,
         intent_payload=epic_d_payload,
         prompt_interpretation=prompt_interpretation,
+        thread_id=context_thread_id,
     )
     epic_d_trace = [{"step": "intent_resolved", "intent": epic_d_payload}]
     # Epic D is authoritative only for the supported v1 families:
@@ -19559,6 +19595,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                         structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                         prompt_interpretation=prompt_interpretation,
                         conversation_action=conversation_action,
+                        thread_id=context_thread_id,
                     )
                 return JsonResponse(response_payload, status=400)
             response_payload = {
@@ -19572,6 +19609,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                     "workspace_id": str(operator_workspace.id),
                     "raw_prompt": message,
                     "structured_operation": epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                    "thread_id": context_thread_id or None,
                 },
                 "intent": epic_d_payload,
                 "prompt_interpretation": prompt_interpretation,
@@ -19600,6 +19638,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                     structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                     prompt_interpretation=prompt_interpretation,
                     conversation_action=conversation_action,
+                    thread_id=context_thread_id,
                 )
             return JsonResponse(response_payload)
         if conversation_action:
@@ -19619,6 +19658,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                     "intent": epic_d_payload,
                     "prompt_interpretation": prompt_interpretation,
                     "conversation_action": conversation_action,
+                    "thread_id": context_thread_id or None,
                 },
                 "intent": epic_d_payload,
                 "prompt_interpretation": prompt_interpretation,
@@ -19647,6 +19687,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                     structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                     prompt_interpretation=prompt_interpretation,
                     conversation_action=conversation_action,
+                    thread_id=context_thread_id,
                 )
             return JsonResponse(response_payload)
         response_payload = {
@@ -19686,6 +19727,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                 prompt_interpretation=prompt_interpretation,
                 conversation_action=conversation_action,
+                thread_id=context_thread_id,
             )
         return JsonResponse(response_payload)
 
@@ -19840,6 +19882,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 request_type="intent.resolve",
                 workspace_id=str(operator_workspace.id),
                 summary=response_payload["summary"],
+                thread_id=context_thread_id,
             )
         return JsonResponse(response_payload)
 
@@ -20078,6 +20121,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             workspace_id=context_workspace_id,
             summary=str(result.get("summary") or ""),
             error=str((result.get("validation_errors") or [""])[0] or "") if str(result.get("status") or "") in {"UnsupportedIntent", "ValidationError"} else "",
+            thread_id=context_thread_id,
         )
     return JsonResponse(result)
 
@@ -20096,6 +20140,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
     action_type = str(payload.get("action_type") or "").strip()
     artifact_type = str(payload.get("artifact_type") or "").strip()
     body_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    thread_id = str(payload.get("thread_id") or body_payload.get("thread_id") or "").strip()
     request_id = str(uuid.uuid4())
     _log_prompt_activity(
         request_id=request_id,
@@ -20105,6 +20150,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
         request_type="intent.apply",
         workspace_id=str(body_payload.get("workspace_id") or body_payload.get("operator_workspace_id") or ""),
         summary=f"Applying intent action {action_type or 'unknown'}.",
+        thread_id=thread_id,
     )
 
     if action_type not in {"CreateDraft", "ApplyPatch"}:
@@ -20150,7 +20196,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         requested_worker_status=str(worker_mention.get("status") or ""),
                         requested_worker_capabilities=worker_mention.get("capabilities") if isinstance(worker_mention.get("capabilities"), list) else [],
                         worker_mention_error=str(worker_mention.get("error") or ""),
-                        conversation_context=_conversation_execution_context(identity, str(workspace.id)),
+                        conversation_context=_conversation_execution_context(identity, str(workspace.id), thread_id),
                     ),
                 )
                 epic_d_payload = epic_d_intent.model_dump(mode="json")
@@ -20170,6 +20216,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     source_message_id=request_id,
                     intent_payload=epic_d_payload,
                     prompt_interpretation=prompt_interpretation,
+                    thread_id=thread_id,
                 )
                 if epic_d_intent.needs_clarification:
                     result_payload = {
@@ -20195,6 +20242,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
                         prompt_interpretation=prompt_interpretation,
                         conversation_action=conversation_action,
+                        thread_id=thread_id,
                     )
                     return JsonResponse(result_payload, status=409)
                 if str(epic_d_intent.intent_type or "") in {"unsupported_declared_entity", "unsupported_intent"} or not conversation_action:
@@ -20221,6 +20269,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
                         prompt_interpretation=prompt_interpretation,
                         conversation_action=conversation_action,
+                        thread_id=thread_id,
                     )
                     return JsonResponse(result_payload, status=409)
                 try:
@@ -20247,6 +20296,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         trace=[{"step": "intent_resolved", "intent": epic_d_payload}, {"step": "conversation_action_failed", "error": str(exc)}],
                         prompt_interpretation=prompt_interpretation,
                         conversation_action=conversation_action,
+                        thread_id=thread_id,
                     )
                     return JsonResponse(
                         {
@@ -20275,6 +20325,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     structured_operation=result_body.get("result") if isinstance(result_body.get("result"), dict) else {},
                     prompt_interpretation=prompt_interpretation,
                     conversation_action=conversation_action,
+                    thread_id=thread_id,
                 )
                 return response
             if operation == "execute_generated_app_crud":
@@ -20291,6 +20342,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         artifact=None,
                         workspace_id=str(workspace.id),
                         user_identity_id=str(identity.id),
+                        conversation_context=_conversation_execution_context(identity, str(workspace.id), thread_id),
                     ),
                 )
                 epic_d_payload = epic_d_intent.model_dump(mode="json")
@@ -20310,6 +20362,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     source_message_id=request_id,
                     intent_payload=epic_d_payload,
                     prompt_interpretation=prompt_interpretation,
+                    thread_id=thread_id,
                 )
                 if epic_d_intent.needs_clarification:
                     result_payload = {
@@ -20335,6 +20388,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                         prompt_interpretation=prompt_interpretation,
                         conversation_action=conversation_action,
+                        thread_id=thread_id,
                     )
                     return JsonResponse(result_payload, status=409)
                 if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity":
@@ -20361,6 +20415,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                         prompt_interpretation=prompt_interpretation,
                         conversation_action=conversation_action,
+                        thread_id=thread_id,
                     )
                     return JsonResponse(result_payload, status=409)
                 if (
@@ -20390,6 +20445,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                         prompt_interpretation=prompt_interpretation,
                         conversation_action=conversation_action,
+                        thread_id=thread_id,
                     )
                     return JsonResponse(result_payload, status=400)
                 if runtime_target_record and generated_artifact_issue:
@@ -20406,6 +20462,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                             _generated_trace_step("user_command", source="agent", prompt=raw_prompt),
                             _generated_trace_step("invalid_generated_artifact_contract", **generated_artifact_issue),
                         ],
+                        thread_id=thread_id,
                     )
                     return JsonResponse(
                         {
@@ -20447,6 +20504,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         summary=result_payload["summary"],
                         error="No matching generated app CRUD operation found.",
                         trace=[_generated_trace_step("user_command", source="agent", prompt=raw_prompt), _generated_trace_step("error", error="unresolved_operation")],
+                        thread_id=thread_id,
                     )
                     return JsonResponse(result_payload, status=400)
                 try:
@@ -20470,6 +20528,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         error=str(exc),
                         trace=[_generated_trace_step("user_command", source="agent", prompt=raw_prompt), _generated_trace_step("error", error=str(exc))],
                         structured_operation=_normalized_generated_operation(structured),
+                        thread_id=thread_id,
                     )
                     return JsonResponse(
                         {
@@ -20519,6 +20578,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                         structured_operation=normalized,
                         prompt_interpretation=clarification_prompt_interpretation,
                         conversation_action=conversation_action,
+                        thread_id=thread_id,
                     )
                     return JsonResponse(
                         {
@@ -20550,6 +20610,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     structured_operation=normalized,
                     prompt_interpretation=prompt_interpretation,
                     conversation_action=conversation_action,
+                    thread_id=thread_id,
                 )
                 generated_artifact = _installed_generated_artifact(workspace, "net-inventory")
                 return JsonResponse(
@@ -20661,6 +20722,7 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "method not allowed"}, status=405)
 
     workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    thread_id = str(request.GET.get("thread_id") or "").strip()
     artifact_id = str(request.GET.get("artifact_id") or "").strip()
     limit_raw = str(request.GET.get("limit") or "100").strip()
     try:
@@ -20691,8 +20753,12 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
         payload_meta = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
         is_prompt_event = entry.message == "prompt_submission"
         prompt_workspace_id = str(meta.get("workspace_id") or "")
+        prompt_thread_id = str(meta.get("thread_id") or "")
+        event_thread_id = prompt_thread_id if is_prompt_event else str(payload_meta.get("thread_id") or "")
         event_artifact_id = str((meta.get("artifact_id") if is_prompt_event else payload_meta.get("artifact_id")) or "")
         if artifact_id and event_artifact_id != artifact_id:
+            continue
+        if thread_id and event_thread_id != thread_id:
             continue
         if workspace_id:
             candidate_workspace_id = prompt_workspace_id if is_prompt_event else str(payload_meta.get("workspace_id") or "")
@@ -20731,6 +20797,7 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
                     "request_type": str(meta.get("request_type") or "intent.resolve"),
                     "prompt": prompt_text,
                     "workspace_id": prompt_workspace_id or None,
+                    "thread_id": str(meta.get("thread_id") or "") or None,
                     "draft_id": draft_id,
                     "job_id": job_id,
                     "error": str(meta.get("error") or ""),
@@ -20767,6 +20834,7 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
                 "request_type": "ai.invoke",
                 "prompt": "",
                 "workspace_id": str(payload_meta.get("workspace_id") or "") or None,
+                "thread_id": str(payload_meta.get("thread_id") or "") or None,
                 "draft_id": None,
                 "job_id": None,
                 "error": "",
@@ -20786,6 +20854,8 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
             if artifact_id and str(event.artifact_id) != artifact_id:
                 continue
             payload = event.payload_json if isinstance(event.payload_json, dict) else {}
+            if thread_id and str(payload.get("thread_id") or "") != thread_id:
+                continue
             summary = str(payload.get("mode") or payload.get("source") or event.event_type)
             items.append(
                 {
@@ -20798,11 +20868,12 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
                     "agent_slug": str(payload.get("agent_slug") or ""),
                     "provider": str(payload.get("provider") or ""),
                     "model_name": str(payload.get("model_name") or ""),
-                    "artifact_id": str(event.artifact_id),
-                    "artifact_type": event.artifact.type.slug if event.artifact.type_id else "",
-                    "artifact_title": event.artifact.title,
-                    "source": "artifact_event",
-                }
+                "artifact_id": str(event.artifact_id),
+                "artifact_type": event.artifact.type.slug if event.artifact.type_id else "",
+                "artifact_title": event.artifact.title,
+                "thread_id": str(payload.get("thread_id") or "") or None,
+                "source": "artifact_event",
+            }
             )
             if len(items) >= limit:
                 break
@@ -20810,7 +20881,7 @@ def ai_activity(request: HttpRequest) -> JsonResponse:
     if workspace_id and len(items) < limit:
         workspace = _resolve_workspace_for_identity(identity, workspace_id)
         if workspace:
-            items.extend(_list_runtime_activity_entries(workspace, limit=max(1, limit - len(items))))
+            items.extend(_list_runtime_activity_entries(workspace, limit=max(1, limit - len(items)), thread_id=thread_id))
 
     items.sort(key=lambda entry: str(entry.get("created_at") or ""), reverse=True)
     return JsonResponse({"items": items[:limit]})
@@ -20825,6 +20896,7 @@ def ai_activity_stream(request: HttpRequest) -> HttpResponse:
         return JsonResponse({"error": "method not allowed"}, status=405)
 
     workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    thread_id = str(request.GET.get("thread_id") or "").strip()
     if not workspace_id:
         return JsonResponse({"error": "workspace_id is required"}, status=400)
     workspace = _resolve_workspace_for_identity(identity, workspace_id)
@@ -20847,6 +20919,8 @@ def ai_activity_stream(request: HttpRequest) -> HttpResponse:
                     continue
                 envelope = _runtime_stream_envelope_from_event(payload)
                 if envelope.get("workspace_id") != str(workspace.id):
+                    continue
+                if thread_id and str(envelope.get("thread_id") or "") != thread_id:
                     continue
                 yield _serialize_runtime_stream_sse(envelope)
 
@@ -24962,6 +25036,7 @@ def _conversation_runtime_payload(*, task: DevTask, workspace: Workspace, action
     payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
     action_payload = payload.get("action_payload") if isinstance(payload.get("action_payload"), dict) else {}
+    thread_id = str(action.get("thread_id") or "").strip()
     requested_outputs = ["patch", "log", "summary"]
     if bool(policy.get("run_tests")) and "report" not in requested_outputs:
         requested_outputs.append("report")
@@ -24997,6 +25072,7 @@ def _conversation_runtime_payload(*, task: DevTask, workspace: Workspace, action
                 "source": "conversation",
                 "dev_task_id": str(task.id),
                 "task_type": str(task.task_type or ""),
+                "thread_id": thread_id or None,
             },
         },
         "policy": {

@@ -111,6 +111,16 @@ describe("AgentActivityDrawer runtime activity", () => {
     expect(document.querySelectorAll(".notification-item.system-runtime-message")).toHaveLength(1);
   });
 
+  it("passes explicit thread id to activity fetch and runtime stream subscription", async () => {
+    apiMocks.listAiActivity.mockResolvedValue({ items: [] });
+
+    render(<AgentActivityDrawer open onClose={() => {}} workspaceId="ws-1" threadId="thread-1" />);
+
+    await waitFor(() => expect(apiMocks.listAiActivity).toHaveBeenCalled());
+    expect(apiMocks.listAiActivity).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1", threadId: "thread-1" }));
+    expect(streamMocks.subscribeRuntimeEventStream).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1", threadId: "thread-1" }));
+  });
+
   it("renders compact app-operation interpretation details with key fields", async () => {
     apiMocks.listAiActivity.mockResolvedValue({
       items: [
@@ -162,7 +172,9 @@ describe("AgentActivityDrawer runtime activity", () => {
     render(<AgentActivityDrawer open onClose={() => {}} workspaceId="ws-1" />);
 
     await waitFor(() => expect(apiMocks.listAiActivity).toHaveBeenCalled());
-    expect(screen.getByText(/Create record · devices · router-1 · name=router-1, status=online · immediate execution/i)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByText(/Create record · devices · router-1 · name=router-1, status=online · immediate execution/i)).toBeInTheDocument()
+    );
   });
 
   it("renders run-supervision interpretation details compactly", async () => {
@@ -338,7 +350,7 @@ describe("AgentActivityDrawer runtime activity", () => {
     render(<AgentActivityDrawer open onClose={() => {}} workspaceId="ws-1" />);
 
     await waitFor(() => expect(apiMocks.listAiActivity).toHaveBeenCalled());
-    expect(screen.getByText(/Run failed: tests_failed/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/Run failed: tests_failed/)).toBeInTheDocument());
     expect(screen.getByText(/retry run · show logs · show artifacts/i)).toBeInTheDocument();
     expect(screen.getByText(/run run-2 · work item wi-2/i)).toBeInTheDocument();
   });

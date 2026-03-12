@@ -10,6 +10,7 @@ describe("runtimeEventStream helpers", () => {
         id: "run-1",
         run_id: "run-1",
         work_item_id: "wi-1",
+        thread_id: "thread-1",
         worker_type: "codex_local",
         worker_id: null,
         status: "queued",
@@ -31,6 +32,7 @@ describe("runtimeEventStream helpers", () => {
       workspace_id: "ws-1",
       run_id: "run-1",
       work_item_id: "wi-1",
+      thread_id: "thread-1",
       worker_type: "codex_local",
       status: "running",
       title: "Run started · run-1",
@@ -44,6 +46,7 @@ describe("runtimeEventStream helpers", () => {
     expect(twice).toHaveLength(1);
     expect(twice[0].status).toBe("running");
     expect(twice[0].worker_id).toBe("worker-1");
+    expect(twice[0].thread_id).toBe("thread-1");
   });
 
   it("applies step and artifact events to run detail without duplication", () => {
@@ -51,6 +54,7 @@ describe("runtimeEventStream helpers", () => {
       id: "run-1",
       run_id: "run-1",
       work_item_id: "wi-1",
+      thread_id: "thread-1",
       worker_type: "codex_local",
       worker_id: "worker-1",
       status: "running",
@@ -77,6 +81,7 @@ describe("runtimeEventStream helpers", () => {
       workspace_id: "ws-1",
       run_id: "run-1",
       work_item_id: "wi-1",
+      thread_id: "thread-1",
       worker_type: "codex_local",
       status: "running",
       title: "Run step completed: inspect repository",
@@ -90,6 +95,7 @@ describe("runtimeEventStream helpers", () => {
       workspace_id: "ws-1",
       run_id: "run-1",
       work_item_id: "wi-1",
+      thread_id: "thread-1",
       worker_type: "codex_local",
       status: "running",
       title: "Run artifact created",
@@ -115,6 +121,7 @@ describe("runtimeEventStream helpers", () => {
       workspace_id: "ws-1",
       run_id: "run-1",
       work_item_id: "wi-1",
+      thread_id: "thread-1",
       worker_type: "codex_local",
       status: "running",
       title: "Run started · run-1",
@@ -128,6 +135,7 @@ describe("runtimeEventStream helpers", () => {
       workspace_id: "ws-1",
       run_id: "run-1",
       work_item_id: "wi-1",
+      thread_id: "thread-1",
       worker_type: "codex_local",
       status: "succeeded",
       title: "Run completed · run-1",
@@ -139,6 +147,7 @@ describe("runtimeEventStream helpers", () => {
     const deduped = upsertActivityEntry(merged, second);
     expect(deduped).toHaveLength(2);
     expect(deduped[0].summary).toBe("Run completed · run-1");
+    expect(deduped[0].thread_id).toBe("thread-1");
   });
 
   it("maps failed and completed runtime events to escalation and execution summary messages", () => {
@@ -149,6 +158,7 @@ describe("runtimeEventStream helpers", () => {
       workspace_id: "ws-1",
       run_id: "run-1",
       work_item_id: "wi-1",
+      thread_id: "thread-1",
       worker_type: "codex_local",
       status: "failed",
       title: "Run failed",
@@ -162,6 +172,7 @@ describe("runtimeEventStream helpers", () => {
       workspace_id: "ws-1",
       run_id: "run-1",
       work_item_id: "wi-1",
+      thread_id: "thread-1",
       worker_type: "codex_local",
       status: "succeeded",
       title: "Run completed · run-1",
@@ -172,6 +183,7 @@ describe("runtimeEventStream helpers", () => {
     expect(failed.conversation_message?.message_type).toBe("escalation");
     expect(failed.conversation_message?.reason).toBe("tests_failed");
     expect(failed.conversation_message?.options).toContain("retry run");
+    expect(failed.conversation_message?.refs?.thread_id).toBe("thread-1");
     expect(completed.conversation_message?.message_type).toBe("execution_summary");
   });
 

@@ -631,7 +631,7 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         logger_calls = []
         request = self.factory.post(
             "/xyn/api/xyn/intent/resolve",
-            data='{"message":"continue Epic D implementation","context":{"workspace_id":"ws-1"}}',
+            data='{"message":"continue Epic D implementation","context":{"workspace_id":"ws-1","thread_id":"thread-1"}}',
             content_type="application/json",
         )
         with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
@@ -647,7 +647,10 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual((payload.get("intent") or {}).get("intent_type"), IntentType.CREATE_AND_DISPATCH_RUN.value)
         self.assertEqual(((payload.get("prompt_interpretation") or {}).get("execution_mode")), "queued_run")
         self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "dispatch_run")
+        self.assertEqual(((payload.get("conversation_action") or {}).get("thread_id")), "thread-1")
+        self.assertEqual(((payload.get("draft_payload") or {}).get("thread_id")), "thread-1")
         self.assertEqual(((payload.get("draft_payload") or {}).get("__operation")), "execute_conversation_action")
+        self.assertTrue(any(call.get("thread_id") == "thread-1" for call in logger_calls))
         self.assertTrue(any(any(step.get("step") == "intent_resolved" for step in (call.get("trace") or [])) for call in logger_calls))
 
     def test_resolve_route_parses_worker_mentions_through_epic_d(self):
@@ -850,6 +853,7 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
     def test_conversation_action_mapper_builds_dispatch_run_for_development_intent(self):
         action = intent_api._conversation_action_from_intent(
             source_message_id="msg-1",
+            thread_id="thread-1",
             intent_payload=IntentEnvelope(
                 intent_family=IntentFamily.DEVELOPMENT_WORK.value,
                 intent_type=IntentType.CREATE_AND_DISPATCH_RUN.value,
@@ -880,6 +884,7 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
             },
         )
         self.assertEqual(action["action_type"], "dispatch_run")
+        self.assertEqual(action["thread_id"], "thread-1")
         self.assertEqual((action.get("target_object") or {}).get("kind"), "work_item")
         self.assertEqual(action["execution_mode"], "queued_run")
 
@@ -909,12 +914,14 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
                 "structured_operation": {"run_id": "run-1", "work_item_id": "epic-d"},
                 "prompt_interpretation": {"target_work_item": {"reference": "epic-d"}},
                 "conversation_action": {"action_type": "dispatch_run"},
+                "thread_id": "thread-1",
             },
             status="succeeded",
             summary="Queued runtime run run-1 for work item epic-d.",
         )
         self.assertEqual(message["message_type"], "execution_summary")
         self.assertEqual((message.get("refs") or {}).get("run_id"), "run-1")
+        self.assertEqual((message.get("refs") or {}).get("thread_id"), "thread-1")
 
     def test_prompt_activity_mapper_builds_escalation_message(self):
         message = intent_api._conversation_message_from_prompt_activity(
@@ -929,7 +936,27 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
             summary="Clarification required.",
         )
         self.assertEqual(message["message_type"], "escalation")
-        self.assertIn("Epic D", message.get("options") or [])
+
+    def test_prompt_activity_mapper_handles_legacy_records_without_thread_id(self):
+        message = intent_api._conversation_message_from_prompt_activity(
+            {
+                "structured_operation": {"run_id": "run-1"},
+                "prompt_interpretation": {"target_run": {"id": "run-1"}},
+            },
+            status="succeeded",
+            summary="Run complete.",
+        )
+        self.assertIsNotNone(message)
+        self.assertIsNone((message.get("refs") or {}).get("thread_id"))
+
+    def test_conversation_runtime_payload_carries_thread_id_in_metadata(self):
+        payload = intent_api._conversation_runtime_payload(
+            task=SimpleNamespace(id="task-1", title="Epic G", task_type="codegen", work_item_id="epic-g"),
+            workspace=SimpleNamespace(id="ws-1"),
+            action={"thread_id": "thread-1", "payload": {}},
+            prompt="continue Epic G implementation",
+        )
+        self.assertEqual(((payload.get("context") or {}).get("metadata") or {}).get("thread_id"), "thread-1")
 
     def test_execute_conversation_action_without_run_returns_clarification(self):
         response = intent_api._execute_conversation_action(

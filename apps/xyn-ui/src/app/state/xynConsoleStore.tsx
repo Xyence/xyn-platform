@@ -2,6 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { applyXynIntent, getXynIntentOptions, previewXynIntent, resolveXynIntent } from "../../api/xyn";
 import type { XynIntentOptionsResponse, XynIntentResolutionResult, XynIntentStatus } from "../../api/types";
 import { emitEntityChange, inferEntityChangeFromResolution } from "../utils/entityChangeEvents";
+import type { Panel } from "../workspace/panelModel";
+import { createWorkspacePanel as createDurableWorkspacePanel, openPanel as openDurablePanel } from "../workspace/panelFactory";
 
 const STORAGE_KEY = "xyn.console.v1.sessions";
 const HINT_STORAGE_KEY = "xyn.console.v1.lastArtifactHint";
@@ -19,6 +21,7 @@ type PendingProposal = {
 };
 
 type ConsoleSessionState = {
+  threadId: string;
   inputText: string;
   lastMessage: string;
   lastResolution: XynIntentResolutionResult | null;
@@ -45,6 +48,7 @@ export type ConsolePanelState = {
   key: string;
   params?: Record<string, unknown>;
   active_group_id?: string | null;
+  panel_object?: Panel | null;
 };
 
 type ActivePanelState = ConsolePanelState | null;
@@ -108,6 +112,7 @@ type ConsoleEditorBridge = {
 };
 
 const DEFAULT_SESSION: ConsoleSessionState = {
+  threadId: "",
   inputText: "",
   lastMessage: "",
   lastResolution: null,
@@ -122,6 +127,7 @@ const DEFAULT_SESSION: ConsoleSessionState = {
 
 function cloneDefaultSession(): ConsoleSessionState {
   return {
+    threadId: "",
     inputText: "",
     lastMessage: "",
     lastResolution: null,
@@ -133,6 +139,13 @@ function cloneDefaultSession(): ConsoleSessionState {
     localDirty: false,
     ignoredFields: [],
   };
+}
+
+function createThreadId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `thread-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function toContextKey(context: XynConsoleContextRef): string {
@@ -249,10 +262,21 @@ type XynConsoleContextValue = {
     params?: Record<string, unknown>;
     open_in?: "current_panel" | "new_panel" | "side_by_side";
     return_to_panel_id?: string;
+    panel_object?: Panel | null;
+  }) => void;
+  openWorkspacePanel: (input: {
+    panel_type: Panel["panel_type"];
+    object_id: string;
+    workspace_id: string;
+    thread_id?: string | null;
+    creation_source: Panel["creation_source"];
+    params?: Record<string, unknown>;
+    title?: string;
   }) => void;
   closePanel: (panelId: string) => void;
   setActivePanelId: (panelId: string | null) => void;
   updateActivePanelParams: (params: Record<string, unknown>) => void;
+  restorePanels: (panels: ConsolePanelState[], activePanelId?: string | null) => void;
   canvasContext: CanvasContext | null;
   setCanvasContext: (context: CanvasContext | null) => void;
   navigateBack: () => void;
@@ -339,6 +363,31 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     [contextKey]
   );
 
+  useEffect(() => {
+    if (session.threadId) return;
+    updateSession((current) => ({
+      ...current,
+      threadId: current.threadId || createThreadId(),
+    }));
+  }, [contextKey, session.threadId, updateSession]);
+
+  const ensureThreadId = useCallback(() => {
+    const existing = String((sessions[contextKey] || DEFAULT_SESSION).threadId || "").trim();
+    if (existing) return existing;
+    const next = createThreadId();
+    setSessions((current) => {
+      const active = current[contextKey] || cloneDefaultSession();
+      return {
+        ...current,
+        [contextKey]: {
+          ...active,
+          threadId: active.threadId || next,
+        },
+      };
+    });
+    return next;
+  }, [contextKey, sessions]);
+
   const setInputText = useCallback(
     (value: string) => {
       updateSession((current) => ({ ...current, inputText: value }));
@@ -385,6 +434,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     }
     const requestSeq = previewRequestSeqRef.current + 1;
     previewRequestSeqRef.current = requestSeq;
+    const threadId = session.threadId || ensureThreadId();
     let active = true;
     setPreviewLoading(true);
     updateSession((current) => (current.previewResolution ? { ...current, previewResolution: null } : current));
@@ -397,6 +447,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
               artifact_id: context.artifact_id || null,
               artifact_type: context.artifact_type || null,
               workspace_id: workspaceIdFromPathname(typeof window !== "undefined" ? window.location.pathname : ""),
+              thread_id: threadId || null,
             },
             snapshot: activeEditorBridge?.getFormSnapshot ? activeEditorBridge.getFormSnapshot() : undefined,
           });
@@ -423,7 +474,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [session.inputText, processing, context.artifact_id, context.artifact_type, activeEditorBridge, updateSession]);
+  }, [session.inputText, session.threadId, processing, context.artifact_id, context.artifact_type, activeEditorBridge, updateSession, ensureThreadId]);
 
   const submitResolve = useCallback(async () => {
     const message = String(session.inputText || "").trim();
@@ -432,6 +483,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     setProcessingStep("resolving");
     setPendingCloseBlock(false);
     try {
+      const threadId = session.threadId || ensureThreadId();
       setProcessingStep("classifying");
       const result = await resolveXynIntent({
         message,
@@ -439,6 +491,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
           artifact_id: context.artifact_id || null,
           artifact_type: context.artifact_type || null,
           workspace_id: workspaceIdFromPathname(typeof window !== "undefined" ? window.location.pathname : ""),
+          thread_id: threadId || null,
         },
         snapshot: activeEditorBridge?.getFormSnapshot ? activeEditorBridge.getFormSnapshot() : undefined,
       });
@@ -466,7 +519,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       setProcessingStep(null);
       setProcessing(false);
     }
-  }, [session.inputText, processing, context.artifact_id, context.artifact_type, storeResolution, activeEditorBridge, updateSession]);
+  }, [session.inputText, session.threadId, processing, context.artifact_id, context.artifact_type, storeResolution, activeEditorBridge, updateSession, ensureThreadId]);
 
   const applyPendingProposalToForm = useCallback(() => {
     if (!session.pendingProposal || !activeEditorBridge) return;
@@ -501,11 +554,13 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     setProcessing(true);
     setProcessingStep("validating");
     try {
+      const threadId = session.threadId || ensureThreadId();
       const applyArtifactType = normalizeConsoleArtifactType(context.artifact_type || session.lastResolution?.artifact_type);
       const result = await applyXynIntent({
         action_type: "ApplyPatch",
         artifact_type: applyArtifactType,
         artifact_id: targetArtifactId,
+        thread_id: threadId || null,
         payload: session.pendingProposal.patch_object,
       });
       storeResolution(result, session.lastMessage || "");
@@ -534,12 +589,14 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     session.lastResolution?.artifact_id,
     session.lastResolution?.artifact_type,
     session.lastMessage,
+    session.threadId,
     processing,
     context.artifact_id,
     context.artifact_type,
     activeEditorBridge,
     updateSession,
     storeResolution,
+    ensureThreadId,
   ]);
 
   const applyPendingProposal = useCallback(async () => {
@@ -553,10 +610,15 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     setProcessing(true);
     setProcessingStep("validating");
     try {
+      const threadId = session.threadId || ensureThreadId();
       const result = await applyXynIntent({
         action_type: "CreateDraft",
         artifact_type: normalizeConsoleArtifactType(session.lastResolution?.artifact_type),
-        payload,
+        thread_id: threadId || null,
+        payload: {
+          ...payload,
+          thread_id: threadId || null,
+        },
       });
       storeResolution(result, session.lastMessage || "");
       updateSession((current) => ({
@@ -584,7 +646,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       setProcessingStep(null);
       setProcessing(false);
     }
-  }, [processing, session.lastResolution?.draft_payload, session.lastMessage, storeResolution]);
+  }, [processing, session.lastResolution?.draft_payload, session.lastMessage, session.threadId, storeResolution, ensureThreadId]);
 
   const cancelPendingProposal = useCallback(() => {
     updateSession((current) => ({
@@ -776,7 +838,13 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const openPanel = useCallback(
-    (input: { key: string; params?: Record<string, unknown>; open_in?: "current_panel" | "new_panel" | "side_by_side"; return_to_panel_id?: string }) => {
+    (input: {
+      key: string;
+      params?: Record<string, unknown>;
+      open_in?: "current_panel" | "new_panel" | "side_by_side";
+      return_to_panel_id?: string;
+      panel_object?: Panel | null;
+    }) => {
       const panelType = inferPanelType(input.key);
       const instanceKey = inferInstanceKey(input.key, input.params);
       const openIn = input.open_in || "current_panel";
@@ -799,6 +867,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
           key: input.key,
           params: input.params || {},
           active_group_id: null,
+          panel_object: input.panel_object || null,
         };
         if (input.return_to_panel_id) {
           setPanelReturnTargets((targets) => ({ ...targets, [next.panel_id]: input.return_to_panel_id as string }));
@@ -862,6 +931,34 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     setActivePanelIdState(panelId);
   }, []);
 
+  const openWorkspacePanel = useCallback(
+    (input: {
+      panel_type: Panel["panel_type"];
+      object_id: string;
+      workspace_id: string;
+      thread_id?: string | null;
+      creation_source: Panel["creation_source"];
+      params?: Record<string, unknown>;
+      title?: string;
+    }) => {
+      const panelObject = createDurableWorkspacePanel({
+        panel_type: input.panel_type,
+        object_id: input.object_id,
+        workspace_id: input.workspace_id,
+        thread_id: input.thread_id ?? null,
+        creation_source: input.creation_source,
+      });
+      const spec = openDurablePanel(panelObject, input.params, input.title);
+      openPanel({
+        key: spec.key,
+        params: spec.params,
+        open_in: spec.open_in,
+        panel_object: panelObject,
+      });
+    },
+    [openPanel]
+  );
+
   const setActivePanel = useCallback(
     (panel: ActivePanelState) => {
       if (!panel) {
@@ -892,6 +989,11 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
 
   const setCanvasContext = useCallback((context: CanvasContext | null) => {
     setCanvasContextState(context);
+  }, []);
+
+  const restorePanels = useCallback((nextPanels: ConsolePanelState[], nextActivePanelId?: string | null) => {
+    setPanels(nextPanels);
+    setActivePanelIdState(nextActivePanelId || nextPanels[0]?.panel_id || null);
   }, []);
 
   const toNavEntry = useCallback((context: CanvasContext): NavigationEntry => {
@@ -1014,9 +1116,11 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       activePanel,
       setActivePanel,
       openPanel,
+      openWorkspacePanel,
       closePanel,
       setActivePanelId,
       updateActivePanelParams,
+      restorePanels,
       canvasContext,
       setCanvasContext,
       navigateBack,
@@ -1062,9 +1166,11 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       activePanel,
       setActivePanel,
       openPanel,
+      openWorkspacePanel,
       closePanel,
       setActivePanelId,
       updateActivePanelParams,
+      restorePanels,
       canvasContext,
       setCanvasContext,
       navigateBack,

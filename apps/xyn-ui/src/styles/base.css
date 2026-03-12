@@ -3546,6 +3546,24 @@ button.sm {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-height: calc(100vh - 240px);
+}
+
+.workbench-canvas .flexlayout__layout {
+  min-height: calc(100vh - 240px);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--card-elevated);
+}
+
+.workbench-canvas .flexlayout__tab_button--selected {
+  color: var(--ink);
+}
+
+.workbench-canvas .flexlayout__tabset_header,
+.workbench-canvas .flexlayout__tab_toolbar {
+  background: var(--surface-soft);
 }
 
 .app-breadcrumbs {

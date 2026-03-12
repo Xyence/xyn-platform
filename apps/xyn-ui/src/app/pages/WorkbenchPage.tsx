@@ -1,28 +1,36 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Layout, Model, Actions, type IJsonModel, type TabNode } from "flexlayout-react";
 import { useParams, useSearchParams } from "react-router-dom";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
 import { useCapabilitySuggestions } from "../components/console/capabilitySuggestions";
 import { useXynConsole } from "../state/xynConsoleStore";
+import { buildWorkspaceLayout, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
 export default function WorkbenchPage() {
-  const { setContext, setOpen, setInputText, clearSessionResolution, activePanel, closePanel, openPanel, setCanvasContext, requestSubmit, setLastArtifactHint } =
+  const {
+    setContext,
+    setOpen,
+    setInputText,
+    clearSessionResolution,
+    activePanel,
+    closePanel,
+    openPanel,
+    setActivePanelId,
+    setCanvasContext,
+    requestSubmit,
+    setLastArtifactHint,
+    panels,
+    restorePanels,
+  } =
     useXynConsole();
   const params = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = String(params.workspaceId || "").trim();
   const { landingSuggestions } = useCapabilitySuggestions(workspaceId);
-  const panel = (activePanel
-    ? {
-        panel_id: activePanel.panel_id,
-        panel_type: activePanel.panel_type,
-        instance_key: activePanel.instance_key,
-        title: activePanel.title,
-        key: activePanel.key as ConsolePanelKey,
-        params: activePanel.params || {},
-        active_group_id: activePanel.active_group_id,
-        open_in: "current_panel",
-      }
-    : null) as ConsolePanelSpec | null;
+  const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
+
+  const panelById = useMemo(() => new Map(panels.map((entry) => [entry.panel_id, entry] as const)), [panels]);
+  const model = useMemo(() => Model.fromJson(syncFlexLayoutModel(layoutJson, panels, activePanel?.panel_id || null)), [layoutJson, panels, activePanel?.panel_id]);
 
   useEffect(() => {
     setContext({ artifact_id: null, artifact_type: null });
@@ -31,8 +39,22 @@ export default function WorkbenchPage() {
   }, [clearSessionResolution, setContext, setOpen]);
 
   useEffect(() => {
-    if (!panel) setCanvasContext(null);
-  }, [panel, setCanvasContext]);
+    const stored = readWorkspaceLayout(workspaceId);
+    if (stored?.panel_ids?.length) {
+      setLayoutJson(stored.flexlayout_model as IJsonModel);
+    } else {
+      setLayoutJson(buildWorkspaceLayout(workspaceId, panels, activePanel?.panel_id || null).flexlayout_model as IJsonModel);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!activePanel) setCanvasContext(null);
+  }, [activePanel, setCanvasContext]);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    writeWorkspaceLayout(buildWorkspaceLayout(workspaceId, panels, activePanel?.panel_id || null));
+  }, [workspaceId, panels, activePanel?.panel_id, layoutJson]);
 
   useEffect(() => {
     const panelKey = String(searchParams.get("panel") || "").trim().toLowerCase();
@@ -92,9 +114,64 @@ export default function WorkbenchPage() {
     requestSubmit();
   };
 
+  const renderPanel = (panelState: typeof panels[number]): ConsolePanelSpec => ({
+    panel_id: panelState.panel_id,
+    panel_type: panelState.panel_type,
+    instance_key: panelState.instance_key,
+    title: panelState.title,
+    key: panelState.key as ConsolePanelKey,
+    params: panelState.params || {},
+    active_group_id: panelState.active_group_id,
+    open_in: "current_panel",
+  });
+
+  const factory = (node: TabNode) => {
+    const panelId = String(node.getId() || "");
+    const panelState = panelById.get(panelId);
+    if (!panelState) {
+      return (
+        <section className="card">
+          <p className="muted">Panel unavailable.</p>
+        </section>
+      );
+    }
+    const panel = renderPanel(panelState);
+    return (
+      <WorkbenchPanelHost
+        panel={panel}
+        workspaceId={workspaceId}
+        onOpenPanel={(next) =>
+          openPanel({
+            key: next.key,
+            params: next.params || {},
+            open_in: next.open_in || "new_panel",
+            return_to_panel_id: next.return_to_panel_id,
+          })
+        }
+        onContextChange={(context) => {
+          setCanvasContext((context || null) as never);
+        }}
+        onClosePanel={() => {
+          if (panel.panel_id) closePanel(panel.panel_id);
+        }}
+      />
+    );
+  };
+
+  const handleModelChange = (nextModel: Model) => {
+    const nextJson = nextModel.toJson();
+    setLayoutJson(nextJson);
+    writeWorkspaceLayout({
+      workspace_id: workspaceId,
+      flexlayout_model: nextJson,
+      panel_ids: panels.map((entry) => entry.panel_id),
+      last_updated: new Date().toISOString(),
+    });
+  };
+
   return (
     <>
-      {!panel ? (
+      {!activePanel ? (
         <div className="workbench-start-shell">
           <section className="card workbench-start-card">
             <p className="muted">Press ⌘K / Ctrl+K or use Xyn to issue a command.</p>
@@ -112,24 +189,24 @@ export default function WorkbenchPage() {
       ) : null}
 
       <section className="workbench-canvas">
-        <WorkbenchPanelHost
-          panel={panel}
-          workspaceId={workspaceId}
-          onOpenPanel={(next) =>
-            openPanel({
-              key: next.key,
-              params: next.params || {},
-              open_in: next.open_in || "current_panel",
-              return_to_panel_id: next.return_to_panel_id,
-            })
-          }
-          onContextChange={(context) => {
-            setCanvasContext((context || null) as never);
-          }}
-          onClosePanel={() => {
-            if (activePanel?.panel_id) closePanel(activePanel.panel_id);
-          }}
-        />
+        {panels.length ? (
+          <Layout
+            model={model}
+            factory={factory}
+            onModelChange={handleModelChange}
+            onAction={(action) => {
+              if (action.type === Actions.deleteTab("").type) {
+                const panelId = String(action.data?.node || "");
+                if (panelId) closePanel(panelId);
+              }
+              if (action.type === Actions.selectTab("").type) {
+                const panelId = String(action.data?.tabNode || "");
+                if (panelId) setActivePanelId(panelId);
+              }
+              return action;
+            }}
+          />
+        ) : null}
       </section>
     </>
   );

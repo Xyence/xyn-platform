@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import "flexlayout-react/style/light.css";
 import { NotificationsProvider } from "./app/state/notificationsStore";
 import { OperationsProvider } from "./app/state/operationRegistry";
 import { PreviewProvider } from "./app/state/previewStore";

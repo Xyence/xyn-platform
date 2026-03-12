@@ -1967,6 +1967,7 @@ export type AiActivityEntry = {
   status: "running" | "succeeded" | "failed";
   summary?: string;
   created_at?: string;
+  thread_id?: string | null;
   actor_id?: string | null;
   request_type?: string;
   prompt?: string;
@@ -2114,6 +2115,7 @@ export type RuntimeRunSummary = {
   id: string;
   run_id: string;
   work_item_id?: string | null;
+  thread_id?: string | null;
   worker_type?: string | null;
   worker_id?: string | null;
   status: string;
@@ -2159,6 +2161,7 @@ export type RuntimeStreamEvent = {
   event_type: string;
   created_at: string;
   workspace_id?: string | null;
+  thread_id?: string | null;
   run_id?: string | null;
   work_item_id?: string | null;
   worker_type?: string | null;
@@ -2784,6 +2787,7 @@ export type ConversationAction = {
     | "request_review"
     | string;
   source_message_id: string;
+  thread_id?: string | null;
   intent_type: string;
   target_object: ConversationActionTarget;
   execution_mode: string;
@@ -2800,6 +2804,7 @@ export type ConversationMessage = {
   refs?: {
     run_id?: string | null;
     work_item_id?: string | null;
+    thread_id?: string | null;
     step_key?: string | null;
     artifact_type?: string | null;
     artifact_uri?: string | null;

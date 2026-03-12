@@ -14,6 +14,7 @@ const RUNTIME_EVENT_TYPES = [
 
 type RuntimeStreamOptions = {
   workspaceId: string;
+  threadId?: string;
   lastEventId?: string;
   since?: string;
   onOpen?: () => void;
@@ -25,10 +26,11 @@ type RuntimeSubscription = {
   close: () => void;
 };
 
-function runtimeStreamUrl(workspaceId: string, lastEventId?: string, since?: string): string {
+function runtimeStreamUrl(workspaceId: string, threadId?: string, lastEventId?: string, since?: string): string {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/ai/activity/stream`);
   url.searchParams.set("workspace_id", workspaceId);
+  if (threadId) url.searchParams.set("thread_id", threadId);
   if (lastEventId) url.searchParams.set("last_event_id", lastEventId);
   if (since) url.searchParams.set("since", since);
   return url.toString();
@@ -52,7 +54,7 @@ export function subscribeRuntimeEventStream(options: RuntimeStreamOptions): Runt
 
   const connect = () => {
     if (closed) return;
-    eventSource = new EventSource(runtimeStreamUrl(options.workspaceId, latestEventId, options.since), { withCredentials: true });
+    eventSource = new EventSource(runtimeStreamUrl(options.workspaceId, options.threadId, latestEventId, options.since), { withCredentials: true });
     eventSource.onopen = () => {
       options.onOpen?.();
     };
@@ -116,6 +118,7 @@ export function runtimeEventToActivityEntry(event: RuntimeStreamEvent): AiActivi
     request_type: "runtime.run",
     prompt: "",
     workspace_id: event.workspace_id || undefined,
+    thread_id: event.thread_id || undefined,
     draft_id: null,
     job_id: null,
     error: String(event.payload?.failure_reason || event.payload?.escalation_reason || ""),
@@ -141,6 +144,7 @@ export function runtimeEventToActivityEntry(event: RuntimeStreamEvent): AiActivi
       refs: {
         run_id: event.run_id || null,
         work_item_id: event.work_item_id || null,
+        thread_id: event.thread_id || null,
         step_key: String(event.payload?.step_key || "") || null,
         artifact_type: String(event.payload?.artifact_type || "") || null,
         artifact_uri: String(event.payload?.uri || "") || null,
@@ -170,6 +174,7 @@ function inferRunSummaryFromEvent(event: RuntimeStreamEvent): RuntimeRunSummary 
     id: event.run_id || "",
     run_id: event.run_id || "",
     work_item_id: event.work_item_id || null,
+    thread_id: event.thread_id || null,
     worker_type: event.worker_type || null,
     worker_id: String(event.payload?.worker_id || "") || null,
     status: String(event.status || event.payload?.status || "queued"),

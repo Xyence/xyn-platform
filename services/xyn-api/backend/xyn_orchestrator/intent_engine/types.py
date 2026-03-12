@@ -213,6 +213,7 @@ class ConversationActionTarget(BaseModel):
 class ConversationAction(BaseModel):
     action_type: str
     source_message_id: str
+    thread_id: Optional[str] = None
     intent_type: str
     target_object: ConversationActionTarget
     execution_mode: str
@@ -226,6 +227,7 @@ class ConversationContextEntity(BaseModel):
 
 
 class ConversationExecutionContext(BaseModel):
+    thread_id: Optional[str] = None
     current_work_item_id: Optional[str] = None
     current_run_id: Optional[str] = None
     active_epic: Optional[str] = None

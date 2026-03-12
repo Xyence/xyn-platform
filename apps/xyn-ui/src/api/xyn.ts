@@ -277,7 +277,7 @@ export async function provisionLocalXynInstance(payload: {
 
 export async function resolveXynIntent(payload: {
   message: string;
-  context?: { artifact_id?: string | null; artifact_type?: string | null; workspace_id?: string | null };
+  context?: { artifact_id?: string | null; artifact_type?: string | null; workspace_id?: string | null; thread_id?: string | null };
   snapshot?: Record<string, unknown>;
   preview?: boolean;
 }): Promise<XynIntentResolutionResult> {
@@ -293,7 +293,7 @@ export async function resolveXynIntent(payload: {
 
 export async function previewXynIntent(payload: {
   message: string;
-  context?: { artifact_id?: string | null; artifact_type?: string | null; workspace_id?: string | null };
+  context?: { artifact_id?: string | null; artifact_type?: string | null; workspace_id?: string | null; thread_id?: string | null };
   snapshot?: Record<string, unknown>;
 }): Promise<XynIntentResolutionResult> {
   return resolveXynIntent({ ...payload, preview: true });
@@ -303,6 +303,7 @@ export async function applyXynIntent(payload: {
   action_type: "CreateDraft" | "ApplyPatch";
   artifact_type: "ArticleDraft" | "ContextPack" | "Workspace";
   artifact_id?: string | null;
+  thread_id?: string | null;
   payload: Record<string, unknown>;
 }): Promise<XynIntentResolutionResult> {
   const apiBaseUrl = resolveApiBaseUrl();
@@ -1873,12 +1874,14 @@ export async function listWorkspaceActivity(workspaceId: string): Promise<{ even
 export async function listAiActivity(params?: {
   workspaceId?: string;
   artifactId?: string;
+  threadId?: string;
   limit?: number;
 }): Promise<{ items: AiActivityEntry[] }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/ai/activity`);
   if (params?.workspaceId) url.searchParams.set("workspace_id", params.workspaceId);
   if (params?.artifactId) url.searchParams.set("artifact_id", params.artifactId);
+  if (params?.threadId) url.searchParams.set("thread_id", params.threadId);
   if (params?.limit) url.searchParams.set("limit", String(params.limit));
   const response = await apiFetch(url.toString(), { credentials: "include" });
   return handle<{ items: AiActivityEntry[] }>(response);

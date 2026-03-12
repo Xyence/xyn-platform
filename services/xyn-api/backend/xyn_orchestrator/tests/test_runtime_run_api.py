@@ -45,11 +45,13 @@ class RuntimeRunApiTests(SimpleTestCase):
                     "started_at": "2026-03-11T10:00:05Z",
                     "heartbeat_at": "2026-03-11T10:00:10Z",
                     "work_item_id": "wi-123",
+                    "thread_id": "thread-1",
                     "worker_type": "codex_local",
                     "worker_id": "codex-local-1",
                     "summary": "Running Codex task",
                     "prompt_payload": {
-                        "target": {"repo": "xyn-platform", "branch": "develop", "workspace_id": str(self.workspace.id), "artifact_id": None}
+                        "target": {"repo": "xyn-platform", "branch": "develop", "workspace_id": str(self.workspace.id), "artifact_id": None},
+                        "context": {"metadata": {"thread_id": "thread-1"}},
                     },
                 }
             ]
@@ -65,6 +67,7 @@ class RuntimeRunApiTests(SimpleTestCase):
         item = payload["runs"][0]
         self.assertEqual(item["run_id"], run_id)
         self.assertEqual(item["work_item_id"], "wi-123")
+        self.assertEqual(item["thread_id"], "thread-1")
         self.assertEqual(item["worker_type"], "codex_local")
         self.assertEqual(item["target"]["repo"], "xyn-platform")
         self.assertIn(item["heartbeat_freshness"], {"fresh", "stale"})
@@ -180,6 +183,7 @@ class RuntimeRunApiTests(SimpleTestCase):
                 "run_id": "run-1",
                 "data": {
                     "workspace_id": str(self.workspace.id),
+                    "thread_id": "thread-1",
                     "work_item_id": "wi-1",
                     "worker_type": "codex_local",
                     "status": "running",
@@ -189,12 +193,13 @@ class RuntimeRunApiTests(SimpleTestCase):
             }
         )
         self.assertEqual(envelope["workspace_id"], str(self.workspace.id))
+        self.assertEqual(envelope["thread_id"], "thread-1")
         self.assertEqual(envelope["run_id"], "run-1")
         self.assertEqual(envelope["worker_type"], "codex_local")
         self.assertEqual(envelope["event_type"], "run.step.completed")
 
     def test_runtime_activity_stream_enforces_workspace_scope_and_streams_envelopes(self):
-        request = self.factory.get("/xyn/api/ai/activity/stream", {"workspace_id": str(self.workspace.id)})
+        request = self.factory.get("/xyn/api/ai/activity/stream", {"workspace_id": str(self.workspace.id), "thread_id": "thread-1"})
         request.user = mock.Mock(is_authenticated=True)
 
         class _FakeStreamResponse:
@@ -224,7 +229,7 @@ class RuntimeRunApiTests(SimpleTestCase):
                     "event_name": "run.started",
                     "occurred_at": "2026-03-11T10:00:00Z",
                     "run_id": "run-1",
-                    "data": {"workspace_id": str(self.workspace.id), "worker_type": "codex_local", "work_item_id": "wi-1", "status": "running"},
+                    "data": {"workspace_id": str(self.workspace.id), "thread_id": "thread-1", "worker_type": "codex_local", "work_item_id": "wi-1", "status": "running"},
                 }
             ),
             "",
@@ -237,7 +242,7 @@ class RuntimeRunApiTests(SimpleTestCase):
                     "event_name": "run.started",
                     "occurred_at": "2026-03-11T10:00:01Z",
                     "run_id": "run-2",
-                    "data": {"workspace_id": str(uuid.uuid4()), "worker_type": "codex_local", "work_item_id": "wi-2", "status": "running"},
+                    "data": {"workspace_id": str(self.workspace.id), "thread_id": "thread-2", "worker_type": "codex_local", "work_item_id": "wi-2", "status": "running"},
                 }
             ),
             "",
@@ -250,5 +255,6 @@ class RuntimeRunApiTests(SimpleTestCase):
             body = "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk) for chunk in response.streaming_content)
         self.assertIn("event: run.started", body)
         self.assertIn("\"workspace_id\":", body)
+        self.assertIn("\"thread_id\": \"thread-1\"", body)
         self.assertIn("evt-1", body)
         self.assertNotIn("evt-2", body)
