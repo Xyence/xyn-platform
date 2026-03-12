@@ -52,7 +52,7 @@ export default function PromptInterpretationPreview({
       <div className="xyn-console-card-head">
         <strong>Prompt interpretation</strong>
         <span className={`xyn-console-interpretation-mode ${clarification ? "clarify" : unsupported ? "warn" : "ready"}`}>
-          {loading ? "Interpreting…" : humanizeExecutionMode(interpretation?.execution_mode)}
+          {loading ? "Previewing…" : humanizeExecutionMode(interpretation?.execution_mode)}
         </span>
       </div>
       {interpretation ? (
@@ -139,7 +139,7 @@ export default function PromptInterpretationPreview({
       ) : (
         <p className="muted small">
           {loading
-            ? "Waiting for backend interpretation…"
+            ? "Checking how Xyn would interpret this prompt…"
             : resolutionSummary || "Structured interpretation unavailable for this prompt path."}
         </p>
       )}

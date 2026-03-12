@@ -120,6 +120,19 @@ describe("resolvePanelCommand", () => {
         },
       },
     });
+    expect(resolvePanelCommand("show me a list of artifacts")).toEqual({
+      panelKey: "artifact_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("open artifacts")).toEqual({
+      panelKey: "artifact_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("please, show me a list of artifacts.")).toEqual({
+      panelKey: "artifact_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("summarize artifact changes from the last run")).toBeNull();
   });
 
   it("parses artifact detail/raw/files commands", () => {

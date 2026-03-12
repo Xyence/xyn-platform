@@ -67,6 +67,50 @@ describe("resolvePromptSurfaceTarget", () => {
     });
   });
 
+  it("normalizes natural-language platform settings phrasing to the same canonical target", () => {
+    expect(
+      resolvePromptSurfaceTarget("please open the platform settings page", {
+        user: { roles: ["app_user"], permissions: [] },
+        workspaceId: "ws-1",
+      })
+    ).toEqual({
+      key: "platform_settings",
+      route: "/w/ws-1/workbench?panel=platform_settings",
+      scope: "global",
+      source: "core_surface",
+    });
+  });
+
+  it("accepts stable direct-view platform settings variants without drifting", () => {
+    const expected = {
+      key: "platform_settings",
+      route: "/w/ws-1/workbench?panel=platform_settings",
+      scope: "global" as const,
+      source: "core_surface" as const,
+    };
+    expect(
+      resolvePromptSurfaceTarget("take me to platform settings", {
+        user: { roles: ["app_user"], permissions: [] },
+        workspaceId: "ws-1",
+      })
+    ).toEqual(expected);
+    expect(
+      resolvePromptSurfaceTarget("please, open the platform settings page.", {
+        user: { roles: ["app_user"], permissions: [] },
+        workspaceId: "ws-1",
+      })
+    ).toEqual(expected);
+  });
+
+  it("does not trap broader platform settings help requests", () => {
+    expect(
+      resolvePromptSurfaceTarget("help me understand how platform settings work", {
+        user: { roles: ["app_user"], permissions: [] },
+        workspaceId: "ws-1",
+      })
+    ).toBeNull();
+  });
+
   it("selects exact global artifact surface when prompt matches a surfaced label", () => {
     const result = resolvePromptSurfaceTarget("open tenant map", {
       globalSurfaces: [
@@ -139,6 +183,6 @@ describe("resolvePromptSurfaceTarget", () => {
 
 describe("canonicalLegacyRouteForPlatformSettings", () => {
   it("returns canonical platform settings hub route", () => {
-    expect(canonicalLegacyRouteForPlatformSettings("ws-1")).toBe("/app/platform/hub");
+    expect(canonicalLegacyRouteForPlatformSettings("ws-1")).toBe("/w/ws-1/workbench?panel=platform_settings");
   });
 });

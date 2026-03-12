@@ -150,6 +150,11 @@ describe("buildUiActionFromPrompt", () => {
     });
   });
 
+  it("does not hijack unmatched list prompts away from backend intent resolution", () => {
+    const action = buildUiActionFromPrompt("list dgertjhertj", artifactsTableContext());
+    expect(action).toBeNull();
+  });
+
   it("does not intercept app-builder artifact commands as generic artifact actions", () => {
     const action = buildUiActionFromPrompt("show artifacts of kind app_spec", artifactsTableContext());
     expect(action).toBeNull();

@@ -12,6 +12,7 @@ import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import { emitEntityChange, inferEntityChangeFromPrompt } from "../../utils/entityChangeEvents";
+import type { ConsolePanelKey } from "./WorkbenchPanelHost";
 import RecentArtifactsMiniTable from "./RecentArtifactsMiniTable";
 import ConsolePromptCard from "./ConsolePromptCard";
 import PromptInterpretationPreview from "./PromptInterpretationPreview";
@@ -125,13 +126,25 @@ function explicitAppBuilderArtifactKind(input: string): string {
 export function resolvePanelCommand(input: string): ResolvedPanelCommand | null {
   const raw = String(input || "").trim();
   if (!raw) return null;
-  const normalized = raw.toLowerCase();
+  const normalized = raw
+    .toLowerCase()
+    .replace(/^(?:please[,\s]+)+/, "")
+    .replace(/^(?:can|could|would)\s+you\s+/, "")
+    .replace(/^take\s+me\s+to\s+/, "go to ")
+    .replace(/[.!?,:;]+$/g, "")
+    .replace(/^show\s+me\s+(?:a\s+)?list\s+of\s+/, "list ")
+    .replace(/^show\s+me\s+/, "show ")
+    .replace(/^(open|show|go to)\s+the\s+/, "$1 ")
+    .replace(/\s+(?:page|screen|view|panel|tab|hub)\s*$/, "")
+    .replace(/[.!?,:;]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 
   let match = normalized.match(/^list\s+([a-z0-9_.-]+)\s+artifacts$/);
   if (match && match[1]) {
     return { panelKey: "artifact_list", params: { namespace: match[1] } };
   }
-  if (/^list\s+artifacts$/.test(normalized) || /^show\s+artifacts$/.test(normalized)) {
+  if (/^list\s+artifacts$/.test(normalized) || /^show\s+artifacts$/.test(normalized) || /^open\s+artifacts$/.test(normalized)) {
     return { panelKey: "artifact_list", params: {} };
   }
   if (/^list\s+workspaces$/.test(normalized)) {
@@ -365,6 +378,30 @@ function stringifyValue(value: unknown): string {
 function shortArtifactId(id: string): string {
   if (!id) return "";
   return id.length > 12 ? id.slice(0, 12) : id;
+}
+
+function getImmediateNavigationAction(
+  resolution: XynIntentResolutionResult | null | undefined,
+): { kind: "panel"; panelKey: string; params: Record<string, unknown> } | { kind: "path"; path: string } | null {
+  if (!resolution || resolution.status !== "IntentResolved") return null;
+  const nextActions = Array.isArray(resolution.next_actions) ? resolution.next_actions : [];
+  const panelAction = nextActions.find(
+    (item) => item.action === "OpenPanel" && typeof item.panel_key === "string" && item.panel_key.trim().length > 0,
+  );
+  if (panelAction?.panel_key) {
+    return {
+      kind: "panel",
+      panelKey: String(panelAction.panel_key),
+      params: (panelAction.params && typeof panelAction.params === "object" ? panelAction.params : {}) as Record<string, unknown>,
+    };
+  }
+  const pathAction = nextActions.find(
+    (item) => item.action === "OpenPath" && typeof item.path === "string" && item.path.trim().length > 0,
+  );
+  if (pathAction?.path) {
+    return { kind: "path", path: String(pathAction.path) };
+  }
+  return null;
 }
 
 function parseDurationToRelativeHours(input: string): number | null {
@@ -737,7 +774,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
 
   // Context-first fallback: keep follow-up prompts in the active table instead of
   // dropping to backend draft intent resolution.
-  const tableLikePrefix = /^(show|list|find|only show|filter)\s+/i;
+  const tableLikePrefix = /^(show|find|only show|filter)\s+/i;
   if (tableLikePrefix.test(prompt)) {
     const stripped = prompt.replace(tableLikePrefix, "").trim();
     const value = stripped || prompt;
@@ -1585,7 +1622,22 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       }
     }
 
-    void submitResolve();
+    const resolved = await submitResolve();
+    const directNavigation = getImmediateNavigationAction(resolved);
+    if (directNavigation?.kind === "panel" && onOpenPanel) {
+      onOpenPanel(directNavigation.panelKey as ConsolePanelKey, directNavigation.params);
+      setInputText("");
+      clearSessionResolution();
+      if (isOverlay) setOpen(false);
+      return;
+    }
+    if (directNavigation?.kind === "path") {
+      navigate(directNavigation.path);
+      setInputText("");
+      clearSessionResolution();
+      if (isOverlay) setOpen(false);
+      return;
+    }
   };
 
   const handleInputKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {

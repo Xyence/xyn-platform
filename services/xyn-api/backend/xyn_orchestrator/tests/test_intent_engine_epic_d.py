@@ -129,6 +129,44 @@ class EpicDIntentEngineTests(unittest.TestCase):
         self.assertEqual(envelope.resolved_subject.get("run_id"), "run-1")
         self.assertEnvelopeStable(envelope)
 
+    def test_artifact_panel_matcher_accepts_natural_list_phrase(self):
+        self.assertEqual(
+            intent_api._match_artifact_panel_command("show me a list of artifacts"),
+            ("artifact_list", {}),
+        )
+
+    def test_artifact_panel_matcher_accepts_stable_direct_view_variants(self):
+        self.assertEqual(
+            intent_api._match_artifact_panel_command("open artifacts"),
+            ("artifact_list", {}),
+        )
+        self.assertEqual(
+            intent_api._match_artifact_panel_command("please, show me a list of artifacts."),
+            ("artifact_list", {}),
+        )
+
+    def test_artifact_panel_matcher_does_not_trap_broader_semantic_requests(self):
+        self.assertIsNone(intent_api._match_artifact_panel_command("summarize artifact changes from the last run"))
+
+    def test_core_surface_matcher_accepts_natural_platform_settings_phrase(self):
+        self.assertEqual(
+            intent_api._match_core_surface_command("please open the platform settings page"),
+            ("platform_settings", {}),
+        )
+
+    def test_core_surface_matcher_accepts_stable_platform_settings_variants(self):
+        self.assertEqual(
+            intent_api._match_core_surface_command("take me to platform settings"),
+            ("platform_settings", {}),
+        )
+        self.assertEqual(
+            intent_api._match_core_surface_command("please, open the platform settings page."),
+            ("platform_settings", {}),
+        )
+
+    def test_core_surface_matcher_does_not_trap_broader_platform_help_requests(self):
+        self.assertIsNone(intent_api._match_core_surface_command("help me understand how platform settings work"))
+
     def test_pause_on_ambiguity_policy_populates(self):
         engine = IntentResolutionEngine(
             proposal_provider=_FakeProvider(),
@@ -725,6 +763,118 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
         self.assertEqual(((payload.get("prompt_interpretation") or {}).get("target_entity") or {}).get("key"), "devices")
         self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "execute_entity_operation")
         self.assertEqual(((payload.get("draft_payload") or {}).get("structured_operation") or {}).get("operation"), "create")
+
+    def test_resolve_route_returns_direct_panel_intent_for_natural_artifact_list_phrase(self):
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"show me a list of artifacts","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertNotEqual(payload["status"], "DraftReady")
+        self.assertEqual(((payload.get("next_actions") or [])[0] or {}).get("action"), "OpenPanel")
+        self.assertEqual(((payload.get("next_actions") or [])[0] or {}).get("panel_key"), "artifact_list")
+        self.assertEqual((payload.get("prompt_interpretation") or {}).get("execution_mode"), "immediate_execution")
+
+    def test_resolve_route_returns_direct_panel_intent_for_open_artifacts_variant(self):
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"open artifacts","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(((payload.get("next_actions") or [])[0] or {}).get("panel_key"), "artifact_list")
+        self.assertNotEqual(payload["status"], "DraftReady")
+
+    def test_resolve_route_returns_direct_panel_intent_for_natural_platform_settings_phrase(self):
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"please open the platform settings page","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(((payload.get("next_actions") or [])[0] or {}).get("action"), "OpenPanel")
+        self.assertEqual(((payload.get("next_actions") or [])[0] or {}).get("panel_key"), "platform_settings")
+        self.assertEqual((payload.get("prompt_interpretation") or {}).get("execution_mode"), "immediate_execution")
+
+    def test_resolve_route_returns_direct_panel_intent_for_take_me_to_platform_settings(self):
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"take me to platform settings","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(((payload.get("next_actions") or [])[0] or {}).get("panel_key"), "platform_settings")
+        self.assertNotEqual(payload["status"], "DraftReady")
+
+    def test_resolve_route_still_uses_epic_d_for_supported_non_deterministic_prompt(self):
+        envelope = IntentEnvelope(
+            intent_family=IntentFamily.DEVELOPMENT_WORK.value,
+            intent_type=IntentType.CREATE_AND_DISPATCH_RUN.value,
+            target_context={"workspace_id": "ws-1"},
+            resolved_subject={"id": "task-1", "label": "Epic D", "work_item_id": "epic-d"},
+            action_payload={"reference": "Epic D", "work_item_action": "continue"},
+            policy={},
+            confidence=0.91,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["reused existing work item"],
+        )
+        engine_calls = []
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"continue Epic D implementation","context":{"workspace_id":"ws-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(
+                intent_api,
+                "_intent_engine",
+                return_value=SimpleNamespace(resolve_intent=lambda **kwargs: engine_calls.append(kwargs) or envelope),
+            ), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertTrue(engine_calls)
+        self.assertEqual((payload.get("intent") or {}).get("intent_type"), IntentType.CREATE_AND_DISPATCH_RUN.value)
 
     def test_resolve_route_returns_machine_readable_unsupported_for_undeclared_entity(self):
         envelope = IntentEnvelope(

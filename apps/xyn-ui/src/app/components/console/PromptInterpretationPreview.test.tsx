@@ -73,4 +73,17 @@ describe("PromptInterpretationPreview", () => {
 
     expect(screen.getByText("Will create and submit an app intent draft.")).toBeInTheDocument();
   });
+
+  it("uses preview wording while a backend interpretation request is in flight", () => {
+    render(
+      <PromptInterpretationPreview
+        inputText="list artifacts"
+        interpretation={null}
+        loading
+      />
+    );
+
+    expect(screen.getByText("Previewing…")).toBeInTheDocument();
+    expect(screen.getByText("Checking how Xyn would interpret this prompt…")).toBeInTheDocument();
+  });
 });

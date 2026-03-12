@@ -237,7 +237,7 @@ type XynConsoleContextValue = {
   badgeActive: boolean;
   pendingCloseBlock: boolean;
   hasEditorBridge: boolean;
-  submitResolve: () => Promise<void>;
+  submitResolve: () => Promise<XynIntentResolutionResult | null>;
   applyPendingProposal: () => Promise<void>;
   applyPendingProposalToForm: () => void;
   applyPendingProposalAndSave: () => Promise<void>;
@@ -436,11 +436,12 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     previewRequestSeqRef.current = requestSeq;
     const threadId = session.threadId || ensureThreadId();
     let active = true;
-    setPreviewLoading(true);
+    setPreviewLoading(false);
     updateSession((current) => (current.previewResolution ? { ...current, previewResolution: null } : current));
     const timer = window.setTimeout(() => {
       void (async () => {
         try {
+          if (active && previewRequestSeqRef.current === requestSeq) setPreviewLoading(true);
           const result = await previewXynIntent({
             message,
             context: {
@@ -476,9 +477,9 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     };
   }, [session.inputText, session.threadId, processing, context.artifact_id, context.artifact_type, activeEditorBridge, updateSession, ensureThreadId]);
 
-  const submitResolve = useCallback(async () => {
+  const submitResolve = useCallback(async (): Promise<XynIntentResolutionResult | null> => {
     const message = String(session.inputText || "").trim();
-    if (!message || processing) return;
+    if (!message || processing) return null;
     setProcessing(true);
     setProcessingStep("resolving");
     setPendingCloseBlock(false);
@@ -504,6 +505,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
         }));
       }
       setOpen(true);
+      return result;
     } catch (error) {
       const failure: XynIntentResolutionResult = {
         status: "ValidationError",
@@ -515,6 +517,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       };
       storeResolution(failure, message);
       setOpen(true);
+      return failure;
     } finally {
       setProcessingStep(null);
       setProcessing(false);

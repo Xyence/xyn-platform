@@ -74,6 +74,9 @@ Current behavior:
 - preview responses do not write prompt activity
 - preview uses a debounced request path and suppresses stale out-of-order responses
 - preview errors fall back to an explicit unavailable interpretation summary instead of leaving stale affordances on screen
+- explicit common navigation/list commands may resolve through a deterministic fast path first
+- broader natural-language phrasing falls through to backend intent resolution
+- both paths must converge into the same canonical executable result shape, so direct open/view actions do not degrade into `DraftReady` unless the intent actually requires drafting
 - the prompt card renders:
   - action
   - target

@@ -16385,7 +16385,18 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
     text = str(message or "").strip()
     if not text:
         return None
-    lower = text.lower()
+    lower = re.sub(r"\s+", " ", text.lower()).strip()
+    lower = re.sub(r"^(?:please[,\s]+)+", "", lower)
+    lower = re.sub(r"^(?:can|could|would)\s+you\s+", "", lower)
+    lower = re.sub(r"^take\s+me\s+to\s+", "go to ", lower)
+    lower = re.sub(r"[.!?,:;]+$", "", lower)
+    lower = re.sub(r"^show\s+me\s+(?:a\s+)?list\s+of\s+", "list ", lower)
+    lower = re.sub(r"^show\s+me\s+", "show ", lower)
+    lower = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", lower)
+    lower = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", lower)
+    lower = re.sub(r"[.!?,:;]+$", "", lower)
+    if re.fullmatch(r"(?:list|show|open)\s+artifacts", lower):
+        return ("artifact_list", {})
     list_match = re.search(r"\blist\s+([a-z0-9_.-]+)\s+artifacts\b", lower)
     if list_match:
         namespace = str(list_match.group(1) or "").strip().lower()
@@ -16400,6 +16411,103 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
     if files_match:
         return ("artifact_files", {"slug": str(files_match.group(1) or "").strip()})
     return None
+
+
+def _match_core_surface_command(message: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    normalized = re.sub(r"\s+", " ", text.lower()).strip()
+    normalized = re.sub(r"^(?:please[,\s]+)+", "", normalized)
+    normalized = re.sub(r"^(?:can|could|would)\s+you\s+", "", normalized)
+    normalized = re.sub(r"^take\s+me\s+to\s+", "go to ", normalized)
+    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
+    normalized = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", normalized)
+    normalized = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", normalized)
+    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
+    platform_settings_aliases = {
+        "platform settings",
+        "open platform settings",
+        "show platform settings",
+        "go to platform settings",
+        "configure platform",
+    }
+    if normalized in platform_settings_aliases:
+        return ("platform_settings", {})
+    return None
+
+
+def _direct_panel_intent_response(
+    *,
+    request_id: str,
+    summary: str,
+    panel_key: str,
+    params: Optional[Dict[str, Any]] = None,
+    prompt_interpretation: Optional[Dict[str, Any]] = None,
+) -> JsonResponse:
+    return JsonResponse(
+        {
+            "status": "IntentResolved",
+            "action_type": "ValidateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": summary,
+            "prompt_interpretation": prompt_interpretation or {},
+            "next_actions": [
+                {
+                    "label": "Open panel",
+                    "action": "OpenPanel",
+                    "panel_key": panel_key,
+                    "params": params or {},
+                }
+            ],
+            "audit": {
+                "request_id": request_id,
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+    )
+
+
+def _direct_panel_prompt_interpretation(
+    *,
+    intent_type: str,
+    action_label: str,
+    target_entity_key: str = "",
+    target_entity_label: str = "",
+    resolution_notes: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    interpretation = PromptInterpretation(
+        intent_family="navigation",
+        intent_type=intent_type,
+        target_entity=(
+            PromptInterpretationTarget(
+                key=target_entity_key or None,
+                label=target_entity_label or None,
+            )
+            if (target_entity_key or target_entity_label)
+            else None
+        ),
+        target_record=None,
+        target_work_item=None,
+        target_run=None,
+        action=PromptInterpretationAction(verb="open", label=action_label),
+        fields=[],
+        execution_mode=PromptInterpretationExecutionMode.IMMEDIATE_EXECUTION.value,
+        confidence=0.95,
+        needs_clarification=False,
+        capability_state=PromptInterpretationCapabilityState(
+            state=PromptInterpretationCapabilityStateValue.ENABLED.value
+            if target_entity_key
+            else PromptInterpretationCapabilityStateValue.UNKNOWN.value
+        ),
+        clarification_reason=None,
+        clarification_options=[],
+        resolution_notes=resolution_notes or [],
+        missing_fields=[],
+        recognized_spans=[],
+    )
+    return interpretation.model_dump(mode="json")
 
 
 def _extract_app_intent_fields(message: str) -> Dict[str, Any]:
@@ -19517,6 +19625,96 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         return JsonResponse(response_payload)
 
     operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
+    core_surface_request = _match_core_surface_command(message)
+    if core_surface_request:
+        panel_key, params = core_surface_request
+        prompt_interpretation = _direct_panel_prompt_interpretation(
+            intent_type="open_view",
+            action_label="Open platform settings",
+            resolution_notes=["resolved as a direct platform surface navigation action"],
+        )
+        response_payload = {
+            "status": "IntentResolved",
+            "action_type": "ValidateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": "Will open platform settings.",
+            "prompt_interpretation": prompt_interpretation,
+            "next_actions": [
+                {"label": "Open panel", "action": "OpenPanel", "panel_key": panel_key, "params": params},
+            ],
+            "audit": {
+                "request_id": request_id,
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=None,
+                proposal={"operation": "open_core_surface", "panel_key": panel_key, "params": params, "prompt": message},
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="completed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=context_workspace_id,
+                summary=response_payload["summary"],
+                prompt_interpretation=prompt_interpretation,
+                thread_id=context_thread_id,
+            )
+        return JsonResponse(response_payload)
+    artifact_panel_request = _match_artifact_panel_command(message)
+    if artifact_panel_request:
+        panel_key, params = artifact_panel_request
+        prompt_interpretation = _direct_panel_prompt_interpretation(
+            intent_type="open_artifact_panel",
+            action_label="Open artifact view",
+            target_entity_key="artifacts" if panel_key == "artifact_list" else "",
+            target_entity_label="Artifacts" if panel_key == "artifact_list" else "",
+            resolution_notes=["resolved as a direct artifact navigation action"],
+        )
+        response_payload = {
+            "status": "IntentResolved",
+            "action_type": "ValidateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": "Will open artifact panel.",
+            "prompt_interpretation": prompt_interpretation,
+            "next_actions": [
+                {"label": "Open panel", "action": "OpenPanel", "panel_key": panel_key, "params": params},
+            ],
+            "audit": {
+                "request_id": str(uuid.uuid4()),
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=None,
+                proposal={"operation": "open_artifact_panel", "panel_key": panel_key, "params": params, "prompt": message},
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="completed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=context_workspace_id,
+                summary=response_payload["summary"],
+                prompt_interpretation=prompt_interpretation,
+                thread_id=context_thread_id,
+            )
+        return JsonResponse(response_payload)
     worker_mention = _parse_worker_mention(message)
     resolved_message = str(worker_mention.get("clean_message") or message).strip() or message
     epic_d_engine = _intent_engine(identity=identity, workspace=operator_workspace)
@@ -20009,31 +20207,6 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                     "panel_key": panel_key,
                     "params": params,
                     "operator_workspace_id": str(operator_workspace.id),
-                },
-                "next_actions": [
-                    {"label": "Open panel", "action": "CreateDraft"},
-                ],
-                "audit": {
-                    "request_id": str(uuid.uuid4()),
-                    "timestamp": timezone.now().isoformat(),
-                },
-            }
-        )
-
-    artifact_panel_request = _match_artifact_panel_command(message)
-    if artifact_panel_request:
-        panel_key, params = artifact_panel_request
-        return JsonResponse(
-            {
-                "status": "DraftReady",
-                "action_type": "CreateDraft",
-                "artifact_type": "Workspace",
-                "artifact_id": None,
-                "summary": "Will open artifact panel.",
-                "draft_payload": {
-                    "__operation": "open_artifact_panel",
-                    "panel_key": panel_key,
-                    "params": params,
                 },
                 "next_actions": [
                     {"label": "Open panel", "action": "CreateDraft"},

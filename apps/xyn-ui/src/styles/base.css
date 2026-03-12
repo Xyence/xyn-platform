@@ -3546,10 +3546,13 @@ button.sm {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  position: relative;
+  margin-top: 12px;
   min-height: calc(100vh - 240px);
 }
 
 .workbench-canvas .flexlayout__layout {
+  position: relative;
   min-height: calc(100vh - 240px);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -4380,6 +4383,7 @@ button.sm {
   vertical-align: middle;
   border-bottom: 1px solid color-mix(in srgb, var(--line) 66%, transparent);
   background: color-mix(in srgb, var(--surface-2, #13213a) 82%, transparent);
+  color: var(--ink);
   padding: 8px 12px;
   font-weight: 600;
 }
@@ -4396,6 +4400,7 @@ button.sm {
 .canvas-table tbody td {
   padding: 10px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--line) 46%, transparent);
+  color: var(--ink);
   vertical-align: middle;
   overflow: hidden;
   text-overflow: ellipsis;

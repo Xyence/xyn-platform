@@ -94,7 +94,7 @@ export default function XynConsolePanel() {
         mode="overlay"
         onRequestClose={() => setOpen(false)}
         onOpenPanel={(panelKey, params) => {
-          openPanel({ key: panelKey, params: params || {}, open_in: "current_panel" });
+          openPanel({ key: panelKey, params: params || {}, open_in: "new_panel" });
           setOpen(false);
         }}
       />

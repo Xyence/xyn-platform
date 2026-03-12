@@ -186,6 +186,20 @@ function normalizePrompt(value: string): string {
   return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function normalizeSurfacePrompt(value: string): string {
+  let normalized = normalizePrompt(value);
+  normalized = normalized.replace(/^(?:please[,\s]+)+/, "");
+  normalized = normalized.replace(/^(?:can|could|would)\s+you\s+/, "");
+  normalized = normalized.replace(/^take\s+me\s+to\s+/, "go to ");
+  normalized = normalized.replace(/[.!?,:;]+$/g, "");
+  normalized = normalized.replace(/^show\s+me\s+(?:a\s+)?list\s+of\s+/, "list ");
+  normalized = normalized.replace(/^show\s+me\s+/, "show ");
+  normalized = normalized.replace(/^(open|show|go to)\s+the\s+/, "$1 ");
+  normalized = normalized.replace(/\s+(?:page|screen|view|panel|tab|hub)\s*$/, "");
+  normalized = normalized.replace(/[.!?,:;]+$/g, "");
+  return normalizePrompt(normalized);
+}
+
 function normalizeRoutePath(route: string): string {
   const trimmed = String(route || "").trim();
   if (!trimmed) return "";
@@ -209,7 +223,7 @@ function candidatePhrasesForSurfaceLabel(label: string): string[] {
 }
 
 function matchSurfaceByPrompt(prompt: string, surfaces: ArtifactSurface[]): ArtifactSurface | null {
-  const normalizedPrompt = normalizePrompt(prompt);
+  const normalizedPrompt = normalizeSurfacePrompt(prompt);
   if (!normalizedPrompt) return null;
   const exactLabelMatch = surfaces.find((surface) => {
     const label = String(surface.nav_label || surface.title || "").trim();
@@ -247,7 +261,7 @@ export function resolvePromptSurfaceTarget(
     };
   }
 ): PromptSurfaceTarget | null {
-  const normalizedPrompt = normalizePrompt(prompt);
+  const normalizedPrompt = normalizeSurfacePrompt(prompt);
   if (!normalizedPrompt) return null;
   const workspaceId = String(options.workspaceId || "").trim();
 
