@@ -18,11 +18,13 @@ export default function DraftsListPage({
   workspaceId,
   workspaceName,
   workspaceColor,
+  workspaceBarVariant = "default",
   onSelectDraft,
 }: {
   workspaceId: string;
   workspaceName: string;
   workspaceColor?: string;
+  workspaceBarVariant?: "default" | "compact";
   onSelectDraft?: (draftId: string) => void;
 }) {
   const navigate = useNavigate();
@@ -85,7 +87,7 @@ export default function DraftsListPage({
 
   return (
     <>
-      <WorkspaceContextBar workspaceName={workspaceName} workspaceColor={workspaceColor} />
+      <WorkspaceContextBar workspaceName={workspaceName} workspaceColor={workspaceColor} variant={workspaceBarVariant} />
       <div className="page-header">
         <div>
           <h2>Drafts</h2>

@@ -4,6 +4,16 @@ import type { XynIntentOptionsResponse, XynIntentResolutionResult, XynIntentStat
 import { emitEntityChange, inferEntityChangeFromResolution } from "../utils/entityChangeEvents";
 import type { Panel } from "../workspace/panelModel";
 import { createWorkspacePanel as createDurableWorkspacePanel, openPanel as openDurablePanel } from "../workspace/panelFactory";
+import type { PanelAffinity } from "../workspace/workspacePresentationPolicy";
+import {
+  friendlyTitleForPanel,
+  panelAffinityForKey,
+  panelAffinityForState,
+  panelStackIdForAffinity,
+  resolveTargetStackId,
+  shouldFocusExistingPanel,
+  shouldReplaceCurrentPanel,
+} from "../workspace/workspacePresentationPolicy";
 
 const STORAGE_KEY = "xyn.console.v1.sessions";
 const HINT_STORAGE_KEY = "xyn.console.v1.lastArtifactHint";
@@ -48,6 +58,9 @@ export type ConsolePanelState = {
   key: string;
   params?: Record<string, unknown>;
   active_group_id?: string | null;
+  panel_affinity: PanelAffinity;
+  workspace_id?: string;
+  thread_id?: string | null;
   panel_object?: Panel | null;
 };
 
@@ -263,6 +276,7 @@ type XynConsoleContextValue = {
     open_in?: "current_panel" | "new_panel" | "side_by_side";
     return_to_panel_id?: string;
     panel_object?: Panel | null;
+    title?: string;
   }) => void;
   openWorkspacePanel: (input: {
     panel_type: Panel["panel_type"];
@@ -277,6 +291,7 @@ type XynConsoleContextValue = {
   setActivePanelId: (panelId: string | null) => void;
   updateActivePanelParams: (params: Record<string, unknown>) => void;
   restorePanels: (panels: ConsolePanelState[], activePanelId?: string | null) => void;
+  syncPanelGroups: (groups: Record<string, string>) => void;
   canvasContext: CanvasContext | null;
   setCanvasContext: (context: CanvasContext | null) => void;
   navigateBack: () => void;
@@ -840,6 +855,11 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
     return key;
   }, []);
 
+  const workspaceId = useMemo(
+    () => workspaceIdFromPathname(typeof window !== "undefined" ? window.location.pathname : ""),
+    [contextKey]
+  );
+
   const openPanel = useCallback(
     (input: {
       key: string;
@@ -847,35 +867,68 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       open_in?: "current_panel" | "new_panel" | "side_by_side";
       return_to_panel_id?: string;
       panel_object?: Panel | null;
+      title?: string;
     }) => {
       const panelType = inferPanelType(input.key);
       const instanceKey = inferInstanceKey(input.key, input.params);
-      const openIn = input.open_in || "current_panel";
+      const openIn = input.open_in || "new_panel";
+      const requestedAffinity = panelAffinityForKey(input.key);
       setPanels((current) => {
-        const existing = current.find((item) => item.panel_type === panelType && item.instance_key === instanceKey);
-        if (existing) {
-          if (input.return_to_panel_id) {
-            setPanelReturnTargets((targets) => ({ ...targets, [existing.panel_id]: input.return_to_panel_id as string }));
+        const existing = current.find((item) => {
+          if (input.panel_object && item.panel_object) {
+            return item.panel_object.panel_type === input.panel_object.panel_type && item.panel_object.object_id === input.panel_object.object_id;
           }
-          setActivePanelIdState(existing.panel_id);
+          return item.panel_type === panelType && item.instance_key === instanceKey;
+        });
+        if (shouldFocusExistingPanel(existing || null)) {
+          if (input.return_to_panel_id) {
+            setPanelReturnTargets((targets) => ({ ...targets, [existing!.panel_id]: input.return_to_panel_id as string }));
+          }
+          setActivePanelIdState(existing!.panel_id);
           return current.map((item) =>
-            item.panel_id === existing.panel_id ? { ...item, key: input.key, params: input.params || {}, title: item.title || input.key } : item
+            item.panel_id === existing!.panel_id
+              ? {
+                  ...item,
+                  key: input.key,
+                  params: input.params || {},
+                  title: friendlyTitleForPanel({
+                    key: input.key,
+                    title: input.title || item.title,
+                    instance_key: item.instance_key,
+                    panel_object: item.panel_object || input.panel_object || null,
+                  }),
+                }
+              : item
           );
         }
+        const activePanel = activePanelId ? current.find((item) => item.panel_id === activePanelId) || null : null;
+        const targetGroupId = resolveTargetStackId({
+          panels: current,
+          activePanel,
+          requestedAffinity,
+        });
         const next: ConsolePanelState = {
           panel_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           panel_type: panelType,
           instance_key: instanceKey,
-          title: input.key,
+          title: friendlyTitleForPanel({
+            key: input.key,
+            title: input.title || null,
+            instance_key: instanceKey,
+            panel_object: input.panel_object || null,
+          }),
           key: input.key,
           params: input.params || {},
-          active_group_id: null,
+          active_group_id: targetGroupId,
+          panel_affinity: requestedAffinity,
+          workspace_id: workspaceId,
+          thread_id: input.panel_object?.thread_id || session.threadId || null,
           panel_object: input.panel_object || null,
         };
         if (input.return_to_panel_id) {
           setPanelReturnTargets((targets) => ({ ...targets, [next.panel_id]: input.return_to_panel_id as string }));
         }
-        if (openIn === "current_panel" && activePanelId) {
+        if (shouldReplaceCurrentPanel(openIn) && activePanelId) {
           const replaced = current.map((item) => (item.panel_id === activePanelId ? next : item));
           setPanelReturnTargets((targets) => {
             const copy = { ...targets };
@@ -892,7 +945,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
         return [...current, next];
       });
     },
-    [activePanelId, inferInstanceKey, inferPanelType]
+    [activePanelId, inferInstanceKey, inferPanelType, session.threadId, workspaceId]
   );
 
   const closePanel = useCallback(
@@ -956,6 +1009,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
         key: spec.key,
         params: spec.params,
         open_in: spec.open_in,
+        title: spec.title,
         panel_object: panelObject,
       });
     },
@@ -997,6 +1051,15 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
   const restorePanels = useCallback((nextPanels: ConsolePanelState[], nextActivePanelId?: string | null) => {
     setPanels(nextPanels);
     setActivePanelIdState(nextActivePanelId || nextPanels[0]?.panel_id || null);
+  }, []);
+
+  const syncPanelGroups = useCallback((groups: Record<string, string>) => {
+    setPanels((current) =>
+      current.map((panel) => ({
+        ...panel,
+        active_group_id: groups[panel.panel_id] || panel.active_group_id || panelStackIdForAffinity(panel.panel_affinity || panelAffinityForState(panel)),
+      }))
+    );
   }, []);
 
   const toNavEntry = useCallback((context: CanvasContext): NavigationEntry => {
@@ -1124,6 +1187,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       setActivePanelId,
       updateActivePanelParams,
       restorePanels,
+      syncPanelGroups,
       canvasContext,
       setCanvasContext,
       navigateBack,
@@ -1174,6 +1238,7 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       setActivePanelId,
       updateActivePanelParams,
       restorePanels,
+      syncPanelGroups,
       canvasContext,
       setCanvasContext,
       navigateBack,

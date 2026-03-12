@@ -18,11 +18,13 @@ export default function JobsListPage({
   workspaceId,
   workspaceName,
   workspaceColor,
+  workspaceBarVariant = "default",
   onSelectJob,
 }: {
   workspaceId: string;
   workspaceName: string;
   workspaceColor?: string;
+  workspaceBarVariant?: "default" | "compact";
   onSelectJob?: (jobId: string) => void;
 }) {
   const navigate = useNavigate();
@@ -81,7 +83,7 @@ export default function JobsListPage({
 
   return (
     <>
-      <WorkspaceContextBar workspaceName={workspaceName} workspaceColor={workspaceColor} />
+      <WorkspaceContextBar workspaceName={workspaceName} workspaceColor={workspaceColor} variant={workspaceBarVariant} />
       <div className="page-header">
         <div>
           <h2>Jobs</h2>

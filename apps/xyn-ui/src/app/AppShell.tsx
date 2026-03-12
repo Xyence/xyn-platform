@@ -734,12 +734,18 @@ export default function AppShell() {
   }
 
   return (
-    <div className="app-shell">
-      <header className="app-header" ref={headerRef}>
+    <div className={`app-shell ${isWorkbenchRoute ? "is-workbench" : ""}`}>
+      <header className={`app-header ${isWorkbenchRoute ? "is-workbench" : ""}`} ref={headerRef}>
         <Link className="brand brand-link" to="/">
           <img className="brand-logo" src={brandLogo} alt="Xyence logo" />
           <div>
             <h1>Xyn</h1>
+            {isWorkbenchRoute && activeWorkspace?.name ? (
+              <div className="app-header-workspace">
+                <span className="workspace-dot" style={{ background: workspaceRoute.workspaceColor || "#6c7a89" }} aria-hidden="true" />
+                <span>{activeWorkspace.name}</span>
+              </div>
+            ) : null}
           </div>
         </Link>
         <div className="header-meta">
@@ -790,7 +796,7 @@ export default function AppShell() {
             onWorkspaceChange={handleWorkspaceChange}
           />
         ) : null}
-        <main className="app-content" ref={contentRef}>
+        <main className={`app-content ${isWorkbenchRoute ? "app-content-workbench" : ""}`} ref={contentRef}>
           <div className={`preview-banner-slot ${preview.enabled ? "active" : ""}`}>
             <PreviewBanner
               actorLabel={String(authUser?.email || authUser?.display_name || authUser?.subject || "current user")}
@@ -815,7 +821,7 @@ export default function AppShell() {
           ) : (
           <Routes>
             <Route path="/" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "/"} replace />} />
-            <Route path="workbench" element={<WorkbenchPage />} />
+            <Route path="workbench" element={<WorkbenchPage workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />} />
             <Route path="console" element={<Navigate to={workspaceScopedTarget(DEFAULT_WORKSPACE_SUBPATH)} replace />} />
             <Route path="apps/articles/edit" element={<ArticleSurfaceEditorRedirectPage />} />
             <Route path="apps/articles/docs" element={<ArticleSurfaceDocsPage />} />

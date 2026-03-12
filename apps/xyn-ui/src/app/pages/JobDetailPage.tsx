@@ -21,12 +21,14 @@ export default function JobDetailPage({
   workspaceId,
   workspaceName,
   workspaceColor,
+  workspaceBarVariant = "default",
   jobId: explicitJobId,
   onBack,
 }: {
   workspaceId: string;
   workspaceName: string;
   workspaceColor?: string;
+  workspaceBarVariant?: "default" | "compact";
   jobId?: string;
   onBack?: () => void;
 }) {
@@ -69,7 +71,7 @@ export default function JobDetailPage({
 
   return (
     <>
-      <WorkspaceContextBar workspaceName={workspaceName} workspaceColor={workspaceColor} />
+      <WorkspaceContextBar workspaceName={workspaceName} workspaceColor={workspaceColor} variant={workspaceBarVariant} />
       <div className="page-header">
         <div>
           <h2>Job Detail</h2>

@@ -2,6 +2,7 @@ import type { IJsonModel } from "flexlayout-react";
 import type { ConsolePanelState } from "../state/xynConsoleStore";
 import type { WorkspaceLayout } from "./panelModel";
 import { validateWorkspaceLayout } from "./panelModel";
+import { buildPresetTabs, defaultWorkspacePreset, panelAffinityForState, panelStackIdForAffinity } from "./workspacePresentationPolicy";
 
 const STORAGE_PREFIX = "xyn.workspace.layout.v1";
 
@@ -10,46 +11,17 @@ export function workspaceLayoutStorageKey(workspaceId: string): string {
 }
 
 export function buildFlexLayoutModel(panels: ConsolePanelState[], activePanelId: string | null): IJsonModel {
-  const tabs = panels.map((panel) => ({
-    type: "tab",
-    id: panel.panel_id,
-    name: panel.title || panel.key,
-    component: "workspace-panel",
-    enableClose: true,
-    config: {
-      panel_id: panel.panel_id,
-    },
-  }));
-  return {
-    global: {
-      tabEnableClose: true,
-      splitterSize: 8,
-    },
-    layout: {
-      type: "row",
-      id: "workspace-root",
-      weight: 100,
-      children: [
-        {
-          type: "tabset",
-          id: "workspace-main",
-          weight: 100,
-          selected: Math.max(
-            0,
-            tabs.findIndex((tab) => String(tab.id || "") === String(activePanelId || ""))
-          ),
-          children: tabs,
-        },
-      ],
-    },
-  };
+  return buildPresetTabs(defaultWorkspacePreset(), panels, activePanelId);
 }
 
 export function buildWorkspaceLayout(workspaceId: string, panels: ConsolePanelState[], activePanelId: string | null): WorkspaceLayout {
+  const preset = defaultWorkspacePreset();
   return validateWorkspaceLayout({
     workspace_id: workspaceId,
     flexlayout_model: buildFlexLayoutModel(panels, activePanelId),
     panel_ids: panels.map((panel) => panel.panel_id),
+    preset_id: preset.preset_id,
+    lock_mode: preset.lock_mode,
     last_updated: new Date().toISOString(),
   });
 }
@@ -72,24 +44,25 @@ function syncNode(
 ): Record<string, unknown> {
   const children = Array.isArray(node.children) ? (node.children as Record<string, unknown>[]) : [];
   if (node.type === "tabset") {
+    const tabsetId = String(node.id || "");
     const nextChildren = children
       .map((child) => syncNode(child, panelsById, activePanelId, added))
       .filter((child) => child.type !== "tab" || panelsById.has(String(child.id || "")));
-    if (!added.value) {
-      const existing = new Set(nextChildren.map((child) => String(child.id || "")));
-      panelsById.forEach((panel, panelId) => {
-        if (existing.has(panelId)) return;
-        nextChildren.push({
-          type: "tab",
-          id: panel.panel_id,
-          name: panel.title || panel.key,
-          component: "workspace-panel",
-          enableClose: true,
-          config: { panel_id: panel.panel_id },
-        });
+    const existing = new Set(nextChildren.map((child) => String(child.id || "")));
+    panelsById.forEach((panel, panelId) => {
+      if (existing.has(panelId)) return;
+      const targetGroupId = panel.active_group_id || panelStackIdForAffinity(panel.panel_affinity || panelAffinityForState(panel));
+      if (targetGroupId !== tabsetId) return;
+      nextChildren.push({
+        type: "tab",
+        id: panel.panel_id,
+        name: panel.title || panel.key,
+        component: "workspace-panel",
+        enableClose: true,
+        config: { panel_id: panel.panel_id },
       });
       added.value = true;
-    }
+    });
     const selected = nextChildren.findIndex((child) => String(child.id || "") === String(activePanelId || ""));
     return {
       ...node,
@@ -127,6 +100,22 @@ export function syncFlexLayoutModel(
     global: typeof currentModel.global === "object" && currentModel.global ? currentModel.global : { tabEnableClose: true, splitterSize: 8 },
     layout: nextLayout,
   } as unknown as IJsonModel;
+}
+
+export function derivePanelGroupAssignments(model: IJsonModel | null): Record<string, string> {
+  if (!model || typeof model !== "object") return {};
+  const assignments: Record<string, string> = {};
+  const walk = (node: Record<string, unknown> | null | undefined, currentTabsetId?: string) => {
+    if (!node || typeof node !== "object") return;
+    const nextTabsetId = node.type === "tabset" && typeof node.id === "string" ? node.id : currentTabsetId;
+    if (node.type === "tab" && typeof node.id === "string" && nextTabsetId) {
+      assignments[node.id] = nextTabsetId;
+    }
+    const children = Array.isArray(node.children) ? (node.children as Array<Record<string, unknown>>) : [];
+    children.forEach((child) => walk(child, nextTabsetId));
+  };
+  walk(model.layout as unknown as Record<string, unknown>);
+  return assignments;
 }
 
 export function readWorkspaceLayout(workspaceId: string): WorkspaceLayout | null {

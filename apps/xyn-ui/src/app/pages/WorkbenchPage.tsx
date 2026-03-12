@@ -4,9 +4,15 @@ import { useParams, useSearchParams } from "react-router-dom";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
 import { useCapabilitySuggestions } from "../components/console/capabilitySuggestions";
 import { useXynConsole } from "../state/xynConsoleStore";
-import { buildWorkspaceLayout, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
+import { buildWorkspaceLayout, derivePanelGroupAssignments, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
-export default function WorkbenchPage() {
+export default function WorkbenchPage({
+  workspaceName = "",
+  workspaceColor = "#6c7a89",
+}: {
+  workspaceName?: string;
+  workspaceColor?: string;
+}) {
   const {
     setContext,
     setOpen,
@@ -21,6 +27,7 @@ export default function WorkbenchPage() {
     setLastArtifactHint,
     panels,
     restorePanels,
+    syncPanelGroups,
   } =
     useXynConsole();
   const params = useParams();
@@ -140,12 +147,15 @@ export default function WorkbenchPage() {
       <WorkbenchPanelHost
         panel={panel}
         workspaceId={workspaceId}
+        workspaceName={workspaceName}
+        workspaceColor={workspaceColor}
         onOpenPanel={(next) =>
           openPanel({
             key: next.key,
             params: next.params || {},
             open_in: next.open_in || "new_panel",
             return_to_panel_id: next.return_to_panel_id,
+            title: next.title,
           })
         }
         onContextChange={(context) => {
@@ -161,6 +171,7 @@ export default function WorkbenchPage() {
   const handleModelChange = (nextModel: Model) => {
     const nextJson = nextModel.toJson();
     setLayoutJson(nextJson);
+    syncPanelGroups(derivePanelGroupAssignments(nextJson as IJsonModel));
     writeWorkspaceLayout({
       workspace_id: workspaceId,
       flexlayout_model: nextJson,

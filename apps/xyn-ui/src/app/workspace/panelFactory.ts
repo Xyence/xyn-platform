@@ -1,6 +1,7 @@
 import type { ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
 import { createPanel, type Panel, type PanelCreationSource, type PanelType } from "./panelModel";
 import { resolvePanelComponent, validatePanelObject } from "./panelRegistry";
+import { friendlyTitleForPanel } from "./workspacePresentationPolicy";
 
 type CreatePanelInput = {
   panel_type: PanelType;
@@ -23,7 +24,11 @@ function panelToConsoleSpec(panel: Panel, params?: Record<string, unknown>, titl
   }
   return {
     panel_id: panel.panel_id,
-    title: title || registered.title,
+    title: friendlyTitleForPanel({
+      key: registered.console_key,
+      title: title || registered.title,
+      panel_object: panel,
+    }),
     key: registered.console_key,
     params: nextParams,
     open_in: "new_panel",

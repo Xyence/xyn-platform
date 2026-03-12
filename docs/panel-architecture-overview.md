@@ -106,3 +106,71 @@ That means Epic G Step 9 should be treated as a boundary-hardening refactor of t
   - conversation-local prompt/session state where needed for restoration
 
 This is still a continuation of the current seam, not a new orchestration path. But it is the highest-risk insertion point for the remainder of Epic G and should be handled deliberately.
+
+## Workspace presentation policy
+
+Epic G follow-on behavior now has an explicit presentation-policy seam in:
+
+- `apps/xyn-ui/src/app/workspace/workspacePresentationPolicy.ts`
+
+The policy is declarative and currently governs:
+
+- default open behavior
+- panel affinity
+- friendly title derivation
+- compact workspace signaling
+- application view/layout presets
+- layout lock mode
+
+### Open behavior
+
+Current default behavior:
+
+- same durable object already open -> focus the existing tab
+- different durable object -> open a new tab and focus it
+- explicit `open_in: "current_panel"` is still allowed and takes precedence
+
+### Panel affinity
+
+Current panel affinities are:
+
+- `conversation`
+- `application`
+- `operations`
+- `artifacts`
+- `generic`
+
+The default workbench preset provides dedicated stacks for:
+
+- conversation
+- application
+- operations
+- artifacts
+
+Generic panels currently fall back to the operations stack.
+
+### Friendly titles
+
+Tab and panel titles are now derived from policy rules instead of raw identifiers where friendly labels exist. For example:
+
+- `jobs_list` -> `Jobs List`
+- `run_detail` -> `Run Detail`
+- `artifact_detail` -> `Artifact Detail`
+
+### Workspace signaling
+
+For workbench layouts, workspace identity should be compact and shared:
+
+- the header carries the primary workspace identity
+- panels may render a compact workspace context bar when useful
+- large in-panel workspace banners are no longer the default for multi-panel layouts
+
+### Presets and lock modes
+
+The first implementation is intentionally narrow:
+
+- presets are code-defined defaults
+- FlexLayout remains the authoritative layout engine
+- lock mode is currently `starting_layout_only`
+
+There is not yet an admin-managed preset editor in this seam.

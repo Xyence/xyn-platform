@@ -1,10 +1,13 @@
 import type { ConsolePanelKey } from "../components/console/WorkbenchPanelHost";
 import { type Panel, type PanelType, isPanelType, validatePanel } from "./panelModel";
+import type { PanelAffinity } from "./workspacePresentationPolicy";
+import { panelAffinityForKey } from "./workspacePresentationPolicy";
 
 export type RegisteredPanelDefinition = {
   panel_type: PanelType;
   console_key: ConsolePanelKey;
   title: string;
+  affinity: PanelAffinity;
 };
 
 const registry = new Map<PanelType, RegisteredPanelDefinition>();
@@ -36,15 +39,15 @@ export function validatePanelObject(input: unknown): Panel {
 }
 
 const DEFAULT_PANEL_DEFINITIONS = [
-  { panel_type: "conversation", console_key: "palette_result", title: "Conversation" },
-  { panel_type: "run_detail", console_key: "run_detail", title: "Run" },
-  { panel_type: "run_list", console_key: "runs", title: "Runs" },
-  { panel_type: "work_item", console_key: "jobs_list", title: "Work Item" },
-  { panel_type: "entity_list", console_key: "palette_result", title: "Records" },
-  { panel_type: "entity_record", console_key: "record_detail", title: "Record" },
-  { panel_type: "artifact_view", console_key: "artifact_detail", title: "Artifact" },
-  { panel_type: "report_view", console_key: "palette_result", title: "Report" },
-  { panel_type: "log_view", console_key: "artifact_raw_json", title: "Log" },
+  { panel_type: "conversation", console_key: "palette_result", title: "Conversation", affinity: panelAffinityForKey("palette_result") },
+  { panel_type: "run_detail", console_key: "run_detail", title: "Run Detail", affinity: panelAffinityForKey("run_detail") },
+  { panel_type: "run_list", console_key: "runs", title: "Active Runs", affinity: panelAffinityForKey("runs") },
+  { panel_type: "work_item", console_key: "jobs_list", title: "Work Item", affinity: panelAffinityForKey("jobs_list") },
+  { panel_type: "entity_list", console_key: "palette_result", title: "Entity List", affinity: panelAffinityForKey("palette_result") },
+  { panel_type: "entity_record", console_key: "record_detail", title: "Record Detail", affinity: panelAffinityForKey("record_detail") },
+  { panel_type: "artifact_view", console_key: "artifact_detail", title: "Artifact", affinity: panelAffinityForKey("artifact_detail") },
+  { panel_type: "report_view", console_key: "palette_result", title: "Report", affinity: panelAffinityForKey("palette_result") },
+  { panel_type: "log_view", console_key: "artifact_raw_json", title: "Log", affinity: panelAffinityForKey("artifact_raw_json") },
 ] satisfies RegisteredPanelDefinition[];
 
 DEFAULT_PANEL_DEFINITIONS.forEach(registerPanelType);

@@ -53,6 +53,8 @@ describe("panelModel", () => {
         workspace_id: "ws-1",
         flexlayout_model: { global: {}, layout: {} },
         panel_ids: ["run_detail:run-1"],
+        preset_id: "workbench.default",
+        lock_mode: "starting_layout_only",
         last_updated: "2026-03-11T10:00:00Z",
       })
     ).toMatchObject({ workspace_id: "ws-1" });

@@ -219,6 +219,7 @@ export default function DraftDetailPage({
   workspaceId,
   workspaceName,
   workspaceColor,
+  workspaceBarVariant = "default",
   draftId: explicitDraftId,
   onBack,
   onOpenJob,
@@ -228,6 +229,7 @@ export default function DraftDetailPage({
   workspaceId: string;
   workspaceName: string;
   workspaceColor?: string;
+  workspaceBarVariant?: "default" | "compact";
   draftId?: string;
   onBack?: () => void;
   onOpenJob?: (jobId: string) => void;
@@ -501,7 +503,7 @@ export default function DraftDetailPage({
 
   return (
     <>
-      <WorkspaceContextBar workspaceName={workspaceName} workspaceColor={workspaceColor} />
+      <WorkspaceContextBar workspaceName={workspaceName} workspaceColor={workspaceColor} variant={workspaceBarVariant} />
       <div className="page-header">
         <div>
           <h2>Draft Detail</h2>

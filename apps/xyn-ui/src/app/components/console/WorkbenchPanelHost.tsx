@@ -1540,12 +1540,16 @@ function humanizePanelTitle(panel: ConsolePanelSpec, resolvedTitle: string): str
 export default function WorkbenchPanelHost({
   panel,
   workspaceId,
+  workspaceName,
+  workspaceColor,
   onOpenPanel,
   onClosePanel,
   onContextChange,
 }: {
   panel: ConsolePanelSpec | null;
   workspaceId: string;
+  workspaceName?: string;
+  workspaceColor?: string;
   onOpenPanel: (panel: ConsolePanelSpec) => void;
   onClosePanel?: () => void;
   onContextChange?: ContextEmitter;
@@ -1616,7 +1620,9 @@ export default function WorkbenchPanelHost({
       return (
         <DraftsListPage
           workspaceId={workspaceId}
-          workspaceName="Current Workspace"
+          workspaceName={workspaceName || "Unknown"}
+          workspaceColor={workspaceColor}
+          workspaceBarVariant="compact"
           onSelectDraft={(draftId) => openPanel("draft_detail", { draft_id: draftId }, { open_in: "new_panel", return_to_panel_id: panel.panel_id })}
         />
       );
@@ -1626,7 +1632,9 @@ export default function WorkbenchPanelHost({
       return (
         <JobsListPage
           workspaceId={workspaceId}
-          workspaceName="Current Workspace"
+          workspaceName={workspaceName || "Unknown"}
+          workspaceColor={workspaceColor}
+          workspaceBarVariant="compact"
           onSelectJob={(jobId) => openPanel("job_detail", { job_id: jobId }, { open_in: "new_panel", return_to_panel_id: panel.panel_id })}
         />
       );
@@ -1636,7 +1644,9 @@ export default function WorkbenchPanelHost({
       return (
         <DraftDetailPage
           workspaceId={workspaceId}
-          workspaceName="Current Workspace"
+          workspaceName={workspaceName || "Unknown"}
+          workspaceColor={workspaceColor}
+          workspaceBarVariant="compact"
           draftId={String(panel.params?.draft_id || "")}
           linkedJobId={String(panel.params?.job_id || "")}
           onBack={() => {
@@ -1656,7 +1666,9 @@ export default function WorkbenchPanelHost({
       return (
         <JobDetailPage
           workspaceId={workspaceId}
-          workspaceName="Current Workspace"
+          workspaceName={workspaceName || "Unknown"}
+          workspaceColor={workspaceColor}
+          workspaceBarVariant="compact"
           jobId={String(panel.params?.job_id || "")}
           onBack={() => {
             if (panel.return_to_panel_id) {

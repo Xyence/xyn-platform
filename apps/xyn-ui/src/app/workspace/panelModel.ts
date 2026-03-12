@@ -50,6 +50,8 @@ export type WorkspaceLayout = {
   workspace_id: string;
   flexlayout_model: unknown;
   panel_ids: string[];
+  preset_id?: string | null;
+  lock_mode?: "unlocked" | "starting_layout_only" | "partially_locked" | "locked" | null;
   last_updated: string;
 };
 
@@ -98,6 +100,9 @@ export function validateWorkspaceLayout(layout: WorkspaceLayout): WorkspaceLayou
     throw new Error("WorkspaceLayout requires serialized flexlayout_model.");
   }
   if (!Array.isArray(layout.panel_ids)) throw new Error("WorkspaceLayout requires panel_ids.");
+  if (layout.lock_mode != null && !["unlocked", "starting_layout_only", "partially_locked", "locked"].includes(String(layout.lock_mode))) {
+    throw new Error("WorkspaceLayout lock_mode is invalid.");
+  }
   if (!String(layout.last_updated || "").trim()) throw new Error("WorkspaceLayout requires last_updated.");
   return layout;
 }

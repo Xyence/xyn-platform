@@ -19,6 +19,7 @@ describe("panelFactory", () => {
     const spec = openPanel(panel);
     expect(spec.panel_id).toBe(panel.panel_id);
     expect(spec.key).toBe("run_detail");
+    expect(spec.title).toBe("Run Detail");
     expect(spec.params).toMatchObject({ run_id: "run-123" });
   });
 
