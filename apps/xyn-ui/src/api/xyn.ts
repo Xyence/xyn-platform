@@ -37,7 +37,10 @@ import type {
   RunListResponse,
   RunLogResponse,
   RuntimeRunDetail,
+  RuntimeRunArtifactContent,
   RuntimeRunListResponse,
+  WorkItemDetail,
+  WorkItemListResponse,
   ContextPackCreatePayload,
   ContextPackDetail,
   ContextPackListResponse,
@@ -4087,6 +4090,14 @@ export async function getRuntimeRunCanvasApi(workspaceId: string, id: string): P
   return handle<RuntimeRunDetail>(response);
 }
 
+export async function getRuntimeRunArtifactContent(workspaceId: string, runId: string, artifactId: string): Promise<RuntimeRunArtifactContent> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/api/runtime/runs/${runId}/artifacts/${artifactId}`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<RuntimeRunArtifactContent>(response);
+}
+
 export async function getRunLogs(id: string): Promise<RunLogResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/runs/${id}/logs`, {
@@ -4135,6 +4146,24 @@ export async function listDevTasks(
   return handle<DevTaskListResponse>(response);
 }
 
+export async function listWorkItems(
+  status?: string,
+  query?: string,
+  page?: number,
+  pageSize?: number,
+  workspaceId?: string
+): Promise<WorkItemListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/work-items`);
+  url.searchParams.set("page_size", String(pageSize ?? 50));
+  if (page) url.searchParams.set("page", String(page));
+  if (status) url.searchParams.set("status", status);
+  if (query) url.searchParams.set("q", query);
+  if (workspaceId) url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<WorkItemListResponse>(response);
+}
+
 export async function createDevTask(payload: DevTaskCreatePayload): Promise<{ id: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks`, {
@@ -4152,6 +4181,14 @@ export async function getDevTask(id: string): Promise<DevTaskDetail> {
     credentials: "include",
   });
   return handle<DevTaskDetail>(response);
+}
+
+export async function getWorkItem(id: string): Promise<WorkItemDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/work-items/${id}`, {
+    credentials: "include",
+  });
+  return handle<WorkItemDetail>(response);
 }
 
 export async function runDevTask(id: string, force = false): Promise<{ run_id: string; status: string }> {

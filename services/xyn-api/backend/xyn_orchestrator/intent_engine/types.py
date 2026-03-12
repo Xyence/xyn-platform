@@ -226,9 +226,17 @@ class ConversationContextEntity(BaseModel):
     label: Optional[str] = None
 
 
+class ConversationContextArtifact(BaseModel):
+    artifact_id: Optional[str] = None
+    label: Optional[str] = None
+    artifact_type: Optional[str] = None
+    run_id: Optional[str] = None
+
+
 class ConversationExecutionContext(BaseModel):
     thread_id: Optional[str] = None
     current_work_item_id: Optional[str] = None
     current_run_id: Optional[str] = None
     active_epic: Optional[str] = None
     recent_entities: List[ConversationContextEntity] = Field(default_factory=list)
+    recent_artifacts: List[ConversationContextArtifact] = Field(default_factory=list)

@@ -23,6 +23,34 @@ describe("panelFactory", () => {
     expect(spec.params).toMatchObject({ run_id: "run-123" });
   });
 
+  it("creates and restores work item panels through the registry path", () => {
+    const panel = createWorkspacePanel({
+      panel_type: "work_item",
+      object_id: "wi-123",
+      workspace_id: "ws-1",
+      thread_id: "thread-1",
+      creation_source: "conversation",
+    });
+
+    const spec = openPanel(panel);
+    expect(spec.key).toBe("work_item_detail");
+    expect(spec.title).toBe("Work Item");
+    expect(spec.params).toMatchObject({ work_item_id: "wi-123" });
+  });
+
+  it("maps runtime artifact object ids into artifact detail params", () => {
+    const panel = createWorkspacePanel({
+      panel_type: "artifact_view",
+      object_id: "runtime-run-artifact:run-1:artifact-1",
+      workspace_id: "ws-1",
+      creation_source: "runtime_event",
+    });
+
+    const spec = openPanel(panel);
+    expect(spec.key).toBe("artifact_detail");
+    expect(spec.params).toMatchObject({ runtime_run_id: "run-1", runtime_artifact_id: "artifact-1" });
+  });
+
   it("rejects invalid panel objects instead of silently opening them", () => {
     expect(() =>
       openPanel({

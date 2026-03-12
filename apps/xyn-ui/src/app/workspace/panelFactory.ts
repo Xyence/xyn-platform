@@ -13,11 +13,26 @@ type CreatePanelInput = {
   params?: Record<string, unknown>;
 };
 
+function parseRuntimeArtifactObjectId(objectId: string): { run_id: string; artifact_id: string } | null {
+  const match = String(objectId || "").match(/^runtime-run-artifact:([^:]+):([^:]+)$/);
+  if (!match) return null;
+  return { run_id: match[1], artifact_id: match[2] };
+}
+
 function panelToConsoleSpec(panel: Panel, params?: Record<string, unknown>, title?: string): ConsolePanelSpec {
   const registered = resolvePanelComponent(panel);
   const nextParams = { ...(params || {}) };
   if (panel.panel_type === "run_detail") nextParams.run_id = panel.object_id;
-  if (panel.panel_type === "artifact_view" || panel.panel_type === "log_view") nextParams.slug = panel.object_id;
+  if (panel.panel_type === "work_item") nextParams.work_item_id = panel.object_id;
+  if (panel.panel_type === "artifact_view" || panel.panel_type === "log_view") {
+    const runtimeArtifact = parseRuntimeArtifactObjectId(panel.object_id);
+    if (runtimeArtifact) {
+      nextParams.runtime_run_id = runtimeArtifact.run_id;
+      nextParams.runtime_artifact_id = runtimeArtifact.artifact_id;
+    } else {
+      nextParams.slug = panel.object_id;
+    }
+  }
   if (panel.panel_type === "entity_record") nextParams.entity_id = panel.object_id;
   if (panel.panel_type === "entity_list" || panel.panel_type === "report_view" || panel.panel_type === "conversation") {
     nextParams.object_id = panel.object_id;

@@ -2111,6 +2111,16 @@ export type RuntimeRunArtifact = {
   metadata?: Record<string, unknown>;
 };
 
+export type RuntimeRunArtifactContent = {
+  artifact_id: string;
+  run_id: string;
+  artifact_type: string;
+  label: string;
+  uri: string;
+  content_type?: string | null;
+  content: string;
+};
+
 export type RuntimeRunSummary = {
   id: string;
   run_id: string;
@@ -2173,7 +2183,15 @@ export type RuntimeStreamEvent = {
 
 export type DevTaskSummary = {
   id: string;
+  work_item_id?: string | null;
   title: string;
+  description?: string;
+  source_conversation_id?: string | null;
+  requested_by?: string | null;
+  intent_type?: string | null;
+  target_repo?: string | null;
+  target_branch?: string | null;
+  execution_policy?: Record<string, unknown>;
   task_type: string;
   status: string;
   priority: number;
@@ -2228,6 +2246,9 @@ export type DevTaskDetail = DevTaskSummary & {
 };
 
 export type DevTaskListResponse = PaginatedResponse<DevTaskSummary, "dev_tasks">;
+export type WorkItemSummary = DevTaskSummary;
+export type WorkItemDetail = DevTaskDetail;
+export type WorkItemListResponse = PaginatedResponse<WorkItemSummary, "work_items">;
 
 export type DevTaskCreatePayload = {
   title: string;

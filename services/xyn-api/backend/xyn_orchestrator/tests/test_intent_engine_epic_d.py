@@ -1328,6 +1328,72 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len((payload.get("result") or {}).get("logs") or []), 1)
 
+    def test_execute_conversation_action_create_work_item_returns_work_item_panel_action(self):
+        fake_task = SimpleNamespace(
+            id="task-1",
+            work_item_id="epic-h",
+            title="Epic H",
+            description="Implement durable coordination",
+            source_conversation_id="thread-1",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={"auto_continue": True},
+        )
+        with patch.object(intent_api, "_ensure_conversation_dev_task", return_value=fake_task), patch.object(
+            intent_api,
+            "_serialize_dev_task_summary",
+            return_value={"id": "task-1", "work_item_id": "epic-h", "title": "Epic H", "status": "queued"},
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "create_work_item",
+                    "thread_id": "thread-1",
+                    "payload": {},
+                    "target_object": {"reference": "Epic H"},
+                },
+                prompt="create work item for Epic H",
+                request_id="req-1",
+                intent_payload={"intent_type": "create_work_item"},
+                prompt_interpretation={"intent_type": "create_work_item"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "work_item_detail")
+
+    def test_execute_conversation_action_dispatch_run_returns_run_and_work_item_panel_actions(self):
+        fake_task = SimpleNamespace(id="task-1", work_item_id="epic-h")
+        with patch.object(intent_api, "_ensure_conversation_dev_task", return_value=fake_task), patch.object(
+            intent_api, "_submit_conversation_runtime_run", return_value={"run_id": "run-1", "work_item_id": "epic-h", "status": "queued"}
+        ), patch.object(
+            intent_api,
+            "_serialize_dev_task_summary",
+            return_value={"id": "task-1", "work_item_id": "epic-h", "title": "Epic H", "status": "queued"},
+        ), patch.object(intent_api, "_project_runtime_status_to_task", return_value={"status": "queued"}):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "dispatch_run",
+                    "thread_id": "thread-1",
+                    "payload": {},
+                    "target_object": {"reference": "Epic H"},
+                },
+                prompt="continue Epic H implementation",
+                request_id="req-1",
+                intent_payload={"intent_type": "create_and_dispatch_run"},
+                prompt_interpretation={"intent_type": "create_and_dispatch_run"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        panel_keys = [entry.get("panel_key") for entry in (payload.get("next_actions") or [])]
+        self.assertIn("work_item_detail", panel_keys)
+        self.assertIn("run_detail", panel_keys)
+
     def test_resolve_route_preserves_legacy_app_builder_flow_without_epic_d_intent(self):
         request = self.factory.post(
             "/xyn/api/xyn/intent/resolve",

@@ -42,7 +42,7 @@ const DEFAULT_PANEL_DEFINITIONS = [
   { panel_type: "conversation", console_key: "palette_result", title: "Conversation", affinity: panelAffinityForKey("palette_result") },
   { panel_type: "run_detail", console_key: "run_detail", title: "Run Detail", affinity: panelAffinityForKey("run_detail") },
   { panel_type: "run_list", console_key: "runs", title: "Active Runs", affinity: panelAffinityForKey("runs") },
-  { panel_type: "work_item", console_key: "jobs_list", title: "Work Item", affinity: panelAffinityForKey("jobs_list") },
+  { panel_type: "work_item", console_key: "work_item_detail", title: "Work Item", affinity: panelAffinityForKey("work_item_detail") },
   { panel_type: "entity_list", console_key: "palette_result", title: "Entity List", affinity: panelAffinityForKey("palette_result") },
   { panel_type: "entity_record", console_key: "record_detail", title: "Record Detail", affinity: panelAffinityForKey("record_detail") },
   { panel_type: "artifact_view", console_key: "artifact_detail", title: "Artifact", affinity: panelAffinityForKey("artifact_detail") },

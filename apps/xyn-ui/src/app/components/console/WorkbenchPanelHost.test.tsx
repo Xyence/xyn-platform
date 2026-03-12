@@ -9,6 +9,9 @@ const apiMocks = vi.hoisted(() => ({
   executeAppPalettePrompt: vi.fn(),
   listRuntimeRunsCanvasApi: vi.fn(),
   getRuntimeRunCanvasApi: vi.fn(),
+  listWorkItems: vi.fn(),
+  getWorkItem: vi.fn(),
+  getRuntimeRunArtifactContent: vi.fn(),
 }));
 
 const streamMocks = vi.hoisted(() => {
@@ -36,6 +39,9 @@ vi.mock("../../../api/xyn", async () => {
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
     listRuntimeRunsCanvasApi: apiMocks.listRuntimeRunsCanvasApi,
     getRuntimeRunCanvasApi: apiMocks.getRuntimeRunCanvasApi,
+    listWorkItems: apiMocks.listWorkItems,
+    getWorkItem: apiMocks.getWorkItem,
+    getRuntimeRunArtifactContent: apiMocks.getRuntimeRunArtifactContent,
   };
 });
 
@@ -54,6 +60,73 @@ vi.mock("../../utils/runtimeEventStream", async () => {
 describe("WorkbenchPanelHost entity refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("loads work items from durable work item API and opens detail targets", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.listWorkItems.mockResolvedValue({
+      count: 1,
+      next: null,
+      prev: null,
+      work_items: [
+        {
+          id: "task-1",
+          work_item_id: "wi-1",
+          title: "Implement Epic H",
+          status: "running",
+          target_repo: "xyn-platform",
+          updated_at: "2026-03-12T12:00:00Z",
+          task_type: "codegen",
+          priority: 0,
+          attempts: 0,
+          max_attempts: 2,
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "wi-list", panel_type: "table", instance_key: "work_items", key: "work_items" }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.listWorkItems).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText("Implement Epic H")).toBeInTheDocument());
+  });
+
+  it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {
+    apiMocks.getRuntimeRunArtifactContent.mockResolvedValue({
+      artifact_id: "artifact-1",
+      run_id: "run-1",
+      artifact_type: "summary",
+      label: "final_summary.md",
+      uri: "artifact://runs/run-1/final_summary.md",
+      content_type: "text/markdown",
+      content: "Run finished successfully.",
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "artifact-panel",
+            panel_type: "detail",
+            instance_key: "runtime-artifact",
+            key: "artifact_detail",
+            params: { runtime_run_id: "run-1", runtime_artifact_id: "artifact-1" },
+          }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getRuntimeRunArtifactContent).toHaveBeenCalledWith("ws-1", "run-1", "artifact-1"));
+    await waitFor(() => expect(screen.getByText("Run finished successfully.")).toBeInTheDocument());
   });
 
   it("reloads a visible matching entity table after an entity change", async () => {

@@ -7,7 +7,10 @@ import {
   getEmsDatasetSchemaTable,
   getEmsRegistrationsTimeseriesCanvasTable,
   getEmsStatusRollupCanvasTable,
+  getRuntimeRunArtifactContent,
   getRuntimeRunCanvasApi,
+  getWorkItem,
+  listWorkItems,
   listAppBuilderArtifacts,
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
@@ -25,7 +28,10 @@ import type {
   CanvasTableResponse,
   LocalProvisionResponse,
   RuntimeRunDetail,
+  RuntimeRunArtifactContent,
   RuntimeRunSummary,
+  WorkItemDetail,
+  WorkItemSummary,
   WorkspaceSummary,
 } from "../../../api/types";
 import CanvasRenderer from "../../../components/canvas/CanvasRenderer";
@@ -48,6 +54,8 @@ export type ConsolePanelKey =
   | "draft_detail"
   | "jobs_list"
   | "job_detail"
+  | "work_items"
+  | "work_item_detail"
   | "palette_result"
   | "app_builder_artifact_list"
   | "run_detail"
@@ -608,6 +616,281 @@ function WorkspacesPanel({
   );
 }
 
+function WorkItemsPanel({
+  panel,
+  workspaceId,
+  onContextChange,
+  onOpenDetail,
+  onTitleChange,
+}: {
+  panel: ConsolePanelSpec | null;
+  workspaceId?: string;
+  onContextChange?: ContextEmitter;
+  onOpenDetail: (target: OpenDetailTarget, row: Record<string, unknown>) => void;
+  onTitleChange?: (title: string) => void;
+}) {
+  const [items, setItems] = useState<WorkItemSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await listWorkItems(undefined, undefined, undefined, undefined, workspaceId);
+        if (!active) return;
+        setItems(next.work_items || []);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load work items");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const payload = useMemo<CanvasTableResponse>(() => ({
+    type: "canvas.table",
+    title: "Work Items",
+    dataset: {
+      name: "work_items",
+      primary_key: "id",
+      columns: [
+        { key: "title", label: "Title", type: "string", sortable: true, searchable: true, filterable: true },
+        { key: "status", label: "Status", type: "string", sortable: true, filterable: true, searchable: true },
+        { key: "work_item_id", label: "Work Item", type: "string", sortable: true, searchable: true, filterable: true },
+        { key: "target_repo", label: "Repo", type: "string", sortable: true, searchable: true, filterable: true },
+        { key: "updated_at", label: "Updated", type: "datetime", sortable: true, filterable: true },
+      ],
+      rows: items.map((item) => ({
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        work_item_id: item.work_item_id || "",
+        target_repo: item.target_repo || "",
+        updated_at: item.updated_at || "",
+      })),
+      total_count: items.length,
+    },
+    query: { entity: "work_items", filters: [], sort: [{ field: "updated_at", dir: "desc" }], limit: 50, offset: 0 },
+  }), [items]);
+
+  useEffect(() => {
+    if (!onContextChange || !panel?.panel_id) return;
+    onContextChange({
+      view_type: "table",
+      dataset: payload.dataset,
+      pagination: { limit: 50, offset: 0, total_count: items.length },
+      ui: {
+        active_panel_id: panel.panel_id,
+        panel_id: panel.panel_id,
+        panel_type: panel.panel_type || "table",
+        instance_key: panel.instance_key || "work_items",
+        active_group_id: panel.active_group_id || null,
+        layout_engine: "simple",
+      },
+    });
+  }, [items.length, onContextChange, panel, payload.dataset]);
+
+  useEffect(() => {
+    if (!onTitleChange) return;
+    onTitleChange("Work Items");
+  }, [onTitleChange]);
+
+  if (loading) return <p className="muted">Loading work items…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  return (
+    <CanvasRenderer
+      payload={payload}
+      query={payload.query}
+      onOpenDetail={onOpenDetail}
+      onRowActivate={() => {
+        // selection is informational only for now
+      }}
+    />
+  );
+}
+
+function WorkItemDetailPanel({
+  workItemId,
+  workspaceId,
+  onOpenPanel,
+}: {
+  workItemId: string;
+  workspaceId?: string;
+} & PanelProps) {
+  const [payload, setPayload] = useState<WorkItemDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getWorkItem(workItemId);
+        if (!active) return;
+        setPayload(next);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load work item");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [workItemId]);
+
+  if (loading) return <p className="muted">Loading work item…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Work item not found.</p>;
+
+  return (
+    <div className="ems-panel-body">
+      <div className="detail-grid">
+        <div><div className="field-label">Title</div><div className="field-value">{payload.title}</div></div>
+        <div><div className="field-label">Status</div><div className="field-value">{payload.status}</div></div>
+        <div><div className="field-label">Work Item</div><div className="field-value">{payload.work_item_id || payload.id}</div></div>
+        <div><div className="field-label">Intent</div><div className="field-value">{payload.intent_type || "—"}</div></div>
+        <div><div className="field-label">Repo</div><div className="field-value">{payload.target_repo || "—"}</div></div>
+        <div><div className="field-label">Branch</div><div className="field-value">{payload.target_branch || "—"}</div></div>
+        <div><div className="field-label">Requested By</div><div className="field-value">{payload.requested_by || "—"}</div></div>
+        <div><div className="field-label">Conversation</div><div className="field-value">{payload.source_conversation_id || "—"}</div></div>
+      </div>
+      {payload.description ? <p>{payload.description}</p> : null}
+      {payload.last_error ? <InlineMessage tone="warn" title="Last error" body={payload.last_error} /> : null}
+      {payload.runtime_run_id ? (
+        <div className="inline-actions" style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            className="ghost sm"
+            onClick={() => onOpenPanel("run_detail", { run_id: payload.runtime_run_id })}
+          >
+            Open Run
+          </button>
+          <span className="muted small">
+            Latest runtime run: {payload.runtime_run_id}{workspaceId ? ` · workspace ${workspaceId}` : ""}
+          </span>
+        </div>
+      ) : null}
+      {payload.result_run_artifacts?.length ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Artifacts</h3></div>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead><tr><th>Label</th><th>Type</th><th>Created</th></tr></thead>
+              <tbody>
+                {payload.result_run_artifacts.map((artifact) => (
+                  <tr key={artifact.id}>
+                    <td>
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        onClick={() => {
+                          if (!payload.runtime_run_id) return;
+                          onOpenPanel("artifact_detail", {
+                            runtime_run_id: payload.runtime_run_id,
+                            runtime_artifact_id: artifact.id,
+                          });
+                        }}
+                      >
+                        {artifact.name}
+                      </button>
+                    </td>
+                    <td>{artifact.kind || "artifact"}</td>
+                    <td>{artifact.created_at || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function RuntimeArtifactDetailPanel({
+  runId,
+  artifactId,
+  workspaceId,
+  onOpenPanel,
+}: {
+  runId: string;
+  artifactId: string;
+  workspaceId?: string;
+} & PanelProps) {
+  const [payload, setPayload] = useState<RuntimeRunArtifactContent | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        if (!workspaceId) {
+          setPayload(null);
+          setError("Workspace context is required.");
+          return;
+        }
+        setLoading(true);
+        setError(null);
+        const next = await getRuntimeRunArtifactContent(workspaceId, runId, artifactId);
+        if (!active) return;
+        setPayload(next);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load runtime artifact");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [artifactId, runId, workspaceId]);
+
+  if (loading) return <p className="muted">Loading run artifact…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Run artifact not found.</p>;
+
+  const contentType = String(payload.content_type || "").toLowerCase();
+  const isJson = contentType.includes("json") || payload.label.endsWith(".json");
+  let renderedContent = payload.content;
+  if (isJson) {
+    try {
+      renderedContent = JSON.stringify(JSON.parse(payload.content || "{}"), null, 2);
+    } catch {
+      renderedContent = payload.content;
+    }
+  }
+
+  return (
+    <div className="ems-panel-body">
+      <div className="inline-actions" style={{ marginBottom: 12 }}>
+        <button type="button" className="ghost sm" onClick={() => onOpenPanel("run_detail", { run_id: runId })}>
+          Open Run
+        </button>
+        <span className="muted small">Run {runId}</span>
+      </div>
+      <div className="detail-grid">
+        <div><div className="field-label">Label</div><div className="field-value">{payload.label}</div></div>
+        <div><div className="field-label">Type</div><div className="field-value">{payload.artifact_type}</div></div>
+        <div><div className="field-label">URI</div><div className="field-value">{payload.uri}</div></div>
+      </div>
+      <pre className="code-block">{renderedContent}</pre>
+    </div>
+  );
+}
+
 function RunsPanel({
   query,
   queryError,
@@ -801,12 +1084,13 @@ function RunDetailPanel({
   workspaceId,
   panel,
   onContextChange,
+  onOpenPanel,
 }: {
   runId: string;
   workspaceId?: string;
   panel: ConsolePanelSpec | null;
   onContextChange?: ContextEmitter;
-}) {
+} & PanelProps) {
   const [payload, setPayload] = useState<RuntimeRunDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -993,7 +1277,20 @@ function RunDetailPanel({
             <tbody>
               {payload.artifacts.map((artifact) => (
                 <tr key={artifact.id}>
-                  <td>{artifact.label}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="ghost sm"
+                      onClick={() =>
+                        onOpenPanel("artifact_detail", {
+                          runtime_run_id: runId,
+                          runtime_artifact_id: artifact.id,
+                        })
+                      }
+                    >
+                      {artifact.label}
+                    </button>
+                  </td>
                   <td>{artifact.artifact_type}</td>
                   <td>{artifact.uri || "—"}</td>
                 </tr>
@@ -1488,6 +1785,8 @@ const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   draft_detail: "Build Draft",
   jobs_list: "Jobs",
   job_detail: "Pipeline Job",
+  work_items: "Work Items",
+  work_item_detail: "Work Item",
   palette_result: "Palette Result",
   app_builder_artifact_list: "Artifacts",
   run_detail: "Run Detail",
@@ -1639,6 +1938,24 @@ export default function WorkbenchPanelHost({
       );
     }
 
+    if (panel.key === "work_items") {
+      return (
+        <WorkItemsPanel
+          workspaceId={workspaceId}
+          panel={panel}
+          onContextChange={onContextChange}
+          onTitleChange={setResolvedTitle}
+          onOpenDetail={(target, row) => {
+            if (target.entity_type === "work_item") {
+              openPanel("work_item_detail", { work_item_id: target.entity_id }, { open_in: "new_panel", return_to_panel_id: panel.panel_id });
+              return;
+            }
+            openPanel("record_detail", { ...target, row }, { open_in: "new_panel", return_to_panel_id: panel.panel_id });
+          }}
+        />
+      );
+    }
+
     if (panel.key === "draft_detail") {
       return (
         <DraftDetailPage
@@ -1678,6 +1995,16 @@ export default function WorkbenchPanelHost({
       );
     }
 
+    if (panel.key === "work_item_detail") {
+      return (
+        <WorkItemDetailPanel
+          workItemId={String(panel.params?.work_item_id || panel.params?.job_id || "")}
+          workspaceId={workspaceId}
+          onOpenPanel={openPanel}
+        />
+      );
+    }
+
     if (panel.key === "palette_result") {
       return (
         <PaletteResultPanel
@@ -1694,7 +2021,15 @@ export default function WorkbenchPanelHost({
     }
 
     if (panel.key === "run_detail") {
-      return <RunDetailPanel runId={String(panel.params?.run_id || "")} workspaceId={workspaceId} panel={panel} onContextChange={onContextChange} />;
+      return (
+        <RunDetailPanel
+          runId={String(panel.params?.run_id || "")}
+          workspaceId={workspaceId}
+          panel={panel}
+          onContextChange={onContextChange}
+          onOpenPanel={openPanel}
+        />
+      );
     }
 
     if (panel.key === "artifact_list") {
@@ -1713,6 +2048,11 @@ export default function WorkbenchPanelHost({
     }
 
     if (panel.key === "artifact_detail") {
+      const runtimeRunId = String(panel.params?.runtime_run_id || "").trim();
+      const runtimeArtifactId = String(panel.params?.runtime_artifact_id || "").trim();
+      if (runtimeRunId && runtimeArtifactId) {
+        return <RuntimeArtifactDetailPanel runId={runtimeRunId} artifactId={runtimeArtifactId} workspaceId={workspaceId} onOpenPanel={openPanel} />;
+      }
       return <ArtifactDetailPanel slug={String(panel.params?.slug || "")} panel={panel} onContextChange={onContextChange} onOpenPanel={openPanel} />;
     }
     if (panel.key === "artifact_raw_json") return <ArtifactRawJsonPanel slug={String(panel.params?.slug || "")} />;

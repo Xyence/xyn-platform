@@ -2137,6 +2137,8 @@ class DevTask(models.Model):
     STATUS_CHOICES = [
         ("queued", "Queued"),
         ("running", "Running"),
+        ("awaiting_review", "Awaiting review"),
+        ("completed", "Completed"),
         ("succeeded", "Succeeded"),
         ("failed", "Failed"),
         ("canceled", "Canceled"),
@@ -2151,6 +2153,7 @@ class DevTask(models.Model):
     ]
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title = models.CharField(max_length=240)
+    description = models.TextField(blank=True)
     task_type = models.CharField(max_length=40, choices=TYPE_CHOICES)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued")
     priority = models.IntegerField(default=0)
@@ -2160,6 +2163,11 @@ class DevTask(models.Model):
     locked_at = models.DateTimeField(null=True, blank=True)
     source_entity_type = models.CharField(max_length=60)
     source_entity_id = models.UUIDField()
+    source_conversation_id = models.CharField(max_length=120, blank=True)
+    intent_type = models.CharField(max_length=80, blank=True)
+    target_repo = models.CharField(max_length=120, blank=True)
+    target_branch = models.CharField(max_length=120, blank=True)
+    execution_policy = models.JSONField(null=True, blank=True)
     source_run = models.ForeignKey(
         Run, null=True, blank=True, on_delete=models.SET_NULL, related_name="dev_tasks_source"
     )

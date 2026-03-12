@@ -2,6 +2,7 @@ import json
 import uuid
 from unittest import mock
 
+from django.http import JsonResponse
 from django.test import RequestFactory, SimpleTestCase
 
 from xyn_orchestrator.models import Workspace
@@ -9,8 +10,10 @@ from xyn_orchestrator.xyn_api import (
     ai_activity_stream,
     _runtime_activity_item_from_event,
     _runtime_stream_envelope_from_event,
+    runtime_run_artifact_detail,
     runtime_run_detail,
     runtime_runs_collection,
+    work_items_collection,
 )
 
 
@@ -258,3 +261,47 @@ class RuntimeRunApiTests(SimpleTestCase):
         self.assertIn("\"thread_id\": \"thread-1\"", body)
         self.assertIn("evt-1", body)
         self.assertNotIn("evt-2", body)
+
+    def test_runtime_run_artifact_detail_proxies_core_artifact_content(self):
+        run_id = uuid.uuid4()
+        artifact_id = uuid.uuid4()
+        request = self.factory.get(
+            f"/api/runtime/runs/{run_id}/artifacts/{artifact_id}",
+            {"workspace_id": str(self.workspace.id)},
+        )
+        request.user = mock.Mock(is_authenticated=True)
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_workspace_for_identity", return_value=self.workspace
+        ), mock.patch("xyn_orchestrator.xyn_api._runtime_run_belongs_to_workspace", return_value=True), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=_FakeResponse(
+                body={
+                    "artifact_id": str(artifact_id),
+                    "artifact_type": "summary",
+                    "label": "final_summary.md",
+                    "uri": f"artifact://runs/{run_id}/final_summary.md",
+                    "content": "done",
+                }
+            ),
+        ):
+            response = runtime_run_artifact_detail(request, run_id, artifact_id)
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertEqual(body["artifact_id"], str(artifact_id))
+        self.assertEqual(body["run_id"], str(run_id))
+
+    def test_work_item_alias_endpoints_return_work_item_shapes(self):
+        request = self.factory.get("/xyn/api/work-items")
+        request.user = mock.Mock(is_authenticated=True)
+        task_id = str(uuid.uuid4())
+        fake_task = {
+            "count": 1,
+            "next": None,
+            "prev": None,
+            "dev_tasks": [{"id": task_id, "work_item_id": "wi-1", "title": "Work", "status": "queued"}],
+        }
+        with mock.patch("xyn_orchestrator.xyn_api.dev_tasks_collection", return_value=JsonResponse(fake_task)):
+            response = work_items_collection(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["work_items"][0]["work_item_id"], "wi-1")

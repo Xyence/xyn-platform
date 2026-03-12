@@ -6,7 +6,13 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 
 from xyn_orchestrator.models import DevTask, Run, UserIdentity, Workspace, WorkspaceMembership
-from xyn_orchestrator.xyn_api import blueprint_dev_tasks, dev_task_detail, dev_task_retry, dev_task_run
+from xyn_orchestrator.xyn_api import (
+    _conversation_execution_context,
+    blueprint_dev_tasks,
+    dev_task_detail,
+    dev_task_retry,
+    dev_task_run,
+)
 
 
 class _FakeResponse:
@@ -126,6 +132,38 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(runtime_payload["policy"]["max_retries"], 2)
         self.assertIn("report", runtime_payload["requested_outputs"])
 
+    def test_work_item_detail_includes_durable_coordination_fields(self):
+        self.task.description = "Track durable coordination"
+        self.task.source_conversation_id = "thread-1"
+        self.task.intent_type = "create_and_dispatch_run"
+        self.task.target_repo = "xyn-platform"
+        self.task.target_branch = "develop"
+        self.task.execution_policy = {"auto_continue": True}
+        self.task.save(
+            update_fields=[
+                "description",
+                "source_conversation_id",
+                "intent_type",
+                "target_repo",
+                "target_branch",
+                "execution_policy",
+                "updated_at",
+            ]
+        )
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}", method="get")
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2]:
+            response = dev_task_detail(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["work_item_id"], "epic-c-bridge")
+        self.assertEqual(payload["description"], "Track durable coordination")
+        self.assertEqual(payload["source_conversation_id"], "thread-1")
+        self.assertEqual(payload["intent_type"], "create_and_dispatch_run")
+        self.assertEqual(payload["target_repo"], "xyn-platform")
+        self.assertEqual(payload["target_branch"], "develop")
+        self.assertEqual(payload["execution_policy"], {"auto_continue": True})
+
     def test_duplicate_run_request_reuses_active_runtime_run(self):
         runtime_run_id = uuid.uuid4()
         self.task.runtime_run_id = runtime_run_id
@@ -223,14 +261,14 @@ class DevTaskRuntimeBridgeTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
-        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["status"], "awaiting_review")
         self.assertEqual(payload["runtime_run_id"], str(runtime_run_id))
         self.assertEqual(payload["result_run_detail"]["summary"], "Need review")
         self.assertEqual(payload["result_run_detail"]["failure_reason"], "contract_violation")
         self.assertEqual(payload["result_run_detail"]["escalation_reason"], "human_review_required")
         self.assertEqual(payload["result_run_artifacts"][0]["metadata"]["uri"], f"artifact://runs/{runtime_run_id}/final_summary.md")
         self.task.refresh_from_db()
-        self.assertEqual(self.task.status, "blocked")
+        self.assertEqual(self.task.status, "awaiting_review")
         self.assertEqual(self.task.last_error, "human_review_required")
 
     def test_retry_submits_new_runtime_run_after_terminal_status(self):
@@ -276,6 +314,52 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(seen["post"], 1)
         self.task.refresh_from_db()
         self.assertEqual(str(self.task.runtime_run_id), new_runtime_run_id)
+
+    def test_conversation_execution_context_uses_durable_task_and_artifact_state(self):
+        runtime_run_id = uuid.uuid4()
+        self.task.runtime_run_id = runtime_run_id
+        self.task.runtime_workspace_id = self.workspace.id
+        self.task.source_conversation_id = "thread-1"
+        self.task.status = "running"
+        self.task.save(
+            update_fields=["runtime_run_id", "runtime_workspace_id", "source_conversation_id", "status", "updated_at"]
+        )
+
+        def _seed_api_request(*, method, path, workspace_id="", workspace_slug="", payload=None, timeout=20):
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}":
+                return _FakeResponse(
+                    body={
+                        "id": str(runtime_run_id),
+                        "run_id": str(runtime_run_id),
+                        "status": "running",
+                        "summary": "In progress",
+                        "prompt_payload": {"target": {"workspace_id": str(self.workspace.id), "repo": "xyn-platform", "branch": "develop"}},
+                    }
+                )
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/steps":
+                return _FakeResponse(body=[])
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/artifacts":
+                return _FakeResponse(
+                    body=[
+                        {
+                            "id": str(uuid.uuid4()),
+                            "artifact_id": str(uuid.uuid4()),
+                            "artifact_type": "summary",
+                            "label": "final_summary.md",
+                            "uri": f"artifact://runs/{runtime_run_id}/final_summary.md",
+                            "created_at": "2026-03-11T12:05:00Z",
+                            "metadata": {},
+                        }
+                    ]
+                )
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        with mock.patch("xyn_orchestrator.xyn_api._seed_api_request", side_effect=_seed_api_request):
+            context = _conversation_execution_context(self.identity, str(self.workspace.id), "thread-1")
+
+        self.assertEqual(context.current_work_item_id, "epic-c-bridge")
+        self.assertEqual(context.current_run_id, str(runtime_run_id))
+        self.assertEqual(context.recent_artifacts[0].artifact_type, "summary")
 
     def test_blueprint_dev_tasks_projects_runtime_status(self):
         runtime_run_id = uuid.uuid4()
