@@ -867,6 +867,55 @@ function GoalDetailPanel({
         {payload.description ? <p className="muted" style={{ marginTop: 12 }}>{payload.description}</p> : null}
         {payload.planning_summary ? <InlineMessage tone="info" title="Planning Summary" body={payload.planning_summary} /> : null}
       </section>
+      {payload.development_loop_summary ? (
+        <section className="card">
+          <div className="card-header"><div><p className="muted">Development Loop</p></div></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Goal Status</div><div className="field-value">{payload.development_loop_summary.goal_status}</div></div>
+          </div>
+          <div className="canvas-table-wrap" style={{ marginTop: 12 }}>
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Thread</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {payload.development_loop_summary.threads.map((thread) => (
+                  <tr key={thread.thread_id}>
+                    <td>{thread.title}</td>
+                    <td>{thread.thread_status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="canvas-table-wrap" style={{ marginTop: 12 }}>
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Recent Work</th>
+                  <th>Status</th>
+                  <th>Run</th>
+                </tr>
+              </thead>
+              <tbody>
+                {payload.development_loop_summary.recent_work_results.map((result) => (
+                  <tr key={result.work_item_id}>
+                    <td>{result.title}</td>
+                    <td>{result.status}</td>
+                    <td>{result.run_id || "—"}</td>
+                  </tr>
+                ))}
+                {!payload.development_loop_summary.recent_work_results.length ? (
+                  <tr><td colSpan={3} className="muted">No recent work results yet.</td></tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
       <section className="card">
         <div className="card-header"><div><p className="muted">Threads</p></div></div>
         <div className="canvas-table-wrap">

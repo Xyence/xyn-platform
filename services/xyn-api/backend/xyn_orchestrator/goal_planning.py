@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from django.contrib.auth import get_user_model
 from django.utils.text import slugify
 
+from .goal_progress import compute_goal_progress, compute_thread_progress
 from .models import CoordinationThread, DevTask, Goal
 from .xco import THREAD_PRIORITY_ORDER, derive_work_queue
 
@@ -54,12 +55,32 @@ class GoalPlanningOutput(BaseModel):
 
 
 @dataclass(frozen=True)
+class GoalRecommendationWorkItem:
+    id: str
+    title: str
+    thread_id: Optional[str]
+    thread_title: str
+
+
+@dataclass(frozen=True)
+class GoalQueueSuggestion:
+    action_type: str
+    thread_id: Optional[str]
+    work_item_id: Optional[str]
+    reason: str
+    summary: str
+
+
+@dataclass(frozen=True)
 class GoalRecommendation:
     goal_id: str
     thread_id: Optional[str]
     thread_title: str
     work_item_id: Optional[str]
     work_item_title: str
+    recommended_work_items: List[GoalRecommendationWorkItem]
+    queue_suggestion: Optional[GoalQueueSuggestion]
+    reasoning_summary: str
     summary: str
 
 
@@ -279,6 +300,7 @@ def decompose_goal(goal: Goal) -> GoalPlanningOutput:
 
 
 def serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
+    progress = compute_goal_progress(goal)
     return {
         "id": str(goal.id),
         "workspace_id": str(goal.workspace_id),
@@ -293,6 +315,10 @@ def serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
         "resolution_notes": goal.resolution_notes_json if isinstance(goal.resolution_notes_json, list) else [],
         "thread_count": goal.threads.count(),
         "work_item_count": goal.work_items.count(),
+        "goal_progress_status": progress.goal_progress_status,
+        "completed_work_items": progress.completed_work_items,
+        "active_work_items": progress.active_work_items,
+        "blocked_work_items": progress.blocked_work_items,
         "created_at": goal.created_at,
         "updated_at": goal.updated_at,
     }
@@ -396,25 +422,134 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
         entry = queue[0]
         task = goal.work_items.filter(id=entry.task_id).select_related("coordination_thread").first()
         thread = task.coordination_thread if task else None
+        blocked_threads = [
+            thread_item.title
+            for thread_item in goal.threads.all().order_by("created_at", "id")
+            if compute_thread_progress(thread_item).thread_status == "blocked"
+        ]
+        reasoning = (
+            f"Selected {task.title if task else entry.work_item_id} from {thread.title if thread else entry.thread_title} "
+            f"because it is the first ready unblocked slice in deterministic queue order."
+        )
+        if blocked_threads:
+            reasoning += f" Blocked threads waiting for dependencies or review: {', '.join(blocked_threads)}."
         return GoalRecommendation(
             goal_id=str(goal.id),
             thread_id=str(thread.id) if thread else entry.thread_id,
             thread_title=str(thread.title) if thread else entry.thread_title,
             work_item_id=str(task.id) if task else None,
             work_item_title=str(task.title) if task else "",
+            recommended_work_items=[
+                GoalRecommendationWorkItem(
+                    id=str(task.id) if task else entry.task_id,
+                    title=str(task.title) if task else entry.work_item_id,
+                    thread_id=str(thread.id) if thread else entry.thread_id,
+                    thread_title=str(thread.title) if thread else entry.thread_title,
+                )
+            ],
+            queue_suggestion=GoalQueueSuggestion(
+                action_type="queue_next_slice"
+                if goal.work_items.filter(status__in=["running", "completed", "awaiting_review"]).exists()
+                else "queue_first_slice",
+                thread_id=str(thread.id) if thread else entry.thread_id,
+                work_item_id=str(task.id) if task else None,
+                reason="The selected slice is the first ready unblocked queue candidate under current durable state.",
+                summary=(
+                    f"Suggest queue_next_slice for {task.title if task else entry.work_item_id}."
+                    if goal.work_items.filter(status__in=["running", "completed", "awaiting_review"]).exists()
+                    else f"Suggest queue_first_slice for {task.title if task else entry.work_item_id}."
+                ),
+            ),
+            reasoning_summary=reasoning,
             summary=f"Queue the next smallest slice from {thread.title if thread else entry.thread_title}: {task.title if task else entry.work_item_id}.",
         )
-    fallback_task = goal.work_items.filter(status__in=["queued", "awaiting_review"]).select_related("coordination_thread").order_by("priority", "created_at", "id").first()
-    fallback_thread = fallback_task.coordination_thread if fallback_task and fallback_task.coordination_thread_id else goal.threads.order_by("created_at", "id").first()
+    paused_thread = (
+        goal.threads.filter(status="paused")
+        .prefetch_related("work_items")
+        .order_by("created_at", "id")
+        .first()
+    )
+    if paused_thread and paused_thread.work_items.filter(status="queued").exists():
+        return GoalRecommendation(
+            goal_id=str(goal.id),
+            thread_id=str(paused_thread.id),
+            thread_title=str(paused_thread.title),
+            work_item_id=None,
+            work_item_title="",
+            recommended_work_items=[],
+            queue_suggestion=GoalQueueSuggestion(
+                action_type="resume_thread",
+                thread_id=str(paused_thread.id),
+                work_item_id=None,
+                reason="The earliest paused thread still has queued work and must be resumed before more slices can run.",
+                summary=f"Suggest resume_thread for {paused_thread.title}.",
+            ),
+            reasoning_summary=(
+                f"{paused_thread.title} is paused with queued work. Resume it before queueing additional slices."
+            ),
+            summary=f"Resume {paused_thread.title} before queueing more work.",
+        )
+    fallback_task = (
+        goal.work_items.filter(status="queued", coordination_thread__status__in=["active", "queued"])
+        .select_related("coordination_thread")
+        .order_by("coordination_thread__created_at", "coordination_thread__id", "priority", "created_at", "id")
+        .first()
+    )
+    fallback_thread = fallback_task.coordination_thread if fallback_task and fallback_task.coordination_thread_id else None
+    if fallback_task and fallback_thread:
+        reasoning = (
+            f"Selected {fallback_task.title} from {fallback_thread.title} as the smallest reviewable slice. "
+            "It is not queue-ready yet, but it is the earliest MVP thread with queued work."
+        )
+        return GoalRecommendation(
+            goal_id=str(goal.id),
+            thread_id=str(fallback_thread.id),
+            thread_title=str(fallback_thread.title),
+            work_item_id=str(fallback_task.id),
+            work_item_title=str(fallback_task.title),
+            recommended_work_items=[
+                GoalRecommendationWorkItem(
+                    id=str(fallback_task.id),
+                    title=str(fallback_task.title),
+                    thread_id=str(fallback_thread.id),
+                    thread_title=str(fallback_thread.title),
+                )
+            ],
+            queue_suggestion=GoalQueueSuggestion(
+                action_type="queue_first_slice" if goal.planning_status != "in_progress" else "queue_next_slice",
+                thread_id=str(fallback_thread.id),
+                work_item_id=str(fallback_task.id),
+                reason="The selected slice is reviewable and is the earliest queued work in the MVP-first thread order.",
+                summary=(
+                    f"Suggest queue_first_slice for {fallback_task.title}."
+                    if goal.planning_status != "in_progress"
+                    else f"Suggest queue_next_slice for {fallback_task.title}."
+                ),
+            ),
+            reasoning_summary=reasoning,
+            summary=f"Start with the smallest queued slice from {fallback_thread.title}: {fallback_task.title}.",
+        )
+    blocked_threads = [
+        thread_item.title
+        for thread_item in goal.threads.all().order_by("created_at", "id")
+        if compute_thread_progress(thread_item).thread_status == "blocked"
+    ]
     return GoalRecommendation(
         goal_id=str(goal.id),
-        thread_id=str(fallback_thread.id) if fallback_thread else None,
-        thread_title=str(fallback_thread.title) if fallback_thread else "",
-        work_item_id=str(fallback_task.id) if fallback_task else None,
-        work_item_title=str(fallback_task.title) if fallback_task else "",
+        thread_id=None,
+        thread_title="",
+        work_item_id=None,
+        work_item_title="",
+        recommended_work_items=[],
+        queue_suggestion=None,
+        reasoning_summary=(
+            f"No executable slice is ready yet. Blocked threads: {', '.join(blocked_threads)}."
+            if blocked_threads
+            else "No executable slice is ready yet. Review the first thread and queue its first work item when ready."
+        ),
         summary=(
-            f"Start with the smallest queued slice from {fallback_thread.title}: {fallback_task.title}."
-            if fallback_thread and fallback_task
-            else "No queue-ready work is active yet. Review the first thread and queue its first work item when ready."
+            f"No executable slice is ready yet. Blocked threads: {', '.join(blocked_threads)}."
+            if blocked_threads
+            else "No executable slice is ready yet. Review the first thread and queue its first work item when ready."
         ),
     )

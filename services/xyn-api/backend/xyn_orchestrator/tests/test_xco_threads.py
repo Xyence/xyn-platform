@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
+from xyn_orchestrator.goal_progress import compute_thread_progress
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xco import derive_work_queue
 from xyn_orchestrator.xyn_api import _dispatch_next_queue_item, _update_thread_status_from_tasks, thread_detail, threads_collection, xco_queue_collection
@@ -226,3 +227,47 @@ class XcoThreadTests(TestCase):
         self.assertIn("run_dispatched_from_queue", event_types)
         task.refresh_from_db()
         self.assertEqual(str(task.coordination_thread_id), str(thread.id))
+
+    def test_thread_progress_reports_not_started_when_no_work_exists(self):
+        thread = self._create_thread(title="Empty")
+        progress = compute_thread_progress(thread)
+        self.assertEqual(progress.thread_status, "not_started")
+        self.assertEqual(progress.work_items_completed, 0)
+        self.assertEqual(progress.work_items_ready, 0)
+        self.assertEqual(progress.work_items_blocked, 0)
+
+    def test_thread_progress_reports_active_when_ready_or_running_work_exists(self):
+        thread = self._create_thread(title="Active Thread", status="active")
+        self._create_task(thread, status="queued", work_item_id="wi-ready")
+        progress = compute_thread_progress(thread)
+        self.assertEqual(progress.thread_status, "active")
+        self.assertEqual(progress.work_items_ready, 1)
+
+    def test_thread_progress_reports_blocked_when_unfinished_work_cannot_proceed(self):
+        thread = self._create_thread(title="Blocked Thread", status="paused")
+        self._create_task(thread, status="queued", work_item_id="wi-blocked")
+        progress = compute_thread_progress(thread)
+        self.assertEqual(progress.thread_status, "blocked")
+        self.assertEqual(progress.work_items_blocked, 1)
+
+    def test_thread_progress_reports_completed_when_all_work_is_completed(self):
+        thread = self._create_thread(title="Done Thread", status="active")
+        self._create_task(thread, status="completed", work_item_id="wi-done-1")
+        self._create_task(thread, status="succeeded", work_item_id="wi-done-2")
+        progress = compute_thread_progress(thread)
+        self.assertEqual(progress.thread_status, "completed")
+        self.assertEqual(progress.work_items_completed, 2)
+
+    def test_thread_summary_exposes_computed_progress_counts(self):
+        thread = self._create_thread(title="Summary Thread", status="active")
+        self._create_task(thread, status="completed", work_item_id="wi-complete")
+        self._create_task(thread, status="queued", work_item_id="wi-ready")
+
+        request = self._request("/xyn/api/threads", data={"workspace_id": str(self.workspace.id)})
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = threads_collection(request)
+        payload = json.loads(response.content)
+        row = next(item for item in payload["threads"] if item["id"] == str(thread.id))
+        self.assertEqual(row["thread_progress_status"], "active")
+        self.assertEqual(row["work_items_completed"], 1)
+        self.assertEqual(row["work_items_ready"], 1)

@@ -5,6 +5,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 
+from xyn_orchestrator.goal_progress import compute_goal_progress
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
 from xyn_orchestrator.models import CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import goal_decompose, goal_detail, goal_review, goals_collection
@@ -196,4 +197,489 @@ class GoalPlanningTests(TestCase):
         persist_goal_plan(goal, decompose_goal(goal), user=self.user)
         recommendation = recommend_next_slice(goal)
         self.assertEqual(recommendation.thread_title, "Listing Data Ingestion")
-        self.assertIn("Start with the smallest queued slice", recommendation.summary)
+        self.assertEqual(len(recommendation.recommended_work_items), 1)
+        self.assertIn("Listing Data Ingestion", recommendation.reasoning_summary)
+        self.assertIsNotNone(recommendation.queue_suggestion)
+        self.assertEqual(recommendation.queue_suggestion.action_type, "queue_first_slice")
+
+    def test_goal_progress_reports_not_started_when_no_work_exists(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Empty Goal",
+            description="No work yet.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        progress = compute_goal_progress(goal)
+        self.assertEqual(progress.goal_progress_status, "not_started")
+        self.assertEqual(progress.completed_work_items, 0)
+        self.assertEqual(progress.active_work_items, 0)
+        self.assertEqual(progress.blocked_work_items, 0)
+
+    def test_goal_progress_reports_in_progress_when_ready_or_running_work_exists(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Active Goal",
+            description="Active work.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Thread A",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Ready item",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="ready-item",
+        )
+        progress = compute_goal_progress(goal)
+        self.assertEqual(progress.goal_progress_status, "in_progress")
+        self.assertEqual(progress.active_work_items, 1)
+
+    def test_goal_progress_reports_completed_when_all_work_is_completed(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Done Goal",
+            description="Completed work.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Thread Done",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        for index in range(2):
+            DevTask.objects.create(
+                title=f"Completed {index}",
+                description="",
+                task_type="codegen",
+                status="completed",
+                priority=index,
+                source_entity_type="goal",
+                source_entity_id=goal.id,
+                source_conversation_id="thread-1",
+                intent_type="goal_planning",
+                target_repo="xyn-platform",
+                target_branch="develop",
+                execution_policy={},
+                goal=goal,
+                coordination_thread=thread,
+                work_item_id=f"completed-{index}",
+            )
+        progress = compute_goal_progress(goal)
+        self.assertEqual(progress.goal_progress_status, "completed")
+        self.assertEqual(progress.completed_work_items, 2)
+
+    def test_goal_progress_reports_stalled_when_only_blocked_work_remains(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked Goal",
+            description="Blocked work.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Thread Blocked",
+            owner=self.identity,
+            priority="normal",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked item",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="blocked-item",
+        )
+        progress = compute_goal_progress(goal)
+        self.assertEqual(progress.goal_progress_status, "stalled")
+        self.assertEqual(progress.blocked_work_items, 1)
+
+    def test_goal_progress_reports_nearing_completion_when_small_remainder_exists(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Nearly Done Goal",
+            description="Mostly complete.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Thread Near",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        for index in range(4):
+            DevTask.objects.create(
+                title=f"Completed {index}",
+                description="",
+                task_type="codegen",
+                status="completed",
+                priority=index,
+                source_entity_type="goal",
+                source_entity_id=goal.id,
+                source_conversation_id="thread-1",
+                intent_type="goal_planning",
+                target_repo="xyn-platform",
+                target_branch="develop",
+                execution_policy={},
+                goal=goal,
+                coordination_thread=thread,
+                work_item_id=f"done-{index}",
+            )
+        DevTask.objects.create(
+            title="Small remaining slice",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=99,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="remaining-slice",
+        )
+        progress = compute_goal_progress(goal)
+        self.assertEqual(progress.goal_progress_status, "nearing_completion")
+        self.assertEqual(progress.completed_work_items, 4)
+        self.assertEqual(progress.active_work_items, 1)
+
+    def test_recommend_next_slice_prefers_ready_unblocked_work_over_blocked_work(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked vs Ready",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        ready_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Ready Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked work",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-work",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        DevTask.objects.create(
+            title="Ready work",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=2,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=ready_thread,
+            work_item_id="ready-work",
+        )
+        recommendation = recommend_next_slice(goal)
+        self.assertEqual(recommendation.thread_title, "Ready Thread")
+        self.assertEqual(recommendation.recommended_work_items[0].title, "Ready work")
+        self.assertEqual(recommendation.queue_suggestion.action_type, "queue_first_slice")
+
+    def test_recommend_next_slice_prefers_earlier_thread_when_candidates_are_equally_valid(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Tie Break Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        earlier = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Earlier Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        later = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Later Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Earlier slice",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=earlier,
+            work_item_id="earlier-slice",
+        )
+        DevTask.objects.create(
+            title="Later slice",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=later,
+            work_item_id="later-slice",
+        )
+        recommendation_a = recommend_next_slice(goal)
+        recommendation_b = recommend_next_slice(goal)
+        self.assertEqual(recommendation_a.thread_title, "Earlier Thread")
+        self.assertEqual(recommendation_a.thread_title, recommendation_b.thread_title)
+        self.assertEqual(recommendation_a.queue_suggestion.action_type, "queue_first_slice")
+
+    def test_recommend_next_slice_suggests_resume_for_paused_thread_with_queued_work(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="No Ready Work",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="normal",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked work",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-work",
+        )
+        recommendation = recommend_next_slice(goal)
+        self.assertEqual(recommendation.recommended_work_items, [])
+        self.assertIsNotNone(recommendation.queue_suggestion)
+        self.assertEqual(recommendation.queue_suggestion.action_type, "resume_thread")
+        self.assertIn("paused", recommendation.reasoning_summary.lower())
+
+    def test_recommend_next_slice_returns_empty_recommendation_when_nothing_is_queueable(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Nothing Queueable",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={"review_required": True},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked work",
+            description="",
+            task_type="codegen",
+            status="awaiting_review",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={"require_human_review_on_failure": True},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-work",
+        )
+        recommendation = recommend_next_slice(goal)
+        self.assertEqual(recommendation.recommended_work_items, [])
+        self.assertIsNone(recommendation.queue_suggestion)
+        self.assertIn("No executable slice is ready yet", recommendation.reasoning_summary)
+
+    def test_goal_detail_includes_development_loop_summary(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Goal Detail Summary",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Listing Data Ingestion",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Implement adapter",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="adapter",
+        )
+        request = self._request(f"/xyn/api/goals/{goal.id}")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = goal_detail(request, str(goal.id))
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["development_loop_summary"]["goal_status"], "completed")
+        self.assertEqual(payload["development_loop_summary"]["threads"][0]["title"], "Listing Data Ingestion")
+        self.assertEqual(payload["development_loop_summary"]["recent_work_results"][0]["title"], "Implement adapter")

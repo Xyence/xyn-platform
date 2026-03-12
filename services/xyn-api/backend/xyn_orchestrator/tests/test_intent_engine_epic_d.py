@@ -213,6 +213,98 @@ class EpicDIntentEngineTests(unittest.TestCase):
         self.assertEqual(envelope.resolved_subject.get("id"), "goal-1")
         self.assertEnvelopeStable(envelope)
 
+    def test_next_slice_question_uses_active_goal_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="what should we build next?",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(active_goal_id="goal-1"),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.RECOMMEND_NEXT_SLICE.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "goal-1")
+        self.assertEnvelopeStable(envelope)
+
+    def test_goal_progress_question_uses_active_goal_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="how close are we to finishing this goal?",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(active_goal_id="goal-1"),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_GOAL.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "goal-1")
+        self.assertEqual(envelope.action_payload.get("summary_mode"), "goal_progress_summary")
+        self.assertEnvelopeStable(envelope)
+
+    def test_explicit_goal_reference_beats_active_goal_context_for_next_slice(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            goal_lookup=lambda query, workspace_id: [
+                {"id": "goal-2", "label": "Deal Scoring", "kind": "goal"}
+            ]
+            if "deal scoring" in query.lower()
+            else [],
+        )
+        envelope = engine.resolve_intent(
+            user_message="what should we build next for deal scoring?",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(active_goal_id="goal-1"),
+            ),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.RECOMMEND_NEXT_SLICE.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "goal-2")
+        self.assertEnvelopeStable(envelope)
+
+    def test_thread_blocked_question_uses_active_thread_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="is this thread blocked?",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(active_coordination_thread_id="thread-1"),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.THREAD_COORDINATION.value)
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_THREAD.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "thread-1")
+        self.assertEqual(envelope.action_payload.get("summary_mode"), "thread_progress_summary")
+        self.assertEnvelopeStable(envelope)
+
+    def test_ambiguous_thread_progress_question_requires_clarification(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+            thread_lookup=lambda query, workspace_id: [
+                {"id": "thread-1", "label": "Listing Data Ingestion", "kind": "coordination_thread"},
+                {"id": "thread-2", "label": "Listing Data QA", "kind": "coordination_thread"},
+            ],
+        )
+        envelope = engine.resolve_intent(
+            user_message="is the listing data thread blocked?",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_THREAD.value)
+        self.assertTrue(envelope.needs_clarification)
+        self.assertEqual(envelope.clarification_reason, ClarificationReason.AMBIGUOUS_TARGET.value)
+        self.assertEnvelopeStable(envelope)
+
     def test_artifact_panel_matcher_accepts_natural_list_phrase(self):
         self.assertEqual(
             intent_api._match_artifact_panel_command("show me a list of artifacts"),
@@ -1581,6 +1673,143 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual(payload["status"], "DraftReady")
         self.assertEqual((payload.get("result") or {}).get("goal", {}).get("id"), "goal-1")
         self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "goal_detail")
+
+    def test_execute_conversation_action_show_goal_returns_goal_progress_summary(self):
+        goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder")
+        detail = {
+            "id": "goal-1",
+            "title": "AI Real Estate Deal Finder",
+            "goal_progress": {
+                "goal_progress_status": "in_progress",
+                "completed_work_items": 2,
+                "active_work_items": 1,
+                "blocked_work_items": 0,
+            },
+            "development_loop_summary": {"recommended_next_slice": {"summary": "Queue the next smallest slice from Listing Data Ingestion."}},
+        }
+        with patch.object(intent_api.Goal.objects, "filter", return_value=SimpleNamespace(first=lambda: goal)), patch.object(
+            intent_api, "_serialize_goal_detail", return_value=detail
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "show_goal",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {"summary_mode": "goal_progress_summary"}},
+                    "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
+                },
+                prompt="how close are we to finishing this goal?",
+                request_id="req-1",
+                intent_payload={"intent_type": "show_goal"},
+                prompt_interpretation={"intent_type": "show_goal"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary_type"], "goal_progress_summary")
+        self.assertIn("AI Real Estate Deal Finder is in progress", payload["summary"])
+
+    def test_execute_conversation_action_show_thread_returns_thread_progress_summary(self):
+        thread = SimpleNamespace(id="thread-1", title="Listing Data Ingestion")
+        detail = {
+            "id": "thread-1",
+            "title": "Listing Data Ingestion",
+            "thread_progress_status": "blocked",
+            "work_items_completed": 1,
+            "work_items_ready": 0,
+            "work_items_blocked": 2,
+        }
+        with patch.object(intent_api.CoordinationThread.objects, "filter", return_value=SimpleNamespace(first=lambda: thread)), patch.object(
+            intent_api, "_coordination_thread_detail", return_value=detail
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "show_thread",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {"summary_mode": "thread_progress_summary"}},
+                    "target_object": {"id": "thread-1", "workspace_id": "ws-1"},
+                },
+                prompt="is this thread blocked?",
+                request_id="req-1",
+                intent_payload={"intent_type": "show_thread"},
+                prompt_interpretation={"intent_type": "show_thread"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary_type"], "thread_progress_summary")
+        self.assertIn("Listing Data Ingestion is blocked", payload["summary"])
+
+    def test_execute_conversation_action_recommend_next_slice_returns_queue_suggestion_without_dispatch(self):
+        goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder")
+        detail = {
+            "id": "goal-1",
+            "title": "AI Real Estate Deal Finder",
+            "goal_progress": {
+                "goal_progress_status": "in_progress",
+                "completed_work_items": 0,
+                "active_work_items": 1,
+                "blocked_work_items": 0,
+            },
+            "development_loop_summary": {
+                "recommended_next_slice": {
+                    "summary": "Queue the next smallest slice from Listing Data Ingestion.",
+                    "queue_suggestion": {
+                        "action_type": "queue_first_slice",
+                        "thread_id": "thread-1",
+                        "work_item_id": "task-1",
+                        "reason": "The selected slice is the first ready unblocked queue candidate under current durable state.",
+                        "summary": "Suggest queue_first_slice for Implement adapter.",
+                    },
+                }
+            },
+        }
+        recommendation = SimpleNamespace(
+            goal_id="goal-1",
+            thread_id="thread-1",
+            thread_title="Listing Data Ingestion",
+            work_item_id="task-1",
+            work_item_title="Implement adapter",
+            recommended_work_items=[],
+            queue_suggestion=SimpleNamespace(
+                action_type="queue_first_slice",
+                thread_id="thread-1",
+                work_item_id="task-1",
+                reason="The selected slice is the first ready unblocked queue candidate under current durable state.",
+                summary="Suggest queue_first_slice for Implement adapter.",
+            ),
+            reasoning_summary="Selected the first ready slice.",
+            summary="Queue the next smallest slice from Listing Data Ingestion.",
+        )
+        with patch.object(intent_api.Goal.objects, "filter", return_value=SimpleNamespace(first=lambda: goal)), patch.object(
+            intent_api, "_serialize_goal_detail", return_value=detail
+        ), patch.object(
+            intent_api, "recommend_next_slice", return_value=recommendation
+        ) as mock_recommend, patch.object(intent_api, "_activate_goal_first_slice") as mock_activate:
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "recommend_next_slice",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {}},
+                    "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
+                },
+                prompt="what should we build next?",
+                request_id="req-1",
+                intent_payload={"intent_type": "recommend_next_slice"},
+                prompt_interpretation={"intent_type": "recommend_next_slice"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary_type"], "next_slice_recommendation")
+        self.assertEqual((((payload.get("result") or {}).get("recommendation") or {}).get("queue_suggestion") or {}).get("action_type"), "queue_first_slice")
+        mock_recommend.assert_called_once()
+        mock_activate.assert_not_called()
 
     def test_resolve_route_preserves_legacy_app_builder_flow_without_epic_d_intent(self):
         request = self.factory.post(

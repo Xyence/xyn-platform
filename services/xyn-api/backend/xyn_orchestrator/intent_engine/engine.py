@@ -600,6 +600,8 @@ class IntentResolutionEngine:
     @classmethod
     def _extract_thread_reference(cls, message: str) -> str:
         text = str(message or "").strip()
+        if re.match(r"^\s*(?:is|show)\s+(?:this\s+)?thread\s+(?:blocked|active|completed|running|status|progress)\b.*$", text, flags=re.IGNORECASE):
+            return ""
         for pattern in (
             r"^\s*(?:pause|resume|prioritize|show)\s+(?:this\s+)?thread\b(?:\s+(.*))?$",
             r"^\s*(?:start|create)\s+(?:a\s+new\s+)?(?:development\s+)?thread\b(?:\s+(.*))?$",
@@ -660,7 +662,7 @@ class IntentResolutionEngine:
             intent_type = IntentType.RESUME_THREAD
         elif re.search(r"\bpriorit", lowered):
             intent_type = IntentType.PRIORITIZE_THREAD
-        elif re.search(r"\b(show|progress|detail)\b", lowered):
+        elif re.search(r"\b(show|progress|detail|blocked|status)\b", lowered):
             intent_type = IntentType.SHOW_THREAD
         if intent_type is None:
             return None
@@ -694,6 +696,8 @@ class IntentResolutionEngine:
             priority_match = re.search(r"\b(critical|high|normal|low)\b", lowered)
             if priority_match:
                 action_payload["priority"] = str(priority_match.group(1) or "").lower()
+        if intent_type == IntentType.SHOW_THREAD and re.search(r"\b(blocked|progress|status)\b", lowered):
+            action_payload["summary_mode"] = "thread_progress_summary"
         return self._intent_envelope(
             intent_family=IntentFamily.THREAD_COORDINATION,
             intent_type=intent_type,
@@ -725,10 +729,16 @@ class IntentResolutionEngine:
     def _resolve_goal_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
         text = str(message or "").strip()
         lowered = text.lower()
-        if not re.search(r"\b(goal|plan|project|application|system)\b", lowered):
+        conversation_context = context.conversation_context or ConversationExecutionContext()
+        progress_query = re.search(
+            r"\b(what should we build next|what should we implement next|what is the next slice|next slice|how close are we to finishing(?: this goal)?|how close is this goal|goal progress)\b",
+            lowered,
+        )
+        if not re.search(r"\b(goal|plan|project|application|system)\b", lowered) and not (
+            conversation_context.active_goal_id and progress_query
+        ):
             return None
         workspace_id = str(context.workspace_id or "").strip()
-        conversation_context = context.conversation_context or ConversationExecutionContext()
         reference = self._extract_goal_reference(text)
         notes: List[str] = []
         candidates = self.goal_lookup(reference or text, workspace_id) if callable(self.goal_lookup) else []
@@ -746,7 +756,7 @@ class IntentResolutionEngine:
                 confidence=0.92,
                 resolution_notes=notes or ["list goals requested"],
             )
-        if re.search(r"\b(what should we build first|what should we implement next|smallest next slice|which thread should we queue first)\b", lowered):
+        if re.search(r"\b(what should we build first|what should we build next|what should we implement next|what is the next slice|smallest next slice|which thread should we queue first)\b", lowered):
             resolved = candidates[0] if len(candidates) == 1 else ({"id": str(conversation_context.active_goal_id)} if conversation_context.active_goal_id else {})
             if len(candidates) > 1:
                 return self._clarification_from_candidates(
@@ -786,6 +796,8 @@ class IntentResolutionEngine:
             intent_type = IntentType.QUEUE_FIRST_SLICE
         elif re.search(r"\b(break .* into implementation threads|decompose|create a plan for)\b", lowered):
             intent_type = IntentType.DECOMPOSE_GOAL
+        elif re.search(r"\b(how close are we to finishing(?: this goal)?|how close is this goal|goal progress)\b", lowered):
+            intent_type = IntentType.SHOW_GOAL
         elif re.search(r"\b(show plan|summarize plan|show goal|goal progress)\b", lowered):
             intent_type = IntentType.SUMMARIZE_PLAN if "plan" in lowered else IntentType.SHOW_GOAL
         elif re.search(r"\b(build|start|create)\b", lowered) and re.search(r"\b(application|system|project)\b", lowered):
@@ -828,7 +840,10 @@ class IntentResolutionEngine:
             intent_type=intent_type,
             target_context={"workspace_id": workspace_id},
             resolved_subject=resolved,
-            action_payload={"reference": reference or text},
+            action_payload={
+                "reference": reference or text,
+                **({"summary_mode": "goal_progress_summary"} if intent_type == IntentType.SHOW_GOAL and re.search(r"\b(how close|goal progress)\b", lowered) else {}),
+            },
             confidence=0.82,
             resolution_notes=notes or [f"{intent_type.value} requested"],
         )

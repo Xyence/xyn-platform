@@ -264,6 +264,32 @@ describe("WorkbenchPanelHost entity refresh", () => {
         work_item_title: "Identify the first listing source and capture the ingestion contract",
         summary: "Queue the next smallest slice from Listing Data Ingestion.",
       },
+      development_loop_summary: {
+        goal_status: "in_progress",
+        threads: [
+          {
+            thread_id: "thread-1",
+            title: "Listing Data Ingestion",
+            thread_status: "active",
+          },
+        ],
+        recent_work_results: [
+          {
+            work_item_id: "goal-wi-1",
+            title: "Identify the first listing source and capture the ingestion contract",
+            status: "queued",
+            run_id: null,
+          },
+        ],
+        recommended_next_slice: {
+          goal_id: "goal-1",
+          thread_id: "thread-1",
+          thread_title: "Listing Data Ingestion",
+          work_item_id: "task-1",
+          work_item_title: "Identify the first listing source and capture the ingestion contract",
+          summary: "Queue the next smallest slice from Listing Data Ingestion.",
+        },
+      },
     });
 
     render(
@@ -278,7 +304,9 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(apiMocks.getGoal).toHaveBeenCalledWith("goal-1"));
     await waitFor(() => expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument());
-    expect(screen.getByText("Listing Data Ingestion")).toBeInTheDocument();
+    expect(screen.getAllByText("Listing Data Ingestion").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Development Loop")).toBeInTheDocument();
+    expect(screen.getAllByText("in_progress").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Queue the next smallest slice from Listing Data Ingestion.")).toBeInTheDocument();
   });
 

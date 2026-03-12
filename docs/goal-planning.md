@@ -145,9 +145,70 @@ Conversation can:
 - create goals
 - decompose goals
 - summarize plans
+- summarize goal and thread progress
 - queue the first slice
 - list/show goals
 - recommend the next smallest slice
+
+## Goal and Thread Progress
+
+Epic K adds a computed development-loop layer on top of durable coordination state.
+
+No new durable progress table exists. Xyn computes progress directly from:
+- `Goal`
+- `CoordinationThread`
+- `DevTask`
+- runtime-backed `Run` state
+- durable runtime artifacts
+
+Supported computed goal statuses:
+- `not_started`
+- `in_progress`
+- `stalled`
+- `nearing_completion`
+- `completed`
+
+Supported computed thread statuses:
+- `not_started`
+- `active`
+- `blocked`
+- `completed`
+
+These computed summaries appear in:
+- `goal_detail`
+- conversation progress answers
+
+## Next Slice Detection
+
+Epic K recommends the next slice deterministically from durable state.
+
+Selection rules:
+- prefer ready unblocked work
+- prefer the smallest executable slice
+- prefer earlier MVP threads when candidates are otherwise equal
+- return no executable recommendation when nothing queueable exists
+
+The recommendation includes:
+- recommended thread
+- recommended work item(s)
+- concise reasoning derived from actual state
+
+It does not create new planning structure.
+
+## Queue Suggestion Mode
+
+Epic K can suggest coordination actions without dispatching work automatically.
+
+Supported suggestion actions:
+- `queue_first_slice`
+- `queue_next_slice`
+- `resume_thread`
+
+Rules:
+- suggestions are read-only outputs derived from durable coordination state
+- suggestions do not submit runtime runs
+- XCO remains the only scheduling and dispatch authority
+- blocked or review-required work does not silently become queueable
 
 ## Developer Guidance
 
@@ -158,8 +219,10 @@ When adding a new planning seed:
 3. ensure output persists through `persist_goal_plan(...)`
 4. prefer queue-ready work items over prose-only planning
 5. keep review/approval explicit before broad execution
+6. keep progress evaluation and next-slice recommendation deterministic and derived from durable state
 
 Do not:
 - add a second queueing or dispatch path
 - let plans remain only in conversation text
 - expand into speculative autonomy beyond XCO scheduling
+- add autonomous replanning or dependency-graph planning in this layer

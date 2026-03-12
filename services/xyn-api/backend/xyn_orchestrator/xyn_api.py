@@ -149,6 +149,7 @@ from .goal_planning import (
     serialize_goal_summary,
     valid_goal_transition,
 )
+from .goal_progress import compute_goal_development_loop_summary, compute_goal_progress, compute_thread_progress
 from .artifact_packages import (
     ArtifactPackageValidationError,
     export_artifact_package,
@@ -25471,20 +25472,114 @@ def _serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
 
 
 def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
+    progress = compute_goal_progress(goal)
     recommendation = recommend_next_slice(goal)
+    development_loop_summary = compute_goal_development_loop_summary(goal, recommendation=recommendation)
     return {
         **_serialize_goal_summary(goal),
         "threads": [_coordination_thread_summary(thread) for thread in goal.threads.all().order_by("created_at", "id")],
         "work_items": [_serialize_work_item_summary(task) for task in goal.work_items.all().order_by("priority", "created_at", "id")],
+        "goal_progress": {
+            "goal_progress_status": progress.goal_progress_status,
+            "completed_work_items": progress.completed_work_items,
+            "active_work_items": progress.active_work_items,
+            "blocked_work_items": progress.blocked_work_items,
+        },
+        "recommended_next_slice": {
+            "goal_id": recommendation.goal_id,
+            "thread_id": recommendation.thread_id,
+            "thread_title": recommendation.thread_title,
+            "work_item_id": recommendation.work_item_id,
+            "work_item_title": recommendation.work_item_title,
+            "recommended_work_items": [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "thread_id": item.thread_id,
+                    "thread_title": item.thread_title,
+                }
+                for item in recommendation.recommended_work_items
+            ],
+            "queue_suggestion": {
+                "action_type": recommendation.queue_suggestion.action_type,
+                "thread_id": recommendation.queue_suggestion.thread_id,
+                "work_item_id": recommendation.queue_suggestion.work_item_id,
+                "reason": recommendation.queue_suggestion.reason,
+                "summary": recommendation.queue_suggestion.summary,
+            }
+            if recommendation.queue_suggestion
+            else None,
+            "reasoning_summary": recommendation.reasoning_summary,
+            "summary": recommendation.summary,
+        },
+        "development_loop_summary": {
+            "goal_status": development_loop_summary.goal_status,
+            "threads": [
+                {
+                    "thread_id": item.thread_id,
+                    "title": item.title,
+                    "thread_status": item.thread_status,
+                }
+                for item in development_loop_summary.threads
+            ],
+            "recent_work_results": [
+                {
+                    "work_item_id": item.work_item_id,
+                    "title": item.title,
+                    "status": item.status,
+                    "run_id": item.run_id,
+                }
+                for item in development_loop_summary.recent_work_results
+            ],
+            "recommended_next_slice": development_loop_summary.recommended_next_slice,
+        },
         "recommendation": {
             "goal_id": recommendation.goal_id,
             "thread_id": recommendation.thread_id,
             "thread_title": recommendation.thread_title,
             "work_item_id": recommendation.work_item_id,
             "work_item_title": recommendation.work_item_title,
+            "recommended_work_items": [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "thread_id": item.thread_id,
+                    "thread_title": item.thread_title,
+                }
+                for item in recommendation.recommended_work_items
+            ],
+            "queue_suggestion": {
+                "action_type": recommendation.queue_suggestion.action_type,
+                "thread_id": recommendation.queue_suggestion.thread_id,
+                "work_item_id": recommendation.queue_suggestion.work_item_id,
+                "reason": recommendation.queue_suggestion.reason,
+                "summary": recommendation.queue_suggestion.summary,
+            }
+            if recommendation.queue_suggestion
+            else None,
+            "reasoning_summary": recommendation.reasoning_summary,
             "summary": recommendation.summary,
         },
     }
+
+
+def _goal_progress_summary_text(goal_detail: Dict[str, Any]) -> str:
+    progress = goal_detail.get("goal_progress") if isinstance(goal_detail.get("goal_progress"), dict) else {}
+    status = str(progress.get("goal_progress_status") or "not_started").replace("_", " ")
+    completed = int(progress.get("completed_work_items") or 0)
+    active = int(progress.get("active_work_items") or 0)
+    blocked = int(progress.get("blocked_work_items") or 0)
+    title = str(goal_detail.get("title") or "This goal")
+    return f"{title} is {status}. Completed {completed} work item(s), active {active}, blocked {blocked}."
+
+
+def _thread_progress_summary_text(thread_detail: Dict[str, Any]) -> str:
+    status = str(thread_detail.get("thread_progress_status") or thread_detail.get("status") or "not_started").replace("_", " ")
+    completed = int(thread_detail.get("work_items_completed") or 0)
+    ready = int(thread_detail.get("work_items_ready") or 0)
+    blocked = int(thread_detail.get("work_items_blocked") or 0)
+    title = str(thread_detail.get("title") or "This thread")
+    return f"{title} is {status}. Completed {completed} work item(s), ready {ready}, blocked {blocked}."
 
 
 def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
@@ -25687,6 +25782,7 @@ def _execute_conversation_action(
     }:
         action_payload = ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("action_payload")
         action_payload = action_payload if isinstance(action_payload, dict) else {}
+        summary_mode = str(action_payload.get("summary_mode") or "").strip()
         thread_id = str(target.get("id") or "").strip()
         thread: Optional[CoordinationThread] = None
         if thread_id:
@@ -25775,6 +25871,7 @@ def _execute_conversation_action(
             thread.save(update_fields=["priority", "updated_at"])
             if previous_priority != next_priority:
                 record_thread_event(thread=thread, event_type="thread_priority_changed", payload={"previous_priority": previous_priority, "priority": next_priority})
+        detail = _coordination_thread_detail(thread)
         summary = (
             f"Paused XCO thread {thread.title}."
             if action_type == ConversationActionType.PAUSE_THREAD.value
@@ -25782,6 +25879,8 @@ def _execute_conversation_action(
             if action_type == ConversationActionType.RESUME_THREAD.value
             else f"Updated XCO thread {thread.title}."
             if action_type == ConversationActionType.PRIORITIZE_THREAD.value
+            else _thread_progress_summary_text(detail)
+            if summary_mode == "thread_progress_summary"
             else f"Showing XCO thread {thread.title}."
         )
         return JsonResponse(
@@ -25790,11 +25889,12 @@ def _execute_conversation_action(
                 "artifact_type": "Workspace",
                 "artifact_id": None,
                 "summary": summary,
+                "summary_type": "thread_progress_summary" if summary_mode == "thread_progress_summary" else None,
                 "intent": intent_payload,
                 "prompt_interpretation": prompt_interpretation,
                 "conversation_action": action,
                 "operation_result": True,
-                "result": {"thread": _coordination_thread_detail(thread)},
+                "result": {"thread": detail},
                 "next_actions": [
                     {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
                 ],
@@ -25816,6 +25916,7 @@ def _execute_conversation_action(
     }:
         action_payload = ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("action_payload")
         action_payload = action_payload if isinstance(action_payload, dict) else {}
+        summary_mode = str(action_payload.get("summary_mode") or "").strip()
         goal_id = str(target.get("id") or "").strip()
         goal: Optional[Goal] = None
         if goal_id:
@@ -25903,7 +26004,10 @@ def _execute_conversation_action(
             goal.refresh_from_db()
             summary = f"Decomposed goal {goal.title} into reviewable threads and work items."
         elif action_type == ConversationActionType.SUMMARIZE_PLAN.value:
-            summary = serialize_goal_summary(goal).get("planning_summary") or f"Showing plan summary for {goal.title}."
+            detail = _serialize_goal_detail(goal)
+            loop_summary = detail.get("development_loop_summary") if isinstance(detail.get("development_loop_summary"), dict) else {}
+            next_slice = loop_summary.get("recommended_next_slice") if isinstance(loop_summary, dict) else {}
+            summary = str((next_slice or {}).get("summary") or "").strip() or serialize_goal_summary(goal).get("planning_summary") or f"Showing plan summary for {goal.title}."
         elif action_type == ConversationActionType.APPROVE_PLAN.value:
             if not valid_goal_transition(goal.planning_status, "in_progress"):
                 return JsonResponse({"status": "ValidationError", "summary": f"Goal {goal.title} cannot transition to in_progress from {goal.planning_status}."}, status=409)
@@ -25943,17 +26047,45 @@ def _execute_conversation_action(
         elif action_type == ConversationActionType.RECOMMEND_NEXT_SLICE.value:
             recommendation = recommend_next_slice(goal)
             detail = _serialize_goal_detail(goal)
+            recommendation_payload = {
+                "goal_id": recommendation.goal_id,
+                "thread_id": recommendation.thread_id,
+                "thread_title": recommendation.thread_title,
+                "work_item_id": recommendation.work_item_id,
+                "work_item_title": recommendation.work_item_title,
+                "recommended_work_items": [
+                    {
+                        "id": item.id,
+                        "title": item.title,
+                        "thread_id": item.thread_id,
+                        "thread_title": item.thread_title,
+                    }
+                    for item in recommendation.recommended_work_items
+                ],
+                "queue_suggestion": {
+                    "action_type": recommendation.queue_suggestion.action_type,
+                    "thread_id": recommendation.queue_suggestion.thread_id,
+                    "work_item_id": recommendation.queue_suggestion.work_item_id,
+                    "reason": recommendation.queue_suggestion.reason,
+                    "summary": recommendation.queue_suggestion.summary,
+                }
+                if recommendation.queue_suggestion
+                else None,
+                "reasoning_summary": recommendation.reasoning_summary,
+                "summary": recommendation.summary,
+            }
             return JsonResponse(
                 {
                     "status": "DraftReady",
                     "artifact_type": "Workspace",
                     "artifact_id": None,
                     "summary": recommendation.summary,
+                    "summary_type": "next_slice_recommendation",
                     "intent": intent_payload,
                     "prompt_interpretation": prompt_interpretation,
                     "conversation_action": action,
                     "operation_result": True,
-                    "result": {"goal": detail, "recommendation": recommendation.__dict__},
+                    "result": {"goal": detail, "recommendation": recommendation_payload},
                     "next_actions": [
                         {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
                     ],
@@ -25961,14 +26093,21 @@ def _execute_conversation_action(
                 }
             )
         else:
-            summary = f"Showing goal {goal.title}."
-        detail = _serialize_goal_detail(goal)
+            detail = _serialize_goal_detail(goal)
+            loop_summary = detail.get("development_loop_summary") if isinstance(detail.get("development_loop_summary"), dict) else {}
+            summary = (
+                _goal_progress_summary_text(detail)
+                if summary_mode == "goal_progress_summary"
+                else str(((loop_summary.get("recommended_next_slice") or {}) if isinstance(loop_summary, dict) else {}).get("summary") or "").strip() or f"Showing goal {goal.title}."
+            )
+        detail = locals().get("detail") if isinstance(locals().get("detail"), dict) else _serialize_goal_detail(goal)
         return JsonResponse(
             {
                 "status": "DraftReady",
                 "artifact_type": "Workspace",
                 "artifact_id": None,
                 "summary": summary,
+                "summary_type": "goal_progress_summary" if summary_mode == "goal_progress_summary" else None,
                 "intent": intent_payload,
                 "prompt_interpretation": prompt_interpretation,
                 "conversation_action": action,
@@ -27258,6 +27397,7 @@ def _thread_status_for_task(task: DevTask) -> str:
 
 
 def _coordination_thread_summary(thread: CoordinationThread) -> Dict[str, Any]:
+    progress = compute_thread_progress(thread)
     policy = effective_thread_policy(thread)
     tasks = list(thread.work_items.all().order_by("-updated_at", "-created_at")[:50])
     queued = 0
@@ -27294,6 +27434,10 @@ def _coordination_thread_summary(thread: CoordinationThread) -> Dict[str, Any]:
         "work_in_progress_limit": thread.work_in_progress_limit,
         "execution_policy": policy,
         "source_conversation_id": thread.source_conversation_id or None,
+        "thread_progress_status": progress.thread_status,
+        "work_items_completed": progress.work_items_completed,
+        "work_items_ready": progress.work_items_ready,
+        "work_items_blocked": progress.work_items_blocked,
         "queued_work_items": queued,
         "running_work_items": running,
         "awaiting_review_work_items": awaiting_review,

@@ -2334,12 +2334,41 @@ export type GoalRecommendation = {
   thread_title: string;
   work_item_id?: string | null;
   work_item_title: string;
+  recommended_work_items?: Array<{
+    id: string;
+    title: string;
+    thread_id?: string | null;
+    thread_title: string;
+  }>;
+  queue_suggestion?: {
+    action_type: string;
+    thread_id?: string | null;
+    work_item_id?: string | null;
+    reason: string;
+    summary: string;
+  } | null;
+  reasoning_summary?: string;
   summary: string;
 };
 
 export type GoalDetail = GoalSummary & {
   threads: CoordinationThreadSummary[];
   work_items: WorkItemSummary[];
+  development_loop_summary?: {
+    goal_status: string;
+    threads: Array<{
+      thread_id: string;
+      title: string;
+      thread_status: string;
+    }>;
+    recent_work_results: Array<{
+      work_item_id: string;
+      title: string;
+      status: string;
+      run_id?: string | null;
+    }>;
+    recommended_next_slice?: GoalRecommendation | null;
+  };
   recommendation?: GoalRecommendation | null;
 };
 
@@ -2953,6 +2982,7 @@ export type XynIntentResolutionResult = {
   artifact_type: string | null;
   artifact_id: string | null;
   summary: string;
+  summary_type?: "goal_progress_summary" | "thread_progress_summary" | "next_slice_recommendation" | string;
   structured_operation?: Record<string, unknown>;
   prompt_interpretation?: PromptInterpretation;
   conversation_action?: ConversationAction;
