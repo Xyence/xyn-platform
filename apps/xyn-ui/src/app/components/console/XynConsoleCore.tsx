@@ -579,7 +579,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
             dataset,
             query: nextQuery,
             title: dataset,
-            open_in: "current_panel",
+            open_in: "new_panel",
             placement: "center",
           },
         },
@@ -1443,6 +1443,12 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       if (action.name === "canvas.open_table") {
         const dataset = String(action.params.dataset || "artifacts");
         const query = (action.params.query as Record<string, unknown> | undefined) || defaultQueryForDataset(dataset);
+        if (isOverlay && onOpenPanel) {
+          onOpenPanel(panelKeyForDataset(dataset), { query });
+          clearSessionResolution();
+          if (isOverlay) setOpen(false);
+          return;
+        }
         openPanel({
           key: panelKeyForDataset(dataset),
           params: { query },

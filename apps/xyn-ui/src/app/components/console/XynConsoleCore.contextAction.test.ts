@@ -89,7 +89,7 @@ describe("buildUiActionFromPrompt", () => {
             offset: 0,
           },
           title: "artifacts",
-          open_in: "current_panel",
+          open_in: "new_panel",
           placement: "center",
         },
       },

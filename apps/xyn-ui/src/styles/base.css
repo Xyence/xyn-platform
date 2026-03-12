@@ -3668,10 +3668,7 @@ button.sm {
 }
 
 .workbench-canvas .page-header h2,
-.workbench-canvas .card-header h3,
-.workbench-canvas .workspace-context-bar,
-.workbench-canvas .workspace-context-bar strong,
-.workbench-canvas .workspace-scope-pill {
+.workbench-canvas .card-header h3 {
   color: var(--ink);
 }
 
@@ -4401,6 +4398,10 @@ button.sm {
 .workspace-context-bar.is-compact .workspace-scope-pill {
   padding: 2px 8px;
   font-size: 0.7rem;
+}
+
+.workbench-canvas .workspace-context-bar {
+  display: none;
 }
 
 .artifacts-registry-search {
