@@ -406,4 +406,20 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("Inspect repository")).toHaveLength(1);
     expect(screen.getAllByText("Final summary")).toHaveLength(1);
   });
+
+  it("does not render duplicate panel chrome headings or close buttons", async () => {
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "platform-1", panel_type: "detail", instance_key: "platform_settings", key: "platform_settings" }}
+          onOpenPanel={() => {}}
+          onClosePanel={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Platform Settings" })).toBeInTheDocument();
+  });
 });

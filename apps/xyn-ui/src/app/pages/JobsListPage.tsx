@@ -1,18 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { createColumnHelper, flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table";
 import InlineMessage from "../../components/InlineMessage";
+import CanvasTable from "../../components/canvas/CanvasTable";
 import { listAppJobs } from "../../api/xyn";
-import type { AppJob } from "../../api/types";
+import type { AppJob, CanvasTableResponse, CanvasTableQuery } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
-
-function formatDate(value?: string): string {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString();
-}
 
 export default function JobsListPage({
   workspaceId,
@@ -31,6 +24,13 @@ export default function JobsListPage({
   const [jobs, setJobs] = useState<AppJob[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState<CanvasTableQuery>({
+    entity: "jobs",
+    filters: [],
+    sort: [{ field: "updated_at", dir: "desc" }],
+    limit: 50,
+    offset: 0,
+  });
 
   const load = useCallback(async () => {
     if (!workspaceId) {
@@ -53,33 +53,32 @@ export default function JobsListPage({
     void load();
   }, [load]);
 
-  const columns = useMemo(() => {
-    const helper = createColumnHelper<AppJob>();
-    return [
-      helper.accessor("type", {
-        header: () => "Type",
-        cell: (ctx) => <strong>{ctx.getValue()}</strong>,
-      }),
-      helper.accessor("status", {
-        header: () => "Status",
-        cell: (ctx) => <span className="chip">{ctx.getValue()}</span>,
-      }),
-      helper.accessor("created_at", {
-        header: () => "Created",
-        cell: (ctx) => formatDate(ctx.getValue()),
-      }),
-      helper.accessor("updated_at", {
-        header: () => "Updated",
-        cell: (ctx) => formatDate(ctx.getValue()),
-      }),
-    ] as ColumnDef<AppJob>[];
-  }, []);
-
-  const table = useReactTable({
-    data: jobs,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  });
+  const payload = useMemo<CanvasTableResponse>(
+    () => ({
+      type: "canvas.table",
+      title: "Jobs",
+      dataset: {
+        name: "jobs",
+        primary_key: "id",
+        columns: [
+          { key: "type", label: "Type", type: "string", sortable: true, filterable: true, searchable: true },
+          { key: "status", label: "Status", type: "string", sortable: true, filterable: true, searchable: true },
+          { key: "created_at", label: "Created", type: "datetime", sortable: true, filterable: true },
+          { key: "updated_at", label: "Updated", type: "datetime", sortable: true, filterable: true },
+        ],
+        rows: jobs.map((job) => ({
+          id: job.id,
+          type: job.type,
+          status: job.status,
+          created_at: job.created_at,
+          updated_at: job.updated_at,
+        })),
+        total_count: jobs.length,
+      },
+      query,
+    }),
+    [jobs, query]
+  );
 
   return (
     <>
@@ -98,40 +97,22 @@ export default function JobsListPage({
       {!workspaceId && <InlineMessage tone="error" title="Workspace required" body="Select a workspace first." />}
       {error && <InlineMessage tone="error" title="Request failed" body={error} />}
       <section className="card">
-        <div className="canvas-table-wrap">
-          <table className="canvas-table">
-            <thead>
-              {table.getHeaderGroups().map((headerGroup) => (
-                <tr key={headerGroup.id}>
-                  {headerGroup.headers.map((header) => (
-                    <th key={header.id}>{header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}</th>
-                  ))}
-                </tr>
-              ))}
-            </thead>
-            <tbody>
-              {table.getRowModel().rows.map((row) => (
-                <tr
-                  key={row.id}
-                  onClick={() =>
-                    onSelectJob ? onSelectJob(row.original.id) : navigate(toWorkspacePath(workspaceId, `jobs/${row.original.id}`))
-                  }
-                >
-                  {row.getVisibleCells().map((cell) => (
-                    <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
-                  ))}
-                </tr>
-              ))}
-              {!loading && jobs.length === 0 && (
-                <tr>
-                  <td colSpan={columns.length} className="muted">
-                    No jobs found.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+        {!loading && jobs.length === 0 ? <p className="muted">No jobs found.</p> : null}
+        <CanvasTable
+          payload={payload}
+          query={query}
+          onSort={(field, sortable) => {
+            if (!sortable) return;
+            setQuery((current) => {
+              const same = current.sort?.[0]?.field === field;
+              const dir = same && current.sort?.[0]?.dir === "asc" ? "desc" : "asc";
+              return { ...current, sort: [{ field, dir }] };
+            });
+          }}
+          onRowActivate={(rowId) => {
+            onSelectJob ? onSelectJob(rowId) : navigate(toWorkspacePath(workspaceId, `jobs/${rowId}`));
+          }}
+        />
       </section>
     </>
   );

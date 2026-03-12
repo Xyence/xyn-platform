@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   executeAppPalettePrompt,
@@ -1841,17 +1840,5 @@ export default function WorkbenchPanelHost({
     return null;
   }
 
-  return (
-    <div className="card ems-panel-host">
-      <div className="ems-panel-head">
-        <h3>{humanizePanelTitle(panel, resolvedTitle)}</h3>
-        {onClosePanel ? (
-          <button type="button" className="ghost sm" onClick={onClosePanel} aria-label={panel.panel_type === "detail" ? "Back" : "Close"} title={panel.panel_type === "detail" ? "Back" : "Close"}>
-            {panel.panel_type === "detail" ? <ArrowLeft size={14} /> : "Close"}
-          </button>
-        ) : null}
-      </div>
-      {content || <p className="muted">Unknown panel.</p>}
-    </div>
-  );
+  return <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>;
 }

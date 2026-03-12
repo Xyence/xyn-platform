@@ -183,4 +183,36 @@ describe("CanvasRenderer", () => {
       expect.objectContaining({ id: "rec-1" })
     );
   });
+
+  it("filters rows by a header-entered filter term", () => {
+    renderWithNotifications(
+      <CanvasRenderer
+        payload={{
+          type: "canvas.table",
+          title: "Artifacts",
+          dataset: {
+            name: "artifacts",
+            primary_key: "slug",
+            columns: [
+              { key: "slug", label: "Slug", type: "string", sortable: true, filterable: true },
+              { key: "name", label: "Name", type: "string", sortable: true, filterable: true },
+            ],
+            rows: [
+              { slug: "core.authn-jwt", name: "Auth JWT" },
+              { slug: "xyn-api", name: "API" },
+            ],
+            total_count: 2,
+          },
+          query: { entity: "artifacts", filters: [], sort: [{ field: "slug", dir: "asc" }], limit: 50, offset: 0 },
+        }}
+        query={{ entity: "artifacts", filters: [], sort: [{ field: "slug", dir: "asc" }], limit: 50, offset: 0 }}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /filter name/i }));
+    fireEvent.change(screen.getByPlaceholderText("Filter Name"), { target: { value: "Auth" } });
+
+    expect(screen.getByText("Auth JWT")).toBeInTheDocument();
+    expect(screen.queryByText("API")).not.toBeInTheDocument();
+  });
 });

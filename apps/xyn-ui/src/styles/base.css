@@ -4508,6 +4508,7 @@ button.sm {
   position: sticky;
   top: 0;
   z-index: 2;
+  overflow: visible;
   text-align: left;
   vertical-align: middle;
   border-bottom: 1px solid color-mix(in srgb, var(--line) 66%, transparent);
@@ -4515,15 +4516,99 @@ button.sm {
   color: var(--ink);
   padding: 8px 12px;
   font-weight: 600;
+  min-width: 120px;
 }
 
-.canvas-table thead th .ghost.sm {
+.canvas-table-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  position: relative;
+}
+
+.canvas-table-header-main,
+.canvas-table-header-sort {
+  min-width: 0;
+}
+
+.canvas-table thead th .canvas-table-header-main.ghost.sm,
+.canvas-table thead th .canvas-table-header-sort.ghost.sm {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
   width: 100%;
+  min-width: 0;
   text-align: left;
   white-space: nowrap;
+  position: relative;
+  z-index: 4;
+  pointer-events: auto;
+}
+
+.canvas-table thead th .canvas-table-header-sort.ghost.sm {
+  width: 32px;
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.canvas-table-header-label {
+  display: inline-block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  mask-image: linear-gradient(to right, #000 0%, #000 85%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 85%, transparent 100%);
+}
+
+.canvas-table-filter-input {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-1, #0f192b) 86%, transparent);
+  color: var(--ink);
+  padding: 6px 8px;
+  font: inherit;
+  position: relative;
+  z-index: 4;
+}
+
+.canvas-table-filter-input::placeholder {
+  color: var(--muted);
+}
+
+.canvas-table-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  touch-action: none;
+  z-index: 2;
+}
+
+.canvas-table-resizer::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  left: 3px;
+  width: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 80%, transparent);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.canvas-table thead th:hover .canvas-table-resizer::after,
+.canvas-table-resizer.is-resizing::after {
+  opacity: 1;
 }
 
 .canvas-table tbody td {
