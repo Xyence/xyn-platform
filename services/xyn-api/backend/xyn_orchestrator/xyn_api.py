@@ -65,6 +65,8 @@ from .models import (
     CoordinationThread,
     DevTask,
     Goal,
+    Application,
+    ApplicationPlan,
     Environment,
     EnvironmentAppState,
     Module,
@@ -150,6 +152,14 @@ from .goal_planning import (
     recommend_next_slice,
     serialize_goal_summary,
     valid_goal_transition,
+)
+from .application_factories import (
+    ApplicationFactoryDefinition,
+    GeneratedApplicationPlan,
+    apply_application_plan,
+    create_or_get_application_plan,
+    get_application_factory,
+    list_application_factories,
 )
 from .goal_progress import (
     compute_goal_development_loop_summary,
@@ -535,6 +545,8 @@ def _intent_goal_candidates(identity: UserIdentity, query: str, workspace_id: st
 
 
 def _conversation_execution_context(identity: UserIdentity, workspace_id: str, thread_id: str = "") -> ConversationExecutionContext:
+    active_application_id: Optional[str] = None
+    active_application_plan_id: Optional[str] = None
     active_goal_id: Optional[str] = None
     active_coordination_thread_id: Optional[str] = None
     current_work_item_id: Optional[str] = None
@@ -587,6 +599,14 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
             continue
         conversation_action = meta.get("conversation_action") if isinstance(meta.get("conversation_action"), dict) else {}
         interpretation = meta.get("prompt_interpretation") if isinstance(meta.get("prompt_interpretation"), dict) else {}
+        if not active_application_id:
+            target_object = conversation_action.get("target_object") if isinstance(conversation_action.get("target_object"), dict) else {}
+            if str(target_object.get("kind") or "").strip() == "application":
+                active_application_id = str(target_object.get("id") or "").strip() or None
+        if not active_application_plan_id:
+            target_object = conversation_action.get("target_object") if isinstance(conversation_action.get("target_object"), dict) else {}
+            if str(target_object.get("kind") or "").strip() == "application_plan":
+                active_application_plan_id = str(target_object.get("id") or "").strip() or None
         if not active_goal_id:
             active_goal_id = (
                 str(meta.get("goal_id") or "").strip()
@@ -631,6 +651,8 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
 
     return ConversationExecutionContext(
         thread_id=thread_token or None,
+        active_application_id=active_application_id,
+        active_application_plan_id=active_application_plan_id,
         active_goal_id=active_goal_id,
         active_coordination_thread_id=active_coordination_thread_id,
         current_work_item_id=current_work_item_id,
@@ -926,6 +948,10 @@ def _prompt_interpretation_from_intent(
         "decompose_goal": ("plan", "Decompose goal"),
         "summarize_plan": ("show", "Summarize plan"),
         "queue_first_slice": ("queue", "Queue first slice"),
+        "list_application_factories": ("show", "List application factories"),
+        "generate_application_plan": ("plan", "Generate application plan"),
+        "apply_application_plan": ("apply", "Apply application plan"),
+        "show_application": ("show", "Show application"),
         "list_goals": ("show", "List goals"),
         "show_goal": ("show", "Show goal"),
         "approve_plan": ("approve", "Approve plan"),
@@ -947,6 +973,27 @@ def _prompt_interpretation_from_intent(
             status=str(resolved_subject.get("planning_status") or "") or None,
         )
         if intent.intent_family == "goal_planning" and (resolved_subject.get("id") or resolved_subject.get("label") or action_payload.get("title") or action_payload.get("reference"))
+        else None
+    )
+    target_application = (
+        PromptInterpretationTarget(
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or action_payload.get("application_name") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            status=str(resolved_subject.get("status") or "") or None,
+        )
+        if intent.intent_type == "show_application" and (resolved_subject.get("id") or resolved_subject.get("label") or action_payload.get("reference"))
+        else None
+    )
+    target_application_plan = (
+        PromptInterpretationTarget(
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or action_payload.get("application_name") or action_payload.get("title") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            status=str(resolved_subject.get("status") or "") or None,
+        )
+        if intent.intent_type in {"generate_application_plan", "apply_application_plan"}
+        and (resolved_subject.get("id") or action_payload.get("application_name") or action_payload.get("reference"))
         else None
     )
     entity_key = str(
@@ -1016,8 +1063,10 @@ def _prompt_interpretation_from_intent(
         execution_mode = PromptInterpretationExecutionMode.QUEUED_RUN.value
     elif intent.intent_type in {"create_thread", "create_goal"}:
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
-    elif intent.intent_type in {"decompose_goal", "approve_plan", "approve_recommendation", "queue_first_slice", "queue_next_slice"}:
+    elif intent.intent_type in {"decompose_goal", "approve_plan", "approve_recommendation", "queue_first_slice", "queue_next_slice", "apply_application_plan"}:
         execution_mode = PromptInterpretationExecutionMode.AWAITING_REVIEW.value
+    elif intent.intent_type in {"generate_application_plan", "create_goal"}:
+        execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
     elif intent.intent_type in {"unsupported_declared_entity", "unsupported_intent"}:
         execution_mode = PromptInterpretationExecutionMode.BLOCKED.value
     else:
@@ -1080,6 +1129,8 @@ def _prompt_interpretation_from_intent(
     interpretation = PromptInterpretation(
         intent_family=intent.intent_family,
         intent_type=intent.intent_type,
+        target_application=target_application,
+        target_application_plan=target_application_plan,
         target_goal=target_goal,
         target_entity=target_entity,
         target_record=target_record,
@@ -1218,6 +1269,10 @@ def _conversation_action_from_intent(
             IntentType.QUEUE_FIRST_SLICE.value: ConversationActionType.QUEUE_FIRST_SLICE.value,
             IntentType.LIST_GOALS.value: ConversationActionType.LIST_GOALS.value,
             IntentType.SHOW_GOAL.value: ConversationActionType.SHOW_GOAL.value,
+            IntentType.LIST_APPLICATION_FACTORIES.value: ConversationActionType.LIST_APPLICATION_FACTORIES.value,
+            IntentType.GENERATE_APPLICATION_PLAN.value: ConversationActionType.GENERATE_APPLICATION_PLAN.value,
+            IntentType.APPLY_APPLICATION_PLAN.value: ConversationActionType.APPLY_APPLICATION_PLAN.value,
+            IntentType.SHOW_APPLICATION.value: ConversationActionType.SHOW_APPLICATION.value,
             IntentType.APPROVE_PLAN.value: ConversationActionType.APPROVE_PLAN.value,
             IntentType.APPROVE_RECOMMENDATION.value: ConversationActionType.APPROVE_RECOMMENDATION.value,
             IntentType.DEFER_EXECUTION.value: ConversationActionType.DEFER_EXECUTION.value,
@@ -1226,8 +1281,17 @@ def _conversation_action_from_intent(
             IntentType.QUEUE_NEXT_SLICE.value: ConversationActionType.QUEUE_NEXT_SLICE.value,
         }
         action_type = action_map.get(intent.intent_type)
+        target_kind = "goal"
+        if intent.intent_type == IntentType.LIST_APPLICATION_FACTORIES.value:
+            target_kind = "workspace"
+        elif intent.intent_type == IntentType.GENERATE_APPLICATION_PLAN.value:
+            target_kind = "application_plan"
+        elif intent.intent_type == IntentType.APPLY_APPLICATION_PLAN.value:
+            target_kind = "application_plan"
+        elif intent.intent_type == IntentType.SHOW_APPLICATION.value:
+            target_kind = "application"
         target = ConversationActionTarget(
-            kind="goal",
+            kind=target_kind,
             id=str(resolved_subject.get("id") or "") or None,
             label=str(resolved_subject.get("label") or action_payload.get("title") or "") or None,
             reference=str(action_payload.get("reference") or "") or None,
@@ -25698,6 +25762,112 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
     }
 
 
+def _serialize_application_factory_summary(definition: ApplicationFactoryDefinition) -> Dict[str, Any]:
+    return {
+        "key": definition.key,
+        "name": definition.name,
+        "description": definition.description,
+        "intended_use_case": definition.intended_use_case,
+        "generated_goal_families": list(definition.generated_goal_families),
+        "assumptions": list(definition.assumptions),
+    }
+
+
+def _serialize_application_plan_generated_goal(goal: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "title": str(goal.get("title") or ""),
+        "description": str(goal.get("description") or ""),
+        "priority": str(goal.get("priority") or "normal"),
+        "goal_type": str(goal.get("goal_type") or "build_system"),
+        "planning_summary": str(goal.get("planning_summary") or ""),
+        "resolution_notes": goal.get("resolution_notes") if isinstance(goal.get("resolution_notes"), list) else [],
+        "threads": goal.get("threads") if isinstance(goal.get("threads"), list) else [],
+        "work_items": goal.get("work_items") if isinstance(goal.get("work_items"), list) else [],
+    }
+
+
+def _serialize_application_plan_summary(plan: ApplicationPlan) -> Dict[str, Any]:
+    payload = plan.plan_json if isinstance(plan.plan_json, dict) else {}
+    generated_goals = payload.get("generated_goals") if isinstance(payload.get("generated_goals"), list) else []
+    return {
+        "id": str(plan.id),
+        "workspace_id": str(plan.workspace_id),
+        "application_id": str(plan.application_id) if plan.application_id else None,
+        "name": plan.name,
+        "summary": plan.summary or "",
+        "source_factory_key": plan.source_factory_key,
+        "source_conversation_id": plan.source_conversation_id or None,
+        "requested_by": str(plan.requested_by_id) if plan.requested_by_id else None,
+        "status": plan.status,
+        "request_objective": plan.request_objective or "",
+        "plan_fingerprint": plan.plan_fingerprint,
+        "generated_goal_count": len(generated_goals),
+        "created_at": plan.created_at,
+        "updated_at": plan.updated_at,
+    }
+
+
+def _serialize_application_plan_detail(plan: ApplicationPlan) -> Dict[str, Any]:
+    payload = plan.plan_json if isinstance(plan.plan_json, dict) else {}
+    factory_definition = get_application_factory(plan.source_factory_key)
+    generated_plan = {
+        "application_name": str(payload.get("application_name") or plan.name),
+        "application_summary": str(payload.get("application_summary") or plan.summary or ""),
+        "source_factory_key": str(payload.get("source_factory_key") or plan.source_factory_key),
+        "request_objective": str(payload.get("request_objective") or plan.request_objective or ""),
+        "ordering_hints": payload.get("ordering_hints") if isinstance(payload.get("ordering_hints"), list) else [],
+        "dependency_hints": payload.get("dependency_hints") if isinstance(payload.get("dependency_hints"), list) else [],
+        "resolution_notes": payload.get("resolution_notes") if isinstance(payload.get("resolution_notes"), list) else [],
+        "generated_goals": [
+            _serialize_application_plan_generated_goal(goal)
+            for goal in (payload.get("generated_goals") if isinstance(payload.get("generated_goals"), list) else [])
+            if isinstance(goal, dict)
+        ],
+    }
+    return {
+        **_serialize_application_plan_summary(plan),
+        "factory": _serialize_application_factory_summary(factory_definition) if factory_definition else None,
+        "application_name": generated_plan["application_name"],
+        "application_summary": generated_plan["application_summary"],
+        "ordering_hints": generated_plan["ordering_hints"],
+        "dependency_hints": generated_plan["dependency_hints"],
+        "resolution_notes": generated_plan["resolution_notes"],
+        "generated_goals": generated_plan["generated_goals"],
+        "generated_plan": generated_plan,
+    }
+
+
+def _serialize_application_summary(application: Application) -> Dict[str, Any]:
+    goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
+    portfolio = _build_goal_portfolio_payload(goals)
+    return {
+        "id": str(application.id),
+        "workspace_id": str(application.workspace_id),
+        "name": application.name,
+        "summary": application.summary or "",
+        "source_factory_key": application.source_factory_key,
+        "source_conversation_id": application.source_conversation_id or None,
+        "requested_by": str(application.requested_by_id) if application.requested_by_id else None,
+        "status": application.status,
+        "request_objective": application.request_objective or "",
+        "goal_count": len(goals),
+        "portfolio_state": portfolio,
+        "created_at": application.created_at,
+        "updated_at": application.updated_at,
+    }
+
+
+def _serialize_application_detail(application: Application) -> Dict[str, Any]:
+    goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
+    factory_definition = get_application_factory(application.source_factory_key)
+    return {
+        **_serialize_application_summary(application),
+        "factory": _serialize_application_factory_summary(factory_definition) if factory_definition else None,
+        "goals": [_serialize_goal_summary(goal) for goal in goals],
+        "metadata": application.metadata_json if isinstance(application.metadata_json, dict) else {},
+    }
+
+
 def _build_goal_portfolio_payload(goals: List[Goal]) -> Dict[str, Any]:
     portfolio_rows = build_goal_portfolio_state(goals, runtime_detail_lookup=_project_runtime_status_to_task)
     portfolio_insights = compute_portfolio_insights(goals, runtime_detail_lookup=_project_runtime_status_to_task)
@@ -26264,6 +26434,10 @@ def _execute_conversation_action(
         ConversationActionType.QUEUE_FIRST_SLICE.value,
         ConversationActionType.LIST_GOALS.value,
         ConversationActionType.SHOW_GOAL.value,
+        ConversationActionType.LIST_APPLICATION_FACTORIES.value,
+        ConversationActionType.GENERATE_APPLICATION_PLAN.value,
+        ConversationActionType.APPLY_APPLICATION_PLAN.value,
+        ConversationActionType.SHOW_APPLICATION.value,
         ConversationActionType.APPROVE_PLAN.value,
         ConversationActionType.APPROVE_RECOMMENDATION.value,
         ConversationActionType.DEFER_EXECUTION.value,
@@ -26274,10 +26448,173 @@ def _execute_conversation_action(
         action_payload = ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("action_payload")
         action_payload = action_payload if isinstance(action_payload, dict) else {}
         summary_mode = str(action_payload.get("summary_mode") or "").strip()
-        goal_id = str(target.get("id") or "").strip()
+        target_kind = str(target.get("kind") or "").strip()
+        target_id = str(target.get("id") or "").strip()
+        application_id = target_id if target_kind == "application" else ""
+        application_plan_id = target_id if target_kind == "application_plan" else ""
+        goal_id = target_id if target_kind == "goal" else ""
         goal: Optional[Goal] = None
         if goal_id:
             goal = Goal.objects.filter(id=goal_id, workspace=workspace).first()
+        application: Optional[Application] = None
+        if application_id:
+            application = Application.objects.filter(id=application_id, workspace=workspace).first()
+        application_plan: Optional[ApplicationPlan] = None
+        if application_plan_id:
+            application_plan = ApplicationPlan.objects.filter(id=application_plan_id, workspace=workspace).first()
+        if action_type == ConversationActionType.LIST_APPLICATION_FACTORIES.value:
+            rows = [_serialize_application_factory_summary(definition) for definition in list_application_factories()]
+            summary = f"Found {len(rows)} application factor{'ies' if len(rows) != 1 else 'y'}."
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": summary,
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"factories": rows},
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.GENERATE_APPLICATION_PLAN.value:
+            objective = str(action_payload.get("objective") or action_payload.get("reference") or prompt).strip()
+            plan, factory_definition, generated_plan, created = create_or_get_application_plan(
+                workspace=workspace,
+                objective=objective,
+                requested_by=identity,
+                source_conversation_id=str(action.get("thread_id") or "").strip(),
+                factory_key=str(action_payload.get("factory_key") or "").strip(),
+                application_name=str(action_payload.get("application_name") or "").strip(),
+            )
+            detail = _serialize_application_plan_detail(plan)
+            action = {
+                **action,
+                "target_object": {
+                    **target,
+                    "id": str(plan.id),
+                    "label": plan.name,
+                    "workspace_id": str(workspace.id),
+                },
+            }
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Generated a reviewable application plan for {plan.name}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {
+                        "application_plan": detail,
+                        "factory": _serialize_application_factory_summary(factory_definition),
+                        "generated_plan": generated_plan.model_dump(mode="json"),
+                        "created": created,
+                    },
+                    "application_plan_id": str(plan.id),
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "application_plan_detail", "label": "Open Application Plan", "params": {"application_plan_id": str(plan.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.APPLY_APPLICATION_PLAN.value:
+            if application_plan is None and context.active_application_plan_id:
+                application_plan = ApplicationPlan.objects.filter(id=context.active_application_plan_id, workspace=workspace).first()
+            if application_plan is None:
+                return JsonResponse(
+                    {
+                        "status": "IntentClarificationRequired",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": "No application plan could be resolved from the conversation context.",
+                        "intent": intent_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": action,
+                        "operation_result": False,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    },
+                    status=409,
+                )
+            application, created = apply_application_plan(application_plan=application_plan, user=user)
+            application.refresh_from_db()
+            application_plan.refresh_from_db()
+            action = {
+                **action,
+                "target_object": {
+                    "kind": "application",
+                    "id": str(application.id),
+                    "label": application.name,
+                    "workspace_id": str(workspace.id),
+                },
+            }
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": (
+                        f"Applied application plan for {application.name} into durable goals, threads, and work items."
+                        if created
+                        else f"Application plan for {application.name} was already applied."
+                    ),
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {
+                        "application": _serialize_application_detail(application),
+                        "application_plan": _serialize_application_plan_detail(application_plan),
+                    },
+                    "application_id": str(application.id),
+                    "application_plan_id": str(application_plan.id),
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "application_detail", "label": "Open Application", "params": {"application_id": str(application.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.SHOW_APPLICATION.value:
+            if application is None and context.active_application_id:
+                application = Application.objects.filter(id=context.active_application_id, workspace=workspace).first()
+            if application is None:
+                return JsonResponse(
+                    {
+                        "status": "IntentClarificationRequired",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": "No application could be resolved from the conversation context.",
+                        "intent": intent_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": action,
+                        "operation_result": False,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    },
+                    status=409,
+                )
+            detail = _serialize_application_detail(application)
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Showing application {application.name}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"application": detail},
+                    "application_id": str(application.id),
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "application_detail", "label": "Open Application", "params": {"application_id": str(application.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
         if action_type == ConversationActionType.LIST_GOALS.value:
             goal_objects = list(Goal.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100])
             goals = [_serialize_goal_summary(item) for item in goal_objects]
@@ -27553,6 +27890,128 @@ def goal_review(request: HttpRequest, goal_id: str) -> JsonResponse:
     else:
         return JsonResponse({"error": "review_action must be approve_plan, defer_execution, adjust_plan, approve_and_queue, queue_first_slice, or queue_next_slice"}, status=400)
     return JsonResponse(result)
+
+
+@login_required
+def application_factories_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    rows = [_serialize_application_factory_summary(definition) for definition in list_application_factories()]
+    return JsonResponse({"factories": rows})
+
+
+@csrf_exempt
+@login_required
+def application_plans_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "GET":
+        workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace, _ = _goal_queryset(identity, workspace_id)
+        plans = list(
+            ApplicationPlan.objects.filter(workspace=workspace)
+            .select_related("application", "requested_by")
+            .order_by("-updated_at", "-created_at")
+        )
+        return JsonResponse({"application_plans": [_serialize_application_plan_summary(plan) for plan in plans]})
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    objective = str(payload.get("objective") or payload.get("request_objective") or "").strip()
+    if not workspace_id or not objective:
+        return JsonResponse({"error": "workspace_id and objective are required"}, status=400)
+    workspace, _ = _goal_queryset(identity, workspace_id)
+    plan, factory_definition, generated_plan, created = create_or_get_application_plan(
+        workspace=workspace,
+        objective=objective,
+        requested_by=identity,
+        source_conversation_id=str(payload.get("source_conversation_id") or "").strip(),
+        factory_key=str(payload.get("factory_key") or "").strip(),
+        application_name=str(payload.get("application_name") or "").strip(),
+    )
+    response_payload = _serialize_application_plan_detail(plan)
+    response_payload["factory"] = _serialize_application_factory_summary(factory_definition)
+    response_payload["generated_plan"] = generated_plan.model_dump(mode="json")
+    response_payload["created"] = created
+    return JsonResponse(response_payload, status=201 if created else 200)
+
+
+@csrf_exempt
+@login_required
+def application_plan_detail(request: HttpRequest, plan_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    plan = get_object_or_404(ApplicationPlan.objects.select_related("workspace", "requested_by", "application"), id=plan_id)
+    if not _workspace_membership(identity, str(plan.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(_serialize_application_plan_detail(plan))
+
+
+@csrf_exempt
+@login_required
+def application_plan_apply(request: HttpRequest, plan_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    plan = get_object_or_404(ApplicationPlan.objects.select_related("workspace", "requested_by", "application"), id=plan_id)
+    if not _workspace_membership(identity, str(plan.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    application, created = apply_application_plan(application_plan=plan, user=request.user)
+    application.refresh_from_db()
+    plan.refresh_from_db()
+    return JsonResponse(
+        {
+            "status": "applied" if created else "already_applied",
+            "application": _serialize_application_detail(application),
+            "application_plan": _serialize_application_plan_detail(plan),
+        }
+    )
+
+
+@login_required
+def applications_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, _ = _goal_queryset(identity, workspace_id)
+    applications = list(
+        Application.objects.filter(workspace=workspace)
+        .select_related("requested_by")
+        .prefetch_related("goals")
+        .order_by("-updated_at", "-created_at")
+    )
+    return JsonResponse({"applications": [_serialize_application_summary(app) for app in applications]})
+
+
+@csrf_exempt
+@login_required
+def application_detail(request: HttpRequest, application_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace", "requested_by").prefetch_related("goals__threads__work_items", "goals__work_items"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(_serialize_application_detail(application))
 
 
 def _review_coordination_thread(

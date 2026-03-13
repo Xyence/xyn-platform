@@ -14,8 +14,27 @@ from xyn_orchestrator.portfolio_intelligence import (
     compute_portfolio_insights,
     recommend_portfolio_goal,
 )
-from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
-from xyn_orchestrator.xyn_api import goal_decompose, goal_detail, goal_review, goals_collection
+from xyn_orchestrator.models import (
+    Application,
+    ApplicationPlan,
+    CoordinationEvent,
+    CoordinationThread,
+    DevTask,
+    Goal,
+    UserIdentity,
+    Workspace,
+    WorkspaceMembership,
+)
+from xyn_orchestrator.xyn_api import (
+    application_detail,
+    application_factories_collection,
+    application_plan_apply,
+    application_plans_collection,
+    goal_decompose,
+    goal_detail,
+    goal_review,
+    goals_collection,
+)
 
 
 class GoalPlanningTests(TestCase):
@@ -297,6 +316,146 @@ class GoalPlanningTests(TestCase):
             CoordinationEvent.objects.filter(thread_id=thread_id, event_type="approval_recommendation").count(),
             1,
         )
+
+    def test_application_factory_catalog_lists_builtins(self):
+        request = self._request("/xyn/api/application-factories")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_factories_collection(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        factory_keys = [row["key"] for row in payload["factories"]]
+        self.assertIn("ai_real_estate_deal_finder", factory_keys)
+        self.assertIn("telecom_support_operations_console", factory_keys)
+        self.assertIn("reseller_portal", factory_keys)
+
+    def test_application_plan_generation_is_reviewable_and_non_executing(self):
+        applications_before = Application.objects.count()
+        goals_before = Goal.objects.count()
+        threads_before = CoordinationThread.objects.count()
+        work_items_before = DevTask.objects.count()
+        request = self._request(
+            "/xyn/api/application-plans",
+            method="post",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "objective": "Build an AI real estate deal finder",
+                    "source_conversation_id": "thread-1",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._dispatch_next_queue_item"
+        ) as mock_dispatch:
+            response = application_plans_collection(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(payload["status"], "review")
+        self.assertEqual(payload["source_factory_key"], "ai_real_estate_deal_finder")
+        self.assertGreaterEqual(len(payload["generated_goals"]), 1)
+        self.assertEqual(Application.objects.count(), applications_before)
+        self.assertEqual(Goal.objects.count(), goals_before)
+        self.assertEqual(CoordinationThread.objects.count(), threads_before)
+        self.assertEqual(DevTask.objects.count(), work_items_before)
+        mock_dispatch.assert_not_called()
+
+    def test_application_plan_apply_creates_durable_objects_and_is_idempotent(self):
+        generate_request = self._request(
+            "/xyn/api/application-plans",
+            method="post",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "objective": "Build an AI real estate deal finder",
+                    "source_conversation_id": "thread-1",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            generate_response = application_plans_collection(generate_request)
+        plan_payload = json.loads(generate_response.content)
+        plan = ApplicationPlan.objects.get(id=plan_payload["id"])
+
+        apply_request = self._request(f"/xyn/api/application-plans/{plan.id}/apply", method="post", data=json.dumps({}))
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._dispatch_next_queue_item"
+        ) as mock_dispatch:
+            apply_response = application_plan_apply(apply_request, str(plan.id))
+        applied = json.loads(apply_response.content)
+        self.assertEqual(apply_response.status_code, 200)
+        self.assertEqual(applied["status"], "applied")
+        application = Application.objects.get(id=applied["application"]["id"])
+        plan.refresh_from_db()
+        self.assertEqual(plan.status, "applied")
+        self.assertEqual(plan.application_id, application.id)
+        self.assertGreater(application.goals.count(), 0)
+        self.assertGreater(CoordinationThread.objects.filter(goal__application=application).count(), 0)
+        self.assertGreater(DevTask.objects.filter(goal__application=application).count(), 0)
+        mock_dispatch.assert_not_called()
+
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            second_response = application_plan_apply(apply_request, str(plan.id))
+        second_payload = json.loads(second_response.content)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(second_payload["status"], "already_applied")
+        self.assertEqual(Application.objects.filter(id=application.id).count(), 1)
+
+    def test_application_detail_groups_goals_and_reuses_portfolio_state(self):
+        plan = ApplicationPlan.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Reviewable plan",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="review",
+            request_objective="Build an AI real estate deal finder",
+            plan_fingerprint=f"plan-{uuid.uuid4().hex}",
+            plan_json={},
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=plan.plan_fingerprint,
+            request_objective=plan.request_objective,
+        )
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Listing and Property Foundation",
+            description="Initial MVP slice",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+            planning_status="decomposed",
+        )
+        CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Listing Data Ingestion",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        request = self._request(f"/xyn/api/applications/{application.id}")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_detail(request, str(application.id))
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["id"], str(application.id))
+        self.assertEqual(len(payload["goals"]), 1)
+        self.assertEqual(payload["goals"][0]["application_id"], str(application.id))
+        self.assertIn("portfolio_state", payload)
+        self.assertEqual(len(payload["portfolio_state"]["goals"]), 1)
 
     def test_recommend_next_slice_includes_stable_recommendation_id_for_unchanged_state(self):
         goal = Goal.objects.create(

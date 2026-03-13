@@ -196,6 +196,51 @@ class EpicDIntentEngineTests(unittest.TestCase):
         self.assertIn("real estate deal finder", str(envelope.action_payload.get("title") or "").lower())
         self.assertEnvelopeStable(envelope)
 
+    def test_list_application_factories_resolves(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="show available application factories",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.LIST_APPLICATION_FACTORIES.value)
+        self.assertEnvelopeStable(envelope)
+
+    def test_generate_application_plan_resolves_for_real_estate_request(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="build an AI real estate deal finder",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.GENERATE_APPLICATION_PLAN.value)
+        self.assertEqual(envelope.action_payload.get("factory_key"), "ai_real_estate_deal_finder")
+        self.assertIn("deal finder", str(envelope.action_payload.get("application_name") or "").lower())
+        self.assertEnvelopeStable(envelope)
+
+    def test_apply_application_plan_uses_active_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="apply this application plan",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(active_application_plan_id="plan-1"),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.APPLY_APPLICATION_PLAN.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "plan-1")
+        self.assertEnvelopeStable(envelope)
+
     def test_decompose_goal_uses_active_goal_context(self):
         engine = IntentResolutionEngine(
             proposal_provider=_FakeProvider(),
@@ -2317,6 +2362,105 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["summary"], "Resumed Listing Data Ingestion.")
         mock_review.assert_called_once()
+
+    def test_execute_conversation_action_list_application_factories_returns_factory_rows(self):
+        response = intent_api._execute_conversation_action(
+            identity=SimpleNamespace(id="user-1"),
+            user=SimpleNamespace(id="user-1"),
+            workspace=SimpleNamespace(id="ws-1"),
+            action={
+                "action_type": "list_application_factories",
+                "thread_id": "thread-1",
+                "payload": {"action_payload": {}},
+                "target_object": {"workspace_id": "ws-1"},
+            },
+            prompt="show available application factories",
+            request_id="req-1",
+            intent_payload={"intent_type": "list_application_factories"},
+            prompt_interpretation={"intent_type": "list_application_factories"},
+        )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertGreaterEqual(len((payload.get("result") or {}).get("factories") or []), 1)
+
+    def test_execute_conversation_action_generate_application_plan_returns_plan_panel_action(self):
+        plan = SimpleNamespace(id="plan-1", name="Deal Finder", source_factory_key="ai_real_estate_deal_finder")
+        detail = {
+            "id": "plan-1",
+            "name": "Deal Finder",
+            "status": "review",
+            "source_factory_key": "ai_real_estate_deal_finder",
+            "generated_goals": [{"title": "Listing and Property Foundation"}],
+        }
+        factory = {"key": "ai_real_estate_deal_finder", "name": "AI Real Estate Deal Finder"}
+        generated = SimpleNamespace(model_dump=lambda mode="json": {"application_name": "Deal Finder"})
+        with patch.object(
+            intent_api,
+            "create_or_get_application_plan",
+            return_value=(plan, factory, generated, True),
+        ), patch.object(intent_api, "_serialize_application_plan_detail", return_value=detail), patch.object(
+            intent_api, "_serialize_application_factory_summary", return_value=factory
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "generate_application_plan",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {"application_name": "Deal Finder", "factory_key": "ai_real_estate_deal_finder"}},
+                    "target_object": {"workspace_id": "ws-1"},
+                },
+                prompt="build an AI real estate deal finder",
+                request_id="req-1",
+                intent_payload={"intent_type": "generate_application_plan"},
+                prompt_interpretation={"intent_type": "generate_application_plan"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["application_plan_id"], "plan-1")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "application_plan_detail")
+
+    def test_execute_conversation_action_apply_application_plan_returns_application_panel_action_without_dispatch(self):
+        application_plan = SimpleNamespace(id="plan-1", workspace_id="ws-1", refresh_from_db=lambda: None)
+        application = SimpleNamespace(id="app-1", name="Deal Finder", refresh_from_db=lambda: None)
+        app_detail = {"id": "app-1", "name": "Deal Finder", "goals": []}
+        plan_detail = {"id": "plan-1", "name": "Deal Finder", "status": "applied"}
+        with patch.object(
+            intent_api.ApplicationPlan.objects,
+            "filter",
+            return_value=SimpleNamespace(first=lambda: application_plan),
+        ), patch.object(
+            intent_api,
+            "apply_application_plan",
+            return_value=(application, True),
+        ) as mock_apply, patch.object(
+            intent_api, "_serialize_application_detail", return_value=app_detail
+        ), patch.object(
+            intent_api, "_serialize_application_plan_detail", return_value=plan_detail
+        ), patch.object(intent_api, "_dispatch_next_queue_item") as mock_dispatch:
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "apply_application_plan",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {}},
+                    "target_object": {"id": "plan-1", "kind": "application_plan", "workspace_id": "ws-1"},
+                },
+                prompt="apply this application plan",
+                request_id="req-1",
+                intent_payload={"intent_type": "apply_application_plan"},
+                prompt_interpretation={"intent_type": "apply_application_plan"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["application_id"], "app-1")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "application_detail")
+        mock_apply.assert_called_once()
+        mock_dispatch.assert_not_called()
 
     def test_resolve_route_preserves_legacy_app_builder_flow_without_epic_d_intent(self):
         request = self.factory.post(

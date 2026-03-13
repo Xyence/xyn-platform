@@ -2369,6 +2369,7 @@ export type CoordinationThreadListResponse = PaginatedResponse<CoordinationThrea
 export type GoalSummary = {
   id: string;
   workspace_id: string;
+  application_id?: string | null;
   title: string;
   description: string;
   source_conversation_id?: string | null;
@@ -2384,6 +2385,7 @@ export type GoalSummary = {
     goal_progress_status: string;
     progress_percent: number;
   };
+  goal_progress_status?: string;
   coordination_priority?: {
     value: string;
     reasons: string[];
@@ -2425,6 +2427,99 @@ export type GoalRecommendation = {
   }>;
   reasoning_summary?: string;
   summary: string;
+};
+
+export type ApplicationFactorySummary = {
+  key: string;
+  name: string;
+  description: string;
+  intended_use_case: string;
+  generated_goal_families: string[];
+  assumptions: string[];
+};
+
+export type GeneratedApplicationPlanGoal = {
+  title: string;
+  description: string;
+  priority: string;
+  goal_type: string;
+  planning_summary: string;
+  resolution_notes: string[];
+  threads: Array<{
+    title: string;
+    description: string;
+    priority: string;
+    domain: string;
+    sequence: number;
+  }>;
+  work_items: Array<{
+    thread_title: string;
+    title: string;
+    description: string;
+    priority: string;
+    sequence: number;
+    dependency_work_item_refs?: string[];
+  }>;
+};
+
+export type ApplicationPlanGeneratedPlan = {
+  application_name: string;
+  application_summary: string;
+  source_factory_key: string;
+  request_objective: string;
+  generated_goals: GeneratedApplicationPlanGoal[];
+  ordering_hints: string[];
+  dependency_hints: string[];
+  resolution_notes: string[];
+};
+
+export type ApplicationPlanSummary = {
+  id: string;
+  application_id?: string | null;
+  workspace_id: string;
+  name: string;
+  summary: string;
+  source_factory_key: string;
+  source_conversation_id?: string | null;
+  requested_by?: string | null;
+  status: "review" | "applied" | "canceled" | string;
+  request_objective: string;
+  plan_fingerprint?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ApplicationPlanDetail = ApplicationPlanSummary & {
+  generated_plan: ApplicationPlanGeneratedPlan;
+  application_name?: string;
+  application_summary?: string;
+  ordering_hints?: string[];
+  dependency_hints?: string[];
+  resolution_notes?: string[];
+  generated_goals?: GeneratedApplicationPlanGoal[];
+  factory?: ApplicationFactorySummary;
+  created?: boolean;
+};
+
+export type ApplicationSummary = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  summary: string;
+  source_factory_key: string;
+  source_conversation_id?: string | null;
+  requested_by?: string | null;
+  status: "active" | "completed" | "archived" | string;
+  request_objective: string;
+  goal_count: number;
+  created_at: string;
+  updated_at: string;
+  portfolio_state?: GoalPortfolioState;
+};
+
+export type ApplicationDetail = ApplicationSummary & {
+  goals: GoalSummary[];
+  portfolio_state?: GoalPortfolioState;
 };
 
 export type GoalDetail = GoalSummary & {
@@ -3059,6 +3154,8 @@ export type PromptInterpretationClarificationOption = {
 export type PromptInterpretation = {
   intent_family: string;
   intent_type: string;
+  target_application?: PromptInterpretationTarget | null;
+  target_application_plan?: PromptInterpretationTarget | null;
   target_entity?: PromptInterpretationTarget | null;
   target_record?: PromptInterpretationTarget | null;
   target_thread?: PromptInterpretationTarget | null;

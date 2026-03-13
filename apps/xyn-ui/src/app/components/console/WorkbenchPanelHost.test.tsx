@@ -10,6 +10,9 @@ const apiMocks = vi.hoisted(() => ({
   listGoals: vi.fn(),
   getGoal: vi.fn(),
   reviewGoal: vi.fn(),
+  getApplicationPlan: vi.fn(),
+  applyApplicationPlan: vi.fn(),
+  getApplication: vi.fn(),
   reviewCoordinationThread: vi.fn(),
   listCoordinationThreads: vi.fn(),
   getCoordinationThread: vi.fn(),
@@ -47,6 +50,9 @@ vi.mock("../../../api/xyn", async () => {
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
     reviewGoal: apiMocks.reviewGoal,
+    getApplicationPlan: apiMocks.getApplicationPlan,
+    applyApplicationPlan: apiMocks.applyApplicationPlan,
+    getApplication: apiMocks.getApplication,
     reviewCoordinationThread: apiMocks.reviewCoordinationThread,
     listCoordinationThreads: apiMocks.listCoordinationThreads,
     getCoordinationThread: apiMocks.getCoordinationThread,
@@ -1098,6 +1104,203 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(screen.getByText("Final summary")).toBeInTheDocument());
     expect(screen.getAllByText("Inspect repository")).toHaveLength(1);
     expect(screen.getAllByText("Final summary")).toHaveLength(1);
+  });
+
+  it("loads application plan detail and applies through the application API", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getApplicationPlan.mockResolvedValue({
+      id: "plan-1",
+      workspace_id: "ws-1",
+      application_id: null,
+      name: "Deal Finder",
+      summary: "Reviewable application plan",
+      source_factory_key: "ai_real_estate_deal_finder",
+      source_conversation_id: "thread-1",
+      requested_by: "user-1",
+      status: "review",
+      request_objective: "Build an AI real estate deal finder",
+      plan_fingerprint: "fp-1",
+      generated_goal_count: 2,
+      created_at: "2026-03-13T10:00:00Z",
+      updated_at: "2026-03-13T10:00:00Z",
+      factory: {
+        key: "ai_real_estate_deal_finder",
+        name: "AI Real Estate Deal Finder",
+        description: "Builds a real estate opportunity workflow.",
+        intended_use_case: "Property discovery and scoring",
+        generated_goal_families: ["foundation", "analysis"],
+        assumptions: ["MVP first"],
+      },
+      application_name: "Deal Finder",
+      application_summary: "A real estate deal finder",
+      ordering_hints: ["Start with ingestion."],
+      dependency_hints: ["Scoring depends on comps."],
+      resolution_notes: ["Review before apply."],
+      generated_goals: [
+        {
+          title: "Listing and Property Foundation",
+          description: "Build the first slice",
+          priority: "high",
+          goal_type: "build_system",
+          planning_summary: "Start with durable entities.",
+          resolution_notes: [],
+          threads: [],
+          work_items: [],
+        },
+      ],
+      generated_plan: {
+        application_name: "Deal Finder",
+        application_summary: "A real estate deal finder",
+        source_factory_key: "ai_real_estate_deal_finder",
+        request_objective: "Build an AI real estate deal finder",
+        ordering_hints: ["Start with ingestion."],
+        dependency_hints: ["Scoring depends on comps."],
+        resolution_notes: ["Review before apply."],
+        generated_goals: [
+          {
+            title: "Listing and Property Foundation",
+            description: "Build the first slice",
+            priority: "high",
+            goal_type: "build_system",
+            planning_summary: "Start with durable entities.",
+            resolution_notes: [],
+            threads: [],
+            work_items: [],
+          },
+        ],
+      },
+    });
+    apiMocks.applyApplicationPlan.mockResolvedValue({
+      status: "applied",
+      application: {
+        id: "app-1",
+        workspace_id: "ws-1",
+        name: "Deal Finder",
+        summary: "A real estate deal finder",
+        source_factory_key: "ai_real_estate_deal_finder",
+        source_conversation_id: "thread-1",
+        requested_by: "user-1",
+        status: "active",
+        request_objective: "Build an AI real estate deal finder",
+        goal_count: 1,
+        portfolio_state: { goals: [], insights: [], recommended_goal: null },
+        created_at: "2026-03-13T10:00:00Z",
+        updated_at: "2026-03-13T10:05:00Z",
+        factory: null,
+        goals: [],
+        metadata: {},
+      },
+      application_plan: { id: "plan-1" },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "plan-1", panel_type: "detail", instance_key: "application_plan:plan-1", key: "application_plan_detail", params: { application_plan_id: "plan-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getApplicationPlan).toHaveBeenCalledWith("plan-1"));
+    await waitFor(() => expect(screen.getByText("Reviewable application plan")).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Apply Plan" }).click();
+    });
+    await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
+    await waitFor(() =>
+      expect(onOpenPanel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          key: "application_detail",
+          params: { application_id: "app-1" },
+        }),
+      ),
+    );
+  });
+
+  it("loads application detail with grouped goals and portfolio summary", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "A real estate deal finder",
+      source_factory_key: "ai_real_estate_deal_finder",
+      source_conversation_id: "thread-1",
+      requested_by: "user-1",
+      status: "active",
+      request_objective: "Build an AI real estate deal finder",
+      goal_count: 1,
+      portfolio_state: {
+        goals: [
+          {
+            goal_id: "goal-1",
+            title: "Listing and Property Foundation",
+            planning_status: "decomposed",
+            goal_progress_status: "in_progress",
+            progress_percent: 25,
+            health_status: "active",
+            active_threads: 1,
+            blocked_threads: 0,
+            recent_execution_count: 1,
+            coordination_priority: { value: "medium", reasons: ["queueable work exists"] },
+          },
+        ],
+        insights: [
+          {
+            key: "steady_progress",
+            summary: "Portfolio activity is balanced around Listing and Property Foundation.",
+            evidence: ["1 active thread exists."],
+            goal_ids: ["goal-1"],
+          },
+        ],
+        recommended_goal: null,
+      },
+      created_at: "2026-03-13T10:00:00Z",
+      updated_at: "2026-03-13T10:05:00Z",
+      factory: {
+        key: "ai_real_estate_deal_finder",
+        name: "AI Real Estate Deal Finder",
+        description: "Builds a real estate opportunity workflow.",
+        intended_use_case: "Property discovery and scoring",
+        generated_goal_families: ["foundation"],
+        assumptions: ["MVP first"],
+      },
+      goals: [
+        {
+          id: "goal-1",
+          workspace_id: "ws-1",
+          application_id: "app-1",
+          title: "Listing and Property Foundation",
+          description: "Build the first slice",
+          goal_type: "build_system",
+          planning_status: "decomposed",
+          priority: "high",
+          planning_summary: "Start with durable entities.",
+          resolution_notes: [],
+          thread_count: 1,
+          work_item_count: 2,
+          created_at: "2026-03-13T10:00:00Z",
+          updated_at: "2026-03-13T10:00:00Z",
+        },
+      ],
+      metadata: {},
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "app-1", panel_type: "detail", instance_key: "application:app-1", key: "application_detail", params: { application_id: "app-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await waitFor(() => expect(screen.getByText("Deal Finder")).toBeInTheDocument());
+    expect(screen.getByText("Listing and Property Foundation")).toBeInTheDocument();
+    expect(screen.getByText("Active Goals")).toBeInTheDocument();
   });
 
   it("does not render duplicate panel chrome headings or close buttons", async () => {

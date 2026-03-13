@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  applyApplicationPlan,
   executeAppPalettePrompt,
+  getApplication,
+  getApplicationPlan,
   getGoal,
   getArtifactConsoleDetailBySlug,
   getArtifactConsoleFilesBySlug,
@@ -26,8 +29,11 @@ import {
   reviewGoal,
 } from "../../../api/xyn";
 import type {
-  AppPaletteResult,
   AppBuilderArtifact,
+  ApplicationDetail,
+  ApplicationFactorySummary,
+  ApplicationPlanDetail,
+  AppPaletteResult,
   ArtifactCanvasTableResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFileRow,
@@ -63,6 +69,8 @@ export type ConsolePanelKey =
   | "platform_settings"
   | "goal_list"
   | "goal_detail"
+  | "application_plan_detail"
+  | "application_detail"
   | "workspaces"
   | "thread_list"
   | "thread_detail"
@@ -2772,11 +2780,231 @@ function LocalProvisionResultPanel({ payload }: { payload?: LocalProvisionRespon
   );
 }
 
+function ApplicationPlanDetailPanel({
+  applicationPlanId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  applicationPlanId: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [payload, setPayload] = useState<ApplicationPlanDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getApplicationPlan(applicationPlanId);
+        if (!active) return;
+        setPayload(next);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load application plan");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [applicationPlanId]);
+
+  useEffect(() => {
+    onTitleChange?.(payload?.name || "Application Plan");
+  }, [onTitleChange, payload?.name]);
+
+  async function handleApply() {
+    try {
+      const response = await applyApplicationPlan(applicationPlanId);
+      setPayload(response.application_plan);
+      setMessage(
+        response.status === "applied"
+          ? "Applied application plan into durable goals, threads, and work items."
+          : "Application plan was already applied."
+      );
+      onOpenPanel("application_detail", { application_id: response.application.id });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to apply application plan");
+    }
+  }
+
+  if (loading) return <p className="muted">Loading application plan…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Application plan not found.</p>;
+  const generatedPlan = payload.generated_plan ?? {
+    ordering_hints: payload.ordering_hints ?? [],
+    dependency_hints: payload.dependency_hints ?? [],
+    generated_goals: payload.generated_goals ?? [],
+  };
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="detail-grid">
+          <div><div className="field-label">Application</div><div className="field-value">{payload.name}</div></div>
+          <div><div className="field-label">Factory</div><div className="field-value">{payload.factory?.name || payload.source_factory_key}</div></div>
+          <div><div className="field-label">Status</div><div className="field-value">{payload.status}</div></div>
+          <div><div className="field-label">Generated Goals</div><div className="field-value">{generatedPlan.generated_goals.length}</div></div>
+        </div>
+        <p className="muted" style={{ marginTop: 12 }}>{payload.summary}</p>
+        {message ? <InlineMessage tone="info" title="Plan Apply" body={message} /> : null}
+        <div className="inline-action-row" style={{ marginTop: 12 }}>
+          <button type="button" className="ghost sm" disabled={payload.status === "applied"} onClick={handleApply}>
+            Apply Plan
+          </button>
+        </div>
+      </section>
+      <section className="card">
+        <div className="field-label">Ordering Hints</div>
+        <ul className="detail-list">
+          {generatedPlan.ordering_hints.map((item) => <li key={item}>{item}</li>)}
+          {!generatedPlan.ordering_hints.length ? <li className="muted">No ordering hints.</li> : null}
+        </ul>
+        <div className="field-label" style={{ marginTop: 12 }}>Dependency Hints</div>
+        <ul className="detail-list">
+          {generatedPlan.dependency_hints.map((item) => <li key={item}>{item}</li>)}
+          {!generatedPlan.dependency_hints.length ? <li className="muted">No dependency hints.</li> : null}
+        </ul>
+      </section>
+      {generatedPlan.generated_goals.map((goal) => (
+        <section className="card" key={goal.title}>
+          <div className="card-header"><div><p className="muted">{goal.title}</p></div></div>
+          <p className="muted">{goal.planning_summary}</p>
+          <div className="canvas-table-wrap" style={{ marginTop: 12 }}>
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Thread</th>
+                  <th>Priority</th>
+                  <th>Initial Work</th>
+                </tr>
+              </thead>
+              <tbody>
+                {goal.threads.map((thread) => (
+                  <tr key={thread.title}>
+                    <td>{thread.title}</td>
+                    <td>{thread.priority}</td>
+                    <td>{goal.work_items.filter((item) => item.thread_title === thread.title).length}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function ApplicationDetailPanel({
+  applicationId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  applicationId: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [payload, setPayload] = useState<ApplicationDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getApplication(applicationId);
+        if (!active) return;
+        setPayload(next);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load application");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [applicationId]);
+
+  useEffect(() => {
+    onTitleChange?.(payload?.name || "Application");
+  }, [onTitleChange, payload?.name]);
+
+  if (loading) return <p className="muted">Loading application…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Application not found.</p>;
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="detail-grid">
+          <div><div className="field-label">Application</div><div className="field-value">{payload.name}</div></div>
+          <div><div className="field-label">Factory</div><div className="field-value">{payload.source_factory_key}</div></div>
+          <div><div className="field-label">Status</div><div className="field-value">{payload.status}</div></div>
+          <div><div className="field-label">Goals</div><div className="field-value">{payload.goal_count}</div></div>
+        </div>
+        <p className="muted" style={{ marginTop: 12 }}>{payload.summary}</p>
+      </section>
+      {payload.portfolio_state ? (
+        <section className="card">
+          <div className="detail-grid">
+            <div><div className="field-label">Active Goals</div><div className="field-value">{payload.portfolio_state.goals.filter((goal) => goal.health_status === "active").length}</div></div>
+            <div><div className="field-label">Blocked Goals</div><div className="field-value">{payload.portfolio_state.goals.filter((goal) => goal.health_status === "blocked").length}</div></div>
+            <div><div className="field-label">Recent Execution</div><div className="field-value">{payload.portfolio_state.goals.reduce((sum, goal) => sum + (goal.recent_execution_count || 0), 0)}</div></div>
+          </div>
+          {payload.portfolio_state.recommended_goal ? (
+            <InlineMessage tone="info" title={`Recommended Goal: ${payload.portfolio_state.recommended_goal.title}`} body={payload.portfolio_state.recommended_goal.summary} />
+          ) : null}
+        </section>
+      ) : null}
+      <section className="card">
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Goal</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Threads</th>
+                <th>Work Items</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payload.goals.map((goal) => (
+                <tr key={goal.id}>
+                  <td>{goal.title}</td>
+                  <td>{goal.planning_status}</td>
+                  <td>{goal.goal_progress_status || "—"}</td>
+                  <td>{goal.thread_count}</td>
+                  <td>{goal.work_item_count}</td>
+                  <td><button type="button" className="ghost sm" onClick={() => onOpenPanel("goal_detail", { goal_id: goal.id })}>Open Goal</button></td>
+                </tr>
+              ))}
+              {!payload.goals.length ? <tr><td colSpan={6} className="muted">No goals found for this application.</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   platform_settings: "Platform Settings",
   workspaces: "Workspaces",
   goal_list: "Goals",
   goal_detail: "Goal",
+  application_plan_detail: "Application Plan",
+  application_detail: "Application",
   thread_list: "Threads",
   thread_detail: "Thread",
   runs: "Runs",
@@ -2964,6 +3192,26 @@ export default function WorkbenchPanelHost({
         <GoalDetailPanel
           goalId={String(panel.params?.goal_id || "")}
           workspaceId={workspaceId}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
+        />
+      );
+    }
+
+    if (panel.key === "application_plan_detail") {
+      return (
+        <ApplicationPlanDetailPanel
+          applicationPlanId={String(panel.params?.application_plan_id || "")}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
+        />
+      );
+    }
+
+    if (panel.key === "application_detail") {
+      return (
+        <ApplicationDetailPanel
+          applicationId={String(panel.params?.application_id || "")}
           onOpenPanel={openPanel}
           onTitleChange={setResolvedTitle}
         />

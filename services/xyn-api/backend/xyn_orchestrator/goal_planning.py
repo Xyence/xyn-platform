@@ -435,6 +435,7 @@ def serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
     progress = compute_goal_progress(goal)
     return {
         "id": str(goal.id),
+        "application_id": str(goal.application_id) if getattr(goal, "application_id", None) else None,
         "workspace_id": str(goal.workspace_id),
         "title": goal.title,
         "description": goal.description or "",

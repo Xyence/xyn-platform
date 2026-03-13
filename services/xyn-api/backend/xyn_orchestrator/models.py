@@ -2702,6 +2702,9 @@ class Goal(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="goals")
+    application = models.ForeignKey(
+        "Application", null=True, blank=True, on_delete=models.SET_NULL, related_name="goals"
+    )
     title = models.CharField(max_length=240)
     description = models.TextField(blank=True)
     source_conversation_id = models.CharField(max_length=120, blank=True)
@@ -2721,3 +2724,80 @@ class Goal(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+
+class Application(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("completed", "Completed"),
+        ("archived", "Archived"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="applications")
+    name = models.CharField(max_length=240)
+    summary = models.TextField(blank=True)
+    source_factory_key = models.CharField(max_length=120)
+    source_conversation_id = models.CharField(max_length=120, blank=True)
+    requested_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="requested_applications"
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    plan_fingerprint = models.CharField(max_length=128, blank=True, default="")
+    request_objective = models.TextField(blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "plan_fingerprint"],
+                condition=~Q(plan_fingerprint=""),
+                name="uniq_application_plan_fingerprint_per_workspace",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class ApplicationPlan(models.Model):
+    STATUS_CHOICES = [
+        ("review", "Review"),
+        ("applied", "Applied"),
+        ("canceled", "Canceled"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="application_plans")
+    application = models.ForeignKey(
+        "Application", null=True, blank=True, on_delete=models.SET_NULL, related_name="plans"
+    )
+    name = models.CharField(max_length=240)
+    summary = models.TextField(blank=True)
+    source_factory_key = models.CharField(max_length=120)
+    source_conversation_id = models.CharField(max_length=120, blank=True)
+    requested_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="requested_application_plans"
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="review")
+    request_objective = models.TextField(blank=True)
+    plan_fingerprint = models.CharField(max_length=128, blank=True, default="")
+    plan_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "plan_fingerprint"],
+                condition=~Q(plan_fingerprint=""),
+                name="uniq_application_plan_fingerprint_review_per_workspace",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return self.name

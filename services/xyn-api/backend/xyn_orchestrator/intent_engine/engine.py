@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from xyn_orchestrator.models import Artifact
 
+from ..application_factories import infer_application_factory_key, infer_application_name
 from .contracts import DraftIntakeContractRegistry
 from .proposal_provider import IntentContextPackMissingError, IntentProposalProvider
 from .types import (
@@ -966,6 +967,83 @@ class IntentResolutionEngine:
             resolution_notes=notes or [f"{intent_type.value} requested"],
         )
 
+    def _resolve_application_factory_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        workspace_id = str(context.workspace_id or "").strip()
+        conversation_context = context.conversation_context or ConversationExecutionContext()
+
+        if re.search(r"\b(show|list)\s+(?:available\s+)?application factories\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.LIST_APPLICATION_FACTORIES,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": text},
+                confidence=0.95,
+                resolution_notes=["application factory catalog requested"],
+            )
+
+        generate_match = re.search(
+            r"\b(?:build|create|generate)\b.+\b(?:application plan|application|console|portal|finder)\b",
+            lowered,
+        )
+        if generate_match:
+            factory_key = infer_application_factory_key(objective=text)
+            application_name = infer_application_name(text)
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.GENERATE_APPLICATION_PLAN,
+                target_context={"workspace_id": workspace_id},
+                action_payload={
+                    "objective": text,
+                    "reference": text,
+                    "factory_key": factory_key,
+                    "application_name": application_name,
+                },
+                confidence=0.91,
+                resolution_notes=[f"application factory plan requested via {factory_key}"],
+            )
+
+        if re.search(r"\bapply(?: this)? application plan\b", lowered):
+            resolved_subject = {}
+            if conversation_context.active_application_plan_id:
+                resolved_subject = {
+                    "id": str(conversation_context.active_application_plan_id),
+                    "label": "Active Application Plan",
+                }
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.APPLY_APPLICATION_PLAN,
+                target_context={"workspace_id": workspace_id},
+                resolved_subject=resolved_subject,
+                action_payload={"reference": text},
+                confidence=0.88 if resolved_subject else 0.48,
+                needs_clarification=not bool(resolved_subject),
+                clarification_reason=ClarificationReason.MISSING_TARGET if not resolved_subject else None,
+                resolution_notes=["application plan apply requested"],
+            )
+
+        if re.search(r"\bshow (?:this )?application\b", lowered):
+            resolved_subject = {}
+            if conversation_context.active_application_id:
+                resolved_subject = {
+                    "id": str(conversation_context.active_application_id),
+                    "label": "Active Application",
+                }
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.SHOW_APPLICATION,
+                target_context={"workspace_id": workspace_id},
+                resolved_subject=resolved_subject,
+                action_payload={"reference": text},
+                confidence=0.84 if resolved_subject else 0.42,
+                needs_clarification=not bool(resolved_subject),
+                clarification_reason=ClarificationReason.MISSING_TARGET if not resolved_subject else None,
+                resolution_notes=["application detail requested"],
+            )
+
+        return None
+
     def _resolve_app_operation_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
         workspace_id = str(context.workspace_id or "").strip()
         if not workspace_id or not callable(self.capability_manifest_lookup):
@@ -1052,12 +1130,13 @@ class IntentResolutionEngine:
                 confidence=0.0,
                 resolution_notes=[str(context.worker_mention_error or "").strip()],
             )
+        application_factory = self._resolve_application_factory_intent(message=user_message, context=context)
         goal_planning = self._resolve_goal_intent(message=user_message, context=context)
         thread_coordination = self._resolve_thread_intent(message=user_message, context=context)
         artifact_diagnostic = self._resolve_artifact_diagnostic_intent(message=user_message, context=context)
         development = self._resolve_development_intent(message=user_message, context=context)
         app_operation = self._resolve_app_operation_intent(message=user_message, context=context)
-        envelope = goal_planning or thread_coordination or artifact_diagnostic or development or app_operation or self._intent_envelope(
+        envelope = application_factory or goal_planning or thread_coordination or artifact_diagnostic or development or app_operation or self._intent_envelope(
             intent_family=IntentFamily.DEVELOPMENT_WORK,
             intent_type=IntentType.UNSUPPORTED_INTENT,
             target_context={"workspace_id": str(context.workspace_id or "").strip()},

@@ -66,6 +66,34 @@ describe("panelFactory", () => {
     expect(spec.params).toMatchObject({ goal_id: "goal-123" });
   });
 
+  it("creates and restores application plan detail panels through the registry path", () => {
+    const panel = createWorkspacePanel({
+      panel_type: "application_plan_detail",
+      object_id: "plan-123",
+      workspace_id: "ws-1",
+      creation_source: "conversation_action",
+    });
+
+    const spec = openPanel(panel);
+    expect(spec.key).toBe("application_plan_detail");
+    expect(spec.title).toBe("Application Plan");
+    expect(spec.params).toMatchObject({ application_plan_id: "plan-123" });
+  });
+
+  it("creates and restores application detail panels through the registry path", () => {
+    const panel = createWorkspacePanel({
+      panel_type: "application_detail",
+      object_id: "app-123",
+      workspace_id: "ws-1",
+      creation_source: "conversation_action",
+    });
+
+    const spec = openPanel(panel);
+    expect(spec.key).toBe("application_detail");
+    expect(spec.title).toBe("Application");
+    expect(spec.params).toMatchObject({ application_id: "app-123" });
+  });
+
   it("maps runtime artifact object ids into artifact detail params", () => {
     const panel = createWorkspacePanel({
       panel_type: "artifact_view",

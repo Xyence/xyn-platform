@@ -45,6 +45,10 @@ import type {
   CoordinationThreadListResponse,
   GoalDetail,
   GoalListResponse,
+  ApplicationFactorySummary,
+  ApplicationPlanDetail,
+  ApplicationSummary,
+  ApplicationDetail,
   WorkQueueResponse,
   ContextPackCreatePayload,
   ContextPackDetail,
@@ -4258,6 +4262,73 @@ export async function reviewGoal(
     body: JSON.stringify({ review_action: reviewAction, recommendation_id: recommendationId || undefined }),
   });
   return handle<{ status: string; goal: GoalDetail; queue_seed?: Record<string, unknown> }>(response);
+}
+
+export async function listApplicationFactories(): Promise<{ factories: ApplicationFactorySummary[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-factories`, {
+    credentials: "include",
+  });
+  return handle<{ factories: ApplicationFactorySummary[] }>(response);
+}
+
+export async function listApplicationPlans(workspaceId: string): Promise<{ application_plans: ApplicationPlanDetail[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/application-plans`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<{ application_plans: ApplicationPlanDetail[] }>(response);
+}
+
+export async function generateApplicationPlan(payload: {
+  workspace_id: string;
+  objective: string;
+  source_conversation_id?: string;
+  factory_key?: string;
+  application_name?: string;
+}): Promise<ApplicationPlanDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-plans`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<ApplicationPlanDetail>(response);
+}
+
+export async function getApplicationPlan(id: string): Promise<ApplicationPlanDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-plans/${id}`, {
+    credentials: "include",
+  });
+  return handle<ApplicationPlanDetail>(response);
+}
+
+export async function applyApplicationPlan(id: string): Promise<{ status: string; application: ApplicationDetail; application_plan: ApplicationPlanDetail }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-plans/${id}/apply`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ status: string; application: ApplicationDetail; application_plan: ApplicationPlanDetail }>(response);
+}
+
+export async function listApplications(workspaceId: string): Promise<{ applications: ApplicationSummary[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/applications`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<{ applications: ApplicationSummary[] }>(response);
+}
+
+export async function getApplication(id: string): Promise<ApplicationDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${id}`, {
+    credentials: "include",
+  });
+  return handle<ApplicationDetail>(response);
 }
 
 export async function listCoordinationThreads(workspaceId: string, status?: string): Promise<CoordinationThreadListResponse> {
