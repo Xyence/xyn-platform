@@ -3120,7 +3120,7 @@ function ComposerDetailPanel({
       setMessage(response.summary || response.status.replace(/_/g, " "));
       openComposer({
         thread_id: thread.id,
-        goal_id: thread.goal?.id || goalId,
+        goal_id: thread.goal_id || goalId,
         application_id: applicationId || payload?.goal?.application_id || undefined,
       });
     } catch (err) {
@@ -3137,6 +3137,14 @@ function ComposerDetailPanel({
   const selectedThread = payload.thread;
   const selectedApplication = payload.application;
   const selectedPlan = payload.application_plan;
+  const selectedPlanGoals = selectedPlan?.generated_goals || selectedPlan?.generated_plan?.generated_goals || [];
+  const portfolioInsights = payload.portfolio_context?.insights || [];
+  const threadDiagnosticSummary = selectedThread?.thread_diagnostic
+    ? selectedThread.thread_diagnostic.observations[0]
+      || selectedThread.thread_diagnostic.likely_causes[0]
+      || selectedThread.thread_diagnostic.provenance?.summary
+      || null
+    : null;
   const recommendation =
     selectedGoal && selectedGoal.recommendation && typeof selectedGoal.recommendation === "object"
       ? selectedGoal.recommendation
@@ -3209,7 +3217,7 @@ function ComposerDetailPanel({
                   <tr key={factory.key}>
                     <td>{factory.name}</td>
                     <td>{factory.description}</td>
-                    <td>{factory.use_case || "—"}</td>
+                    <td>{factory.intended_use_case || "—"}</td>
                     <td>
                       <button type="button" className="ghost sm" onClick={() => openComposer({ factory_key: factory.key })}>
                         Select
@@ -3229,7 +3237,7 @@ function ComposerDetailPanel({
             <div><div className="field-label">Plan</div><div className="field-value">{selectedPlan.name}</div></div>
             <div><div className="field-label">Factory</div><div className="field-value">{selectedPlan.factory?.name || selectedPlan.source_factory_key}</div></div>
             <div><div className="field-label">Status</div><div className="field-value">{selectedPlan.status}</div></div>
-            <div><div className="field-label">Goals</div><div className="field-value">{selectedPlan.generated_goals.length}</div></div>
+            <div><div className="field-label">Goals</div><div className="field-value">{selectedPlanGoals.length}</div></div>
           </div>
           <p className="muted" style={{ marginTop: 12 }}>{selectedPlan.summary}</p>
           <div className="inline-action-row" style={{ marginTop: 12 }}>
@@ -3244,7 +3252,7 @@ function ComposerDetailPanel({
         <section className="card">
           <div className="detail-grid">
             <div><div className="field-label">Application</div><div className="field-value">{selectedApplication.name}</div></div>
-            <div><div className="field-label">Factory</div><div className="field-value">{selectedApplication.factory?.name || selectedApplication.source_factory_key}</div></div>
+            <div><div className="field-label">Factory</div><div className="field-value">{selectedApplication.source_factory_key}</div></div>
             <div><div className="field-label">Status</div><div className="field-value">{selectedApplication.status}</div></div>
             <div><div className="field-label">Goals</div><div className="field-value">{selectedApplication.goals.length}</div></div>
           </div>
@@ -3348,7 +3356,7 @@ function ComposerDetailPanel({
                         onClick={() =>
                           openComposer({
                             application_id: selectedApplication?.id || selectedGoal?.application_id || undefined,
-                            goal_id: selectedGoal?.id || thread.goal?.id || undefined,
+                            goal_id: selectedGoal?.id || thread.goal_id || undefined,
                             thread_id: thread.id,
                           })
                         }
@@ -3372,8 +3380,8 @@ function ComposerDetailPanel({
             <div><div className="field-label">Completed</div><div className="field-value">{selectedThread.work_items_completed}</div></div>
             <div><div className="field-label">Blocked</div><div className="field-value">{selectedThread.work_items_blocked}</div></div>
           </div>
-          {selectedThread.thread_diagnostic?.summary ? (
-            <InlineMessage tone="info" title="Thread Diagnostic" body={selectedThread.thread_diagnostic.summary} />
+          {threadDiagnosticSummary ? (
+            <InlineMessage tone="info" title="Thread Diagnostic" body={threadDiagnosticSummary} />
           ) : null}
           <div className="inline-action-row" style={{ marginTop: 12 }}>
             <button type="button" className="ghost sm" onClick={() => handleThreadReview(selectedThread, "resume_thread")}>Resume Thread</button>
@@ -3388,7 +3396,7 @@ function ComposerDetailPanel({
           <div className="field-label">Portfolio Context</div>
           <div className="detail-grid">
             <div><div className="field-label">Goals</div><div className="field-value">{payload.portfolio_context.goals.length}</div></div>
-            <div><div className="field-label">Insights</div><div className="field-value">{payload.portfolio_context.insights.length}</div></div>
+            <div><div className="field-label">Insights</div><div className="field-value">{portfolioInsights.length}</div></div>
             <div><div className="field-label">Recommended Goal</div><div className="field-value">{payload.portfolio_context.recommended_goal?.title || "—"}</div></div>
           </div>
         </section>
