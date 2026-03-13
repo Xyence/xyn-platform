@@ -375,6 +375,34 @@ class EpicDIntentEngineTests(unittest.TestCase):
         self.assertEqual(envelope.action_payload.get("summary_mode"), "goal_insight_summary")
         self.assertEnvelopeStable(envelope)
 
+    def test_portfolio_health_question_resolves_to_goal_listing_summary(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="show portfolio health",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.LIST_GOALS.value)
+        self.assertEqual(envelope.action_payload.get("summary_mode"), "portfolio_health_summary")
+        self.assertEnvelopeStable(envelope)
+
+    def test_portfolio_recommendation_question_resolves_to_goal_listing_summary(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="which goal should run next?",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.LIST_GOALS.value)
+        self.assertEqual(envelope.action_payload.get("summary_mode"), "portfolio_recommendation_summary")
+        self.assertEnvelopeStable(envelope)
+
     def test_artifact_analysis_question_uses_recent_artifact_context(self):
         engine = IntentResolutionEngine(
             proposal_provider=_FakeProvider(),
@@ -2146,6 +2174,52 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual((((payload.get("result") or {}).get("recommendation") or {}).get("queue_suggestion") or {}).get("action_type"), "queue_first_slice")
         mock_recommend.assert_called_once()
         mock_activate.assert_not_called()
+
+    def test_execute_conversation_action_list_goals_returns_portfolio_health_summary(self):
+        goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder")
+        with patch.object(intent_api.Goal.objects, "filter", return_value=SimpleNamespace(order_by=lambda *_args, **_kwargs: [goal])), patch.object(
+            intent_api, "_serialize_goal_summary", return_value={"id": "goal-1", "title": "AI Real Estate Deal Finder"}
+        ), patch.object(
+            intent_api,
+            "_build_goal_portfolio_payload",
+            return_value={
+                "goals": [
+                    {
+                        "goal_id": "goal-1",
+                        "title": "AI Real Estate Deal Finder",
+                        "health_status": "active",
+                        "recent_execution_count": 2,
+                    },
+                    {
+                        "goal_id": "goal-2",
+                        "title": "Comparable Analysis",
+                        "health_status": "blocked",
+                        "recent_execution_count": 0,
+                    },
+                ],
+                "insights": [],
+                "recommended_goal": None,
+            },
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "list_goals",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {"summary_mode": "portfolio_health_summary"}},
+                    "target_object": {"workspace_id": "ws-1"},
+                },
+                prompt="show portfolio health",
+                request_id="req-1",
+                intent_payload={"intent_type": "list_goals"},
+                prompt_interpretation={"intent_type": "list_goals"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Portfolio health:", payload["summary"])
+        self.assertEqual((payload.get("result") or {}).get("portfolio_state", {}).get("goals", [])[0]["goal_id"], "goal-1")
 
     def test_execute_conversation_action_approve_recommendation_uses_goal_approval_gate(self):
         goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder", refresh_from_db=lambda: None)

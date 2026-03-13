@@ -8,7 +8,12 @@ from django.test import RequestFactory, TestCase
 from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
 from xyn_orchestrator.development_intelligence import compute_goal_development_insights, compute_goal_diagnostic
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
-from xyn_orchestrator.portfolio_intelligence import build_goal_portfolio_row, build_goal_portfolio_state, compute_portfolio_insights
+from xyn_orchestrator.portfolio_intelligence import (
+    build_goal_portfolio_row,
+    build_goal_portfolio_state,
+    compute_portfolio_insights,
+    recommend_portfolio_goal,
+)
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import goal_decompose, goal_detail, goal_review, goals_collection
 
@@ -1265,6 +1270,137 @@ class GoalPlanningTests(TestCase):
         first = build_goal_portfolio_state([goal], runtime_detail_lookup=lambda _task: None)
         second = build_goal_portfolio_state([goal], runtime_detail_lookup=lambda _task: None)
         self.assertEqual(first, second)
+
+    def test_goal_listing_includes_portfolio_recommendation(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Portfolio Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Listing Data Ingestion",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Implement adapter",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="task-1",
+        )
+
+        list_request = self._request("/xyn/api/goals", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_workspace_for_identity", return_value=self.workspace
+        ):
+            list_response = goals_collection(list_request)
+        listing = json.loads(list_response.content)
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(listing["portfolio_state"]["recommended_goal"]["goal_id"], str(goal.id))
+        self.assertEqual(listing["portfolio_state"]["recommended_goal"]["queue_action_type"], "queue_first_slice")
+
+    def test_recommend_portfolio_goal_prefers_high_priority_actionable_goal(self):
+        dominant_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        dominant_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=dominant_goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="high",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Resume-worthy task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=dominant_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=dominant_goal,
+            coordination_thread=dominant_thread,
+            work_item_id="resume-task",
+        )
+        secondary_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Secondary Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        secondary_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=secondary_goal,
+            title="Secondary Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Secondary queued task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=secondary_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=secondary_goal,
+            coordination_thread=secondary_thread,
+            work_item_id="secondary-task",
+        )
+
+        recommendation = recommend_portfolio_goal([secondary_goal, dominant_goal], runtime_detail_lookup=lambda _task: None)
+
+        self.assertIsNotNone(recommendation)
+        self.assertEqual(recommendation.goal_id, str(dominant_goal.id))
+        self.assertEqual(recommendation.queue_action_type, "resume_thread")
 
     def test_compute_portfolio_insights_detects_blocked_goal(self):
         goal = Goal.objects.create(

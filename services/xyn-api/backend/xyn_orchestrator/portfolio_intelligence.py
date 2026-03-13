@@ -38,6 +38,18 @@ class PortfolioInsight:
     goal_ids: List[str]
 
 
+@dataclass(frozen=True)
+class GoalPortfolioRecommendation:
+    goal_id: str
+    title: str
+    coordination_priority: str
+    summary: str
+    reasoning: str
+    thread_id: Optional[str]
+    work_item_id: Optional[str]
+    queue_action_type: Optional[str]
+
+
 def _recent_execution_count(
     goal: Goal,
     *,
@@ -275,3 +287,57 @@ def compute_portfolio_insights(
         )
 
     return insights
+
+
+def recommend_portfolio_goal(
+    goals: Iterable[Goal],
+    *,
+    runtime_detail_lookup: Optional[Callable[[DevTask], Optional[Dict[str, Any]]]] = None,
+) -> Optional[GoalPortfolioRecommendation]:
+    from .goal_planning import recommend_next_slice
+
+    ordered_goals = list(goals)
+    rows = {
+        row.goal_id: row
+        for row in build_goal_portfolio_state(ordered_goals, runtime_detail_lookup=runtime_detail_lookup)
+    }
+    priority_rank = {"high": 0, "medium": 1, "low": 2}
+    candidates: List[tuple[int, int, str, Goal, Any]] = []
+    for goal in ordered_goals:
+        recommendation = recommend_next_slice(goal)
+        queue_suggestion = getattr(recommendation, "queue_suggestion", None)
+        actionable = bool(queue_suggestion or getattr(recommendation, "thread_id", None))
+        if not actionable:
+            continue
+        row = rows.get(str(goal.id))
+        if row is None:
+            continue
+        candidates.append(
+            (
+                priority_rank.get(row.coordination_priority.value, 99),
+                0 if queue_suggestion else 1,
+                row.goal_id,
+                goal,
+                recommendation,
+            )
+        )
+    if not candidates:
+        return None
+
+    _, _, _, goal, recommendation = min(candidates)
+    row = rows[str(goal.id)]
+    queue_suggestion = getattr(recommendation, "queue_suggestion", None)
+    action_type = getattr(queue_suggestion, "action_type", None) if queue_suggestion else None
+    reasoning = getattr(recommendation, "reasoning_summary", "") or ""
+    if not reasoning:
+        reasoning = row.coordination_priority.reasons[0] if row.coordination_priority.reasons else "This goal has the strongest current advisory priority."
+    return GoalPortfolioRecommendation(
+        goal_id=str(goal.id),
+        title=str(goal.title or ""),
+        coordination_priority=row.coordination_priority.value,
+        summary=str(getattr(recommendation, "summary", "") or ""),
+        reasoning=reasoning,
+        thread_id=str(getattr(recommendation, "thread_id", "") or "") or None,
+        work_item_id=str(getattr(recommendation, "work_item_id", "") or "") or None,
+        queue_action_type=str(action_type or "") or None,
+    )

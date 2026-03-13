@@ -36,6 +36,7 @@ import type {
   CoordinationThreadDetail,
   CoordinationThreadSummary,
   GoalDetail,
+  GoalListResponse,
   GoalSummary,
   LocalProvisionResponse,
   RuntimeRunDetail,
@@ -740,7 +741,7 @@ function GoalListPanel({
   workspaceId: string;
   onTitleChange?: (title: string) => void;
 } & PanelProps) {
-  const [goals, setGoals] = useState<GoalSummary[]>([]);
+  const [payload, setPayload] = useState<GoalListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -752,7 +753,7 @@ function GoalListPanel({
         setError(null);
         const next = await listGoals(workspaceId);
         if (!active) return;
-        setGoals(next.goals || []);
+        setPayload(next);
       } catch (err) {
         if (!active) return;
         setError(err instanceof Error ? err.message : "Failed to load goals");
@@ -771,44 +772,77 @@ function GoalListPanel({
 
   if (loading) return <p className="muted">Loading goals…</p>;
   if (error) return <p className="danger-text">{error}</p>;
+  const goals = payload?.goals || [];
+  const portfolioState = payload?.portfolio_state;
+  const recommendedGoal = portfolioState?.recommended_goal;
+  const portfolioInsights = portfolioState?.insights || [];
   return (
-    <section className="card">
-      <div className="canvas-table-wrap">
-        <table className="canvas-table">
-          <thead>
-            <tr>
-              <th>Title</th>
-              <th>Status</th>
-              <th>Priority</th>
-              <th>Threads</th>
-              <th>Work Items</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {goals.map((goal) => (
-              <tr key={goal.id}>
-                <td>{goal.title}</td>
-                <td>{goal.planning_status}</td>
-                <td>{goal.priority}</td>
-                <td>{goal.thread_count}</td>
-                <td>{goal.work_item_count}</td>
-                <td>
-                  <button type="button" className="ghost sm" onClick={() => onOpenPanel("goal_detail", { goal_id: goal.id })}>
-                    Open
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {!goals.length ? (
+    <div className="panel-section-stack">
+      {portfolioState ? (
+        <section className="card">
+          <div className="detail-grid">
+            <div><div className="field-label">Total Goals</div><div className="field-value">{portfolioState.goals.length}</div></div>
+            <div><div className="field-label">Active Goals</div><div className="field-value">{portfolioState.goals.filter((goal) => goal.health_status === "active").length}</div></div>
+            <div><div className="field-label">Blocked Goals</div><div className="field-value">{portfolioState.goals.filter((goal) => goal.health_status === "blocked").length}</div></div>
+            <div><div className="field-label">Recent Execution</div><div className="field-value">{portfolioState.goals.reduce((sum, goal) => sum + (goal.recent_execution_count || 0), 0)}</div></div>
+          </div>
+          {recommendedGoal ? (
+            <InlineMessage
+              tone="info"
+              title={`Recommended Goal: ${recommendedGoal.title}`}
+              body={`${recommendedGoal.summary}${recommendedGoal.reasoning ? ` ${recommendedGoal.reasoning}` : ""}`}
+            />
+          ) : null}
+          {portfolioInsights.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Portfolio Insights</div>
+              <ul className="bulleted-list">
+                {portfolioInsights.slice(0, 3).map((insight) => (
+                  <li key={insight.key}>{insight.summary}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+      <section className="card">
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
               <tr>
-                <td colSpan={6} className="muted">No goals found.</td>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Coordination</th>
+                <th>Threads</th>
+                <th>Work Items</th>
+                <th>Actions</th>
               </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
-    </section>
+            </thead>
+            <tbody>
+              {goals.map((goal) => (
+                <tr key={goal.id}>
+                  <td>{goal.title}</td>
+                  <td>{goal.planning_status}</td>
+                  <td>{goal.coordination_priority?.value || goal.priority}</td>
+                  <td>{goal.thread_count}</td>
+                  <td>{goal.work_item_count}</td>
+                  <td>
+                    <button type="button" className="ghost sm" onClick={() => onOpenPanel("goal_detail", { goal_id: goal.id })}>
+                      Open
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!goals.length ? (
+                <tr>
+                  <td colSpan={6} className="muted">No goals found.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   );
 }
 

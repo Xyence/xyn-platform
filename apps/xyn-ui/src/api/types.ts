@@ -2524,6 +2524,16 @@ export type GoalPortfolioState = {
     evidence: string[];
     goal_ids: string[];
   }>;
+  recommended_goal?: {
+    goal_id: string;
+    title: string;
+    coordination_priority: string;
+    summary: string;
+    reasoning: string;
+    thread_id?: string | null;
+    work_item_id?: string | null;
+    queue_action_type?: string | null;
+  } | null;
 };
 
 export type WorkQueueItem = {

@@ -194,6 +194,43 @@ describe("WorkbenchPanelHost entity refresh", () => {
           updated_at: "2026-03-12T10:00:00Z",
         },
       ],
+      portfolio_state: {
+        goals: [
+          {
+            goal_id: "goal-1",
+            title: "AI Real Estate Deal Finder",
+            planning_status: "decomposed",
+            goal_progress_status: "in_progress",
+            progress_percent: 25,
+            health_status: "active",
+            active_threads: 1,
+            blocked_threads: 0,
+            recent_execution_count: 2,
+            coordination_priority: {
+              value: "medium",
+              reasons: ["Goal has active execution or queueable progress but no blocking condition."],
+            },
+          },
+        ],
+        insights: [
+          {
+            key: "steady_progress",
+            summary: "Portfolio activity is balanced with AI Real Estate Deal Finder showing the strongest current forward progress.",
+            evidence: ["AI Real Estate Deal Finder is at 25% progress with 1 active thread."],
+            goal_ids: ["goal-1"],
+          },
+        ],
+        recommended_goal: {
+          goal_id: "goal-1",
+          title: "AI Real Estate Deal Finder",
+          coordination_priority: "medium",
+          summary: "Queue the next smallest slice from Listing Data Ingestion.",
+          reasoning: "Goal has active execution or queueable progress but no blocking condition.",
+          thread_id: "thread-1",
+          work_item_id: "task-1",
+          queue_action_type: "queue_first_slice",
+        },
+      },
     });
 
     render(
@@ -208,6 +245,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(apiMocks.listGoals).toHaveBeenCalledWith("ws-1"));
     await waitFor(() => expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument());
+    expect(screen.getByText(/Recommended Goal: AI Real Estate Deal Finder/i)).toBeInTheDocument();
+    expect(screen.getByText(/Portfolio activity is balanced/i)).toBeInTheDocument();
   });
 
   it("loads durable goal detail with threads, work items, and recommendation", async () => {

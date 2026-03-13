@@ -159,7 +159,12 @@ from .goal_progress import (
     compute_thread_execution_metrics,
     compute_thread_progress,
 )
-from .portfolio_intelligence import build_goal_portfolio_row, build_goal_portfolio_state, compute_portfolio_insights
+from .portfolio_intelligence import (
+    build_goal_portfolio_row,
+    build_goal_portfolio_state,
+    compute_portfolio_insights,
+    recommend_portfolio_goal,
+)
 from .execution_observability import build_artifact_evolution, build_thread_timeline, serialize_thread_timeline
 from .development_intelligence import (
     build_artifact_analysis_context,
@@ -25693,6 +25698,55 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
     }
 
 
+def _build_goal_portfolio_payload(goals: List[Goal]) -> Dict[str, Any]:
+    portfolio_rows = build_goal_portfolio_state(goals, runtime_detail_lookup=_project_runtime_status_to_task)
+    portfolio_insights = compute_portfolio_insights(goals, runtime_detail_lookup=_project_runtime_status_to_task)
+    portfolio_recommendation = recommend_portfolio_goal(goals, runtime_detail_lookup=_project_runtime_status_to_task)
+    return {
+        "goals": [
+            {
+                "goal_id": row.goal_id,
+                "title": row.title,
+                "planning_status": row.planning_status,
+                "goal_progress_status": row.goal_progress_status,
+                "progress_percent": row.progress_percent,
+                "health_status": row.health_status,
+                "active_threads": row.active_threads,
+                "blocked_threads": row.blocked_threads,
+                "recent_execution_count": row.recent_execution_count,
+                "coordination_priority": {
+                    "value": row.coordination_priority.value,
+                    "reasons": row.coordination_priority.reasons,
+                },
+            }
+            for row in portfolio_rows
+        ],
+        "insights": [
+            {
+                "key": insight.key,
+                "summary": insight.summary,
+                "evidence": insight.evidence,
+                "goal_ids": insight.goal_ids,
+            }
+            for insight in portfolio_insights
+        ],
+        "recommended_goal": (
+            {
+                "goal_id": portfolio_recommendation.goal_id,
+                "title": portfolio_recommendation.title,
+                "coordination_priority": portfolio_recommendation.coordination_priority,
+                "summary": portfolio_recommendation.summary,
+                "reasoning": portfolio_recommendation.reasoning,
+                "thread_id": portfolio_recommendation.thread_id,
+                "work_item_id": portfolio_recommendation.work_item_id,
+                "queue_action_type": portfolio_recommendation.queue_action_type,
+            }
+            if portfolio_recommendation
+            else None
+        ),
+    }
+
+
 def _goal_progress_summary_text(goal_detail: Dict[str, Any]) -> str:
     progress = goal_detail.get("goal_progress") if isinstance(goal_detail.get("goal_progress"), dict) else {}
     status = str(progress.get("goal_progress_status") or "not_started").replace("_", " ")
@@ -26225,18 +26279,45 @@ def _execute_conversation_action(
         if goal_id:
             goal = Goal.objects.filter(id=goal_id, workspace=workspace).first()
         if action_type == ConversationActionType.LIST_GOALS.value:
-            goals = [_serialize_goal_summary(item) for item in Goal.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100]]
+            goal_objects = list(Goal.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100])
+            goals = [_serialize_goal_summary(item) for item in goal_objects]
+            portfolio_state = _build_goal_portfolio_payload(goal_objects)
+            recommended_goal = portfolio_state.get("recommended_goal") if isinstance(portfolio_state, dict) else None
+            portfolio_insights = portfolio_state.get("insights") if isinstance(portfolio_state, dict) else []
+            if summary_mode == "portfolio_health_summary":
+                active_goals = sum(1 for item in (portfolio_state.get("goals") or []) if item.get("health_status") == "active")
+                blocked_goals = sum(1 for item in (portfolio_state.get("goals") or []) if item.get("health_status") == "blocked")
+                summary = (
+                    f"Portfolio health: {active_goals} active goal(s), {blocked_goals} blocked goal(s), "
+                    f"and {len(goals)} total goal(s)."
+                )
+            elif summary_mode == "portfolio_recommendation_summary":
+                if isinstance(recommended_goal, dict) and recommended_goal.get("title"):
+                    summary = (
+                        f"{recommended_goal['title']} is the strongest current portfolio candidate. "
+                        f"{recommended_goal.get('summary') or recommended_goal.get('reasoning') or ''}"
+                    ).strip()
+                else:
+                    summary = "No portfolio-level goal recommendation is currently actionable."
+            elif summary_mode == "portfolio_insight_summary":
+                first_insight = portfolio_insights[0] if portfolio_insights else None
+                if isinstance(first_insight, dict) and first_insight.get("summary"):
+                    summary = str(first_insight["summary"])
+                else:
+                    summary = f"Found {len(goals)} goal(s) with no dominant portfolio issue right now."
+            else:
+                summary = f"Found {len(goals)} goal(s)."
             return JsonResponse(
                 {
                     "status": "DraftReady",
                     "artifact_type": "Workspace",
                     "artifact_id": None,
-                    "summary": f"Found {len(goals)} goal(s).",
+                    "summary": summary,
                     "intent": intent_payload,
                     "prompt_interpretation": prompt_interpretation,
                     "conversation_action": action,
                     "operation_result": True,
-                    "result": {"goals": goals},
+                    "result": {"goals": goals, "portfolio_state": portfolio_state},
                     "next_actions": [
                         {"action": "OpenPanel", "panel_key": "goal_list", "label": "Open Goals", "params": {"workspace_id": str(workspace.id)}}
                     ],
@@ -27336,7 +27417,6 @@ def goals_collection(request: HttpRequest) -> JsonResponse:
         qs = qs.filter(goal_type=goal_type)
     ordered_goals = list(qs.order_by("-updated_at", "-created_at"))
     portfolio_rows = build_goal_portfolio_state(ordered_goals, runtime_detail_lookup=_project_runtime_status_to_task)
-    portfolio_insights = compute_portfolio_insights(ordered_goals, runtime_detail_lookup=_project_runtime_status_to_task)
     portfolio_by_goal_id = {row.goal_id: row for row in portfolio_rows}
     rows: List[Dict[str, Any]] = []
     for goal in ordered_goals:
@@ -27360,35 +27440,7 @@ def goals_collection(request: HttpRequest) -> JsonResponse:
     if not isinstance(response, JsonResponse):
         return response
     payload = json.loads(response.content)
-    payload["portfolio_state"] = {
-        "goals": [
-            {
-                "goal_id": row.goal_id,
-                "title": row.title,
-                "planning_status": row.planning_status,
-                "goal_progress_status": row.goal_progress_status,
-                "progress_percent": row.progress_percent,
-                "health_status": row.health_status,
-                "active_threads": row.active_threads,
-                "blocked_threads": row.blocked_threads,
-                "recent_execution_count": row.recent_execution_count,
-                "coordination_priority": {
-                    "value": row.coordination_priority.value,
-                    "reasons": row.coordination_priority.reasons,
-                },
-            }
-            for row in portfolio_rows
-        ],
-        "insights": [
-            {
-                "key": insight.key,
-                "summary": insight.summary,
-                "evidence": insight.evidence,
-                "goal_ids": insight.goal_ids,
-            }
-            for insight in portfolio_insights
-        ],
-    }
+    payload["portfolio_state"] = _build_goal_portfolio_payload(ordered_goals)
     return JsonResponse(payload, status=response.status_code)
 
 

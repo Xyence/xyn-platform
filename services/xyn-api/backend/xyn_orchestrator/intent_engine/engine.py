@@ -799,6 +799,10 @@ class IntentResolutionEngine:
         text = str(message or "").strip()
         lowered = text.lower()
         conversation_context = context.conversation_context or ConversationExecutionContext()
+        portfolio_query = re.search(
+            r"\b(show portfolio health|which goal should run next|which goal should we work on next|which goal should we queue first|what changed across goals recently)\b",
+            lowered,
+        )
         progress_query = re.search(
             r"\b(what should we build next|what should we implement next|what is the next slice|next slice|how close are we to finishing(?: this goal)?|how close is this goal|goal progress)\b",
             lowered,
@@ -807,7 +811,7 @@ class IntentResolutionEngine:
             r"\b(approve the next slice|approve the recommended work|approve recommended work|queue the recommended work|queue the next slice)\b",
             lowered,
         )
-        if not re.search(r"\b(goal|plan|project|application|system)\b", lowered) and not (
+        if not portfolio_query and not re.search(r"\b(goal|plan|project|application|system|portfolio)\b", lowered) and not (
             conversation_context.active_goal_id and (progress_query or supervised_goal_action)
         ):
             return None
@@ -828,6 +832,33 @@ class IntentResolutionEngine:
                 action_payload={"reference": reference or text},
                 confidence=0.92,
                 resolution_notes=notes or ["list goals requested"],
+            )
+        if re.search(r"\bshow portfolio health\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.LIST_GOALS,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text, "summary_mode": "portfolio_health_summary"},
+                confidence=0.9,
+                resolution_notes=notes or ["portfolio health requested"],
+            )
+        if re.search(r"\b(which goal should run next|which goal should we work on next|which goal should we queue first)\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.LIST_GOALS,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text, "summary_mode": "portfolio_recommendation_summary"},
+                confidence=0.88,
+                resolution_notes=notes or ["portfolio recommendation requested"],
+            )
+        if re.search(r"\bwhat changed across goals recently\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.LIST_GOALS,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text, "summary_mode": "portfolio_insight_summary"},
+                confidence=0.86,
+                resolution_notes=notes or ["portfolio insight requested"],
             )
         if re.search(r"\b(what should we build first|what should we build next|what should we implement next|what is the next slice|smallest next slice|which thread should we queue first)\b", lowered):
             resolved = candidates[0] if len(candidates) == 1 else ({"id": str(conversation_context.active_goal_id)} if conversation_context.active_goal_id else {})
