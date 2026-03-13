@@ -1169,14 +1169,19 @@ def _conversation_action_from_intent(
             IntentType.RETRY_RUN.value: ConversationActionType.RETRY_RUN.value,
             IntentType.SUMMARIZE_RUN.value: ConversationActionType.SUMMARIZE_RUN.value,
             IntentType.SHOW_STATUS.value: ConversationActionType.SHOW_STATUS.value,
+            IntentType.SHOW_ARTIFACT_ANALYSIS.value: ConversationActionType.SHOW_ARTIFACT_ANALYSIS.value,
             IntentType.CONTINUE_RUN.value: ConversationActionType.CONTINUE_RUN.value,
             IntentType.PAUSE_OR_HOLD.value: ConversationActionType.PAUSE_RUN.value,
             IntentType.REQUEST_REVIEW.value: ConversationActionType.REQUEST_REVIEW.value,
         }
         action_type = action_type_map.get(intent.intent_type)
         target = ConversationActionTarget(
-            kind="run",
-            id=str(resolved_subject.get("run_id") or resolved_subject.get("id") or "") or None,
+            kind="artifact" if intent.intent_type == IntentType.SHOW_ARTIFACT_ANALYSIS.value else "run",
+            id=(
+                str(action_payload.get("artifact_id") or resolved_subject.get("id") or "") or None
+                if intent.intent_type == IntentType.SHOW_ARTIFACT_ANALYSIS.value
+                else str(resolved_subject.get("run_id") or resolved_subject.get("id") or "") or None
+            ),
             label=str(resolved_subject.get("label") or resolved_subject.get("run_id") or "") or None,
             reference=str(action_payload.get("reference") or "") or None,
             workspace_id=str(target_context.get("workspace_id") or "") or None,
@@ -25155,29 +25160,40 @@ def runtime_run_artifact_detail(request: HttpRequest, run_id: uuid.UUID, artifac
         return JsonResponse({"error": "run not found"}, status=404)
     if not isinstance(artifact_payload, dict):
         return JsonResponse({"error": "runtime artifact unavailable"}, status=502)
-    artifact_payload["run_id"] = str(run_id)
+    return JsonResponse(_runtime_run_artifact_detail_payload_for_workspace(workspace=workspace, run_id=run_id, artifact_id=artifact_id, artifact_payload=artifact_payload))
+
+
+def _runtime_run_artifact_detail_payload_for_workspace(
+    *,
+    workspace: Workspace,
+    run_id: uuid.UUID | str,
+    artifact_id: uuid.UUID | str,
+    artifact_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload = dict(artifact_payload or {})
+    payload["run_id"] = str(run_id)
     evolution = build_artifact_evolution(
         workspace=workspace,
         current_run_id=str(run_id),
         current_artifact_id=str(artifact_id),
-        current_artifact=artifact_payload,
+        current_artifact=payload,
         runtime_detail_lookup=_project_runtime_status_to_task,
     )
-    artifact_payload["evolution"] = evolution
+    payload["evolution"] = evolution
     analysis_context = build_artifact_analysis_context(
         workspace=workspace,
         evolution=evolution,
         runtime_detail_lookup=_project_runtime_status_to_task,
     )
-    artifact_payload["analysis"] = serialize_artifact_analysis(
+    payload["analysis"] = serialize_artifact_analysis(
         compute_artifact_analysis(
-            current_artifact=artifact_payload,
+            current_artifact=payload,
             evolution=evolution,
             run_status_by_run_id=analysis_context.get("run_status_by_run_id") if isinstance(analysis_context, dict) else None,
             supervised_run_ids=analysis_context.get("supervised_run_ids") if isinstance(analysis_context, dict) else None,
         )
     )
-    return JsonResponse(artifact_payload)
+    return payload
 
 
 EPIC_C_DEV_TASK_TYPES = {"codegen"}
@@ -25711,6 +25727,111 @@ def _thread_progress_summary_text(thread_detail: Dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+def _thread_diagnostic_summary_text(thread_detail: Dict[str, Any]) -> str:
+    diagnostic = thread_detail.get("thread_diagnostic") if isinstance(thread_detail.get("thread_diagnostic"), dict) else {}
+    title = str(thread_detail.get("title") or "This thread")
+    status = str(diagnostic.get("status") or thread_detail.get("thread_progress_status") or thread_detail.get("status") or "unknown").replace("_", " ")
+    observations = diagnostic.get("observations") if isinstance(diagnostic.get("observations"), list) else []
+    evidence = diagnostic.get("evidence") if isinstance(diagnostic.get("evidence"), list) else []
+    parts = [f"{title} diagnostic status is {status}."]
+    if observations:
+        parts.append(str(observations[0]))
+    if evidence:
+        parts.append(f"Evidence: {str(evidence[0])}")
+    provenance = diagnostic.get("provenance") if isinstance(diagnostic.get("provenance"), dict) else {}
+    provenance_summary = str(provenance.get("summary") or "").strip()
+    if provenance_summary:
+        parts.append(provenance_summary)
+    return " ".join(parts)
+
+
+def _goal_diagnostic_summary_text(goal_detail: Dict[str, Any]) -> str:
+    diagnostic = goal_detail.get("goal_diagnostic") if isinstance(goal_detail.get("goal_diagnostic"), dict) else {}
+    title = str(goal_detail.get("title") or "This goal")
+    status = str(diagnostic.get("status") or ((goal_detail.get("goal_progress") or {}) if isinstance(goal_detail.get("goal_progress"), dict) else {}).get("goal_progress_status") or "unknown").replace("_", " ")
+    observations = diagnostic.get("observations") if isinstance(diagnostic.get("observations"), list) else []
+    evidence = diagnostic.get("evidence") if isinstance(diagnostic.get("evidence"), list) else []
+    parts = [f"{title} diagnostic status is {status}."]
+    if observations:
+        parts.append(str(observations[0]))
+    if evidence:
+        parts.append(f"Evidence: {str(evidence[0])}")
+    return " ".join(parts)
+
+
+def _goal_insight_summary_text(goal_detail: Dict[str, Any]) -> str:
+    insights = goal_detail.get("development_insights") if isinstance(goal_detail.get("development_insights"), list) else []
+    title = str(goal_detail.get("title") or "This goal")
+    if not insights:
+        return f"{title} has no recent development insight beyond the current durable progress state."
+    first = insights[0] if isinstance(insights[0], dict) else {}
+    summary = str(first.get("summary") or "").strip()
+    evidence = first.get("evidence") if isinstance(first.get("evidence"), list) else []
+    parts = [summary or f"{title} has a recent development insight available."]
+    if evidence:
+        parts.append(f"Evidence: {str(evidence[0])}")
+    return " ".join(parts)
+
+
+def _artifact_analysis_summary_text(artifact_detail: Dict[str, Any]) -> str:
+    analysis = artifact_detail.get("analysis") if isinstance(artifact_detail.get("analysis"), dict) else {}
+    label = str(artifact_detail.get("label") or artifact_detail.get("artifact_id") or "artifact")
+    status = str(analysis.get("status") or "unknown").replace("_", " ")
+    observations = analysis.get("observations") if isinstance(analysis.get("observations"), list) else []
+    evidence = analysis.get("evidence") if isinstance(analysis.get("evidence"), list) else []
+    parts = [f"{label} analysis status is {status}."]
+    if observations:
+        parts.append(str(observations[0]))
+    if evidence:
+        parts.append(f"Evidence: {str(evidence[0])}")
+    provenance = analysis.get("provenance") if isinstance(analysis.get("provenance"), dict) else {}
+    provenance_summary = str(provenance.get("summary") or "").strip()
+    if provenance_summary:
+        parts.append(provenance_summary)
+    return " ".join(parts)
+
+
+def _runtime_run_artifact_detail_for_conversation(
+    *,
+    workspace: Workspace,
+    run_id: str,
+    artifact_id: str,
+) -> Dict[str, Any]:
+    try:
+        parsed_run_id = uuid.UUID(str(run_id))
+        parsed_artifact_id = uuid.UUID(str(artifact_id))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("runtime artifact reference is invalid") from exc
+    try:
+        run_response = _seed_api_request(method="GET", path=f"/api/v1/runs/{parsed_run_id}", timeout=20)
+        artifact_response = _seed_api_request(method="GET", path=f"/api/v1/runs/{parsed_run_id}/artifacts/{parsed_artifact_id}", timeout=20)
+    except requests.RequestException as exc:
+        raise RuntimeError("failed to reach xyn-core") from exc
+    if run_response.status_code == 404:
+        raise RuntimeError("runtime run not found")
+    if run_response.status_code >= 400:
+        raise RuntimeError("runtime run unavailable")
+    if artifact_response.status_code == 404:
+        raise RuntimeError("runtime artifact not found")
+    if artifact_response.status_code >= 400:
+        raise RuntimeError("runtime artifact unavailable")
+    try:
+        run_payload = run_response.json() if run_response.content else {}
+        artifact_payload = artifact_response.json() if artifact_response.content else {}
+    except ValueError as exc:
+        raise RuntimeError("invalid runtime artifact response") from exc
+    if not isinstance(run_payload, dict) or not _runtime_run_belongs_to_workspace(run_payload, workspace):
+        raise RuntimeError("runtime run not found")
+    if not isinstance(artifact_payload, dict):
+        raise RuntimeError("runtime artifact unavailable")
+    return _runtime_run_artifact_detail_payload_for_workspace(
+        workspace=workspace,
+        run_id=parsed_run_id,
+        artifact_id=parsed_artifact_id,
+        artifact_payload=artifact_payload,
+    )
+
+
 def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
     result_run = task.result_run
     run_payload = None
@@ -26043,6 +26164,8 @@ def _execute_conversation_action(
             if action_type == ConversationActionType.SHOW_THREAD_REVIEW.value
             else f"Updated XCO thread {thread.title}."
             if action_type == ConversationActionType.PRIORITIZE_THREAD.value
+            else _thread_diagnostic_summary_text(detail)
+            if summary_mode == "thread_diagnostic_summary"
             else _thread_progress_summary_text(detail)
             if summary_mode == "thread_progress_summary"
             else f"Showing XCO thread {thread.title}."
@@ -26053,7 +26176,13 @@ def _execute_conversation_action(
                 "artifact_type": "Workspace",
                 "artifact_id": None,
                 "summary": summary,
-                "summary_type": "thread_progress_summary" if summary_mode == "thread_progress_summary" else None,
+                "summary_type": (
+                    "thread_diagnostic_summary"
+                    if summary_mode == "thread_diagnostic_summary"
+                    else "thread_progress_summary"
+                    if summary_mode == "thread_progress_summary"
+                    else None
+                ),
                 "intent": intent_payload,
                 "prompt_interpretation": prompt_interpretation,
                 "conversation_action": action,
@@ -26310,6 +26439,10 @@ def _execute_conversation_action(
             summary = (
                 _goal_progress_summary_text(detail)
                 if summary_mode == "goal_progress_summary"
+                else _goal_diagnostic_summary_text(detail)
+                if summary_mode == "goal_diagnostic_summary"
+                else _goal_insight_summary_text(detail)
+                if summary_mode == "goal_insight_summary"
                 else str(((loop_summary.get("recommended_next_slice") or {}) if isinstance(loop_summary, dict) else {}).get("summary") or "").strip() or f"Showing goal {goal.title}."
             )
         detail = locals().get("detail") if isinstance(locals().get("detail"), dict) else _serialize_goal_detail(goal)
@@ -26319,7 +26452,15 @@ def _execute_conversation_action(
                 "artifact_type": "Workspace",
                 "artifact_id": None,
                 "summary": summary,
-                "summary_type": "goal_progress_summary" if summary_mode == "goal_progress_summary" else None,
+                "summary_type": (
+                    "goal_progress_summary"
+                    if summary_mode == "goal_progress_summary"
+                    else "goal_diagnostic_summary"
+                    if summary_mode == "goal_diagnostic_summary"
+                    else "goal_insight_summary"
+                    if summary_mode == "goal_insight_summary"
+                    else None
+                ),
                 "intent": intent_payload,
                 "prompt_interpretation": prompt_interpretation,
                 "conversation_action": action,
@@ -26327,6 +26468,67 @@ def _execute_conversation_action(
                 "result": {"goal": detail},
                 "next_actions": [
                     {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                ],
+                "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+            }
+        )
+
+    if action_type == ConversationActionType.SHOW_ARTIFACT_ANALYSIS.value:
+        action_payload = ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("action_payload")
+        action_payload = action_payload if isinstance(action_payload, dict) else {}
+        artifact_id = str(action_payload.get("artifact_id") or target.get("id") or "").strip()
+        run_id = str(action_payload.get("run_id") or "").strip()
+        if not artifact_id or not run_id:
+            return JsonResponse(
+                {
+                    "status": "IntentClarificationRequired",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": "No artifact could be resolved from the conversation context.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": False,
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                },
+                status=409,
+            )
+        try:
+            detail = _runtime_run_artifact_detail_for_conversation(workspace=workspace, run_id=run_id, artifact_id=artifact_id)
+        except RuntimeError as exc:
+            return JsonResponse(
+                {
+                    "status": "ValidationError",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": str(exc) or "Artifact analysis is unavailable.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": False,
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                },
+                status=409,
+            )
+        return JsonResponse(
+            {
+                "status": "DraftReady",
+                "artifact_type": "Workspace",
+                "artifact_id": None,
+                "summary": _artifact_analysis_summary_text(detail),
+                "summary_type": "artifact_analysis_summary",
+                "intent": intent_payload,
+                "prompt_interpretation": prompt_interpretation,
+                "conversation_action": action,
+                "operation_result": True,
+                "result": {"artifact": detail},
+                "next_actions": [
+                    {
+                        "action": "OpenPanel",
+                        "panel_key": "artifact_detail",
+                        "label": "Open Artifact",
+                        "params": {"runtime_run_id": run_id, "runtime_artifact_id": artifact_id},
+                    }
                 ],
                 "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
             }

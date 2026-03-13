@@ -361,6 +361,15 @@ describe("WorkbenchPanelHost entity refresh", () => {
         blocked_threads: 0,
         recent_artifacts: 1,
       },
+      goal_diagnostic: {
+        status: "active",
+        observations: ["Listing ingestion remains the primary execution path."],
+        contributing_threads: [
+          { thread_id: "thread-1", title: "Listing Data Ingestion", status: "active" },
+        ],
+        evidence: ["1 active thread and 0 blocked threads are contributing current progress."],
+        suggested_human_review_focus: "Confirm the ingestion thread keeps moving before broadening scope.",
+      },
       development_insights: [
         {
           key: "steady_progress",
@@ -385,6 +394,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("Listing Data Ingestion").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Development Loop")).toBeInTheDocument();
     expect(screen.getByText("Goal Health")).toBeInTheDocument();
+    expect(screen.getByText("Goal Diagnostic")).toBeInTheDocument();
+    expect(screen.getByText("Listing ingestion remains the primary execution path.")).toBeInTheDocument();
     expect(screen.getByText("Development Insights")).toBeInTheDocument();
     expect(screen.getByText("Development activity appears steady without a dominant operational issue right now.")).toBeInTheDocument();
     expect(screen.getByText("33%")).toBeInTheDocument();
@@ -511,6 +522,20 @@ describe("WorkbenchPanelHost entity refresh", () => {
       work_items_completed: 0,
       work_items_ready: 1,
       work_items_blocked: 0,
+      thread_diagnostic: {
+        status: "active",
+        observations: ["Runtime refactor is progressing but still depends on the current queue slice."],
+        likely_causes: ["The thread still has active in-flight work."],
+        evidence: ["1 ready work item and 1 running work item remain in the thread."],
+        suggested_human_review_action: "Review the next run result before queueing more work.",
+        provenance: {
+          provenance_status: "supervised_queue_proven",
+          supervised_queue_evidence: true,
+          ambiguous_runtime_evidence: false,
+          evidence: ["A run_dispatched_from_queue event exists for the active run."],
+          summary: "Recent execution is attributable to the supervised queue path.",
+        },
+      },
       metrics: {
         average_run_duration_seconds: 120,
         total_completed_work_items: 0,
@@ -596,6 +621,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Promoted for queue dispatch")).toBeInTheDocument();
     expect(screen.getByText("Final summary")).toBeInTheDocument();
     expect(screen.getByText("Thread Review")).toBeInTheDocument();
+    expect(screen.getByText("Thread Diagnostic")).toBeInTheDocument();
+    expect(screen.getByText("Runtime refactor is progressing but still depends on the current queue slice.")).toBeInTheDocument();
     expect(screen.getByText("Avg Run Duration")).toBeInTheDocument();
     expect(screen.getByText("120s")).toBeInTheDocument();
     expect(screen.getByText("Scheduler refactor is running")).toBeInTheDocument();

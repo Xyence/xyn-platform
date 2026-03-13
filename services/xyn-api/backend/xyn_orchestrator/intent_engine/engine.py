@@ -600,7 +600,11 @@ class IntentResolutionEngine:
     @classmethod
     def _extract_thread_reference(cls, message: str) -> str:
         text = str(message or "").strip()
-        if re.match(r"^\s*(?:is|show)\s+(?:this\s+)?thread\s+(?:blocked|active|completed|running|status|progress)\b.*$", text, flags=re.IGNORECASE):
+        if re.match(
+            r"^\s*(?:is|show|why\s+is|what\s+is\s+blocking)\s+(?:this\s+)?thread\s+(?:blocked|active|completed|running|status|progress|slow)\b.*$",
+            text,
+            flags=re.IGNORECASE,
+        ):
             return ""
         for pattern in (
             r"^\s*(?:pause|resume|prioritize|show)\s+(?:this\s+)?thread\b(?:\s+(.*))?$",
@@ -664,7 +668,7 @@ class IntentResolutionEngine:
             intent_type = IntentType.RESUME_THREAD
         elif re.search(r"\bpriorit", lowered):
             intent_type = IntentType.PRIORITIZE_THREAD
-        elif re.search(r"\b(show|progress|detail|blocked|status)\b", lowered):
+        elif re.search(r"\b(show|progress|detail|blocked|status|slow)\b", lowered):
             intent_type = IntentType.SHOW_THREAD
         if intent_type is None:
             return None
@@ -700,6 +704,11 @@ class IntentResolutionEngine:
                 action_payload["priority"] = str(priority_match.group(1) or "").lower()
         if intent_type == IntentType.SHOW_THREAD and re.search(r"\b(blocked|progress|status)\b", lowered):
             action_payload["summary_mode"] = "thread_progress_summary"
+        elif intent_type == IntentType.SHOW_THREAD and re.search(
+            r"\b(why .*thread .*slow|why is this thread slow|what is blocking this thread|why is this thread blocked|thread diagnostic|biggest issue in this thread)\b",
+            lowered,
+        ):
+            action_payload["summary_mode"] = "thread_diagnostic_summary"
         return self._intent_envelope(
             intent_family=IntentFamily.THREAD_COORDINATION,
             intent_type=intent_type,
@@ -708,6 +717,64 @@ class IntentResolutionEngine:
             action_payload=action_payload,
             confidence=0.87,
             resolution_notes=notes or [f"{intent_type.value} requested"],
+        )
+
+    def _resolve_artifact_diagnostic_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        if not re.search(r"\b(show|analy[sz]e|review)\b.*\bartifact\b.*\b(evolution|analysis)\b|\bshow artifact evolution analysis\b", lowered):
+            return None
+        workspace_id = str(context.workspace_id or "").strip()
+        conversation_context = context.conversation_context or ConversationExecutionContext()
+        recent_artifacts = [item for item in (conversation_context.recent_artifacts or []) if getattr(item, "artifact_id", None)]
+        if len(recent_artifacts) > 1:
+            return self._intent_envelope(
+                intent_family=IntentFamily.RUN_SUPERVISION,
+                intent_type=IntentType.SHOW_ARTIFACT_ANALYSIS,
+                target_context={"workspace_id": workspace_id},
+                confidence=0.42,
+                needs_clarification=True,
+                clarification_reason=ClarificationReason.AMBIGUOUS_TARGET,
+                clarification_options=[
+                    {
+                        "id": str(item.artifact_id or ""),
+                        "label": str(item.label or item.artifact_id or ""),
+                        "kind": "artifact",
+                        "payload": {"artifact_id": str(item.artifact_id or ""), "run_id": str(item.run_id or "") or None},
+                    }
+                    for item in recent_artifacts
+                ],
+                resolution_notes=["multiple recent artifacts are available for analysis"],
+            )
+        if not recent_artifacts:
+            return self._intent_envelope(
+                intent_family=IntentFamily.RUN_SUPERVISION,
+                intent_type=IntentType.SHOW_ARTIFACT_ANALYSIS,
+                target_context={"workspace_id": workspace_id},
+                confidence=0.38,
+                needs_clarification=True,
+                clarification_reason=ClarificationReason.MISSING_TARGET,
+                resolution_notes=["artifact analysis target is missing from current context"],
+            )
+        artifact = recent_artifacts[0]
+        return self._intent_envelope(
+            intent_family=IntentFamily.RUN_SUPERVISION,
+            intent_type=IntentType.SHOW_ARTIFACT_ANALYSIS,
+            target_context={"workspace_id": workspace_id},
+            resolved_subject={
+                "id": str(artifact.artifact_id or ""),
+                "label": str(artifact.label or artifact.artifact_id or ""),
+                "run_id": str(artifact.run_id or "") or None,
+                "artifact_type": str(artifact.artifact_type or "") or None,
+            },
+            action_payload={
+                "reference": text,
+                "artifact_id": str(artifact.artifact_id or ""),
+                "run_id": str(artifact.run_id or "") or None,
+                "summary_mode": "artifact_analysis_summary",
+            },
+            confidence=0.8,
+            resolution_notes=["artifact analysis requested from recent artifact context"],
         )
 
     @classmethod
@@ -808,6 +875,8 @@ class IntentResolutionEngine:
             intent_type = IntentType.DECOMPOSE_GOAL
         elif re.search(r"\b(how close are we to finishing(?: this goal)?|how close is this goal|goal progress)\b", lowered):
             intent_type = IntentType.SHOW_GOAL
+        elif re.search(r"\b(why is this goal stalled|why is this goal slow|goal diagnostic|what changed in this goal recently|what is the biggest issue right now)\b", lowered):
+            intent_type = IntentType.SHOW_GOAL
         elif re.search(r"\b(show plan|summarize plan|show goal|goal progress)\b", lowered):
             intent_type = IntentType.SUMMARIZE_PLAN if "plan" in lowered else IntentType.SHOW_GOAL
         elif re.search(r"\b(build|start|create)\b", lowered) and re.search(r"\b(application|system|project)\b", lowered):
@@ -852,7 +921,15 @@ class IntentResolutionEngine:
             resolved_subject=resolved,
             action_payload={
                 "reference": reference or text,
-                **({"summary_mode": "goal_progress_summary"} if intent_type == IntentType.SHOW_GOAL and re.search(r"\b(how close|goal progress)\b", lowered) else {}),
+                **(
+                    {"summary_mode": "goal_progress_summary"}
+                    if intent_type == IntentType.SHOW_GOAL and re.search(r"\b(how close|goal progress)\b", lowered)
+                    else {"summary_mode": "goal_diagnostic_summary"}
+                    if intent_type == IntentType.SHOW_GOAL and re.search(r"\b(why is this goal stalled|why is this goal slow|goal diagnostic|what is the biggest issue right now)\b", lowered)
+                    else {"summary_mode": "goal_insight_summary"}
+                    if intent_type == IntentType.SHOW_GOAL and re.search(r"\bwhat changed in this goal recently\b", lowered)
+                    else {}
+                ),
             },
             confidence=0.82,
             resolution_notes=notes or [f"{intent_type.value} requested"],
@@ -946,9 +1023,10 @@ class IntentResolutionEngine:
             )
         goal_planning = self._resolve_goal_intent(message=user_message, context=context)
         thread_coordination = self._resolve_thread_intent(message=user_message, context=context)
+        artifact_diagnostic = self._resolve_artifact_diagnostic_intent(message=user_message, context=context)
         development = self._resolve_development_intent(message=user_message, context=context)
         app_operation = self._resolve_app_operation_intent(message=user_message, context=context)
-        envelope = goal_planning or thread_coordination or development or app_operation or self._intent_envelope(
+        envelope = goal_planning or thread_coordination or artifact_diagnostic or development or app_operation or self._intent_envelope(
             intent_family=IntentFamily.DEVELOPMENT_WORK,
             intent_type=IntentType.UNSUPPORTED_INTENT,
             target_context={"workspace_id": str(context.workspace_id or "").strip()},

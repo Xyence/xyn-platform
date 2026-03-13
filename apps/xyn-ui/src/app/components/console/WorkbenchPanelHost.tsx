@@ -971,6 +971,41 @@ function GoalDetailPanel({
           </div>
         </section>
       ) : null}
+      {payload.goal_diagnostic ? (
+        <section className="card">
+          <div className="card-header"><div><p className="muted">Goal Diagnostic</p></div></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Status</div><div className="field-value">{payload.goal_diagnostic.status}</div></div>
+            <div><div className="field-label">Contributing Threads</div><div className="field-value">{payload.goal_diagnostic.contributing_threads.length}</div></div>
+          </div>
+          {payload.goal_diagnostic.observations.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Observations</div>
+              <ul className="detail-list">
+                {payload.goal_diagnostic.observations.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {payload.goal_diagnostic.evidence.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Evidence</div>
+              <ul className="detail-list">
+                {payload.goal_diagnostic.evidence.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {payload.goal_diagnostic.suggested_human_review_focus ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Suggested Review Focus</div>
+              <div className="field-value">{payload.goal_diagnostic.suggested_human_review_focus}</div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       {payload.development_insights?.length ? (
         <section className="card">
           <div className="card-header"><div><p className="muted">Development Insights</p></div></div>
@@ -1327,6 +1362,45 @@ function ThreadDetailPanel({
           </button>
         </div>
       </section>
+      {payload.thread_diagnostic ? (
+        <section className="card">
+          <div className="card-header">
+            <div>
+              <p className="muted">Thread Diagnostic</p>
+            </div>
+          </div>
+          <div className="detail-grid">
+            <div><div className="field-label">Status</div><div className="field-value">{payload.thread_diagnostic.status}</div></div>
+            <div><div className="field-label">Provenance</div><div className="field-value">{payload.thread_diagnostic.provenance?.summary || "—"}</div></div>
+          </div>
+          {payload.thread_diagnostic.observations.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Observations</div>
+              <ul className="detail-list">
+                {payload.thread_diagnostic.observations.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {payload.thread_diagnostic.evidence.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Evidence</div>
+              <ul className="detail-list">
+                {payload.thread_diagnostic.evidence.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {payload.thread_diagnostic.suggested_human_review_action ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Suggested Review Action</div>
+              <div className="field-value">{payload.thread_diagnostic.suggested_human_review_action}</div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       <section className="card">
         <div className="card-header">
           <div>

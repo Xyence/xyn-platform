@@ -321,6 +321,101 @@ class EpicDIntentEngineTests(unittest.TestCase):
         self.assertEqual(envelope.action_payload.get("summary_mode"), "thread_progress_summary")
         self.assertEnvelopeStable(envelope)
 
+    def test_thread_diagnostic_question_uses_active_thread_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="why is this thread slow?",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(active_coordination_thread_id="thread-1"),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.THREAD_COORDINATION.value)
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_THREAD.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "thread-1")
+        self.assertEqual(envelope.action_payload.get("summary_mode"), "thread_diagnostic_summary")
+        self.assertEnvelopeStable(envelope)
+
+    def test_goal_diagnostic_question_uses_active_goal_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="why is this goal stalled?",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(active_goal_id="goal-1"),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_GOAL.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "goal-1")
+        self.assertEqual(envelope.action_payload.get("summary_mode"), "goal_diagnostic_summary")
+        self.assertEnvelopeStable(envelope)
+
+    def test_goal_insight_question_uses_active_goal_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="what changed in this goal recently?",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(active_goal_id="goal-1"),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_GOAL.value)
+        self.assertEqual(envelope.resolved_subject.get("id"), "goal-1")
+        self.assertEqual(envelope.action_payload.get("summary_mode"), "goal_insight_summary")
+        self.assertEnvelopeStable(envelope)
+
+    def test_artifact_analysis_question_uses_recent_artifact_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="show artifact evolution analysis",
+            context=ResolutionContext(
+                workspace_id="ws-1",
+                conversation_context=ConversationExecutionContext(
+                    recent_artifacts=[
+                        {
+                            "artifact_id": "artifact-1",
+                            "run_id": "run-1",
+                            "label": "final_summary.md",
+                        }
+                    ]
+                ),
+            ),
+        )
+        self.assertEqual(envelope.intent_family, IntentFamily.RUN_SUPERVISION.value)
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_ARTIFACT_ANALYSIS.value)
+        self.assertEqual(envelope.action_payload.get("artifact_id"), "artifact-1")
+        self.assertEqual(envelope.action_payload.get("run_id"), "run-1")
+        self.assertEqual(envelope.action_payload.get("summary_mode"), "artifact_analysis_summary")
+        self.assertEnvelopeStable(envelope)
+
+    def test_artifact_analysis_question_requires_clarification_without_artifact_context(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="show artifact evolution analysis",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.SHOW_ARTIFACT_ANALYSIS.value)
+        self.assertTrue(envelope.needs_clarification)
+        self.assertEqual(envelope.clarification_reason, ClarificationReason.MISSING_TARGET.value)
+        self.assertEnvelopeStable(envelope)
+
     def test_review_this_thread_uses_active_thread_context(self):
         engine = IntentResolutionEngine(
             proposal_provider=_FakeProvider(),
@@ -1793,6 +1888,79 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertIn("Latest result: Implement adapter is completed with 1 artifact(s).", payload["summary"])
         self.assertIn("Next slice: Queue the next smallest slice from Listing Data Ingestion.", payload["summary"])
 
+    def test_execute_conversation_action_show_goal_returns_goal_diagnostic_summary(self):
+        goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder")
+        detail = {
+            "id": "goal-1",
+            "title": "AI Real Estate Deal Finder",
+            "goal_progress": {"goal_progress_status": "stalled"},
+            "goal_diagnostic": {
+                "status": "blocked",
+                "observations": ["Comparable Analysis is blocked on missing property ingestion records."],
+                "evidence": ["1 blocked thread is preventing forward progress."],
+            },
+        }
+        with patch.object(intent_api.Goal.objects, "filter", return_value=SimpleNamespace(first=lambda: goal)), patch.object(
+            intent_api, "_serialize_goal_detail", return_value=detail
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "show_goal",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {"summary_mode": "goal_diagnostic_summary"}},
+                    "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
+                },
+                prompt="why is this goal stalled?",
+                request_id="req-1",
+                intent_payload={"intent_type": "show_goal"},
+                prompt_interpretation={"intent_type": "show_goal"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary_type"], "goal_diagnostic_summary")
+        self.assertIn("AI Real Estate Deal Finder diagnostic status is blocked.", payload["summary"])
+        self.assertIn("Comparable Analysis is blocked on missing property ingestion records.", payload["summary"])
+
+    def test_execute_conversation_action_show_goal_returns_goal_insight_summary(self):
+        goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder")
+        detail = {
+            "id": "goal-1",
+            "title": "AI Real Estate Deal Finder",
+            "development_insights": [
+                {
+                    "key": "high_activity_low_progress",
+                    "summary": "Activity is high but completion remains low across the active threads.",
+                    "evidence": ["3 active threads produced 5 artifacts while only 1 work item completed."],
+                }
+            ],
+        }
+        with patch.object(intent_api.Goal.objects, "filter", return_value=SimpleNamespace(first=lambda: goal)), patch.object(
+            intent_api, "_serialize_goal_detail", return_value=detail
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "show_goal",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {"summary_mode": "goal_insight_summary"}},
+                    "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
+                },
+                prompt="what changed in this goal recently?",
+                request_id="req-1",
+                intent_payload={"intent_type": "show_goal"},
+                prompt_interpretation={"intent_type": "show_goal"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary_type"], "goal_insight_summary")
+        self.assertIn("Activity is high but completion remains low across the active threads.", payload["summary"])
+        self.assertIn("Evidence: 3 active threads produced 5 artifacts while only 1 work item completed.", payload["summary"])
+
     def test_execute_conversation_action_show_thread_returns_thread_progress_summary(self):
         thread = SimpleNamespace(id="thread-1", title="Listing Data Ingestion")
         detail = {
@@ -1829,6 +1997,85 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertIn("Listing Data Ingestion is blocked", payload["summary"])
         self.assertIn("Latest run run-1 is failed.", payload["summary"])
         self.assertIn("1 artifact(s) are available for review.", payload["summary"])
+
+    def test_execute_conversation_action_show_thread_returns_thread_diagnostic_summary(self):
+        thread = SimpleNamespace(id="thread-1", title="Listing Data Ingestion")
+        detail = {
+            "id": "thread-1",
+            "title": "Listing Data Ingestion",
+            "thread_diagnostic": {
+                "status": "slow",
+                "observations": ["Recent runs are significantly slower than the thread baseline."],
+                "evidence": ["Average run duration is 780s over the last 3 runs."],
+                "provenance": {
+                    "summary": "Execution provenance is not fully attributable to the supervised queue path from current durable signals.",
+                },
+            },
+            "thread_progress_status": "active",
+        }
+        with patch.object(intent_api.CoordinationThread.objects, "filter", return_value=SimpleNamespace(first=lambda: thread)), patch.object(
+            intent_api, "_coordination_thread_detail", return_value=detail
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "show_thread",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {"summary_mode": "thread_diagnostic_summary"}},
+                    "target_object": {"id": "thread-1", "workspace_id": "ws-1"},
+                },
+                prompt="why is this thread slow?",
+                request_id="req-1",
+                intent_payload={"intent_type": "show_thread"},
+                prompt_interpretation={"intent_type": "show_thread"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary_type"], "thread_diagnostic_summary")
+        self.assertIn("Listing Data Ingestion diagnostic status is slow.", payload["summary"])
+        self.assertIn("Recent runs are significantly slower than the thread baseline.", payload["summary"])
+        self.assertIn("Execution provenance is not fully attributable to the supervised queue path", payload["summary"])
+
+    def test_execute_conversation_action_show_artifact_analysis_returns_artifact_analysis_summary(self):
+        detail = {
+            "artifact_id": "artifact-1",
+            "run_id": "run-1",
+            "label": "final_summary.md",
+            "artifact_type": "summary",
+            "uri": "artifact://runs/run-1/final_summary.md",
+            "analysis": {
+                "status": "high_churn",
+                "observations": ["Artifact revisions are accumulating quickly without stable progression."],
+                "evidence": ["4 revisions were created within the last hour."],
+                "provenance": {
+                    "summary": "Execution provenance is not fully attributable to the supervised queue path from current durable signals.",
+                },
+            },
+        }
+        with patch.object(intent_api, "_runtime_run_artifact_detail_for_conversation", return_value=detail):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "show_artifact_analysis",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {"artifact_id": "artifact-1", "run_id": "run-1"}},
+                    "target_object": {"id": "artifact-1", "workspace_id": "ws-1"},
+                },
+                prompt="show artifact evolution analysis",
+                request_id="req-1",
+                intent_payload={"intent_type": "show_artifact_analysis"},
+                prompt_interpretation={"intent_type": "show_artifact_analysis"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary_type"], "artifact_analysis_summary")
+        self.assertIn("final_summary.md analysis status is high churn.", payload["summary"])
+        self.assertIn("Artifact revisions are accumulating quickly without stable progression.", payload["summary"])
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "artifact_detail")
 
     def test_execute_conversation_action_recommend_next_slice_returns_queue_suggestion_without_dispatch(self):
         goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder")

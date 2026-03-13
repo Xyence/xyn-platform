@@ -2341,6 +2341,20 @@ export type CoordinationThreadDetail = CoordinationThreadSummary & {
     failed_work_items: number;
     blocked_work_items: number;
   };
+  thread_diagnostic?: {
+    status: string;
+    observations: string[];
+    likely_causes: string[];
+    evidence: string[];
+    suggested_human_review_action?: string | null;
+    provenance?: {
+      provenance_status: string;
+      supervised_queue_evidence: boolean;
+      ambiguous_runtime_evidence: boolean;
+      evidence: string[];
+      summary: string;
+    };
+  };
   work_items_completed?: number;
   work_items_ready?: number;
   work_items_blocked?: number;
@@ -2424,6 +2438,17 @@ export type GoalDetail = GoalSummary & {
     active_threads: number;
     blocked_threads: number;
     recent_artifacts: number;
+  };
+  goal_diagnostic?: {
+    status: string;
+    observations: string[];
+    contributing_threads: Array<{
+      thread_id: string;
+      title: string;
+      status: string;
+    }>;
+    evidence: string[];
+    suggested_human_review_focus?: string | null;
   };
   development_insights?: Array<{
     key: string;
