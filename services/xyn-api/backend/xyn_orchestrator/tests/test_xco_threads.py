@@ -310,7 +310,7 @@ class XcoThreadTests(TestCase):
             CoordinationEvent.objects.filter(
                 thread=thread,
                 work_item=task,
-                event_type="thread_next_slice_approved",
+                event_type="approval_queue_next_slice",
             ).exists()
         )
 
@@ -326,6 +326,12 @@ class XcoThreadTests(TestCase):
         self.assertEqual(resume_response.status_code, 200)
         thread.refresh_from_db()
         self.assertEqual(thread.status, "active")
+        self.assertTrue(
+            CoordinationEvent.objects.filter(
+                thread=thread,
+                event_type="approval_thread_resume",
+            ).exists()
+        )
 
         self._create_task(thread, status="completed", work_item_id="wi-done")
         complete_request = self._request(

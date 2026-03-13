@@ -189,7 +189,7 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(
             CoordinationEvent.objects.filter(
                 thread=seeded_task.coordination_thread,
-                event_type="recommendation_approved",
+                event_type="approval_queue_first_slice",
                 work_item=seeded_task,
             ).exists()
         )
@@ -248,7 +248,7 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(payload["status"], "not_ready")
         self.assertEqual(thread.status, "active")
         self.assertEqual(goal.planning_status, "proposed")
-        self.assertFalse(CoordinationEvent.objects.filter(event_type="recommendation_approved", work_item=task).exists())
+        self.assertFalse(CoordinationEvent.objects.filter(event_type="approval_recommendation", work_item=task).exists())
 
     def test_goal_review_repeat_approval_does_not_duplicate_queue_side_effects(self):
         goal = Goal.objects.create(
@@ -280,7 +280,7 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(second_payload["status"], "already_queued")
         thread_id = first_payload["queue_seed"]["thread_id"]
         self.assertEqual(
-            CoordinationEvent.objects.filter(thread_id=thread_id, event_type="recommendation_approved").count(),
+            CoordinationEvent.objects.filter(thread_id=thread_id, event_type="approval_recommendation").count(),
             1,
         )
 
@@ -301,7 +301,7 @@ class GoalPlanningTests(TestCase):
 
         self.assertTrue(recommendation_a.recommendation_id)
         self.assertEqual(recommendation_a.recommendation_id, recommendation_b.recommendation_id)
-        self.assertFalse(CoordinationEvent.objects.filter(event_type="recommendation_approved").exists())
+        self.assertFalse(CoordinationEvent.objects.filter(event_type__startswith="approval_").exists())
 
     def test_recommend_next_slice_changes_recommendation_id_when_state_changes(self):
         goal = Goal.objects.create(
@@ -374,7 +374,7 @@ class GoalPlanningTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 409)
         self.assertEqual(payload["status"], "stale_recommendation")
-        self.assertFalse(CoordinationEvent.objects.filter(event_type="recommendation_approved").exists())
+        self.assertFalse(CoordinationEvent.objects.filter(event_type__startswith="approval_").exists())
 
     def test_recommend_next_slice_prefers_first_queue_ready_work_item(self):
         goal = Goal.objects.create(

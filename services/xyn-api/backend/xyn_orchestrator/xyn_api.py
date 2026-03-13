@@ -26797,6 +26797,7 @@ def _approve_goal_recommendation(
     requested_action_type: str,
     submitted_recommendation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    original_requested_action_type = str(requested_action_type or "approve_and_queue").strip() or "approve_and_queue"
     recommendation = recommend_next_slice(goal)
     queue_suggestion = recommendation.queue_suggestion
     submitted_identity = parse_recommendation_id(submitted_recommendation_id)
@@ -26832,7 +26833,7 @@ def _approve_goal_recommendation(
             "summary": f"No queueable recommendation is available for {goal.title}.",
             "queue_seed": None,
         }
-    action_type = str(requested_action_type or "approve_and_queue").strip() or "approve_and_queue"
+    action_type = original_requested_action_type
     if action_type == "approve_and_queue":
         action_type = str(queue_suggestion.action_type or "").strip()
     if action_type not in allowed_actions:
@@ -26951,14 +26952,21 @@ def _approve_goal_recommendation(
     if goal.planning_status != "in_progress" and valid_goal_transition(goal.planning_status, "in_progress"):
         goal.planning_status = "in_progress"
         goal.save(update_fields=["planning_status", "updated_at"])
+    if original_requested_action_type == "queue_first_slice":
+        approval_event_type = "approval_queue_first_slice"
+    elif original_requested_action_type == "queue_next_slice":
+        approval_event_type = "approval_queue_next_slice"
+    else:
+        approval_event_type = "approval_recommendation"
     record_thread_event(
         thread=thread,
-        event_type="recommendation_approved",
+        event_type=approval_event_type,
         work_item=task,
         payload={
             "goal_id": str(goal.id),
             "user_id": str(getattr(identity, "id", "") or ""),
-            "action_type": action_type,
+            "requested_action_type": original_requested_action_type,
+            "resolved_action_type": action_type,
             "work_item_id": str(task.work_item_id or task.id),
         },
     )
@@ -27188,6 +27196,11 @@ def _review_coordination_thread(
                 409,
             )
         transition_thread_status(thread, "active", payload={"reason": "thread_review_resume", "user_id": str(identity.id)})
+        record_thread_event(
+            thread=thread,
+            event_type="approval_thread_resume",
+            payload={"user_id": str(identity.id), "thread_id": str(thread.id)},
+        )
         thread.refresh_from_db()
         return ({"status": "resumed", "thread": _coordination_thread_detail(thread), "summary": f"Resumed {thread.title}."}, 200)
 
@@ -27245,7 +27258,7 @@ def _review_coordination_thread(
     task = thread.work_items.filter(id=entry.task_id).first()
     record_thread_event(
         thread=thread,
-        event_type="thread_next_slice_approved",
+        event_type="approval_queue_next_slice",
         work_item=task,
         run_id=str(task.runtime_run_id) if task and task.runtime_run_id else None,
         payload={
