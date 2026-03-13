@@ -307,6 +307,69 @@ These summaries appear in:
 They are derived from durable `Run`, artifact, thread, and goal state rather
 than freeform narration.
 
+## Execution Observability
+
+Epic M adds a read-only execution observability layer on top of the same
+durable coordination state.
+
+Observability derives only from:
+- `Goal`
+- `CoordinationThread`
+- `DevTask`
+- runtime-backed `Run` state
+- durable runtime artifacts
+- coordination events
+
+Epic M does not:
+- change planning
+- change queue scheduling
+- trigger execution
+- introduce automation
+
+### Thread Timeline
+
+Each thread exposes a computed timeline reconstructed from:
+- work-item lifecycle
+- run lifecycle
+- coordination events
+
+Timeline entries are timestamped, ordered deterministically, and remain
+reconstructable from durable state.
+
+### Execution Metrics
+
+Thread observability includes:
+- average run duration
+- total completed work items
+- failed work items
+- blocked work items
+
+Goal observability includes:
+- active threads
+- blocked threads
+- total completed work items
+- artifact production count
+
+These metrics are computed on demand and are not stored in a separate durable
+metrics table.
+
+### Artifact Evolution
+
+Artifact detail now exposes a read-only evolution history grouped by logical
+artifact identity and ordered by creation time. This uses existing runtime
+artifact records and does not introduce a second artifact model.
+
+### Goal Health Indicators
+
+Goal detail includes a compact operational health view:
+- progress percent
+- active threads
+- blocked threads
+- recent artifacts
+
+These indicators remain observational and do not alter recommendation or queue
+behavior.
+
 ## Developer Guidance
 
 When adding a new planning seed:

@@ -2121,6 +2121,16 @@ export type RuntimeRunArtifactContent = {
   uri: string;
   content_type?: string | null;
   content: string;
+  evolution?: Array<{
+    artifact_id: string;
+    run_id: string;
+    work_item_id?: string | null;
+    artifact_type: string;
+    label: string;
+    uri: string;
+    created_at?: string | null;
+    is_current: boolean;
+  }>;
 };
 
 export type RuntimeRunSummary = {
@@ -2297,14 +2307,24 @@ export type CoordinationThreadSummary = {
 export type CoordinationEvent = {
   id: string;
   event_type: string;
+  source?: string;
   work_item_id?: string | null;
+  work_item_title?: string | null;
   run_id?: string | null;
+  status?: string | null;
+  summary?: string | null;
   payload: Record<string, unknown>;
   created_at: string;
 };
 
 export type CoordinationThreadDetail = CoordinationThreadSummary & {
   thread_progress_status?: "not_started" | "active" | "blocked" | "completed" | string;
+  metrics?: {
+    average_run_duration_seconds: number;
+    total_completed_work_items: number;
+    failed_work_items: number;
+    blocked_work_items: number;
+  };
   work_items_completed?: number;
   work_items_ready?: number;
   work_items_blocked?: number;
@@ -2368,6 +2388,27 @@ export type GoalRecommendation = {
 export type GoalDetail = GoalSummary & {
   threads: CoordinationThreadSummary[];
   work_items: WorkItemSummary[];
+  goal_progress?: {
+    goal_progress_status: string;
+    completed_work_items: number;
+    active_work_items: number;
+    blocked_work_items: number;
+    active_threads?: number;
+    blocked_threads?: number;
+    artifact_production_count?: number;
+  };
+  metrics?: {
+    active_threads: number;
+    blocked_threads: number;
+    total_completed_work_items: number;
+    artifact_production_count: number;
+  };
+  goal_health?: {
+    progress_percent: number;
+    active_threads: number;
+    blocked_threads: number;
+    recent_artifacts: number;
+  };
   development_loop_summary?: {
     goal_status: string;
     threads: Array<{

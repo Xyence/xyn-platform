@@ -6,7 +6,8 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
-from xyn_orchestrator.goal_progress import compute_thread_progress
+from xyn_orchestrator.execution_observability import build_thread_timeline, serialize_thread_timeline
+from xyn_orchestrator.goal_progress import compute_thread_execution_metrics, compute_thread_progress
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xco import derive_work_queue
 from xyn_orchestrator.xyn_api import _dispatch_next_queue_item, _update_thread_status_from_tasks, thread_detail, thread_review, threads_collection, xco_queue_collection
@@ -257,6 +258,133 @@ class XcoThreadTests(TestCase):
         progress = compute_thread_progress(thread)
         self.assertEqual(progress.thread_status, "completed")
         self.assertEqual(progress.work_items_completed, 2)
+
+    def test_thread_execution_metrics_calculate_duration_and_counts(self):
+        thread = self._create_thread(title="Metrics Thread", status="active")
+        finished = self._create_task(thread, title="Finished task", status="completed", work_item_id="wi-finished", runtime_run_id=uuid.uuid4())
+        self._create_task(thread, title="Failed task", status="failed", work_item_id="wi-failed")
+        self._create_task(thread, title="Blocked task", status="queued", work_item_id="wi-blocked", dependency_work_item_ids=["missing-dependency"])
+
+        def runtime_detail_lookup(task):
+            if task.id != finished.id:
+                return None
+            return {
+                "started_at": "2026-03-12T10:00:00Z",
+                "completed_at": "2026-03-12T10:02:00Z",
+                "artifacts": [],
+            }
+
+        metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=runtime_detail_lookup)
+        self.assertEqual(metrics.average_run_duration_seconds, 120)
+        self.assertEqual(metrics.total_completed_work_items, 1)
+        self.assertEqual(metrics.failed_work_items, 1)
+        self.assertEqual(metrics.blocked_work_items, 1)
+
+    def test_build_thread_timeline_reconstructs_ordered_lifecycle_from_durable_state(self):
+        thread = self._create_thread(title="Timeline Thread")
+        task = self._create_task(thread, title="Implement scheduler", status="completed", work_item_id="wi-timeline")
+        CoordinationEvent.objects.create(
+            thread=thread,
+            event_type="work_item_promoted",
+            work_item=task,
+            run_id=uuid.uuid4(),
+            payload_json={"summary": "Promoted for queue dispatch"},
+        )
+        started = timezone.now() - timezone.timedelta(minutes=5)
+        completed = timezone.now() - timezone.timedelta(minutes=1)
+
+        timeline = build_thread_timeline(
+            thread,
+            runtime_detail_lookup=lambda candidate: {
+                "id": "run-1",
+                "run_id": "run-1",
+                "status": "completed",
+                "started_at": started,
+                "completed_at": completed,
+                "summary": "Scheduler completed successfully.",
+            }
+            if candidate.id == task.id
+            else None,
+        )
+        serialized = serialize_thread_timeline(timeline)
+        event_types = [entry["event_type"] for entry in serialized]
+        self.assertIn("work_item_queued", event_types)
+        self.assertIn("work_item_running", event_types)
+        self.assertIn("work_item_completed", event_types)
+        timestamps = [entry["created_at"] for entry in serialized]
+        self.assertEqual(timestamps, sorted(timestamps))
+
+    def test_build_thread_timeline_marks_blocked_work_items(self):
+        thread = self._create_thread(title="Blocked Timeline", status="paused")
+        self._create_task(thread, title="Blocked item", status="queued", work_item_id="wi-blocked")
+        timeline = serialize_thread_timeline(build_thread_timeline(thread))
+        blocked = [entry for entry in timeline if entry["event_type"] == "work_item_blocked"]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["work_item_id"], "wi-blocked")
+
+    def test_thread_detail_returns_computed_execution_timeline(self):
+        thread = self._create_thread(title="Detail Timeline")
+        task = self._create_task(thread, title="Implement timeline", status="completed", work_item_id="wi-detail")
+        request = self._request(f"/xyn/api/threads/{thread.id}")
+        started = timezone.now() - timezone.timedelta(minutes=3)
+        completed = timezone.now() - timezone.timedelta(minutes=1)
+        with self._auth_patches()[0], mock.patch(
+            "xyn_orchestrator.xyn_api._project_runtime_status_to_task",
+            side_effect=lambda candidate: {
+                "id": "run-detail",
+                "run_id": "run-detail",
+                "status": "completed",
+                "started_at": started,
+                "completed_at": completed,
+                "summary": "Timeline finished",
+            }
+            if candidate.id == task.id
+            else None,
+        ):
+            response = thread_detail(request, str(thread.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertTrue(any(entry["event_type"] == "work_item_running" for entry in payload["timeline"]))
+        self.assertTrue(any(entry["event_type"] == "work_item_completed" for entry in payload["timeline"]))
+
+    def test_thread_detail_includes_execution_metrics(self):
+        thread = self._create_thread(title="Detail Metrics", status="active")
+        finished = self._create_task(
+            thread,
+            title="Finished task",
+            status="completed",
+            work_item_id="wi-finished",
+            runtime_run_id=uuid.uuid4(),
+        )
+        self._create_task(thread, title="Failed task", status="failed", work_item_id="wi-failed")
+        self._create_task(
+            thread,
+            title="Blocked task",
+            status="queued",
+            work_item_id="wi-blocked",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        request = self._request(f"/xyn/api/threads/{thread.id}")
+        with self._auth_patches()[0], mock.patch(
+            "xyn_orchestrator.xyn_api._project_runtime_status_to_task",
+            side_effect=lambda candidate: {
+                "id": "run-detail-metrics",
+                "run_id": "run-detail-metrics",
+                "status": "completed",
+                "started_at": "2026-03-12T10:00:00Z",
+                "completed_at": "2026-03-12T10:02:00Z",
+                "summary": "Done",
+            }
+            if candidate.id == finished.id
+            else None,
+        ):
+            response = thread_detail(request, str(thread.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["metrics"]["average_run_duration_seconds"], 120)
+        self.assertEqual(payload["metrics"]["total_completed_work_items"], 1)
+        self.assertEqual(payload["metrics"]["failed_work_items"], 1)
+        self.assertEqual(payload["metrics"]["blocked_work_items"], 1)
 
     def test_thread_summary_exposes_computed_progress_counts(self):
         thread = self._create_thread(title="Summary Thread", status="active")

@@ -151,7 +151,15 @@ from .goal_planning import (
     serialize_goal_summary,
     valid_goal_transition,
 )
-from .goal_progress import compute_goal_development_loop_summary, compute_goal_progress, compute_thread_progress
+from .goal_progress import (
+    compute_goal_development_loop_summary,
+    compute_goal_execution_metrics,
+    compute_goal_health_indicators,
+    compute_goal_progress,
+    compute_thread_execution_metrics,
+    compute_thread_progress,
+)
+from .execution_observability import build_artifact_evolution, build_thread_timeline, serialize_thread_timeline
 from .artifact_packages import (
     ArtifactPackageValidationError,
     export_artifact_package,
@@ -25137,6 +25145,13 @@ def runtime_run_artifact_detail(request: HttpRequest, run_id: uuid.UUID, artifac
     if not isinstance(artifact_payload, dict):
         return JsonResponse({"error": "runtime artifact unavailable"}, status=502)
     artifact_payload["run_id"] = str(run_id)
+    artifact_payload["evolution"] = build_artifact_evolution(
+        workspace=workspace,
+        current_run_id=str(run_id),
+        current_artifact_id=str(artifact_id),
+        current_artifact=artifact_payload,
+        runtime_detail_lookup=_project_runtime_status_to_task,
+    )
     return JsonResponse(artifact_payload)
 
 
@@ -25505,6 +25520,8 @@ def _serialize_goal_recent_result(goal: Goal, result: Any, *, goal_status: str) 
 
 def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
     progress = compute_goal_progress(goal)
+    metrics = compute_goal_execution_metrics(goal, runtime_detail_lookup=_project_runtime_status_to_task)
+    health = compute_goal_health_indicators(goal, runtime_detail_lookup=_project_runtime_status_to_task)
     recommendation = recommend_next_slice(goal)
     development_loop_summary = compute_goal_development_loop_summary(goal, recommendation=recommendation)
     recommendation_actions = [
@@ -25526,6 +25543,21 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             "completed_work_items": progress.completed_work_items,
             "active_work_items": progress.active_work_items,
             "blocked_work_items": progress.blocked_work_items,
+            "active_threads": progress.active_threads,
+            "blocked_threads": progress.blocked_threads,
+            "artifact_production_count": progress.artifact_production_count,
+        },
+        "metrics": {
+            "active_threads": metrics.active_threads,
+            "blocked_threads": metrics.blocked_threads,
+            "total_completed_work_items": metrics.total_completed_work_items,
+            "artifact_production_count": metrics.artifact_production_count,
+        },
+        "goal_health": {
+            "progress_percent": health.progress_percent,
+            "active_threads": health.active_threads,
+            "blocked_threads": health.blocked_threads,
+            "recent_artifacts": health.recent_artifacts,
         },
         "recommended_next_slice": {
             "recommendation_id": recommendation.recommendation_id,
@@ -27870,6 +27902,7 @@ def _thread_status_for_task(task: DevTask) -> str:
 
 def _coordination_thread_summary(thread: CoordinationThread) -> Dict[str, Any]:
     progress = compute_thread_progress(thread)
+    metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=_project_runtime_status_to_task)
     policy = effective_thread_policy(thread)
     tasks = list(thread.work_items.all().order_by("-updated_at", "-created_at")[:50])
     queued = 0
@@ -27910,6 +27943,12 @@ def _coordination_thread_summary(thread: CoordinationThread) -> Dict[str, Any]:
         "work_items_completed": progress.work_items_completed,
         "work_items_ready": progress.work_items_ready,
         "work_items_blocked": progress.work_items_blocked,
+        "metrics": {
+            "average_run_duration_seconds": metrics.average_run_duration_seconds,
+            "total_completed_work_items": metrics.total_completed_work_items,
+            "failed_work_items": metrics.failed_work_items,
+            "blocked_work_items": metrics.blocked_work_items,
+        },
         "queued_work_items": queued,
         "running_work_items": running,
         "awaiting_review_work_items": awaiting_review,
@@ -27941,17 +27980,9 @@ def _coordination_thread_detail(thread: CoordinationThread) -> Dict[str, Any]:
                 break
         if len(recent_artifacts) >= 20 and len(recent_runs) >= 10:
             break
-    timeline = [
-        {
-            "id": str(event.id),
-            "event_type": event.event_type,
-            "work_item_id": str(event.work_item.work_item_id or event.work_item_id) if event.work_item_id else None,
-            "run_id": str(event.run_id) if event.run_id else None,
-            "payload": event.payload_json if isinstance(event.payload_json, dict) else {},
-            "created_at": event.created_at,
-        }
-        for event in thread.events.all().order_by("-created_at")[:100]
-    ]
+    timeline = serialize_thread_timeline(
+        build_thread_timeline(thread, runtime_detail_lookup=_project_runtime_status_to_task)
+    )[-100:]
     return {
         **_coordination_thread_summary(thread),
         "work_items": work_items,

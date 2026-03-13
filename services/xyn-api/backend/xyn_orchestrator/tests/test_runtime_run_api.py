@@ -284,12 +284,65 @@ class RuntimeRunApiTests(SimpleTestCase):
                     "content": "done",
                 }
             ),
-        ):
+        ), mock.patch("xyn_orchestrator.xyn_api.build_artifact_evolution", return_value=[]):
             response = runtime_run_artifact_detail(request, run_id, artifact_id)
         self.assertEqual(response.status_code, 200)
         body = json.loads(response.content)
         self.assertEqual(body["artifact_id"], str(artifact_id))
         self.assertEqual(body["run_id"], str(run_id))
+
+    def test_runtime_run_artifact_detail_includes_evolution_history(self):
+        run_id = uuid.uuid4()
+        artifact_id = uuid.uuid4()
+        request = self.factory.get(
+            f"/api/runtime/runs/{run_id}/artifacts/{artifact_id}",
+            {"workspace_id": str(self.workspace.id)},
+        )
+        request.user = mock.Mock(is_authenticated=True)
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_workspace_for_identity", return_value=self.workspace
+        ), mock.patch("xyn_orchestrator.xyn_api._runtime_run_belongs_to_workspace", return_value=True), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=_FakeResponse(
+                body={
+                    "artifact_id": str(artifact_id),
+                    "artifact_type": "summary",
+                    "label": "final_summary.md",
+                    "uri": f"artifact://runs/{run_id}/final_summary.md",
+                    "content": "done",
+                    "work_item_id": "wi-1",
+                }
+            ),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api.build_artifact_evolution",
+            return_value=[
+                {
+                    "artifact_id": "artifact-older",
+                    "run_id": "run-older",
+                    "work_item_id": "wi-1",
+                    "artifact_type": "summary",
+                    "label": "final_summary.md",
+                    "uri": "artifact://runs/run-older/final_summary.md",
+                    "created_at": "2026-03-12T10:00:00Z",
+                    "is_current": False,
+                },
+                {
+                    "artifact_id": str(artifact_id),
+                    "run_id": str(run_id),
+                    "work_item_id": "wi-1",
+                    "artifact_type": "summary",
+                    "label": "final_summary.md",
+                    "uri": f"artifact://runs/{run_id}/final_summary.md",
+                    "created_at": "2026-03-12T10:10:00Z",
+                    "is_current": True,
+                },
+            ],
+        ):
+            response = runtime_run_artifact_detail(request, run_id, artifact_id)
+        self.assertEqual(response.status_code, 200)
+        body = json.loads(response.content)
+        self.assertEqual(len(body["evolution"]), 2)
+        self.assertTrue(body["evolution"][-1]["is_current"])
 
     def test_work_item_alias_endpoints_return_work_item_shapes(self):
         request = self.factory.get("/xyn/api/work-items")

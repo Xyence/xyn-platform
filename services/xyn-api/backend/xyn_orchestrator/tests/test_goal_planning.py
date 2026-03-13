@@ -5,7 +5,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 
-from xyn_orchestrator.goal_progress import compute_goal_progress
+from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import goal_decompose, goal_detail, goal_review, goals_collection
@@ -646,6 +646,205 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(progress.completed_work_items, 4)
         self.assertEqual(progress.active_work_items, 1)
 
+    def test_goal_execution_metrics_calculate_thread_state_and_artifact_counts(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Observed Goal",
+            description="Operational metrics",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        active_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Active Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="normal",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        finished = DevTask.objects.create(
+            title="Finished slice",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=active_thread,
+            work_item_id="finished-slice",
+            runtime_run_id=uuid.uuid4(),
+        )
+        DevTask.objects.create(
+            title="Ready slice",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=0,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=active_thread,
+            work_item_id="ready-slice",
+        )
+        DevTask.objects.create(
+            title="Blocked slice",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=2,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-slice",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+
+        def runtime_detail_lookup(task):
+            if task.id != finished.id:
+                return None
+            return {
+                "artifacts": [
+                    {"id": "artifact-1"},
+                    {"id": "artifact-2"},
+                ]
+            }
+
+        metrics = compute_goal_execution_metrics(goal, runtime_detail_lookup=runtime_detail_lookup)
+        self.assertEqual(metrics.active_threads, 1)
+        self.assertEqual(metrics.blocked_threads, 1)
+        self.assertEqual(metrics.total_completed_work_items, 1)
+        self.assertEqual(metrics.artifact_production_count, 2)
+
+    def test_goal_health_indicators_reflect_progress_and_blocked_threads(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Health Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        active_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Active Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="normal",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        finished = DevTask.objects.create(
+            title="Finished",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=active_thread,
+            work_item_id="done-1",
+            runtime_run_id=uuid.uuid4(),
+        )
+        DevTask.objects.create(
+            title="Ready",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=2,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=active_thread,
+            work_item_id="ready-1",
+        )
+        DevTask.objects.create(
+            title="Blocked",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=3,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-1",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+
+        def runtime_detail_lookup(task):
+            if task.id != finished.id:
+                return None
+            return {"artifacts": [{"id": "artifact-1"}]}
+
+        health = compute_goal_health_indicators(goal, runtime_detail_lookup=runtime_detail_lookup)
+        self.assertEqual(health.progress_percent, 33)
+        self.assertEqual(health.active_threads, 1)
+        self.assertEqual(health.blocked_threads, 1)
+        self.assertEqual(health.recent_artifacts, 1)
+
     def test_recommend_next_slice_prefers_ready_unblocked_work_over_blocked_work(self):
         goal = Goal.objects.create(
             workspace=self.workspace,
@@ -1069,3 +1268,110 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(payload["development_loop_summary"]["recent_work_results"][0]["title"], "Implement adapter")
         self.assertEqual(payload["development_loop_summary"]["recent_work_results"][0]["artifact_count"], 1)
         self.assertEqual(payload["development_loop_summary"]["recent_work_results"][0]["artifact_labels"], ["Final summary"])
+
+    def test_goal_detail_includes_goal_health_and_execution_metrics(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Goal Health Detail",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        active_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Active Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="normal",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Completed work",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=active_thread,
+            work_item_id="goal-health-complete",
+            runtime_run_id="8ca46c57-aa11-4495-a232-c43775a34c59",
+        )
+        DevTask.objects.create(
+            title="Ready work",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=2,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=active_thread,
+            work_item_id="goal-health-ready",
+        )
+        DevTask.objects.create(
+            title="Blocked work",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=2,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="goal-health-blocked",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        request = self._request(f"/xyn/api/goals/{goal.id}")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._fetch_runtime_run_detail_payload",
+            return_value={
+                "run_id": "8ca46c57-aa11-4495-a232-c43775a34c59",
+                "status": "completed",
+                "summary": "Completed successfully",
+                "artifacts": [{"id": "artifact-1", "artifact_type": "summary", "label": "Summary"}],
+                "steps": [],
+            },
+        ):
+            response = goal_detail(request, str(goal.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["metrics"]["active_threads"], 1)
+        self.assertEqual(payload["metrics"]["blocked_threads"], 1)
+        self.assertEqual(payload["metrics"]["total_completed_work_items"], 1)
+        self.assertEqual(payload["metrics"]["artifact_production_count"], 1)
+        self.assertEqual(payload["goal_health"]["active_threads"], 1)
+        self.assertEqual(payload["goal_health"]["blocked_threads"], 1)
+        self.assertEqual(payload["goal_health"]["recent_artifacts"], 1)

@@ -910,6 +910,9 @@ function GoalDetailPanel({
           <div className="card-header"><div><p className="muted">Development Loop</p></div></div>
           <div className="detail-grid">
             <div><div className="field-label">Goal Status</div><div className="field-value">{payload.development_loop_summary.goal_status}</div></div>
+            <div><div className="field-label">Active Threads</div><div className="field-value">{payload.metrics?.active_threads ?? payload.goal_progress?.active_threads ?? 0}</div></div>
+            <div><div className="field-label">Blocked Threads</div><div className="field-value">{payload.metrics?.blocked_threads ?? payload.goal_progress?.blocked_threads ?? 0}</div></div>
+            <div><div className="field-label">Artifacts Produced</div><div className="field-value">{payload.metrics?.artifact_production_count ?? payload.goal_progress?.artifact_production_count ?? 0}</div></div>
           </div>
           {actionState.message ? <p className="muted" style={{ marginTop: 12 }}>{actionState.message}</p> : null}
           <div className="canvas-table-wrap" style={{ marginTop: 12 }}>
@@ -954,6 +957,17 @@ function GoalDetailPanel({
                 ) : null}
               </tbody>
             </table>
+          </div>
+        </section>
+      ) : null}
+      {payload.goal_health ? (
+        <section className="card">
+          <div className="card-header"><div><p className="muted">Goal Health</p></div></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Progress</div><div className="field-value">{payload.goal_health.progress_percent}%</div></div>
+            <div><div className="field-label">Active Threads</div><div className="field-value">{payload.goal_health.active_threads}</div></div>
+            <div><div className="field-label">Blocked Threads</div><div className="field-value">{payload.goal_health.blocked_threads}</div></div>
+            <div><div className="field-label">Recent Artifacts</div><div className="field-value">{payload.goal_health.recent_artifacts}</div></div>
           </div>
         </section>
       ) : null}
@@ -1263,6 +1277,8 @@ function ThreadDetailPanel({
           <div><div className="field-label">Completed</div><div className="field-value">{payload.work_items_completed ?? payload.completed_work_items}</div></div>
           <div><div className="field-label">Ready</div><div className="field-value">{payload.work_items_ready ?? payload.queued_work_items}</div></div>
           <div><div className="field-label">Blocked</div><div className="field-value">{payload.work_items_blocked ?? payload.awaiting_review_work_items}</div></div>
+          <div><div className="field-label">Avg Run Duration</div><div className="field-value">{payload.metrics?.average_run_duration_seconds ? `${payload.metrics.average_run_duration_seconds}s` : "—"}</div></div>
+          <div><div className="field-label">Failed Work</div><div className="field-value">{payload.metrics?.failed_work_items ?? 0}</div></div>
         </div>
         {actionState.message ? <p className="muted" style={{ marginTop: 12 }}>{actionState.message}</p> : null}
         <div className="inline-action-row" style={{ marginTop: 12 }}>
@@ -1441,7 +1457,7 @@ function ThreadDetailPanel({
         <div className="card-header">
           <div>
             <h3>Activity Timeline</h3>
-            <p className="muted">Coordination events emitted from durable thread state changes.</p>
+            <p className="muted">Ordered execution history reconstructed from durable work items, runs, and coordination events.</p>
           </div>
         </div>
         <div className="canvas-table-wrap">
@@ -1449,8 +1465,10 @@ function ThreadDetailPanel({
             <thead>
               <tr>
                 <th>Event</th>
+                <th>Source</th>
                 <th>Run</th>
                 <th>Work Item</th>
+                <th>Summary</th>
                 <th>Created</th>
               </tr>
             </thead>
@@ -1458,14 +1476,16 @@ function ThreadDetailPanel({
               {payload.timeline.map((event) => (
                 <tr key={event.id}>
                   <td>{event.event_type}</td>
+                  <td>{event.source || "—"}</td>
                   <td>{event.run_id || "—"}</td>
-                  <td>{event.work_item_id || "—"}</td>
+                  <td>{event.work_item_title || event.work_item_id || "—"}</td>
+                  <td>{event.summary || event.status || "—"}</td>
                   <td>{String(event.created_at || "")}</td>
                 </tr>
               ))}
               {!payload.timeline.length ? (
                 <tr>
-                  <td colSpan={4} className="muted">
+                  <td colSpan={6} className="muted">
                     No coordination events recorded yet.
                   </td>
                 </tr>
@@ -1657,6 +1677,42 @@ function RuntimeArtifactDetailPanel({
         <div><div className="field-label">Type</div><div className="field-value">{payload.artifact_type}</div></div>
         <div><div className="field-label">URI</div><div className="field-value">{payload.uri}</div></div>
       </div>
+      <section className="card" style={{ marginTop: 12 }}>
+        <div className="card-header">
+          <div>
+            <p className="muted">Artifact Evolution</p>
+          </div>
+        </div>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Run</th>
+                <th>Created</th>
+                <th>Current</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(payload.evolution || []).map((entry) => (
+                <tr key={`${entry.run_id}:${entry.artifact_id}`}>
+                  <td>{entry.label}</td>
+                  <td>{entry.run_id}</td>
+                  <td>{String(entry.created_at || "—")}</td>
+                  <td>{entry.is_current ? "yes" : "no"}</td>
+                </tr>
+              ))}
+              {!payload.evolution?.length ? (
+                <tr>
+                  <td colSpan={4} className="muted">
+                    No prior artifact versions were found for this logical artifact.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
       <pre className="code-block">{renderedContent}</pre>
     </div>
   );

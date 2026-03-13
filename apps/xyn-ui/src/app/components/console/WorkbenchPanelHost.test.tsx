@@ -340,6 +340,27 @@ describe("WorkbenchPanelHost entity refresh", () => {
           summary: "Queue the next smallest slice from Listing Data Ingestion.",
         },
       },
+      goal_progress: {
+        goal_progress_status: "in_progress",
+        completed_work_items: 0,
+        active_work_items: 1,
+        blocked_work_items: 0,
+        active_threads: 1,
+        blocked_threads: 0,
+        artifact_production_count: 1,
+      },
+      metrics: {
+        active_threads: 1,
+        blocked_threads: 0,
+        total_completed_work_items: 0,
+        artifact_production_count: 1,
+      },
+      goal_health: {
+        progress_percent: 33,
+        active_threads: 1,
+        blocked_threads: 0,
+        recent_artifacts: 1,
+      },
     });
 
     render(
@@ -356,6 +377,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument());
     expect(screen.getAllByText("Listing Data Ingestion").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Development Loop")).toBeInTheDocument();
+    expect(screen.getByText("Goal Health")).toBeInTheDocument();
+    expect(screen.getByText("33%")).toBeInTheDocument();
+    expect(screen.getAllByText("Active Threads").length).toBeGreaterThan(0);
+    expect(screen.getByText("Artifacts Produced")).toBeInTheDocument();
     expect(screen.getAllByText("in_progress").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Artifacts")).toBeInTheDocument();
     expect(screen.getAllByText("Identify the first listing source and capture the ingestion contract").length).toBeGreaterThanOrEqual(1);
@@ -449,8 +474,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
           {
             id: "evt-1",
             event_type: "run_dispatched_from_queue",
+            source: "coordination_event",
             work_item_id: "wi-1",
+            work_item_title: "Implement scheduler",
             run_id: "run-1",
+            status: "queued",
+            summary: "Promoted for queue dispatch",
             payload: {},
             created_at: "2026-03-12T10:05:00Z",
           },
@@ -473,6 +502,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
       work_items_completed: 0,
       work_items_ready: 1,
       work_items_blocked: 0,
+      metrics: {
+        average_run_duration_seconds: 120,
+        total_completed_work_items: 0,
+        failed_work_items: 0,
+        blocked_work_items: 0,
+      },
       queued_work_items: 0,
       running_work_items: 1,
       awaiting_review_work_items: 0,
@@ -523,8 +558,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
         {
           id: "evt-1",
           event_type: "run_dispatched_from_queue",
+          source: "coordination_event",
           work_item_id: "wi-1",
+          work_item_title: "Implement scheduler",
           run_id: "run-1",
+          status: "queued",
+          summary: "Promoted for queue dispatch",
           payload: {},
           created_at: "2026-03-12T10:05:00Z",
         },
@@ -542,10 +581,14 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getCoordinationThread).toHaveBeenCalledWith("thread-1"));
-    await waitFor(() => expect(screen.getByText("Implement scheduler")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("Implement scheduler").length).toBeGreaterThan(0));
     expect(screen.getByText("run_dispatched_from_queue")).toBeInTheDocument();
+    expect(screen.getByText("coordination_event")).toBeInTheDocument();
+    expect(screen.getByText("Promoted for queue dispatch")).toBeInTheDocument();
     expect(screen.getByText("Final summary")).toBeInTheDocument();
     expect(screen.getByText("Thread Review")).toBeInTheDocument();
+    expect(screen.getByText("Avg Run Duration")).toBeInTheDocument();
+    expect(screen.getByText("120s")).toBeInTheDocument();
     expect(screen.getByText("Scheduler refactor is running")).toBeInTheDocument();
 
     await act(async () => {
@@ -565,6 +608,28 @@ describe("WorkbenchPanelHost entity refresh", () => {
       uri: "artifact://runs/run-1/final_summary.md",
       content_type: "text/markdown",
       content: "Run finished successfully.",
+      evolution: [
+        {
+          artifact_id: "artifact-older",
+          run_id: "run-0",
+          work_item_id: "wi-1",
+          artifact_type: "summary",
+          label: "final_summary.md",
+          uri: "artifact://runs/run-0/final_summary.md",
+          created_at: "2026-03-12T10:00:00Z",
+          is_current: false,
+        },
+        {
+          artifact_id: "artifact-1",
+          run_id: "run-1",
+          work_item_id: "wi-1",
+          artifact_type: "summary",
+          label: "final_summary.md",
+          uri: "artifact://runs/run-1/final_summary.md",
+          created_at: "2026-03-12T10:10:00Z",
+          is_current: true,
+        },
+      ],
     });
 
     render(
@@ -585,6 +650,9 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(apiMocks.getRuntimeRunArtifactContent).toHaveBeenCalledWith("ws-1", "run-1", "artifact-1"));
     await waitFor(() => expect(screen.getByText("Run finished successfully.")).toBeInTheDocument());
+    expect(screen.getByText("Artifact Evolution")).toBeInTheDocument();
+    expect(screen.getByText("run-0")).toBeInTheDocument();
+    expect(screen.getByText("yes")).toBeInTheDocument();
   });
 
   it("reloads a visible matching entity table after an entity change", async () => {
