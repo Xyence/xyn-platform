@@ -229,6 +229,10 @@ Action payloads are suggestion metadata only. They:
 
 Recommendation actions must stay deterministic for unchanged durable state.
 
+Actionable recommendations now also include a `recommendation_id`. Xyn uses
+that identifier to verify that the user is approving the same durable
+recommendation instance that was shown to them.
+
 ## Approval Workflow
 
 Epic L adds an approval gate in front of supervised queueing.
@@ -246,6 +250,7 @@ recommendation
 Approval gate behavior:
 - verifies thread state
 - verifies work-item readiness
+- validates `recommendation_id` when one is submitted
 - queues work only through the existing XCO path
 - records an approval event
 - rejects invalid or stale approvals with no side effects
@@ -254,6 +259,17 @@ The approval gate does not:
 - auto-queue on recommendation generation
 - auto-dispatch runs
 - bypass Epic I scheduling
+
+If a submitted `recommendation_id` is stale, Xyn returns a safe explicit stale
+result and performs no queue mutation.
+
+Approval-related coordination events use explicit normalized event types:
+- `approval_recommendation`
+- `approval_queue_first_slice`
+- `approval_queue_next_slice`
+- `approval_thread_resume`
+
+Rejected approvals do not emit a separate approval event in the current model.
 
 ## Thread Review Mode
 

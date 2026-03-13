@@ -195,7 +195,7 @@ class GoalPlanningTests(TestCase):
         )
         mock_dispatch.assert_not_called()
 
-    def test_goal_review_rejects_not_ready_recommendation_without_side_effects(self):
+    def test_goal_review_returns_no_recommendation_for_blocked_work_without_side_effects(self):
         goal = Goal.objects.create(
             workspace=self.workspace,
             title="Blocked Goal",
@@ -244,8 +244,8 @@ class GoalPlanningTests(TestCase):
         payload = json.loads(response.content)
         thread.refresh_from_db()
         goal.refresh_from_db()
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(payload["status"], "not_ready")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "no_recommendation")
         self.assertEqual(thread.status, "active")
         self.assertEqual(goal.planning_status, "proposed")
         self.assertFalse(CoordinationEvent.objects.filter(event_type="approval_recommendation", work_item=task).exists())
@@ -937,10 +937,10 @@ class GoalPlanningTests(TestCase):
         thread = CoordinationThread.objects.create(
             workspace=self.workspace,
             goal=goal,
-            title="Paused Thread",
+            title="Primary Thread",
             owner=self.identity,
-            priority="normal",
-            status="paused",
+            priority="high",
+            status="active",
             work_in_progress_limit=1,
             execution_policy={},
             source_conversation_id="thread-1",
@@ -962,16 +962,48 @@ class GoalPlanningTests(TestCase):
             coordination_thread=thread,
             work_item_id="queued-work",
         )
+        other_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Follow-on Thread",
+            owner=self.identity,
+            priority="low",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Follow-on work",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=2,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=other_thread,
+            work_item_id="follow-on-work",
+        )
+        recommendation_id = recommend_next_slice(goal).recommendation_id
+        task = thread.work_items.get(work_item_id="queued-work")
+        task.status = "completed"
+        task.save(update_fields=["status", "updated_at"])
         request = self._request(
             f"/xyn/api/goals/{goal.id}/review",
             method="POST",
-            data=json.dumps({"review_action": "approve_and_queue"}),
+            data=json.dumps({"review_action": "approve_and_queue", "recommendation_id": recommendation_id}),
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             response = goal_review(request, str(goal.id))
         payload = json.loads(response.content)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "no_recommendation")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(payload["status"], "stale_recommendation")
 
     def test_goal_detail_includes_development_loop_summary(self):
         goal = Goal.objects.create(
