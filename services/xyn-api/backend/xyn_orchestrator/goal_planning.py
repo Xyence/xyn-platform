@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
+import hashlib
+import json
 
 from pydantic import BaseModel, Field
 from django.contrib.auth import get_user_model
@@ -82,6 +84,7 @@ class RecommendationAction:
 
 @dataclass(frozen=True)
 class GoalRecommendation:
+    recommendation_id: Optional[str]
     goal_id: str
     thread_id: Optional[str]
     thread_title: str
@@ -92,6 +95,74 @@ class GoalRecommendation:
     actions: List[RecommendationAction]
     reasoning_summary: str
     summary: str
+
+
+def build_recommendation_id(
+    *,
+    goal_id: str,
+    thread_id: Optional[str],
+    work_item_id: Optional[str],
+    queue_action_type: Optional[str],
+    recommended_work_items: Iterable[GoalRecommendationWorkItem],
+) -> Optional[str]:
+    normalized_goal_id = str(goal_id or "").strip()
+    normalized_thread_id = str(thread_id or "").strip()
+    normalized_work_item_id = str(work_item_id or "").strip()
+    normalized_queue_action = str(queue_action_type or "").strip()
+    recommended_ids = [str(item.id or "").strip() for item in recommended_work_items if str(item.id or "").strip()]
+    if not normalized_goal_id or not (normalized_queue_action or normalized_thread_id or normalized_work_item_id or recommended_ids):
+        return None
+    payload = {
+        "goal_id": normalized_goal_id,
+        "thread_id": normalized_thread_id,
+        "work_item_id": normalized_work_item_id,
+        "queue_action_type": normalized_queue_action,
+        "recommended_work_item_ids": recommended_ids,
+    }
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:12]
+    return (
+        f"rec:v1:{normalized_goal_id}:{normalized_thread_id or '-'}:{normalized_work_item_id or '-'}:"
+        f"{normalized_queue_action or '-'}:{digest}"
+    )
+
+
+def parse_recommendation_id(recommendation_id: Optional[str]) -> Dict[str, Optional[str]]:
+    text = str(recommendation_id or "").strip()
+    if not text:
+        return {"goal_id": None, "thread_id": None, "work_item_id": None, "queue_action_type": None}
+    parts = text.split(":")
+    if len(parts) < 7 or parts[0] != "rec" or parts[1] != "v1":
+        return {"goal_id": None, "thread_id": None, "work_item_id": None, "queue_action_type": None}
+    _, _, goal_id, thread_id, work_item_id, queue_action_type, _digest = parts[:7]
+    return {
+        "goal_id": goal_id or None,
+        "thread_id": None if thread_id == "-" else thread_id,
+        "work_item_id": None if work_item_id == "-" else work_item_id,
+        "queue_action_type": None if queue_action_type == "-" else queue_action_type,
+    }
+
+
+def _finalize_recommendation(recommendation: GoalRecommendation) -> GoalRecommendation:
+    recommendation_id = build_recommendation_id(
+        goal_id=recommendation.goal_id,
+        thread_id=recommendation.thread_id,
+        work_item_id=recommendation.work_item_id,
+        queue_action_type=recommendation.queue_suggestion.action_type if recommendation.queue_suggestion else None,
+        recommended_work_items=recommendation.recommended_work_items,
+    )
+    return GoalRecommendation(
+        recommendation_id=recommendation_id,
+        goal_id=recommendation.goal_id,
+        thread_id=recommendation.thread_id,
+        thread_title=recommendation.thread_title,
+        work_item_id=recommendation.work_item_id,
+        work_item_title=recommendation.work_item_title,
+        recommended_work_items=recommendation.recommended_work_items,
+        queue_suggestion=recommendation.queue_suggestion,
+        actions=recommendation.actions,
+        reasoning_summary=recommendation.reasoning_summary,
+        summary=recommendation.summary,
+    )
 
 
 def _build_recommendation_actions(
@@ -475,7 +546,8 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
 def recommend_next_slice(goal: Goal) -> GoalRecommendation:
     progress = compute_goal_progress(goal)
     if progress.goal_progress_status == "completed" or str(goal.planning_status or "").strip().lower() == "completed":
-        return GoalRecommendation(
+        return _finalize_recommendation(GoalRecommendation(
+            recommendation_id=None,
             goal_id=str(goal.id),
             thread_id=None,
             thread_title="",
@@ -486,7 +558,7 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
             actions=[],
             reasoning_summary=f"{goal.title} is completed. No additional executable slice is recommended.",
             summary=f"{goal.title} is completed. No additional executable slice is recommended.",
-        )
+        ))
     thread_qs = goal.threads.prefetch_related("work_items").all()
     queue = derive_work_queue(
         threads=thread_qs,
@@ -508,7 +580,8 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
         )
         if blocked_threads:
             reasoning += f" Blocked threads waiting for dependencies or review: {', '.join(blocked_threads)}."
-        return GoalRecommendation(
+        return _finalize_recommendation(GoalRecommendation(
+            recommendation_id=None,
             goal_id=str(goal.id),
             thread_id=str(thread.id) if thread else entry.thread_id,
             thread_title=str(thread.title) if thread else entry.thread_title,
@@ -554,7 +627,7 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
             ),
             reasoning_summary=reasoning,
             summary=f"Queue the next smallest slice from {thread.title if thread else entry.thread_title}: {task.title if task else entry.work_item_id}.",
-        )
+        ))
     paused_thread = (
         goal.threads.filter(status="paused")
         .prefetch_related("work_items")
@@ -562,7 +635,8 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
         .first()
     )
     if paused_thread and paused_thread.work_items.filter(status="queued").exists():
-        return GoalRecommendation(
+        return _finalize_recommendation(GoalRecommendation(
+            recommendation_id=None,
             goal_id=str(goal.id),
             thread_id=str(paused_thread.id),
             thread_title=str(paused_thread.title),
@@ -591,7 +665,7 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
                 f"{paused_thread.title} is paused with queued work. Resume it before queueing additional slices."
             ),
             summary=f"Resume {paused_thread.title} before queueing more work.",
-        )
+        ))
     fallback_task = (
         goal.work_items.filter(status="queued", coordination_thread__status__in=["active", "queued"])
         .select_related("coordination_thread")
@@ -604,7 +678,8 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
             f"Selected {fallback_task.title} from {fallback_thread.title} as the smallest reviewable slice. "
             "It is not queue-ready yet, but it is the earliest MVP thread with queued work."
         )
-        return GoalRecommendation(
+        return _finalize_recommendation(GoalRecommendation(
+            recommendation_id=None,
             goal_id=str(goal.id),
             thread_id=str(fallback_thread.id),
             thread_title=str(fallback_thread.title),
@@ -646,7 +721,7 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
             ),
             reasoning_summary=reasoning,
             summary=f"Start with the smallest queued slice from {fallback_thread.title}: {fallback_task.title}.",
-        )
+        ))
     blocked_thread_objects = [
         thread_item
         for thread_item in goal.threads.all().order_by("created_at", "id")
@@ -654,7 +729,8 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
     ]
     blocked_threads = [thread_item.title for thread_item in blocked_thread_objects]
     first_blocked = blocked_thread_objects[0] if blocked_thread_objects else None
-    return GoalRecommendation(
+    return _finalize_recommendation(GoalRecommendation(
+        recommendation_id=None,
         goal_id=str(goal.id),
         thread_id=None,
         thread_title="",
@@ -677,4 +753,4 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
             if blocked_threads
             else "No executable slice is ready yet. Review the first thread and queue its first work item when ready."
         ),
-    )
+    ))

@@ -193,6 +193,7 @@ def compute_goal_development_loop_summary(goal: Goal, *, recommendation: Optiona
     recommended_next_slice = None
     if recommendation is not None:
         recommended_next_slice = {
+            "recommendation_id": getattr(recommendation, "recommendation_id", None),
             "goal_id": getattr(recommendation, "goal_id", ""),
             "thread_id": getattr(recommendation, "thread_id", None),
             "thread_title": getattr(recommendation, "thread_title", ""),

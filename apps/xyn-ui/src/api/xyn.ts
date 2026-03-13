@@ -4245,13 +4245,17 @@ export async function decomposeGoal(id: string): Promise<{ goal: GoalDetail; thr
   return handle<{ goal: GoalDetail; threads: CoordinationThreadDetail[]; work_items: WorkItemDetail[]; planning_output: Record<string, unknown> }>(response);
 }
 
-export async function reviewGoal(id: string, reviewAction: string): Promise<{ status: string; goal: GoalDetail; queue_seed?: Record<string, unknown> }> {
+export async function reviewGoal(
+  id: string,
+  reviewAction: string,
+  recommendationId?: string | null,
+): Promise<{ status: string; goal: GoalDetail; queue_seed?: Record<string, unknown> }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/goals/${id}/review`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",
-    body: JSON.stringify({ review_action: reviewAction }),
+    body: JSON.stringify({ review_action: reviewAction, recommendation_id: recommendationId || undefined }),
   });
   return handle<{ status: string; goal: GoalDetail; queue_seed?: Record<string, unknown> }>(response);
 }

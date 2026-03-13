@@ -167,11 +167,12 @@ class GoalPlanningTests(TestCase):
             priority="high",
         )
         persist_goal_plan(goal, decompose_goal(goal), user=self.user)
+        recommendation_id = recommend_next_slice(goal).recommendation_id
 
         request = self._request(
             f"/xyn/api/goals/{goal.id}/review",
             method="post",
-            data=json.dumps({"review_action": "queue_first_slice"}),
+            data=json.dumps({"review_action": "queue_first_slice", "recommendation_id": recommendation_id}),
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
             "xyn_orchestrator.xyn_api._dispatch_next_queue_item"
@@ -260,11 +261,12 @@ class GoalPlanningTests(TestCase):
             priority="high",
         )
         persist_goal_plan(goal, decompose_goal(goal), user=self.user)
+        recommendation_id = recommend_next_slice(goal).recommendation_id
 
         request = self._request(
             f"/xyn/api/goals/{goal.id}/review",
             method="post",
-            data=json.dumps({"review_action": "approve_and_queue"}),
+            data=json.dumps({"review_action": "approve_and_queue", "recommendation_id": recommendation_id}),
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             first = goal_review(request, str(goal.id))
@@ -281,6 +283,98 @@ class GoalPlanningTests(TestCase):
             CoordinationEvent.objects.filter(thread_id=thread_id, event_type="recommendation_approved").count(),
             1,
         )
+
+    def test_recommend_next_slice_includes_stable_recommendation_id_for_unchanged_state(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Stable Recommendation",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        persist_goal_plan(goal, decompose_goal(goal), user=self.user)
+
+        recommendation_a = recommend_next_slice(goal)
+        recommendation_b = recommend_next_slice(goal)
+
+        self.assertTrue(recommendation_a.recommendation_id)
+        self.assertEqual(recommendation_a.recommendation_id, recommendation_b.recommendation_id)
+        self.assertFalse(CoordinationEvent.objects.filter(event_type="recommendation_approved").exists())
+
+    def test_recommend_next_slice_changes_recommendation_id_when_state_changes(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Changing Recommendation",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Paused Thread",
+            owner=self.identity,
+            priority="normal",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Queued work",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="queued-work",
+        )
+        recommendation_a = recommend_next_slice(goal)
+        thread.status = "active"
+        thread.save(update_fields=["status", "updated_at"])
+        recommendation_b = recommend_next_slice(goal)
+        self.assertNotEqual(recommendation_a.recommendation_id, recommendation_b.recommendation_id)
+
+    def test_goal_review_rejects_stale_recommendation_id_without_side_effects(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Stale Recommendation",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        persist_goal_plan(goal, decompose_goal(goal), user=self.user)
+        recommendation_id = recommend_next_slice(goal).recommendation_id
+        task = goal.work_items.order_by("priority", "created_at", "id").first()
+        self.assertIsNotNone(task)
+        task.status = "completed"
+        task.save(update_fields=["status", "updated_at"])
+
+        request = self._request(
+            f"/xyn/api/goals/{goal.id}/review",
+            method="post",
+            data=json.dumps({"review_action": "approve_and_queue", "recommendation_id": recommendation_id}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = goal_review(request, str(goal.id))
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(payload["status"], "stale_recommendation")
+        self.assertFalse(CoordinationEvent.objects.filter(event_type="recommendation_approved").exists())
 
     def test_recommend_next_slice_prefers_first_queue_ready_work_item(self):
         goal = Goal.objects.create(

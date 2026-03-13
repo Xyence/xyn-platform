@@ -870,9 +870,21 @@ function GoalDetailPanel({
   async function handleApproveAndQueue() {
     try {
       setActionState({ status: "submitting", message: null });
-      const response = await reviewGoal(goalId, "approve_and_queue");
+      const response = await reviewGoal(goalId, "approve_and_queue", payload.recommendation?.recommendation_id);
       setPayload(response.goal);
-      setActionState({ status: "idle", message: response.status === "approved" ? "Approved and queued the recommended slice." : response.status === "already_queued" ? "The recommended slice is already queued." : response.status === "no_recommendation" ? "No queueable recommendation is available right now." : null });
+      setActionState({
+        status: "idle",
+        message:
+          response.status === "approved"
+            ? "Approved and queued the recommended slice."
+            : response.status === "already_queued"
+              ? "The recommended slice is already queued."
+              : response.status === "no_recommendation"
+                ? "No queueable recommendation is available right now."
+                : response.status === "stale_recommendation"
+                  ? "That recommendation is no longer current. Refresh the goal and review the latest next slice."
+                  : null,
+      });
     } catch (err) {
       setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to approve recommendation" });
     }

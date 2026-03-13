@@ -2335,6 +2335,7 @@ export type GoalSummary = {
 };
 
 export type GoalRecommendation = {
+  recommendation_id?: string | null;
   goal_id: string;
   thread_id?: string | null;
   thread_title: string;

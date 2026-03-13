@@ -288,6 +288,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
         },
       ],
       recommendation: {
+        recommendation_id: "rec:v1:goal-1:thread-1:task-1:queue_first_slice:abcd1234",
         goal_id: "goal-1",
         thread_id: "thread-1",
         thread_title: "Listing Data Ingestion",
@@ -330,6 +331,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
           },
         ],
         recommended_next_slice: {
+          recommendation_id: "rec:v1:goal-1:thread-1:task-1:queue_first_slice:abcd1234",
           goal_id: "goal-1",
           thread_id: "thread-1",
           thread_title: "Listing Data Ingestion",
@@ -366,7 +368,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await act(async () => {
       screen.getByRole("button", { name: "Approve and Queue" }).click();
     });
-    await waitFor(() => expect(apiMocks.reviewGoal).toHaveBeenCalledWith("goal-1", "approve_and_queue"));
+    await waitFor(() =>
+      expect(apiMocks.reviewGoal).toHaveBeenCalledWith(
+        "goal-1",
+        "approve_and_queue",
+        "rec:v1:goal-1:thread-1:task-1:queue_first_slice:abcd1234",
+      ),
+    );
     expect(screen.getByText("Approved and queued the recommended slice.")).toBeInTheDocument();
   });
 

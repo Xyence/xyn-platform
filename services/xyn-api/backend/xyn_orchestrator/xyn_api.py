@@ -145,6 +145,7 @@ from .goal_planning import (
     GoalPlanningOutput,
     decompose_goal,
     infer_goal_type,
+    parse_recommendation_id,
     persist_goal_plan,
     recommend_next_slice,
     serialize_goal_summary,
@@ -25527,6 +25528,7 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             "blocked_work_items": progress.blocked_work_items,
         },
         "recommended_next_slice": {
+            "recommendation_id": recommendation.recommendation_id,
             "goal_id": recommendation.goal_id,
             "thread_id": recommendation.thread_id,
             "thread_title": recommendation.thread_title,
@@ -25571,6 +25573,7 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             "recommended_next_slice": development_loop_summary.recommended_next_slice,
         },
         "recommendation": {
+            "recommendation_id": recommendation.recommendation_id,
             "goal_id": recommendation.goal_id,
             "thread_id": recommendation.thread_id,
             "thread_title": recommendation.thread_title,
@@ -26118,8 +26121,14 @@ def _execute_conversation_action(
                 if action_type == ConversationActionType.APPROVE_RECOMMENDATION.value
                 else "queue_next_slice"
             )
-            approval = _approve_goal_recommendation(goal=goal, identity=identity, requested_action_type=requested_action)
-            if approval["status"] in {"rejected", "not_ready", "invalid_thread_state", "no_recommendation"}:
+            submitted_recommendation_id = str((((action.get("payload") or {}).get("action_payload") or {}).get("recommendation_id")) or "").strip() or None
+            approval = _approve_goal_recommendation(
+                goal=goal,
+                identity=identity,
+                requested_action_type=requested_action,
+                submitted_recommendation_id=submitted_recommendation_id,
+            )
+            if approval["status"] in {"rejected", "not_ready", "invalid_thread_state", "no_recommendation", "stale_recommendation"}:
                 return JsonResponse(
                     {
                         "status": approval["status"],
@@ -26185,6 +26194,7 @@ def _execute_conversation_action(
             recommendation = recommend_next_slice(goal)
             detail = _serialize_goal_detail(goal)
             recommendation_payload = {
+                "recommendation_id": recommendation.recommendation_id,
                 "goal_id": recommendation.goal_id,
                 "thread_id": recommendation.thread_id,
                 "thread_title": recommendation.thread_title,
@@ -26785,9 +26795,11 @@ def _approve_goal_recommendation(
     goal: Goal,
     identity: UserIdentity,
     requested_action_type: str,
+    submitted_recommendation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     recommendation = recommend_next_slice(goal)
     queue_suggestion = recommendation.queue_suggestion
+    submitted_identity = parse_recommendation_id(submitted_recommendation_id)
     thread_for_blocked_state = (
         goal.threads.filter(id=recommendation.thread_id).prefetch_related("work_items").first()
         if recommendation.thread_id
@@ -26846,6 +26858,37 @@ def _approve_goal_recommendation(
         if recommendation.work_item_id
         else None
     )
+    if submitted_recommendation_id and recommendation.recommendation_id != submitted_recommendation_id:
+        current_thread_id = str(thread.id) if thread else None
+        current_work_item_id = str(task.id) if task else None
+        if (
+            submitted_identity.get("goal_id") == str(goal.id)
+            and submitted_identity.get("thread_id") == current_thread_id
+            and submitted_identity.get("work_item_id") == current_work_item_id
+            and thread is not None
+            and task is not None
+        ):
+            task_lookup = {str(item.work_item_id or item.id): item for item in goal.work_items.all()}
+            queue = derive_work_queue(
+                threads=goal.threads.all(),
+                status_lookup=lambda candidate: _thread_status_for_task(candidate),
+                task_lookup=lambda work_item_id: task_lookup.get(str(work_item_id)),
+            )
+            if queue and str(queue[0].task_id) == str(task.id) and thread.status == "active":
+                return {
+                    "status": "already_queued",
+                    "summary": f"{task.title} is already the next eligible XCO queue item.",
+                    "queue_seed": {
+                        "thread_id": str(thread.id),
+                        "work_item_id": str(task.id),
+                        "work_item_reference": str(task.work_item_id or task.id),
+                    },
+                }
+        return {
+            "status": "stale_recommendation",
+            "summary": f"The recommendation for {goal.title} is no longer current. Refresh the goal and review the latest next slice.",
+            "queue_seed": None,
+        }
     if thread is None or task is None or task.coordination_thread_id != thread.id:
         return {
             "status": "rejected",
@@ -27108,8 +27151,13 @@ def goal_review(request: HttpRequest, goal_id: str) -> JsonResponse:
         goal.save(update_fields=["planning_status", "updated_at"])
         result = {"status": "adjustment_requested", "goal": _serialize_goal_detail(goal)}
     elif review_action in {"queue_first_slice", "queue_next_slice", "approve_and_queue"}:
-        approval = _approve_goal_recommendation(goal=goal, identity=identity, requested_action_type=review_action)
-        if approval["status"] in {"rejected", "not_ready", "invalid_thread_state"}:
+        approval = _approve_goal_recommendation(
+            goal=goal,
+            identity=identity,
+            requested_action_type=review_action,
+            submitted_recommendation_id=str(payload.get("recommendation_id") or "").strip() or None,
+        )
+        if approval["status"] in {"rejected", "not_ready", "invalid_thread_state", "stale_recommendation"}:
             return JsonResponse({"status": approval["status"], "summary": approval["summary"]}, status=409)
         goal.refresh_from_db()
         result = {"status": approval["status"], "goal": _serialize_goal_detail(goal), "queue_seed": approval.get("queue_seed"), "summary": approval["summary"]}

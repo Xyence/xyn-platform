@@ -1855,6 +1855,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
             },
         }
         recommendation = SimpleNamespace(
+            recommendation_id="rec:v1:goal-1:thread-1:task-1:queue_first_slice:abcd1234",
             goal_id="goal-1",
             thread_id="thread-1",
             thread_title="Listing Data Ingestion",
@@ -1894,6 +1895,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["summary_type"], "next_slice_recommendation")
+        self.assertTrue((((payload.get("result") or {}).get("recommendation") or {}).get("recommendation_id")))
         self.assertEqual((((payload.get("result") or {}).get("recommendation") or {}).get("queue_suggestion") or {}).get("action_type"), "queue_first_slice")
         mock_recommend.assert_called_once()
         mock_activate.assert_not_called()
@@ -1919,7 +1921,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
                 action={
                     "action_type": "approve_recommendation",
                     "thread_id": "thread-1",
-                    "payload": {"action_payload": {}},
+                    "payload": {"action_payload": {"recommendation_id": "rec:v1:goal-1:thread-1:task-1:queue_first_slice:abcd1234"}},
                     "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
                 },
                 prompt="approve the next slice",
@@ -1931,7 +1933,12 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["summary"], "Approved and queued the recommended slice.")
         self.assertEqual((payload.get("result") or {}).get("queue_seed", {}).get("work_item_id"), "task-1")
-        mock_approve.assert_called_once()
+        mock_approve.assert_called_once_with(
+            goal=goal,
+            identity=SimpleNamespace(id="user-1"),
+            requested_action_type="approve_and_queue",
+            submitted_recommendation_id="rec:v1:goal-1:thread-1:task-1:queue_first_slice:abcd1234",
+        )
         mock_activate.assert_not_called()
 
     def test_execute_conversation_action_review_thread_returns_thread_detail(self):
