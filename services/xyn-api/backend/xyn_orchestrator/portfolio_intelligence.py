@@ -23,8 +23,19 @@ class GoalPortfolioRow:
     health_status: str
     active_threads: int
     blocked_threads: int
+    active_work_items: int
+    blocked_work_items: int
+    artifact_production_count: int
     recent_execution_count: int
     coordination_priority: GoalPrioritySignal
+
+
+@dataclass(frozen=True)
+class PortfolioInsight:
+    key: str
+    summary: str
+    evidence: List[str]
+    goal_ids: List[str]
 
 
 def _recent_execution_count(
@@ -119,6 +130,9 @@ def build_goal_portfolio_row(
         health_status=health_status,
         active_threads=health.active_threads,
         blocked_threads=health.blocked_threads,
+        active_work_items=progress.active_work_items,
+        blocked_work_items=progress.blocked_work_items,
+        artifact_production_count=progress.artifact_production_count,
         recent_execution_count=recent_execution_count,
         coordination_priority=GoalPrioritySignal(value="low", reasons=[]),
     )
@@ -132,6 +146,9 @@ def build_goal_portfolio_row(
         health_status=row.health_status,
         active_threads=row.active_threads,
         blocked_threads=row.blocked_threads,
+        active_work_items=row.active_work_items,
+        blocked_work_items=row.blocked_work_items,
+        artifact_production_count=row.artifact_production_count,
         recent_execution_count=row.recent_execution_count,
         coordination_priority=priority,
     )
@@ -146,3 +163,115 @@ def build_goal_portfolio_state(
         build_goal_portfolio_row(goal, runtime_detail_lookup=runtime_detail_lookup)
         for goal in goals
     ]
+
+
+def compute_portfolio_insights(
+    goals: Iterable[Goal],
+    *,
+    runtime_detail_lookup: Optional[Callable[[DevTask], Optional[Dict[str, Any]]]] = None,
+) -> List[PortfolioInsight]:
+    goal_list = list(goals)
+    rows = build_goal_portfolio_state(goal_list, runtime_detail_lookup=runtime_detail_lookup)
+    if not rows:
+        return []
+
+    insights: List[PortfolioInsight] = []
+    by_goal_id = {row.goal_id: row for row in rows}
+
+    blocked_goal_ids = [
+        row.goal_id
+        for row in rows
+        if row.goal_progress_status == "stalled" or (row.blocked_threads > 0 and row.active_threads == 0)
+    ]
+    if blocked_goal_ids:
+        blocked_titles = [by_goal_id[goal_id].title for goal_id in blocked_goal_ids]
+        insights.append(
+            PortfolioInsight(
+                key="blocked_goals",
+                summary=(
+                    f"Blocked progress is concentrated in {', '.join(blocked_titles[:3])}."
+                    if len(blocked_titles) <= 3
+                    else f"{len(blocked_titles)} goals are currently blocked."
+                ),
+                evidence=[
+                    f"{by_goal_id[goal_id].title} has {by_goal_id[goal_id].blocked_threads} blocked thread(s) and {by_goal_id[goal_id].blocked_work_items} blocked work item(s)."
+                    for goal_id in blocked_goal_ids[:3]
+                ],
+                goal_ids=blocked_goal_ids,
+            )
+        )
+
+    total_recent_execution = sum(row.recent_execution_count for row in rows)
+    dominant = max(rows, key=lambda row: (row.recent_execution_count, row.artifact_production_count, row.goal_id))
+    other_recent_execution = total_recent_execution - dominant.recent_execution_count
+    if dominant.recent_execution_count > 0 and dominant.recent_execution_count > max(1, other_recent_execution):
+        insights.append(
+            PortfolioInsight(
+                key="dominant_goal",
+                summary=f"{dominant.title} currently dominates recent execution activity.",
+                evidence=[
+                    f"{dominant.recent_execution_count} recent execution event(s) were observed for {dominant.title}.",
+                    f"Other goals account for {other_recent_execution} recent execution event(s).",
+                ],
+                goal_ids=[dominant.goal_id],
+            )
+        )
+
+    starved_rows = [
+        row
+        for row in rows
+        if (row.active_threads > 0 or row.active_work_items > 0) and row.recent_execution_count == 0 and total_recent_execution > 0
+    ]
+    if starved_rows:
+        insights.append(
+            PortfolioInsight(
+                key="starved_goals",
+                summary=(
+                    f"{starved_rows[0].title} appears idle despite queueable or active work."
+                    if len(starved_rows) == 1
+                    else f"{len(starved_rows)} goals appear idle despite queueable or active work."
+                ),
+                evidence=[
+                    f"{row.title} has {row.active_threads} active thread(s) and {row.active_work_items} active or ready work item(s) with no recent execution activity."
+                    for row in starved_rows[:3]
+                ],
+                goal_ids=[row.goal_id for row in starved_rows],
+            )
+        )
+
+    churn_rows = [
+        row
+        for row in rows
+        if row.artifact_production_count >= 4 and row.progress_percent < 50
+    ]
+    if churn_rows:
+        insights.append(
+            PortfolioInsight(
+                key="artifact_churn",
+                summary=(
+                    f"Artifact churn is concentrated in {churn_rows[0].title}."
+                    if len(churn_rows) == 1
+                    else "Artifact churn is concentrated in a small set of active goals."
+                ),
+                evidence=[
+                    f"{row.title} produced {row.artifact_production_count} artifact(s) while progress is {row.progress_percent}%."
+                    for row in churn_rows[:3]
+                ],
+                goal_ids=[row.goal_id for row in churn_rows],
+            )
+        )
+
+    if not insights:
+        healthiest = max(rows, key=lambda row: (row.progress_percent, -row.blocked_threads, row.goal_id))
+        insights.append(
+            PortfolioInsight(
+                key="steady_progress",
+                summary=f"Portfolio activity is balanced with {healthiest.title} showing the strongest current forward progress.",
+                evidence=[
+                    f"{healthiest.title} is at {healthiest.progress_percent}% progress with {healthiest.active_threads} active thread(s)."
+                ],
+                goal_ids=[healthiest.goal_id],
+            )
+        )
+
+    return insights

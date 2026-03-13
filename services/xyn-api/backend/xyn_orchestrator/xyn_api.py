@@ -159,7 +159,7 @@ from .goal_progress import (
     compute_thread_execution_metrics,
     compute_thread_progress,
 )
-from .portfolio_intelligence import build_goal_portfolio_row, build_goal_portfolio_state
+from .portfolio_intelligence import build_goal_portfolio_row, build_goal_portfolio_state, compute_portfolio_insights
 from .execution_observability import build_artifact_evolution, build_thread_timeline, serialize_thread_timeline
 from .development_intelligence import (
     build_artifact_analysis_context,
@@ -27336,6 +27336,7 @@ def goals_collection(request: HttpRequest) -> JsonResponse:
         qs = qs.filter(goal_type=goal_type)
     ordered_goals = list(qs.order_by("-updated_at", "-created_at"))
     portfolio_rows = build_goal_portfolio_state(ordered_goals, runtime_detail_lookup=_project_runtime_status_to_task)
+    portfolio_insights = compute_portfolio_insights(ordered_goals, runtime_detail_lookup=_project_runtime_status_to_task)
     portfolio_by_goal_id = {row.goal_id: row for row in portfolio_rows}
     rows: List[Dict[str, Any]] = []
     for goal in ordered_goals:
@@ -27377,7 +27378,16 @@ def goals_collection(request: HttpRequest) -> JsonResponse:
                 },
             }
             for row in portfolio_rows
-        ]
+        ],
+        "insights": [
+            {
+                "key": insight.key,
+                "summary": insight.summary,
+                "evidence": insight.evidence,
+                "goal_ids": insight.goal_ids,
+            }
+            for insight in portfolio_insights
+        ],
     }
     return JsonResponse(payload, status=response.status_code)
 

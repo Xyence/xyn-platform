@@ -2509,11 +2509,20 @@ export type GoalPortfolioState = {
     health_status: string;
     active_threads: number;
     blocked_threads: number;
+    active_work_items?: number;
+    blocked_work_items?: number;
+    artifact_production_count?: number;
     recent_execution_count: number;
     coordination_priority: {
       value: string;
       reasons: string[];
     };
+  }>;
+  insights?: Array<{
+    key: string;
+    summary: string;
+    evidence: string[];
+    goal_ids: string[];
   }>;
 };
 

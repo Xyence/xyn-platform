@@ -8,7 +8,7 @@ from django.test import RequestFactory, TestCase
 from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
 from xyn_orchestrator.development_intelligence import compute_goal_development_insights, compute_goal_diagnostic
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
-from xyn_orchestrator.portfolio_intelligence import build_goal_portfolio_row, build_goal_portfolio_state
+from xyn_orchestrator.portfolio_intelligence import build_goal_portfolio_row, build_goal_portfolio_state, compute_portfolio_insights
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import goal_decompose, goal_detail, goal_review, goals_collection
 
@@ -1265,6 +1265,212 @@ class GoalPlanningTests(TestCase):
         first = build_goal_portfolio_state([goal], runtime_detail_lookup=lambda _task: None)
         second = build_goal_portfolio_state([goal], runtime_detail_lookup=lambda _task: None)
         self.assertEqual(first, second)
+
+    def test_compute_portfolio_insights_detects_blocked_goal(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="high",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-1",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        insights = compute_portfolio_insights([goal], runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(insights[0].key, "blocked_goals")
+        self.assertIn("blocked", insights[0].summary.lower())
+
+    def test_compute_portfolio_insights_detects_dominant_goal(self):
+        dominant_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Dominant Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        quiet_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Quiet Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        dominant_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=dominant_goal,
+            title="Dominant Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        quiet_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=quiet_goal,
+            title="Quiet Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        for index in range(3):
+            DevTask.objects.create(
+                title=f"Dominant task {index}",
+                description="",
+                task_type="codegen",
+                status="completed",
+                priority=index + 1,
+                source_entity_type="goal",
+                source_entity_id=dominant_goal.id,
+                source_conversation_id="thread-1",
+                intent_type="goal_planning",
+                target_repo="xyn-platform",
+                target_branch="develop",
+                execution_policy={},
+                goal=dominant_goal,
+                coordination_thread=dominant_thread,
+                work_item_id=f"dominant-{index}",
+                runtime_run_id=uuid.uuid4(),
+            )
+        DevTask.objects.create(
+            title="Quiet task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=quiet_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=quiet_goal,
+            coordination_thread=quiet_thread,
+            work_item_id="quiet-1",
+        )
+        insights = compute_portfolio_insights([dominant_goal, quiet_goal], runtime_detail_lookup=lambda _task: None)
+        dominant = next((item for item in insights if item.key == "dominant_goal"), None)
+        self.assertIsNotNone(dominant)
+        self.assertIn("dominates", dominant.summary.lower())
+
+    def test_compute_portfolio_insights_detects_starved_goal(self):
+        active_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Active Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        starved_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Starved Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        active_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=active_goal,
+            title="Active Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        starved_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=starved_goal,
+            title="Starved Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Done",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=active_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=active_goal,
+            coordination_thread=active_thread,
+            work_item_id="done-1",
+            runtime_run_id=uuid.uuid4(),
+        )
+        DevTask.objects.create(
+            title="Ready but idle",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=starved_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=starved_goal,
+            coordination_thread=starved_thread,
+            work_item_id="idle-1",
+        )
+        insights = compute_portfolio_insights([active_goal, starved_goal], runtime_detail_lookup=lambda _task: None)
+        starved = next((item for item in insights if item.key == "starved_goals"), None)
+        self.assertIsNotNone(starved)
+        self.assertIn("idle", starved.summary.lower())
 
     def test_recommend_next_slice_prefers_earlier_thread_when_candidates_are_equally_valid(self):
         goal = Goal.objects.create(
