@@ -862,6 +862,7 @@ function GoalDetailPanel({
   const recommendationActions = Array.isArray(payload.recommendation?.actions) ? payload.recommendation?.actions : [];
   const queueableAction = recommendationActions.find((action) => action.type === "approve_and_queue");
   const reviewThreadAction = recommendationActions.find((action) => action.type === "review_thread");
+  const recommendationId = payload.recommendation?.recommendation_id || null;
   const reviewWorkItemId =
     payload.recommendation?.work_item_id ||
     payload.recommendation?.recommended_work_items?.[0]?.id ||
@@ -870,7 +871,7 @@ function GoalDetailPanel({
   async function handleApproveAndQueue() {
     try {
       setActionState({ status: "submitting", message: null });
-      const response = await reviewGoal(goalId, "approve_and_queue", payload.recommendation?.recommendation_id);
+      const response = await reviewGoal(goalId, "approve_and_queue", recommendationId);
       setPayload(response.goal);
       setActionState({
         status: "idle",
