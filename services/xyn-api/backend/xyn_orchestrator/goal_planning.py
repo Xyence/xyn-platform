@@ -72,6 +72,15 @@ class GoalQueueSuggestion:
 
 
 @dataclass(frozen=True)
+class RecommendationAction:
+    type: str
+    label: str
+    target_work_item: Optional[str]
+    target_thread: Optional[str]
+    queueable: bool
+
+
+@dataclass(frozen=True)
 class GoalRecommendation:
     goal_id: str
     thread_id: Optional[str]
@@ -80,8 +89,60 @@ class GoalRecommendation:
     work_item_title: str
     recommended_work_items: List[GoalRecommendationWorkItem]
     queue_suggestion: Optional[GoalQueueSuggestion]
+    actions: List[RecommendationAction]
     reasoning_summary: str
     summary: str
+
+
+def _build_recommendation_actions(
+    *,
+    queue_suggestion: Optional[GoalQueueSuggestion],
+    thread_id: Optional[str],
+    work_item_id: Optional[str],
+) -> List[RecommendationAction]:
+    actions: List[RecommendationAction] = []
+    if queue_suggestion:
+        action_type = str(queue_suggestion.action_type or "").strip()
+        if action_type == "resume_thread":
+            actions.append(
+                RecommendationAction(
+                    type="resume_thread",
+                    label="Resume Thread",
+                    target_work_item=None,
+                    target_thread=thread_id or queue_suggestion.thread_id,
+                    queueable=False,
+                )
+            )
+        elif action_type in {"queue_first_slice", "queue_next_slice"}:
+            actions.append(
+                RecommendationAction(
+                    type="approve_and_queue",
+                    label="Approve and Queue",
+                    target_work_item=work_item_id or queue_suggestion.work_item_id,
+                    target_thread=thread_id or queue_suggestion.thread_id,
+                    queueable=True,
+                )
+            )
+            actions.append(
+                RecommendationAction(
+                    type=action_type,
+                    label="Queue First Slice" if action_type == "queue_first_slice" else "Queue Next Slice",
+                    target_work_item=work_item_id or queue_suggestion.work_item_id,
+                    target_thread=thread_id or queue_suggestion.thread_id,
+                    queueable=True,
+                )
+            )
+    if thread_id:
+        actions.append(
+            RecommendationAction(
+                type="review_thread",
+                label="Review Thread",
+                target_work_item=None,
+                target_thread=thread_id,
+                queueable=False,
+            )
+        )
+    return actions
 
 
 def infer_goal_type(title: str, description: str = "") -> str:
@@ -412,6 +473,20 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
 
 
 def recommend_next_slice(goal: Goal) -> GoalRecommendation:
+    progress = compute_goal_progress(goal)
+    if progress.goal_progress_status == "completed" or str(goal.planning_status or "").strip().lower() == "completed":
+        return GoalRecommendation(
+            goal_id=str(goal.id),
+            thread_id=None,
+            thread_title="",
+            work_item_id=None,
+            work_item_title="",
+            recommended_work_items=[],
+            queue_suggestion=None,
+            actions=[],
+            reasoning_summary=f"{goal.title} is completed. No additional executable slice is recommended.",
+            summary=f"{goal.title} is completed. No additional executable slice is recommended.",
+        )
     thread_qs = goal.threads.prefetch_related("work_items").all()
     queue = derive_work_queue(
         threads=thread_qs,
@@ -460,6 +535,23 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
                     else f"Suggest queue_first_slice for {task.title if task else entry.work_item_id}."
                 ),
             ),
+            actions=_build_recommendation_actions(
+                queue_suggestion=GoalQueueSuggestion(
+                    action_type="queue_next_slice"
+                    if goal.work_items.filter(status__in=["running", "completed", "awaiting_review"]).exists()
+                    else "queue_first_slice",
+                    thread_id=str(thread.id) if thread else entry.thread_id,
+                    work_item_id=str(task.id) if task else None,
+                    reason="The selected slice is the first ready unblocked queue candidate under current durable state.",
+                    summary=(
+                        f"Suggest queue_next_slice for {task.title if task else entry.work_item_id}."
+                        if goal.work_items.filter(status__in=["running", "completed", "awaiting_review"]).exists()
+                        else f"Suggest queue_first_slice for {task.title if task else entry.work_item_id}."
+                    ),
+                ),
+                thread_id=str(thread.id) if thread else entry.thread_id,
+                work_item_id=str(task.id) if task else None,
+            ),
             reasoning_summary=reasoning,
             summary=f"Queue the next smallest slice from {thread.title if thread else entry.thread_title}: {task.title if task else entry.work_item_id}.",
         )
@@ -483,6 +575,17 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
                 work_item_id=None,
                 reason="The earliest paused thread still has queued work and must be resumed before more slices can run.",
                 summary=f"Suggest resume_thread for {paused_thread.title}.",
+            ),
+            actions=_build_recommendation_actions(
+                queue_suggestion=GoalQueueSuggestion(
+                    action_type="resume_thread",
+                    thread_id=str(paused_thread.id),
+                    work_item_id=None,
+                    reason="The earliest paused thread still has queued work and must be resumed before more slices can run.",
+                    summary=f"Suggest resume_thread for {paused_thread.title}.",
+                ),
+                thread_id=str(paused_thread.id),
+                work_item_id=None,
             ),
             reasoning_summary=(
                 f"{paused_thread.title} is paused with queued work. Resume it before queueing additional slices."
@@ -526,14 +629,31 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
                     else f"Suggest queue_next_slice for {fallback_task.title}."
                 ),
             ),
+            actions=_build_recommendation_actions(
+                queue_suggestion=GoalQueueSuggestion(
+                    action_type="queue_first_slice" if goal.planning_status != "in_progress" else "queue_next_slice",
+                    thread_id=str(fallback_thread.id),
+                    work_item_id=str(fallback_task.id),
+                    reason="The selected slice is reviewable and is the earliest queued work in the MVP-first thread order.",
+                    summary=(
+                        f"Suggest queue_first_slice for {fallback_task.title}."
+                        if goal.planning_status != "in_progress"
+                        else f"Suggest queue_next_slice for {fallback_task.title}."
+                    ),
+                ),
+                thread_id=str(fallback_thread.id),
+                work_item_id=str(fallback_task.id),
+            ),
             reasoning_summary=reasoning,
             summary=f"Start with the smallest queued slice from {fallback_thread.title}: {fallback_task.title}.",
         )
-    blocked_threads = [
-        thread_item.title
+    blocked_thread_objects = [
+        thread_item
         for thread_item in goal.threads.all().order_by("created_at", "id")
         if compute_thread_progress(thread_item).thread_status == "blocked"
     ]
+    blocked_threads = [thread_item.title for thread_item in blocked_thread_objects]
+    first_blocked = blocked_thread_objects[0] if blocked_thread_objects else None
     return GoalRecommendation(
         goal_id=str(goal.id),
         thread_id=None,
@@ -542,6 +662,11 @@ def recommend_next_slice(goal: Goal) -> GoalRecommendation:
         work_item_title="",
         recommended_work_items=[],
         queue_suggestion=None,
+        actions=_build_recommendation_actions(
+            queue_suggestion=None,
+            thread_id=str(first_blocked.id) if first_blocked else None,
+            work_item_id=None,
+        ),
         reasoning_summary=(
             f"No executable slice is ready yet. Blocked threads: {', '.join(blocked_threads)}."
             if blocked_threads

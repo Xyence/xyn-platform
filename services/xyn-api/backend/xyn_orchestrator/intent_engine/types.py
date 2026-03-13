@@ -87,6 +87,7 @@ class IntentType(str, Enum):
     CREATE_THREAD = "create_thread"
     LIST_THREADS = "list_threads"
     SHOW_THREAD = "show_thread"
+    SHOW_THREAD_REVIEW = "show_thread_review"
     PAUSE_THREAD = "pause_thread"
     RESUME_THREAD = "resume_thread"
     PRIORITIZE_THREAD = "prioritize_thread"
@@ -97,9 +98,11 @@ class IntentType(str, Enum):
     LIST_GOALS = "list_goals"
     SHOW_GOAL = "show_goal"
     APPROVE_PLAN = "approve_plan"
+    APPROVE_RECOMMENDATION = "approve_recommendation"
     DEFER_EXECUTION = "defer_execution"
     ADJUST_PLAN = "adjust_plan"
     RECOMMEND_NEXT_SLICE = "recommend_next_slice"
+    QUEUE_NEXT_SLICE = "queue_next_slice"
     UNSUPPORTED_DECLARED_ENTITY = "unsupported_declared_entity"
     UNSUPPORTED_INTENT = "unsupported_intent"
 
@@ -222,6 +225,7 @@ class ConversationActionType(str, Enum):
     CREATE_THREAD = "create_thread"
     LIST_THREADS = "list_threads"
     SHOW_THREAD = "show_thread"
+    SHOW_THREAD_REVIEW = "show_thread_review"
     PAUSE_THREAD = "pause_thread"
     RESUME_THREAD = "resume_thread"
     PRIORITIZE_THREAD = "prioritize_thread"
@@ -232,9 +236,11 @@ class ConversationActionType(str, Enum):
     LIST_GOALS = "list_goals"
     SHOW_GOAL = "show_goal"
     APPROVE_PLAN = "approve_plan"
+    APPROVE_RECOMMENDATION = "approve_recommendation"
     DEFER_EXECUTION = "defer_execution"
     ADJUST_PLAN = "adjust_plan"
     RECOMMEND_NEXT_SLICE = "recommend_next_slice"
+    QUEUE_NEXT_SLICE = "queue_next_slice"
 
 
 class ConversationActionTarget(BaseModel):

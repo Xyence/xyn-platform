@@ -4295,6 +4295,20 @@ export async function updateCoordinationThread(id: string, payload: Record<strin
   return handle<CoordinationThreadDetail>(response);
 }
 
+export async function reviewCoordinationThread(
+  id: string,
+  reviewAction: "resume_thread" | "queue_next_slice" | "mark_thread_completed",
+): Promise<{ status: string; summary?: string; thread: CoordinationThreadDetail; queue_seed?: Record<string, unknown> }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/threads/${id}/review`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify({ review_action: reviewAction }),
+  });
+  return handle<{ status: string; summary?: string; thread: CoordinationThreadDetail; queue_seed?: Record<string, unknown> }>(response);
+}
+
 export async function getWorkQueue(workspaceId: string): Promise<WorkQueueResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/xco/queue`);

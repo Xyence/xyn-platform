@@ -139,6 +139,7 @@ from .xco import (
     record_thread_event,
     transition_thread_status,
     valid_thread_transition,
+    work_item_is_blocked,
 )
 from .goal_planning import (
     GoalPlanningOutput,
@@ -891,6 +892,7 @@ def _prompt_interpretation_from_intent(
         "create_thread": ("create", "Create thread"),
         "list_threads": ("show", "List threads"),
         "show_thread": ("show", "Show thread"),
+        "show_thread_review": ("review", "Review thread"),
         "pause_thread": ("pause", "Pause thread"),
         "resume_thread": ("continue", "Resume thread"),
         "prioritize_thread": ("prioritize", "Prioritize thread"),
@@ -901,9 +903,11 @@ def _prompt_interpretation_from_intent(
         "list_goals": ("show", "List goals"),
         "show_goal": ("show", "Show goal"),
         "approve_plan": ("approve", "Approve plan"),
+        "approve_recommendation": ("approve", "Approve recommendation"),
         "defer_execution": ("defer", "Defer execution"),
         "adjust_plan": ("adjust", "Adjust plan"),
         "recommend_next_slice": ("recommend", "Recommend next slice"),
+        "queue_next_slice": ("queue", "Queue next slice"),
         "unsupported_declared_entity": ("unsupported", "Unsupported declared entity"),
         "unsupported_intent": ("unsupported", "Unsupported intent"),
     }
@@ -986,7 +990,7 @@ def _prompt_interpretation_from_intent(
         execution_mode = PromptInterpretationExecutionMode.QUEUED_RUN.value
     elif intent.intent_type in {"create_thread", "create_goal"}:
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
-    elif intent.intent_type in {"decompose_goal", "approve_plan", "queue_first_slice"}:
+    elif intent.intent_type in {"decompose_goal", "approve_plan", "approve_recommendation", "queue_first_slice", "queue_next_slice"}:
         execution_mode = PromptInterpretationExecutionMode.AWAITING_REVIEW.value
     elif intent.intent_type in {"unsupported_declared_entity", "unsupported_intent"}:
         execution_mode = PromptInterpretationExecutionMode.BLOCKED.value
@@ -1162,6 +1166,7 @@ def _conversation_action_from_intent(
             IntentType.CREATE_THREAD.value: ConversationActionType.CREATE_THREAD.value,
             IntentType.LIST_THREADS.value: ConversationActionType.LIST_THREADS.value,
             IntentType.SHOW_THREAD.value: ConversationActionType.SHOW_THREAD.value,
+            IntentType.SHOW_THREAD_REVIEW.value: ConversationActionType.SHOW_THREAD_REVIEW.value,
             IntentType.PAUSE_THREAD.value: ConversationActionType.PAUSE_THREAD.value,
             IntentType.RESUME_THREAD.value: ConversationActionType.RESUME_THREAD.value,
             IntentType.PRIORITIZE_THREAD.value: ConversationActionType.PRIORITIZE_THREAD.value,
@@ -1183,9 +1188,11 @@ def _conversation_action_from_intent(
             IntentType.LIST_GOALS.value: ConversationActionType.LIST_GOALS.value,
             IntentType.SHOW_GOAL.value: ConversationActionType.SHOW_GOAL.value,
             IntentType.APPROVE_PLAN.value: ConversationActionType.APPROVE_PLAN.value,
+            IntentType.APPROVE_RECOMMENDATION.value: ConversationActionType.APPROVE_RECOMMENDATION.value,
             IntentType.DEFER_EXECUTION.value: ConversationActionType.DEFER_EXECUTION.value,
             IntentType.ADJUST_PLAN.value: ConversationActionType.ADJUST_PLAN.value,
             IntentType.RECOMMEND_NEXT_SLICE.value: ConversationActionType.RECOMMEND_NEXT_SLICE.value,
+            IntentType.QUEUE_NEXT_SLICE.value: ConversationActionType.QUEUE_NEXT_SLICE.value,
         }
         action_type = action_map.get(intent.intent_type)
         target = ConversationActionTarget(
@@ -25471,10 +25478,44 @@ def _serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
     return serialize_goal_summary(goal)
 
 
+def _serialize_goal_recent_result(goal: Goal, result: Any, *, goal_status: str) -> Dict[str, Any]:
+    task = goal.work_items.filter(work_item_id=result.work_item_id).select_related("coordination_thread").first()
+    artifact_labels: List[str] = []
+    if task:
+        runtime_detail = _project_runtime_status_to_task(task)
+        if isinstance(runtime_detail, dict):
+            artifact_labels = [
+                str(artifact.get("label") or artifact.get("artifact_type") or "artifact")
+                for artifact in (runtime_detail.get("artifacts") if isinstance(runtime_detail.get("artifacts"), list) else [])
+                if isinstance(artifact, dict)
+            ]
+    return {
+        "work_item_id": result.work_item_id,
+        "title": result.title,
+        "status": result.status,
+        "run_id": result.run_id,
+        "thread_id": str(task.coordination_thread_id) if task and task.coordination_thread_id else None,
+        "thread_title": str(task.coordination_thread.title) if task and task.coordination_thread_id else "",
+        "artifact_count": len(artifact_labels),
+        "artifact_labels": artifact_labels[:5],
+        "goal_status": goal_status,
+    }
+
+
 def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
     progress = compute_goal_progress(goal)
     recommendation = recommend_next_slice(goal)
     development_loop_summary = compute_goal_development_loop_summary(goal, recommendation=recommendation)
+    recommendation_actions = [
+        {
+            "type": action.type,
+            "label": action.label,
+            "target_work_item": action.target_work_item,
+            "target_thread": action.target_thread,
+            "queueable": action.queueable,
+        }
+        for action in recommendation.actions
+    ]
     return {
         **_serialize_goal_summary(goal),
         "threads": [_coordination_thread_summary(thread) for thread in goal.threads.all().order_by("created_at", "id")],
@@ -25509,6 +25550,7 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             }
             if recommendation.queue_suggestion
             else None,
+            "actions": recommendation_actions,
             "reasoning_summary": recommendation.reasoning_summary,
             "summary": recommendation.summary,
         },
@@ -25523,12 +25565,7 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
                 for item in development_loop_summary.threads
             ],
             "recent_work_results": [
-                {
-                    "work_item_id": item.work_item_id,
-                    "title": item.title,
-                    "status": item.status,
-                    "run_id": item.run_id,
-                }
+                _serialize_goal_recent_result(goal, item, goal_status=development_loop_summary.goal_status)
                 for item in development_loop_summary.recent_work_results
             ],
             "recommended_next_slice": development_loop_summary.recommended_next_slice,
@@ -25557,6 +25594,7 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             }
             if recommendation.queue_suggestion
             else None,
+            "actions": recommendation_actions,
             "reasoning_summary": recommendation.reasoning_summary,
             "summary": recommendation.summary,
         },
@@ -25570,7 +25608,20 @@ def _goal_progress_summary_text(goal_detail: Dict[str, Any]) -> str:
     active = int(progress.get("active_work_items") or 0)
     blocked = int(progress.get("blocked_work_items") or 0)
     title = str(goal_detail.get("title") or "This goal")
-    return f"{title} is {status}. Completed {completed} work item(s), active {active}, blocked {blocked}."
+    loop_summary = goal_detail.get("development_loop_summary") if isinstance(goal_detail.get("development_loop_summary"), dict) else {}
+    recent_results = loop_summary.get("recent_work_results") if isinstance(loop_summary.get("recent_work_results"), list) else []
+    latest = recent_results[0] if recent_results and isinstance(recent_results[0], dict) else {}
+    next_slice = loop_summary.get("recommended_next_slice") if isinstance(loop_summary.get("recommended_next_slice"), dict) else {}
+    parts = [f"{title} is {status}. Completed {completed} work item(s), active {active}, blocked {blocked}."]
+    if latest:
+        artifact_count = int(latest.get("artifact_count") or 0)
+        parts.append(
+            f"Latest result: {str(latest.get('title') or 'Work item')} is {str(latest.get('status') or 'updated')} with {artifact_count} artifact(s)."
+        )
+    next_summary = str(next_slice.get("summary") or "").strip()
+    if next_summary:
+        parts.append(f"Next slice: {next_summary}")
+    return " ".join(parts)
 
 
 def _thread_progress_summary_text(thread_detail: Dict[str, Any]) -> str:
@@ -25579,7 +25630,17 @@ def _thread_progress_summary_text(thread_detail: Dict[str, Any]) -> str:
     ready = int(thread_detail.get("work_items_ready") or 0)
     blocked = int(thread_detail.get("work_items_blocked") or 0)
     title = str(thread_detail.get("title") or "This thread")
-    return f"{title} is {status}. Completed {completed} work item(s), ready {ready}, blocked {blocked}."
+    recent_runs = thread_detail.get("recent_runs") if isinstance(thread_detail.get("recent_runs"), list) else []
+    latest_run = recent_runs[0] if recent_runs and isinstance(recent_runs[0], dict) else {}
+    recent_artifacts = thread_detail.get("recent_artifacts") if isinstance(thread_detail.get("recent_artifacts"), list) else []
+    parts = [f"{title} is {status}. Completed {completed} work item(s), ready {ready}, blocked {blocked}."]
+    if latest_run:
+        parts.append(
+            f"Latest run {str(latest_run.get('id') or 'run')} is {str(latest_run.get('status') or 'unknown')}."
+        )
+    if recent_artifacts:
+        parts.append(f"{len(recent_artifacts)} artifact(s) are available for review.")
+    return " ".join(parts)
 
 
 def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
@@ -25776,6 +25837,7 @@ def _execute_conversation_action(
         ConversationActionType.CREATE_THREAD.value,
         ConversationActionType.LIST_THREADS.value,
         ConversationActionType.SHOW_THREAD.value,
+        ConversationActionType.SHOW_THREAD_REVIEW.value,
         ConversationActionType.PAUSE_THREAD.value,
         ConversationActionType.RESUME_THREAD.value,
         ConversationActionType.PRIORITIZE_THREAD.value,
@@ -25861,7 +25923,41 @@ def _execute_conversation_action(
         if action_type == ConversationActionType.PAUSE_THREAD.value:
             transition_thread_status(thread, "paused")
         elif action_type == ConversationActionType.RESUME_THREAD.value:
-            transition_thread_status(thread, "active")
+            response_payload, status_code = _review_coordination_thread(thread=thread, identity=identity, review_action="resume_thread")
+            if status_code >= 400:
+                return JsonResponse(
+                    {
+                        "status": response_payload.get("status") or "ValidationError",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": response_payload.get("summary") or f"{thread.title} could not be resumed.",
+                        "intent": intent_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": action,
+                        "operation_result": False,
+                        "result": {"thread": response_payload.get("thread")},
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    },
+                    status=status_code,
+                )
+            detail = response_payload.get("thread") if isinstance(response_payload.get("thread"), dict) else _coordination_thread_detail(thread)
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": response_payload.get("summary") or f"Resumed XCO thread {thread.title}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"thread": detail},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
         elif action_type == ConversationActionType.PRIORITIZE_THREAD.value:
             next_priority = str(action_payload.get("priority") or "high").strip().lower() or "high"
             if next_priority not in THREAD_PRIORITY_ORDER:
@@ -25875,8 +25971,8 @@ def _execute_conversation_action(
         summary = (
             f"Paused XCO thread {thread.title}."
             if action_type == ConversationActionType.PAUSE_THREAD.value
-            else f"Resumed XCO thread {thread.title}."
-            if action_type == ConversationActionType.RESUME_THREAD.value
+            else f"Reviewing XCO thread {thread.title}."
+            if action_type == ConversationActionType.SHOW_THREAD_REVIEW.value
             else f"Updated XCO thread {thread.title}."
             if action_type == ConversationActionType.PRIORITIZE_THREAD.value
             else _thread_progress_summary_text(detail)
@@ -25910,9 +26006,11 @@ def _execute_conversation_action(
         ConversationActionType.LIST_GOALS.value,
         ConversationActionType.SHOW_GOAL.value,
         ConversationActionType.APPROVE_PLAN.value,
+        ConversationActionType.APPROVE_RECOMMENDATION.value,
         ConversationActionType.DEFER_EXECUTION.value,
         ConversationActionType.ADJUST_PLAN.value,
         ConversationActionType.RECOMMEND_NEXT_SLICE.value,
+        ConversationActionType.QUEUE_NEXT_SLICE.value,
     }:
         action_payload = ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("action_payload")
         action_payload = action_payload if isinstance(action_payload, dict) else {}
@@ -26014,6 +26112,45 @@ def _execute_conversation_action(
             goal.planning_status = "in_progress"
             goal.save(update_fields=["planning_status", "updated_at"])
             summary = f"Approved plan for {goal.title}."
+        elif action_type in {ConversationActionType.APPROVE_RECOMMENDATION.value, ConversationActionType.QUEUE_NEXT_SLICE.value}:
+            requested_action = (
+                "approve_and_queue"
+                if action_type == ConversationActionType.APPROVE_RECOMMENDATION.value
+                else "queue_next_slice"
+            )
+            approval = _approve_goal_recommendation(goal=goal, identity=identity, requested_action_type=requested_action)
+            if approval["status"] in {"rejected", "not_ready", "invalid_thread_state", "no_recommendation"}:
+                return JsonResponse(
+                    {
+                        "status": approval["status"],
+                        "summary": approval["summary"],
+                        "intent": intent_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": action,
+                        "operation_result": False,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    },
+                    status=409,
+                )
+            goal.refresh_from_db()
+            detail = _serialize_goal_detail(goal)
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": approval["summary"],
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"goal": detail, "queue_seed": approval.get("queue_seed")},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
         elif action_type == ConversationActionType.DEFER_EXECUTION.value:
             summary = f"Deferred execution for {goal.title}."
         elif action_type == ConversationActionType.ADJUST_PLAN.value:
@@ -26643,6 +26780,156 @@ def _activate_goal_first_slice(goal: Goal) -> Dict[str, Optional[str]]:
     }
 
 
+def _approve_goal_recommendation(
+    *,
+    goal: Goal,
+    identity: UserIdentity,
+    requested_action_type: str,
+) -> Dict[str, Any]:
+    recommendation = recommend_next_slice(goal)
+    queue_suggestion = recommendation.queue_suggestion
+    thread_for_blocked_state = (
+        goal.threads.filter(id=recommendation.thread_id).prefetch_related("work_items").first()
+        if recommendation.thread_id
+        else None
+    )
+    if not queue_suggestion or not recommendation.actions:
+        if thread_for_blocked_state and compute_thread_progress(thread_for_blocked_state).thread_status == "blocked":
+            return {
+                "status": "not_ready",
+                "summary": f"{thread_for_blocked_state.title} is blocked and cannot be queued until its current blockers are cleared.",
+                "queue_seed": None,
+            }
+        return {
+            "status": "no_recommendation",
+            "summary": f"No queueable recommendation is available for {goal.title}.",
+            "queue_seed": None,
+        }
+    allowed_actions = {
+        action.type: action for action in recommendation.actions if getattr(action, "queueable", False)
+    }
+    if not allowed_actions:
+        if thread_for_blocked_state and compute_thread_progress(thread_for_blocked_state).thread_status == "blocked":
+            return {
+                "status": "not_ready",
+                "summary": f"{thread_for_blocked_state.title} is blocked and cannot be queued until its current blockers are cleared.",
+                "queue_seed": None,
+            }
+        return {
+            "status": "no_recommendation",
+            "summary": f"No queueable recommendation is available for {goal.title}.",
+            "queue_seed": None,
+        }
+    action_type = str(requested_action_type or "approve_and_queue").strip() or "approve_and_queue"
+    if action_type == "approve_and_queue":
+        action_type = str(queue_suggestion.action_type or "").strip()
+    if action_type not in allowed_actions:
+        if str(requested_action_type or "").strip() == "approve_and_queue":
+            return {
+                "status": "no_recommendation",
+                "summary": f"No queueable recommendation is available for {goal.title}.",
+                "queue_seed": None,
+            }
+        return {
+            "status": "rejected",
+            "summary": f"{action_type or 'This action'} is not queueable for the current recommendation.",
+            "queue_seed": None,
+        }
+
+    thread = (
+        goal.threads.filter(id=recommendation.thread_id).prefetch_related("work_items").first()
+        if recommendation.thread_id
+        else None
+    )
+    task = (
+        goal.work_items.filter(id=recommendation.work_item_id).select_related("coordination_thread").first()
+        if recommendation.work_item_id
+        else None
+    )
+    if thread is None or task is None or task.coordination_thread_id != thread.id:
+        return {
+            "status": "rejected",
+            "summary": "The recommended work item could not be resolved from durable coordination state.",
+            "queue_seed": None,
+        }
+    if thread.status not in {"active", "queued"}:
+        return {
+            "status": "invalid_thread_state",
+            "summary": f"Thread {thread.title} is {thread.status} and cannot be queued from the current recommendation.",
+            "queue_seed": None,
+        }
+    task_lookup = {str(item.work_item_id or item.id): item for item in goal.work_items.all()}
+    if thread.status == "queued" and action_type == "queue_first_slice":
+        transition_thread_status(
+            thread,
+            "active",
+            work_item=task,
+            payload={"reason": "goal_queue_first_slice", "goal_id": str(goal.id)},
+        )
+        thread.refresh_from_db()
+    task_status = _thread_status_for_task(task)
+    dependency_ids = task.dependency_work_item_ids if isinstance(task.dependency_work_item_ids, list) else []
+    blocked_by_dependency = False
+    for reference in dependency_ids:
+        dep = task_lookup.get(str(reference))
+        dep_status = _thread_status_for_task(dep) if dep is not None else ""
+        if dep is None or dep_status not in {"completed", "succeeded"}:
+            blocked_by_dependency = True
+            break
+    if task_status != "queued" or blocked_by_dependency:
+        return {
+            "status": "not_ready",
+            "summary": f"{task.title} is not ready to enter the XCO queue.",
+            "queue_seed": None,
+        }
+    queue = derive_work_queue(
+        threads=goal.threads.all(),
+        status_lookup=lambda candidate: _thread_status_for_task(candidate),
+        task_lookup=lambda work_item_id: task_lookup.get(str(work_item_id)),
+    )
+    if queue and str(queue[0].task_id) == str(task.id) and thread.status == "active":
+        return {
+            "status": "already_queued",
+            "summary": f"{task.title} is already the next eligible XCO queue item.",
+            "queue_seed": {
+                "thread_id": str(thread.id),
+                "work_item_id": str(task.id),
+                "work_item_reference": str(task.work_item_id or task.id),
+            },
+        }
+
+    if thread.status != "active":
+        transition_thread_status(
+            thread,
+            "active",
+            work_item=task,
+            payload={"reason": "recommendation_approved", "goal_id": str(goal.id)},
+        )
+    if goal.planning_status != "in_progress" and valid_goal_transition(goal.planning_status, "in_progress"):
+        goal.planning_status = "in_progress"
+        goal.save(update_fields=["planning_status", "updated_at"])
+    record_thread_event(
+        thread=thread,
+        event_type="recommendation_approved",
+        work_item=task,
+        payload={
+            "goal_id": str(goal.id),
+            "user_id": str(getattr(identity, "id", "") or ""),
+            "action_type": action_type,
+            "work_item_id": str(task.work_item_id or task.id),
+        },
+    )
+    return {
+        "status": "approved",
+        "summary": f"Approved and queued {task.title} through XCO scheduling.",
+        "queue_seed": {
+            "thread_id": str(thread.id),
+            "work_item_id": str(task.id),
+            "work_item_reference": str(task.work_item_id or task.id),
+        },
+    }
+
+
 def _coordination_task_lookup_factory(workspace_id: str):
     cache: Dict[str, Optional[DevTask]] = {}
 
@@ -26820,13 +27107,117 @@ def goal_review(request: HttpRequest, goal_id: str) -> JsonResponse:
         goal.planning_status = "proposed"
         goal.save(update_fields=["planning_status", "updated_at"])
         result = {"status": "adjustment_requested", "goal": _serialize_goal_detail(goal)}
-    elif review_action == "queue_first_slice":
-        seeded = _activate_goal_first_slice(goal)
+    elif review_action in {"queue_first_slice", "queue_next_slice", "approve_and_queue"}:
+        approval = _approve_goal_recommendation(goal=goal, identity=identity, requested_action_type=review_action)
+        if approval["status"] in {"rejected", "not_ready", "invalid_thread_state"}:
+            return JsonResponse({"status": approval["status"], "summary": approval["summary"]}, status=409)
         goal.refresh_from_db()
-        result = {"status": "queued_first_slice", "goal": _serialize_goal_detail(goal), "queue_seed": seeded}
+        result = {"status": approval["status"], "goal": _serialize_goal_detail(goal), "queue_seed": approval.get("queue_seed"), "summary": approval["summary"]}
     else:
-        return JsonResponse({"error": "review_action must be approve_plan, defer_execution, adjust_plan, or queue_first_slice"}, status=400)
+        return JsonResponse({"error": "review_action must be approve_plan, defer_execution, adjust_plan, approve_and_queue, queue_first_slice, or queue_next_slice"}, status=400)
     return JsonResponse(result)
+
+
+def _review_coordination_thread(
+    *,
+    thread: CoordinationThread,
+    identity: UserIdentity,
+    review_action: str,
+) -> Tuple[Dict[str, Any], int]:
+    if review_action not in {"resume_thread", "queue_next_slice", "mark_thread_completed"}:
+        return ({"error": "review_action must be resume_thread, queue_next_slice, or mark_thread_completed"}, 400)
+
+    if review_action == "resume_thread":
+        if thread.status == "active":
+            return ({"status": "already_active", "thread": _coordination_thread_detail(thread), "summary": f"{thread.title} is already active."}, 200)
+        if not valid_thread_transition(thread.status, "active"):
+            return (
+                {
+                    "status": "invalid_thread_state",
+                    "thread": _coordination_thread_detail(thread),
+                    "summary": f"{thread.title} cannot be resumed from {thread.status}.",
+                },
+                409,
+            )
+        transition_thread_status(thread, "active", payload={"reason": "thread_review_resume", "user_id": str(identity.id)})
+        thread.refresh_from_db()
+        return ({"status": "resumed", "thread": _coordination_thread_detail(thread), "summary": f"Resumed {thread.title}."}, 200)
+
+    if review_action == "mark_thread_completed":
+        unfinished = thread.work_items.exclude(status__in=["completed", "succeeded", "failed", "canceled"]).exists()
+        if unfinished:
+            return (
+                {
+                    "status": "unfinished_work",
+                    "thread": _coordination_thread_detail(thread),
+                    "summary": f"{thread.title} still has unfinished work items and cannot be marked completed.",
+                },
+                409,
+            )
+        if thread.status == "completed":
+            return ({"status": "already_completed", "thread": _coordination_thread_detail(thread), "summary": f"{thread.title} is already completed."}, 200)
+        if not valid_thread_transition(thread.status, "completed"):
+            return (
+                {
+                    "status": "invalid_thread_state",
+                    "thread": _coordination_thread_detail(thread),
+                    "summary": f"{thread.title} cannot be completed from {thread.status}.",
+                },
+                409,
+            )
+        transition_thread_status(thread, "completed", payload={"reason": "thread_review_complete", "user_id": str(identity.id)})
+        thread.refresh_from_db()
+        return ({"status": "completed", "thread": _coordination_thread_detail(thread), "summary": f"Marked {thread.title} completed."}, 200)
+
+    if thread.status != "active":
+        return (
+            {
+                "status": "invalid_thread_state",
+                "thread": _coordination_thread_detail(thread),
+                "summary": f"{thread.title} must be active before queueing the next slice.",
+            },
+            409,
+        )
+
+    queue = derive_work_queue(
+        threads=CoordinationThread.objects.filter(id=thread.id).select_related("workspace", "owner", "goal").prefetch_related("work_items"),
+        status_lookup=_xco_status_lookup,
+        task_lookup=_coordination_task_lookup_factory(str(thread.workspace_id)),
+    )
+    entry = next((candidate for candidate in queue if candidate.thread_id == str(thread.id)), None)
+    if not entry:
+        return (
+            {
+                "status": "no_queueable_work",
+                "thread": _coordination_thread_detail(thread),
+                "summary": f"No queueable work is ready for {thread.title}.",
+            },
+            409,
+        )
+    task = thread.work_items.filter(id=entry.task_id).first()
+    record_thread_event(
+        thread=thread,
+        event_type="thread_next_slice_approved",
+        work_item=task,
+        run_id=str(task.runtime_run_id) if task and task.runtime_run_id else None,
+        payload={
+            "user_id": str(identity.id),
+            "work_item_id": str(task.work_item_id or task.id) if task else entry.work_item_id,
+        },
+    )
+    thread.refresh_from_db()
+    return (
+        {
+            "status": "approved",
+            "thread": _coordination_thread_detail(thread),
+            "queue_seed": {
+                "thread_id": str(thread.id),
+                "work_item_id": str(task.work_item_id or task.id) if task else entry.work_item_id,
+            },
+            "summary": f"Approved the next slice for {thread.title}.",
+        },
+        200,
+    )
 
 
 @csrf_exempt
@@ -26928,6 +27319,26 @@ def thread_timeline(request: HttpRequest, thread_id: str) -> JsonResponse:
     if not _workspace_membership(identity, str(thread.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     return JsonResponse({"events": _coordination_thread_detail(thread).get("timeline", [])})
+
+
+@csrf_exempt
+@login_required
+def thread_review(request: HttpRequest, thread_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    thread = get_object_or_404(
+        CoordinationThread.objects.select_related("workspace", "owner", "goal").prefetch_related("work_items", "events"),
+        id=thread_id,
+    )
+    if not _workspace_membership(identity, str(thread.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    review_action = str(payload.get("review_action") or "").strip().lower()
+    response_payload, status_code = _review_coordination_thread(thread=thread, identity=identity, review_action=review_action)
+    return JsonResponse(response_payload, status=status_code)
 
 
 @login_required
@@ -27452,15 +27863,22 @@ def _coordination_thread_summary(thread: CoordinationThread) -> Dict[str, Any]:
 def _coordination_thread_detail(thread: CoordinationThread) -> Dict[str, Any]:
     work_items = [_serialize_work_item_summary(task) for task in thread.work_items.all().order_by("-updated_at", "-created_at")[:100]]
     recent_artifacts: List[Dict[str, Any]] = []
+    recent_runs: List[Dict[str, Any]] = []
+    seen_run_ids: set[str] = set()
     for task in thread.work_items.all().order_by("-updated_at", "-created_at")[:20]:
         detail = _project_runtime_status_to_task(task)
         if not isinstance(detail, dict):
             continue
+        run_payload = _serialize_runtime_run_for_dev_task(detail)
+        run_id = str(run_payload.get("id") or "").strip()
+        if run_id and run_id not in seen_run_ids:
+            recent_runs.append(run_payload)
+            seen_run_ids.add(run_id)
         for artifact in _serialize_runtime_artifacts_for_thread(detail, work_item_id=task.work_item_id or str(task.id)):
             recent_artifacts.append(dict(artifact))
             if len(recent_artifacts) >= 20:
                 break
-        if len(recent_artifacts) >= 20:
+        if len(recent_artifacts) >= 20 and len(recent_runs) >= 10:
             break
     timeline = [
         {
@@ -27476,6 +27894,7 @@ def _coordination_thread_detail(thread: CoordinationThread) -> Dict[str, Any]:
     return {
         **_coordination_thread_summary(thread),
         "work_items": work_items,
+        "recent_runs": recent_runs,
         "recent_artifacts": recent_artifacts,
         "timeline": timeline,
     }

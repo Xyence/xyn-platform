@@ -210,6 +210,87 @@ Rules:
 - XCO remains the only scheduling and dispatch authority
 - blocked or review-required work does not silently become queueable
 
+## Supervised Recommendation Actions
+
+Epic L extends the development loop with explicit supervised actions attached to
+recommendations.
+
+Supported recommendation actions:
+- `approve_and_queue`
+- `queue_first_slice`
+- `queue_next_slice`
+- `resume_thread`
+- `review_thread`
+
+Action payloads are suggestion metadata only. They:
+- reference durable `Goal`, `CoordinationThread`, and `DevTask` identities
+- remain read-only until the user explicitly approves an action
+- do not dispatch runtime work directly
+
+Recommendation actions must stay deterministic for unchanged durable state.
+
+## Approval Workflow
+
+Epic L adds an approval gate in front of supervised queueing.
+
+Approved flow:
+
+```text
+recommendation
+  -> user approval
+  -> approval gate validation
+  -> XCO queue path
+  -> runtime dispatch later through Epic I / Epic C
+```
+
+Approval gate behavior:
+- verifies thread state
+- verifies work-item readiness
+- queues work only through the existing XCO path
+- records an approval event
+- rejects invalid or stale approvals with no side effects
+
+The approval gate does not:
+- auto-queue on recommendation generation
+- auto-dispatch runs
+- bypass Epic I scheduling
+
+## Thread Review Mode
+
+Epic L exposes a narrow thread review workflow.
+
+Thread review shows:
+- thread status
+- completed, active, and blocked work items
+- recent run results
+- produced artifacts
+
+Supported supervised review actions:
+- `resume_thread`
+- `queue_next_slice`
+- `mark_thread_completed`
+
+These actions route through coordination APIs and follow the same supervised
+queue/approval boundaries as the Goal development loop.
+
+## Result Review Loop
+
+After execution completes, Xyn recomputes the development loop from durable
+state and surfaces:
+- completed work-item result
+- actual run/artifact outputs
+- impact on thread progress
+- impact on goal progress
+- the next recommended slice
+
+These summaries appear in:
+- `goal_detail`
+- `thread_detail`
+- conversation progress and review responses
+
+They are derived from durable `Run`, artifact, thread, and goal state rather
+than freeform narration.
+
 ## Developer Guidance
 
 When adding a new planning seed:
@@ -220,9 +301,11 @@ When adding a new planning seed:
 4. prefer queue-ready work items over prose-only planning
 5. keep review/approval explicit before broad execution
 6. keep progress evaluation and next-slice recommendation deterministic and derived from durable state
+7. keep approval and queue actions supervised and routed through XCO only
 
 Do not:
 - add a second queueing or dispatch path
 - let plans remain only in conversation text
 - expand into speculative autonomy beyond XCO scheduling
 - add autonomous replanning or dependency-graph planning in this layer
+- introduce automatic queueing, background execution agents, or autonomous execution

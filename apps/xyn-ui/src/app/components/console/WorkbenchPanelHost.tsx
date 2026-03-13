@@ -22,6 +22,8 @@ import {
   queryArtifactCanvasTable,
   queryEmsDevicesCanvasTable,
   queryEmsRegistrationsCanvasTable,
+  reviewCoordinationThread,
+  reviewGoal,
 } from "../../../api/xyn";
 import type {
   AppPaletteResult,
@@ -823,6 +825,10 @@ function GoalDetailPanel({
   const [payload, setPayload] = useState<GoalDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionState, setActionState] = useState<{ status: "idle" | "submitting"; message: string | null }>({
+    status: "idle",
+    message: null,
+  });
 
   useEffect(() => {
     let active = true;
@@ -853,6 +859,25 @@ function GoalDetailPanel({
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Goal not found.</p>;
 
+  const recommendationActions = Array.isArray(payload.recommendation?.actions) ? payload.recommendation?.actions : [];
+  const queueableAction = recommendationActions.find((action) => action.type === "approve_and_queue");
+  const reviewThreadAction = recommendationActions.find((action) => action.type === "review_thread");
+  const reviewWorkItemId =
+    payload.recommendation?.work_item_id ||
+    payload.recommendation?.recommended_work_items?.[0]?.id ||
+    null;
+
+  async function handleApproveAndQueue() {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await reviewGoal(goalId, "approve_and_queue");
+      setPayload(response.goal);
+      setActionState({ status: "idle", message: response.status === "approved" ? "Approved and queued the recommended slice." : response.status === "already_queued" ? "The recommended slice is already queued." : response.status === "no_recommendation" ? "No queueable recommendation is available right now." : null });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to approve recommendation" });
+    }
+  }
+
   return (
     <div className="panel-section-stack">
       <section className="card">
@@ -873,6 +898,7 @@ function GoalDetailPanel({
           <div className="detail-grid">
             <div><div className="field-label">Goal Status</div><div className="field-value">{payload.development_loop_summary.goal_status}</div></div>
           </div>
+          {actionState.message ? <p className="muted" style={{ marginTop: 12 }}>{actionState.message}</p> : null}
           <div className="canvas-table-wrap" style={{ marginTop: 12 }}>
             <table className="canvas-table">
               <thead>
@@ -897,6 +923,7 @@ function GoalDetailPanel({
                 <tr>
                   <th>Recent Work</th>
                   <th>Status</th>
+                  <th>Artifacts</th>
                   <th>Run</th>
                 </tr>
               </thead>
@@ -905,11 +932,12 @@ function GoalDetailPanel({
                   <tr key={result.work_item_id}>
                     <td>{result.title}</td>
                     <td>{result.status}</td>
+                    <td>{result.artifact_count ? `${result.artifact_count}` : "0"}</td>
                     <td>{result.run_id || "—"}</td>
                   </tr>
                 ))}
                 {!payload.development_loop_summary.recent_work_results.length ? (
-                  <tr><td colSpan={3} className="muted">No recent work results yet.</td></tr>
+                  <tr><td colSpan={4} className="muted">No recent work results yet.</td></tr>
                 ) : null}
               </tbody>
             </table>
@@ -977,6 +1005,28 @@ function GoalDetailPanel({
       {payload.recommendation?.summary ? (
         <section className="card">
           <InlineMessage tone="info" title="Recommended Next Slice" body={payload.recommendation.summary} />
+          {payload.recommendation.reasoning_summary ? <p className="muted" style={{ marginTop: 10 }}>{payload.recommendation.reasoning_summary}</p> : null}
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            <button type="button" className="ghost sm" disabled={!queueableAction || actionState.status === "submitting"} onClick={handleApproveAndQueue}>
+              Approve and Queue
+            </button>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={!reviewThreadAction?.target_thread}
+              onClick={() => reviewThreadAction?.target_thread && onOpenPanel("thread_detail", { thread_id: reviewThreadAction.target_thread })}
+            >
+              View Thread
+            </button>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={!reviewWorkItemId}
+              onClick={() => reviewWorkItemId && onOpenPanel("work_item_detail", { work_item_id: reviewWorkItemId })}
+            >
+              Review Work Items
+            </button>
+          </div>
         </section>
       ) : null}
     </div>
@@ -1131,6 +1181,10 @@ function ThreadDetailPanel({
   const [payload, setPayload] = useState<CoordinationThreadDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionState, setActionState] = useState<{ status: "idle" | "submitting"; message: string | null }>({
+    status: "idle",
+    message: null,
+  });
 
   useEffect(() => {
     let active = true;
@@ -1157,6 +1211,17 @@ function ThreadDetailPanel({
     onTitleChange?.(payload?.title || "Thread");
   }, [onTitleChange, payload?.title]);
 
+  async function handleReviewAction(action: "resume_thread" | "queue_next_slice" | "mark_thread_completed") {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await reviewCoordinationThread(threadId, action);
+      setPayload(response.thread);
+      setActionState({ status: "idle", message: response.summary || null });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to update thread review state" });
+    }
+  }
+
   if (loading) return <p className="muted">Loading XCO thread…</p>;
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Thread not found.</p>;
@@ -1173,6 +1238,46 @@ function ThreadDetailPanel({
           <div><div className="field-label">Owner</div><div className="field-value">{payload.owner || "—"}</div></div>
         </div>
         {payload.description ? <p className="muted" style={{ marginTop: 12 }}>{payload.description}</p> : null}
+      </section>
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <p className="muted">Thread Review</p>
+          </div>
+        </div>
+        <div className="detail-grid">
+          <div><div className="field-label">Progress</div><div className="field-value">{payload.thread_progress_status || payload.status}</div></div>
+          <div><div className="field-label">Completed</div><div className="field-value">{payload.work_items_completed ?? payload.completed_work_items}</div></div>
+          <div><div className="field-label">Ready</div><div className="field-value">{payload.work_items_ready ?? payload.queued_work_items}</div></div>
+          <div><div className="field-label">Blocked</div><div className="field-value">{payload.work_items_blocked ?? payload.awaiting_review_work_items}</div></div>
+        </div>
+        {actionState.message ? <p className="muted" style={{ marginTop: 12 }}>{actionState.message}</p> : null}
+        <div className="inline-action-row" style={{ marginTop: 12 }}>
+          <button
+            type="button"
+            className="ghost sm"
+            disabled={payload.status !== "paused" || actionState.status === "submitting"}
+            onClick={() => handleReviewAction("resume_thread")}
+          >
+            Resume Thread
+          </button>
+          <button
+            type="button"
+            className="ghost sm"
+            disabled={payload.status !== "active" || actionState.status === "submitting"}
+            onClick={() => handleReviewAction("queue_next_slice")}
+          >
+            Queue Next Slice
+          </button>
+          <button
+            type="button"
+            className="ghost sm"
+            disabled={payload.status === "completed" || actionState.status === "submitting"}
+            onClick={() => handleReviewAction("mark_thread_completed")}
+          >
+            Mark Thread Completed
+          </button>
+        </div>
       </section>
       <section className="card">
         <div className="card-header">
@@ -1217,6 +1322,47 @@ function ThreadDetailPanel({
                 <tr>
                   <td colSpan={5} className="muted">
                     No work items are attached to this thread yet.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <h3>Recent Runs</h3>
+            <p className="muted">Recent runtime results linked to this thread.</p>
+          </div>
+        </div>
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Status</th>
+                <th>Summary</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payload.recent_runs.map((run) => (
+                <tr key={run.id}>
+                  <td>{run.id}</td>
+                  <td>{run.status || "—"}</td>
+                  <td>{run.summary || run.error || "—"}</td>
+                  <td>
+                    <button type="button" className="ghost sm" onClick={() => onOpenPanel("run_detail", { run_id: run.id })}>
+                      Run
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!payload.recent_runs.length ? (
+                <tr>
+                  <td colSpan={4} className="muted">
+                    No recent run results are available for this thread yet.
                   </td>
                 </tr>
               ) : null}

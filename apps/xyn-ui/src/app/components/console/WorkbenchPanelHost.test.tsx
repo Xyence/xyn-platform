@@ -9,6 +9,8 @@ const apiMocks = vi.hoisted(() => ({
   executeAppPalettePrompt: vi.fn(),
   listGoals: vi.fn(),
   getGoal: vi.fn(),
+  reviewGoal: vi.fn(),
+  reviewCoordinationThread: vi.fn(),
   listCoordinationThreads: vi.fn(),
   getCoordinationThread: vi.fn(),
   getWorkQueue: vi.fn(),
@@ -44,6 +46,8 @@ vi.mock("../../../api/xyn", async () => {
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
+    reviewGoal: apiMocks.reviewGoal,
+    reviewCoordinationThread: apiMocks.reviewCoordinationThread,
     listCoordinationThreads: apiMocks.listCoordinationThreads,
     getCoordinationThread: apiMocks.getCoordinationThread,
     getWorkQueue: apiMocks.getWorkQueue,
@@ -208,6 +212,33 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
   it("loads durable goal detail with threads, work items, and recommendation", async () => {
     const onOpenPanel = vi.fn();
+    apiMocks.reviewGoal.mockResolvedValue({
+      status: "approved",
+      goal: {
+        id: "goal-1",
+        workspace_id: "ws-1",
+        title: "AI Real Estate Deal Finder",
+        description: "Build a deal finder using listings and comps.",
+        goal_type: "build_system",
+        planning_status: "in_progress",
+        priority: "high",
+        planning_summary: "Start with listing ingestion and property CRUD.",
+        resolution_notes: ["Bias toward MVP-first slices."],
+        thread_count: 2,
+        work_item_count: 3,
+        created_at: "2026-03-12T10:00:00Z",
+        updated_at: "2026-03-12T10:00:00Z",
+        threads: [],
+        work_items: [],
+        recommendation: null,
+        development_loop_summary: {
+          goal_status: "in_progress",
+          threads: [],
+          recent_work_results: [],
+          recommended_next_slice: null,
+        },
+      },
+    });
     apiMocks.getGoal.mockResolvedValue({
       id: "goal-1",
       workspace_id: "ws-1",
@@ -262,6 +293,22 @@ describe("WorkbenchPanelHost entity refresh", () => {
         thread_title: "Listing Data Ingestion",
         work_item_id: "task-1",
         work_item_title: "Identify the first listing source and capture the ingestion contract",
+        actions: [
+          {
+            type: "approve_and_queue",
+            label: "Approve and Queue",
+            target_thread: "thread-1",
+            target_work_item: "task-1",
+            queueable: true,
+          },
+          {
+            type: "review_thread",
+            label: "Review Thread",
+            target_thread: "thread-1",
+            target_work_item: null,
+            queueable: false,
+          },
+        ],
         summary: "Queue the next smallest slice from Listing Data Ingestion.",
       },
       development_loop_summary: {
@@ -279,6 +326,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
             title: "Identify the first listing source and capture the ingestion contract",
             status: "queued",
             run_id: null,
+            artifact_count: 1,
           },
         ],
         recommended_next_slice: {
@@ -307,11 +355,100 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("Listing Data Ingestion").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Development Loop")).toBeInTheDocument();
     expect(screen.getAllByText("in_progress").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    expect(screen.getAllByText("Identify the first listing source and capture the ingestion contract").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("1").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Queue the next smallest slice from Listing Data Ingestion.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve and Queue" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "View Thread" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Review Work Items" })).toBeEnabled();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Approve and Queue" }).click();
+    });
+    await waitFor(() => expect(apiMocks.reviewGoal).toHaveBeenCalledWith("goal-1", "approve_and_queue"));
+    expect(screen.getByText("Approved and queued the recommended slice.")).toBeInTheDocument();
   });
 
   it("loads XCO thread detail with work item, run, artifact, and timeline navigation", async () => {
     const onOpenPanel = vi.fn();
+    apiMocks.reviewCoordinationThread.mockResolvedValue({
+      status: "approved",
+      summary: "Approved the next slice for Runtime Refactor.",
+      thread: {
+        id: "thread-1",
+        workspace_id: "ws-1",
+        title: "Runtime Refactor",
+        description: "Refactor runtime queue handling",
+        owner: null,
+        priority: "high",
+        status: "active",
+        domain: "development",
+        work_in_progress_limit: 1,
+        execution_policy: { max_concurrent_runs: 1 },
+        source_conversation_id: "thread-conversation-1",
+        thread_progress_status: "active",
+        work_items_completed: 0,
+        work_items_ready: 1,
+        work_items_blocked: 0,
+        queued_work_items: 1,
+        running_work_items: 1,
+        awaiting_review_work_items: 0,
+        completed_work_items: 0,
+        failed_work_items: 0,
+        recent_run_ids: ["run-1"],
+        created_at: "2026-03-12T10:00:00Z",
+        updated_at: "2026-03-12T10:00:00Z",
+        work_items: [
+          {
+            id: "task-1",
+            work_item_id: "wi-1",
+            title: "Implement scheduler",
+            status: "running",
+            target_repo: "xyn-platform",
+            runtime_run_id: "run-1",
+            task_type: "codegen",
+            priority: 0,
+            attempts: 0,
+            max_attempts: 2,
+          },
+        ],
+        recent_runs: [
+          {
+            id: "run-1",
+            status: "running",
+            summary: "Scheduler refactor is running",
+            error: null,
+            log_text: "",
+            started_at: "2026-03-12T10:05:00Z",
+            finished_at: null,
+            failure_reason: null,
+            escalation_reason: null,
+          },
+        ],
+        recent_artifacts: [
+          {
+            id: "artifact-1",
+            run_id: "run-1",
+            work_item_id: "wi-1",
+            artifact_type: "summary",
+            label: "Final summary",
+            uri: "artifact://runs/run-1/final_summary.md",
+            created_at: "2026-03-12T10:10:00Z",
+          },
+        ],
+        timeline: [
+          {
+            id: "evt-1",
+            event_type: "run_dispatched_from_queue",
+            work_item_id: "wi-1",
+            run_id: "run-1",
+            payload: {},
+            created_at: "2026-03-12T10:05:00Z",
+          },
+        ],
+      },
+    });
     apiMocks.getCoordinationThread.mockResolvedValue({
       id: "thread-1",
       workspace_id: "ws-1",
@@ -324,6 +461,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
       work_in_progress_limit: 1,
       execution_policy: { max_concurrent_runs: 1 },
       source_conversation_id: "thread-conversation-1",
+      thread_progress_status: "active",
+      work_items_completed: 0,
+      work_items_ready: 1,
+      work_items_blocked: 0,
       queued_work_items: 0,
       running_work_items: 1,
       awaiting_review_work_items: 0,
@@ -344,6 +485,19 @@ describe("WorkbenchPanelHost entity refresh", () => {
           priority: 0,
           attempts: 0,
           max_attempts: 2,
+        },
+      ],
+      recent_runs: [
+        {
+          id: "run-1",
+          status: "running",
+          summary: "Scheduler refactor is running",
+          error: null,
+          log_text: "",
+          started_at: "2026-03-12T10:05:00Z",
+          finished_at: null,
+          failure_reason: null,
+          escalation_reason: null,
         },
       ],
       recent_artifacts: [
@@ -383,6 +537,15 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(screen.getByText("Implement scheduler")).toBeInTheDocument());
     expect(screen.getByText("run_dispatched_from_queue")).toBeInTheDocument();
     expect(screen.getByText("Final summary")).toBeInTheDocument();
+    expect(screen.getByText("Thread Review")).toBeInTheDocument();
+    expect(screen.getByText("Scheduler refactor is running")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Queue Next Slice" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.reviewCoordinationThread).toHaveBeenCalledWith("thread-1", "queue_next_slice"));
+    expect(screen.getByText("Approved the next slice for Runtime Refactor.")).toBeInTheDocument();
   });
 
   it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {

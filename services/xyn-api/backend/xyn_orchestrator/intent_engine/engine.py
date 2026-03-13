@@ -656,7 +656,9 @@ class IntentResolutionEngine:
             )
 
         intent_type = None
-        if re.search(r"\bpause\b", lowered):
+        if re.search(r"\breview\b", lowered):
+            intent_type = IntentType.SHOW_THREAD_REVIEW
+        elif re.search(r"\bpause\b", lowered):
             intent_type = IntentType.PAUSE_THREAD
         elif re.search(r"\bresume\b", lowered):
             intent_type = IntentType.RESUME_THREAD
@@ -734,8 +736,12 @@ class IntentResolutionEngine:
             r"\b(what should we build next|what should we implement next|what is the next slice|next slice|how close are we to finishing(?: this goal)?|how close is this goal|goal progress)\b",
             lowered,
         )
+        supervised_goal_action = re.search(
+            r"\b(approve the next slice|approve the recommended work|approve recommended work|queue the recommended work|queue the next slice)\b",
+            lowered,
+        )
         if not re.search(r"\b(goal|plan|project|application|system)\b", lowered) and not (
-            conversation_context.active_goal_id and progress_query
+            conversation_context.active_goal_id and (progress_query or supervised_goal_action)
         ):
             return None
         workspace_id = str(context.workspace_id or "").strip()
@@ -786,7 +792,11 @@ class IntentResolutionEngine:
                 confidence=0.83,
                 resolution_notes=notes or ["recommend next slice requested"],
             )
-        if re.search(r"\b(approve plan|approve this plan)\b", lowered):
+        if re.search(r"\b(approve the next slice|approve the recommended work|approve recommended work)\b", lowered):
+            intent_type = IntentType.APPROVE_RECOMMENDATION
+        elif re.search(r"\b(queue the recommended work|queue the next slice)\b", lowered):
+            intent_type = IntentType.QUEUE_NEXT_SLICE
+        elif re.search(r"\b(approve plan|approve this plan)\b", lowered):
             intent_type = IntentType.APPROVE_PLAN
         elif re.search(r"\b(defer execution|not yet|hold this plan)\b", lowered):
             intent_type = IntentType.DEFER_EXECUTION

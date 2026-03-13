@@ -2145,6 +2145,7 @@ export type RuntimeRunSummary = {
     workspace_id?: string | null;
     artifact_id?: string | null;
   };
+  error?: string | null;
   failure_reason?: string | null;
   escalation_reason?: string | null;
 };
@@ -2303,7 +2304,12 @@ export type CoordinationEvent = {
 };
 
 export type CoordinationThreadDetail = CoordinationThreadSummary & {
+  thread_progress_status?: "not_started" | "active" | "blocked" | "completed" | string;
+  work_items_completed?: number;
+  work_items_ready?: number;
+  work_items_blocked?: number;
   work_items: WorkItemSummary[];
+  recent_runs: RuntimeRunSummary[];
   recent_artifacts: RuntimeRunArtifact[];
   timeline: CoordinationEvent[];
 };
@@ -2347,6 +2353,13 @@ export type GoalRecommendation = {
     reason: string;
     summary: string;
   } | null;
+  actions?: Array<{
+    type: string;
+    label: string;
+    target_work_item?: string | null;
+    target_thread?: string | null;
+    queueable: boolean;
+  }>;
   reasoning_summary?: string;
   summary: string;
 };
@@ -2366,6 +2379,11 @@ export type GoalDetail = GoalSummary & {
       title: string;
       status: string;
       run_id?: string | null;
+      thread_id?: string | null;
+      thread_title?: string;
+      artifact_count?: number;
+      artifact_labels?: string[];
+      goal_status?: string;
     }>;
     recommended_next_slice?: GoalRecommendation | null;
   };

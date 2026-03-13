@@ -7,7 +7,7 @@ from django.test import RequestFactory, TestCase
 
 from xyn_orchestrator.goal_progress import compute_goal_progress
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
-from xyn_orchestrator.models import CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
+from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import goal_decompose, goal_detail, goal_review, goals_collection
 
 
@@ -173,16 +173,114 @@ class GoalPlanningTests(TestCase):
             method="post",
             data=json.dumps({"review_action": "queue_first_slice"}),
         )
-        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._dispatch_next_queue_item"
+        ) as mock_dispatch:
             response = goal_review(request, str(goal.id))
         payload = json.loads(response.content)
         goal.refresh_from_db()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "queued_first_slice")
+        self.assertEqual(payload["status"], "approved")
         self.assertEqual(goal.planning_status, "in_progress")
         seeded_task = DevTask.objects.get(id=payload["queue_seed"]["work_item_id"])
         self.assertEqual(seeded_task.status, "queued")
         self.assertEqual(seeded_task.coordination_thread.status, "active")
+        self.assertTrue(
+            CoordinationEvent.objects.filter(
+                thread=seeded_task.coordination_thread,
+                event_type="recommendation_approved",
+                work_item=seeded_task,
+            ).exists()
+        )
+        mock_dispatch.assert_not_called()
+
+    def test_goal_review_rejects_not_ready_recommendation_without_side_effects(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked Goal",
+            description="Blocked work.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        task = DevTask.objects.create(
+            title="Blocked item",
+            description="",
+            task_type="codegen",
+            status="awaiting_review",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="blocked-item",
+        )
+
+        request = self._request(
+            f"/xyn/api/goals/{goal.id}/review",
+            method="post",
+            data=json.dumps({"review_action": "approve_and_queue"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = goal_review(request, str(goal.id))
+        payload = json.loads(response.content)
+        thread.refresh_from_db()
+        goal.refresh_from_db()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(payload["status"], "not_ready")
+        self.assertEqual(thread.status, "active")
+        self.assertEqual(goal.planning_status, "proposed")
+        self.assertFalse(CoordinationEvent.objects.filter(event_type="recommendation_approved", work_item=task).exists())
+
+    def test_goal_review_repeat_approval_does_not_duplicate_queue_side_effects(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Repeat Approval Goal",
+            description="Repeat approval idempotency.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        persist_goal_plan(goal, decompose_goal(goal), user=self.user)
+
+        request = self._request(
+            f"/xyn/api/goals/{goal.id}/review",
+            method="post",
+            data=json.dumps({"review_action": "approve_and_queue"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            first = goal_review(request, str(goal.id))
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            second = goal_review(request, str(goal.id))
+        first_payload = json.loads(first.content)
+        second_payload = json.loads(second.content)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first_payload["status"], "approved")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second_payload["status"], "already_queued")
+        thread_id = first_payload["queue_seed"]["thread_id"]
+        self.assertEqual(
+            CoordinationEvent.objects.filter(thread_id=thread_id, event_type="recommendation_approved").count(),
+            1,
+        )
 
     def test_recommend_next_slice_prefers_first_queue_ready_work_item(self):
         goal = Goal.objects.create(
@@ -201,6 +299,54 @@ class GoalPlanningTests(TestCase):
         self.assertIn("Listing Data Ingestion", recommendation.reasoning_summary)
         self.assertIsNotNone(recommendation.queue_suggestion)
         self.assertEqual(recommendation.queue_suggestion.action_type, "queue_first_slice")
+        action_types = [action.type for action in recommendation.actions]
+        self.assertEqual(action_types[:2], ["approve_and_queue", "queue_first_slice"])
+        self.assertTrue(recommendation.actions[0].queueable)
+        self.assertEqual(recommendation.actions[0].target_work_item, str(recommendation.work_item_id))
+        self.assertEqual(recommendation.actions[0].target_thread, str(recommendation.thread_id))
+
+    def test_recommend_next_slice_for_paused_thread_is_not_queueable(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Paused Goal",
+            description="Resume before queueing.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Paused Thread",
+            owner=self.identity,
+            priority="high",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Queued item",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="queued-item",
+        )
+        recommendation = recommend_next_slice(goal)
+        self.assertEqual(recommendation.queue_suggestion.action_type, "resume_thread")
+        self.assertEqual([action.type for action in recommendation.actions], ["resume_thread", "review_thread"])
+        self.assertFalse(recommendation.actions[0].queueable)
 
     def test_goal_progress_reports_not_started_when_no_work_exists(self):
         goal = Goal.objects.create(
@@ -636,6 +782,102 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(recommendation.recommended_work_items, [])
         self.assertIsNone(recommendation.queue_suggestion)
         self.assertIn("No executable slice is ready yet", recommendation.reasoning_summary)
+        self.assertEqual([action.type for action in recommendation.actions], ["review_thread"])
+
+    def test_recommend_next_slice_returns_empty_for_completed_goal(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Completed Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="completed",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Completed Thread",
+            owner=self.identity,
+            priority="normal",
+            status="completed",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Completed work",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="completed-work",
+        )
+        recommendation = recommend_next_slice(goal)
+        self.assertEqual(recommendation.recommended_work_items, [])
+        self.assertIsNone(recommendation.queue_suggestion)
+        self.assertEqual(recommendation.actions, [])
+        self.assertIn("completed", recommendation.summary.lower())
+
+    def test_goal_review_rejects_stale_approval_when_thread_state_changes(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Stale Approval",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Paused Thread",
+            owner=self.identity,
+            priority="normal",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Queued work",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="queued-work",
+        )
+        request = self._request(
+            f"/xyn/api/goals/{goal.id}/review",
+            method="POST",
+            data=json.dumps({"review_action": "approve_and_queue"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = goal_review(request, str(goal.id))
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "no_recommendation")
 
     def test_goal_detail_includes_development_loop_summary(self):
         goal = Goal.objects.create(
@@ -674,12 +916,30 @@ class GoalPlanningTests(TestCase):
             goal=goal,
             coordination_thread=thread,
             work_item_id="adapter",
+            runtime_run_id="77ad82b5-a303-4455-8994-853e4bb89df3",
         )
         request = self._request(f"/xyn/api/goals/{goal.id}")
-        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._fetch_runtime_run_detail_payload",
+            return_value={
+                "run_id": "77ad82b5-a303-4455-8994-853e4bb89df3",
+                "status": "completed",
+                "summary": "Adapter implemented",
+                "artifacts": [
+                    {
+                        "id": "artifact-1",
+                        "artifact_type": "summary",
+                        "label": "Final summary",
+                    }
+                ],
+                "steps": [],
+            },
+        ):
             response = goal_detail(request, str(goal.id))
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["development_loop_summary"]["goal_status"], "completed")
         self.assertEqual(payload["development_loop_summary"]["threads"][0]["title"], "Listing Data Ingestion")
         self.assertEqual(payload["development_loop_summary"]["recent_work_results"][0]["title"], "Implement adapter")
+        self.assertEqual(payload["development_loop_summary"]["recent_work_results"][0]["artifact_count"], 1)
+        self.assertEqual(payload["development_loop_summary"]["recent_work_results"][0]["artifact_labels"], ["Final summary"])

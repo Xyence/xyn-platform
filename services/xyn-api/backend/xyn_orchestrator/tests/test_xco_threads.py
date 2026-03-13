@@ -9,7 +9,7 @@ from django.utils import timezone
 from xyn_orchestrator.goal_progress import compute_thread_progress
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xco import derive_work_queue
-from xyn_orchestrator.xyn_api import _dispatch_next_queue_item, _update_thread_status_from_tasks, thread_detail, threads_collection, xco_queue_collection
+from xyn_orchestrator.xyn_api import _dispatch_next_queue_item, _update_thread_status_from_tasks, thread_detail, thread_review, threads_collection, xco_queue_collection
 
 
 class XcoThreadTests(TestCase):
@@ -271,3 +271,70 @@ class XcoThreadTests(TestCase):
         self.assertEqual(row["thread_progress_status"], "active")
         self.assertEqual(row["work_items_completed"], 1)
         self.assertEqual(row["work_items_ready"], 1)
+
+    def test_thread_detail_includes_recent_runs(self):
+        thread = self._create_thread(status="active")
+        self._create_task(thread, work_item_id="wi-run", runtime_run_id=uuid.uuid4(), status="running")
+        request = self._request(f"/xyn/api/threads/{thread.id}")
+        with self._auth_patches()[0]:
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._fetch_runtime_run_detail_payload",
+                return_value={
+                    "run_id": "8dfc1f0c-5897-427e-b8ee-0debde6d1b0e",
+                    "status": "running",
+                    "summary": "Refactor is running",
+                    "artifacts": [],
+                    "steps": [],
+                },
+            ):
+                response = thread_detail(request, str(thread.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["recent_runs"][0]["summary"], "Refactor is running")
+
+    def test_thread_review_queue_next_slice_records_approval_without_dispatch(self):
+        thread = self._create_thread(status="active", priority="high")
+        task = self._create_task(thread, work_item_id="wi-next", status="queued")
+        request = self._request(
+            f"/xyn/api/threads/{thread.id}/review",
+            method="post",
+            data=json.dumps({"review_action": "queue_next_slice"}),
+        )
+        with self._auth_patches()[0]:
+            response = thread_review(request, str(thread.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["status"], "approved")
+        self.assertEqual(payload["queue_seed"]["work_item_id"], "wi-next")
+        self.assertTrue(
+            CoordinationEvent.objects.filter(
+                thread=thread,
+                work_item=task,
+                event_type="thread_next_slice_approved",
+            ).exists()
+        )
+
+    def test_thread_review_resume_and_complete_follow_coordination_state_rules(self):
+        thread = self._create_thread(status="paused")
+        resume_request = self._request(
+            f"/xyn/api/threads/{thread.id}/review",
+            method="post",
+            data=json.dumps({"review_action": "resume_thread"}),
+        )
+        with self._auth_patches()[0]:
+            resume_response = thread_review(resume_request, str(thread.id))
+        self.assertEqual(resume_response.status_code, 200)
+        thread.refresh_from_db()
+        self.assertEqual(thread.status, "active")
+
+        self._create_task(thread, status="completed", work_item_id="wi-done")
+        complete_request = self._request(
+            f"/xyn/api/threads/{thread.id}/review",
+            method="post",
+            data=json.dumps({"review_action": "mark_thread_completed"}),
+        )
+        with self._auth_patches()[0]:
+            complete_response = thread_review(complete_request, str(thread.id))
+        self.assertEqual(complete_response.status_code, 200)
+        thread.refresh_from_db()
+        self.assertEqual(thread.status, "completed")
