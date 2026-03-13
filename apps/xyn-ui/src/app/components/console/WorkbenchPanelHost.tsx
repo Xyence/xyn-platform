@@ -1713,6 +1713,47 @@ function RuntimeArtifactDetailPanel({
           </table>
         </div>
       </section>
+      {payload.analysis ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header">
+            <div>
+              <p className="muted">Artifact Analysis</p>
+            </div>
+          </div>
+          <div className="detail-grid">
+            <div><div className="field-label">Status</div><div className="field-value">{payload.analysis.status}</div></div>
+            <div><div className="field-label">Versions</div><div className="field-value">{payload.analysis.version_count}</div></div>
+            <div><div className="field-label">Recent Activity</div><div className="field-value">{payload.analysis.recent_activity_count}</div></div>
+            <div><div className="field-label">Provenance</div><div className="field-value">{payload.analysis.provenance.summary}</div></div>
+          </div>
+          {payload.analysis.observations.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Observations</div>
+              <ul className="detail-list">
+                {payload.analysis.observations.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {payload.analysis.evidence.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Evidence</div>
+              <ul className="detail-list">
+                {payload.analysis.evidence.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {payload.analysis.suggested_human_review_focus ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Suggested Review Focus</div>
+              <div className="field-value">{payload.analysis.suggested_human_review_focus}</div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       <pre className="code-block">{renderedContent}</pre>
     </div>
   );

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from .execution_observability import ThreadTimelineEntry, build_thread_timeline, serialize_thread_timeline
 from .goal_progress import (
@@ -63,6 +63,18 @@ class GoalDiagnostic:
     contributing_threads: List[GoalDiagnosticThread]
     evidence: List[str]
     suggested_human_review_focus: Optional[str]
+
+
+@dataclass(frozen=True)
+class ArtifactAnalysis:
+    artifact_identity: str
+    version_count: int
+    recent_activity_count: int
+    status: str
+    observations: List[str]
+    evidence: List[str]
+    suggested_human_review_focus: Optional[str]
+    provenance: ProvenanceAssessment
 
 
 def _assess_thread_provenance(
@@ -394,4 +406,155 @@ def serialize_goal_diagnostic(diagnostic: GoalDiagnostic) -> Dict[str, object]:
         ],
         "evidence": diagnostic.evidence,
         "suggested_human_review_focus": diagnostic.suggested_human_review_focus,
+    }
+
+
+def build_artifact_analysis_context(
+    *,
+    workspace,
+    evolution: List[Dict[str, Any]],
+    runtime_detail_lookup: Optional[Callable[[DevTask], Optional[Dict[str, Any]]]] = None,
+) -> Dict[str, object]:
+    work_item_ids = {
+        str(row.get("work_item_id") or "").strip()
+        for row in evolution
+        if isinstance(row, dict) and str(row.get("work_item_id") or "").strip()
+    }
+    tasks = (
+        DevTask.objects.select_related("coordination_thread")
+        .filter(runtime_workspace_id=workspace.id, work_item_id__in=work_item_ids)
+        .order_by("created_at", "id")
+    )
+    run_status_by_run_id: Dict[str, str] = {}
+    supervised_run_ids: Set[str] = set()
+    for task in tasks:
+        detail = runtime_detail_lookup(task) if callable(runtime_detail_lookup) else None
+        if not isinstance(detail, dict):
+            continue
+        run_id = str(detail.get("run_id") or detail.get("id") or "").strip()
+        if not run_id:
+            continue
+        status = str(detail.get("status") or task.status or "").strip().lower()
+        if status:
+            run_status_by_run_id[run_id] = status
+        thread = getattr(task, "coordination_thread", None)
+        if thread is None:
+            continue
+        if thread.events.filter(event_type="run_dispatched_from_queue", run_id=run_id).exists():
+            supervised_run_ids.add(run_id)
+    return {
+        "run_status_by_run_id": run_status_by_run_id,
+        "supervised_run_ids": supervised_run_ids,
+    }
+
+
+def compute_artifact_analysis(
+    *,
+    current_artifact: Dict[str, Any],
+    evolution: List[Dict[str, Any]],
+    run_status_by_run_id: Optional[Dict[str, str]] = None,
+    supervised_run_ids: Optional[Set[str]] = None,
+) -> ArtifactAnalysis:
+    rows = [row for row in evolution if isinstance(row, dict)]
+    run_status_by_run_id = run_status_by_run_id or {}
+    supervised_run_ids = supervised_run_ids or set()
+
+    artifact_identity = str(
+        current_artifact.get("label")
+        or current_artifact.get("artifact_type")
+        or current_artifact.get("artifact_id")
+        or "artifact"
+    ).strip()
+    version_count = len(rows)
+    recent_activity_count = min(version_count, 5)
+    observations: List[str] = []
+    evidence: List[str] = []
+    suggested_focus: Optional[str] = None
+
+    failed_revision_count = 0
+    missing_lineage = False
+    run_ids: Set[str] = set()
+    for row in rows:
+        run_id = str(row.get("run_id") or "").strip()
+        if run_id:
+            run_ids.add(run_id)
+        else:
+            missing_lineage = True
+        if not row.get("created_at"):
+            missing_lineage = True
+        status = str(run_status_by_run_id.get(run_id) or "").strip().lower()
+        if status in TERMINAL_FAILURE_STATUSES:
+            failed_revision_count += 1
+
+    supervised_queue_evidence = bool(run_ids & supervised_run_ids)
+    ambiguous_runtime_evidence = bool(run_ids) and not supervised_queue_evidence
+    provenance_evidence: List[str] = []
+    if supervised_queue_evidence:
+        provenance_evidence.append("At least one artifact revision is linked to an explicit supervised queue dispatch event.")
+        provenance_status = "supervised_queue_proven"
+        provenance_summary = "Supervised queue provenance is proven for at least part of this artifact history."
+    elif ambiguous_runtime_evidence:
+        provenance_evidence.append("Artifact revisions have runtime execution history without explicit supervised queue dispatch evidence.")
+        provenance_status = "runtime_provenance_ambiguous"
+        provenance_summary = "Artifact history includes runtime execution, but supervised queue provenance is not fully attributable from durable signals."
+    else:
+        provenance_status = "no_runtime_evidence"
+        provenance_summary = "No runtime execution history is currently visible for this artifact family."
+
+    status = "stable_progression"
+    if failed_revision_count >= 2:
+        status = "repeated_failed_revisions"
+        observations.append("Recent artifact revisions are linked to repeated failed or blocked execution results.")
+        evidence.append(f"{failed_revision_count} recent revision(s) are linked to failed or blocked run states.")
+        suggested_focus = "Inspect the failing revisions and linked run outputs before approving another iteration."
+    elif version_count >= 4:
+        status = "high_churn"
+        observations.append("This artifact family has been revised frequently in recent history.")
+        evidence.append(f"{version_count} total revisions were observed for this artifact family.")
+        suggested_focus = "Review whether recent revisions are converging on a stable output before queueing more work."
+    elif version_count <= 1 or missing_lineage:
+        status = "sparse_history"
+        observations.append("Artifact lineage is sparse or partially linked.")
+        evidence.append("There is too little or too incomplete version history to infer a strong revision pattern.")
+        suggested_focus = "Inspect the surrounding thread and run history before drawing conclusions from this artifact family."
+    else:
+        observations.append("Artifact history shows steady progression without repeated failed revisions.")
+        evidence.append(f"{version_count} revision(s) are present without repeated failure-linked churn.")
+        suggested_focus = "Continue reviewing later revisions for substantive changes."
+
+    evidence.extend(provenance_evidence)
+    return ArtifactAnalysis(
+        artifact_identity=artifact_identity,
+        version_count=version_count,
+        recent_activity_count=recent_activity_count,
+        status=status,
+        observations=observations,
+        evidence=evidence,
+        suggested_human_review_focus=suggested_focus,
+        provenance=ProvenanceAssessment(
+            provenance_status=provenance_status,
+            supervised_queue_evidence=supervised_queue_evidence,
+            ambiguous_runtime_evidence=ambiguous_runtime_evidence,
+            evidence=provenance_evidence,
+            summary=provenance_summary,
+        ),
+    )
+
+
+def serialize_artifact_analysis(analysis: ArtifactAnalysis) -> Dict[str, object]:
+    return {
+        "artifact_identity": analysis.artifact_identity,
+        "version_count": analysis.version_count,
+        "recent_activity_count": analysis.recent_activity_count,
+        "status": analysis.status,
+        "observations": analysis.observations,
+        "evidence": analysis.evidence,
+        "suggested_human_review_focus": analysis.suggested_human_review_focus,
+        "provenance": {
+            "provenance_status": analysis.provenance.provenance_status,
+            "supervised_queue_evidence": analysis.provenance.supervised_queue_evidence,
+            "ambiguous_runtime_evidence": analysis.provenance.ambiguous_runtime_evidence,
+            "evidence": analysis.provenance.evidence,
+            "summary": analysis.provenance.summary,
+        },
     }

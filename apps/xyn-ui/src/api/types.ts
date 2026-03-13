@@ -2121,6 +2121,22 @@ export type RuntimeRunArtifactContent = {
   uri: string;
   content_type?: string | null;
   content: string;
+  analysis?: {
+    artifact_identity: string;
+    version_count: number;
+    recent_activity_count: number;
+    status: string;
+    observations: string[];
+    evidence: string[];
+    suggested_human_review_focus?: string | null;
+    provenance: {
+      provenance_status: string;
+      supervised_queue_evidence: boolean;
+      ambiguous_runtime_evidence: boolean;
+      evidence: string[];
+      summary: string;
+    };
+  };
   evolution?: Array<{
     artifact_id: string;
     run_id: string;

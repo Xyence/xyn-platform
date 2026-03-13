@@ -161,8 +161,11 @@ from .goal_progress import (
 )
 from .execution_observability import build_artifact_evolution, build_thread_timeline, serialize_thread_timeline
 from .development_intelligence import (
+    build_artifact_analysis_context,
     build_thread_observability_bundle,
+    compute_artifact_analysis,
     compute_goal_diagnostic,
+    serialize_artifact_analysis,
     serialize_goal_diagnostic,
     serialize_thread_diagnostic,
 )
@@ -25151,12 +25154,26 @@ def runtime_run_artifact_detail(request: HttpRequest, run_id: uuid.UUID, artifac
     if not isinstance(artifact_payload, dict):
         return JsonResponse({"error": "runtime artifact unavailable"}, status=502)
     artifact_payload["run_id"] = str(run_id)
-    artifact_payload["evolution"] = build_artifact_evolution(
+    evolution = build_artifact_evolution(
         workspace=workspace,
         current_run_id=str(run_id),
         current_artifact_id=str(artifact_id),
         current_artifact=artifact_payload,
         runtime_detail_lookup=_project_runtime_status_to_task,
+    )
+    artifact_payload["evolution"] = evolution
+    analysis_context = build_artifact_analysis_context(
+        workspace=workspace,
+        evolution=evolution,
+        runtime_detail_lookup=_project_runtime_status_to_task,
+    )
+    artifact_payload["analysis"] = serialize_artifact_analysis(
+        compute_artifact_analysis(
+            current_artifact=artifact_payload,
+            evolution=evolution,
+            run_status_by_run_id=analysis_context.get("run_status_by_run_id") if isinstance(analysis_context, dict) else None,
+            supervised_run_ids=analysis_context.get("supervised_run_ids") if isinstance(analysis_context, dict) else None,
+        )
     )
     return JsonResponse(artifact_payload)
 

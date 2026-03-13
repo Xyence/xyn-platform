@@ -608,6 +608,22 @@ describe("WorkbenchPanelHost entity refresh", () => {
       uri: "artifact://runs/run-1/final_summary.md",
       content_type: "text/markdown",
       content: "Run finished successfully.",
+      analysis: {
+        artifact_identity: "final_summary.md",
+        version_count: 2,
+        recent_activity_count: 2,
+        status: "stable_progression",
+        observations: ["Artifact history shows steady progression without repeated failed revisions."],
+        evidence: ["2 revision(s) are present without repeated failure-linked churn."],
+        suggested_human_review_focus: "Continue reviewing later revisions for substantive changes.",
+        provenance: {
+          provenance_status: "supervised_queue_proven",
+          supervised_queue_evidence: true,
+          ambiguous_runtime_evidence: false,
+          evidence: ["At least one artifact revision is linked to an explicit supervised queue dispatch event."],
+          summary: "Supervised queue provenance is proven for at least part of this artifact history.",
+        },
+      },
       evolution: [
         {
           artifact_id: "artifact-older",
@@ -651,6 +667,9 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(apiMocks.getRuntimeRunArtifactContent).toHaveBeenCalledWith("ws-1", "run-1", "artifact-1"));
     await waitFor(() => expect(screen.getByText("Run finished successfully.")).toBeInTheDocument());
     expect(screen.getByText("Artifact Evolution")).toBeInTheDocument();
+    expect(screen.getByText("Artifact Analysis")).toBeInTheDocument();
+    expect(screen.getByText("stable_progression")).toBeInTheDocument();
+    expect(screen.getByText("Supervised queue provenance is proven for at least part of this artifact history.")).toBeInTheDocument();
     expect(screen.getByText("run-0")).toBeInTheDocument();
     expect(screen.getByText("yes")).toBeInTheDocument();
   });
