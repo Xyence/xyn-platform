@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 
 from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
+from xyn_orchestrator.development_intelligence import compute_goal_diagnostic
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import goal_decompose, goal_detail, goal_review, goals_collection
@@ -1375,3 +1376,203 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(payload["goal_health"]["active_threads"], 1)
         self.assertEqual(payload["goal_health"]["blocked_threads"], 1)
         self.assertEqual(payload["goal_health"]["recent_artifacts"], 1)
+        self.assertEqual(payload["goal_diagnostic"]["status"], "blocked")
+
+    def test_goal_diagnostic_detects_blocked_goal_due_to_blocked_threads(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="high",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked slice",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="blocked-slice",
+        )
+        diagnostic = compute_goal_diagnostic(goal)
+        self.assertEqual(diagnostic.status, "blocked")
+        self.assertTrue(any("blocked" in line.lower() for line in diagnostic.evidence))
+
+    def test_goal_diagnostic_detects_fragmented_goal(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Fragmented Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        for index in range(3):
+            thread = CoordinationThread.objects.create(
+                workspace=self.workspace,
+                goal=goal,
+                title=f"Active Thread {index + 1}",
+                owner=self.identity,
+                priority="normal",
+                status="active",
+                work_in_progress_limit=1,
+                execution_policy={},
+                source_conversation_id="thread-1",
+            )
+            DevTask.objects.create(
+                title=f"Queued {index + 1}",
+                description="",
+                task_type="codegen",
+                status="queued",
+                priority=index,
+                source_entity_type="goal",
+                source_entity_id=goal.id,
+                source_conversation_id="thread-1",
+                intent_type="goal_planning",
+                target_repo="xyn-platform",
+                target_branch="develop",
+                execution_policy={},
+                goal=goal,
+                coordination_thread=thread,
+                work_item_id=f"queued-{index + 1}",
+            )
+        diagnostic = compute_goal_diagnostic(goal)
+        self.assertEqual(diagnostic.status, "fragmented")
+        self.assertTrue(any("active thread" in line.lower() for line in diagnostic.evidence))
+
+    def test_goal_diagnostic_detects_high_activity_low_progress(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="High Activity Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Active Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        task = DevTask.objects.create(
+            title="Queued work",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="queued-work",
+            runtime_run_id=uuid.uuid4(),
+        )
+
+        def runtime_detail_lookup(candidate):
+            if candidate.id != task.id:
+                return None
+            return {
+                "id": "run-1",
+                "run_id": "run-1",
+                "status": "failed",
+                "artifacts": [
+                    {"id": "artifact-1", "artifact_type": "summary", "label": "Summary 1"},
+                    {"id": "artifact-2", "artifact_type": "summary", "label": "Summary 2"},
+                    {"id": "artifact-3", "artifact_type": "summary", "label": "Summary 3"},
+                    {"id": "artifact-4", "artifact_type": "summary", "label": "Summary 4"},
+                ],
+            }
+
+        diagnostic = compute_goal_diagnostic(goal, runtime_detail_lookup=runtime_detail_lookup)
+        self.assertEqual(diagnostic.status, "high_activity_low_progress")
+        self.assertTrue(any("artifact" in line.lower() for line in diagnostic.evidence))
+
+    def test_goal_diagnostic_detects_completed_goal(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Completed Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="completed",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Done Thread",
+            owner=self.identity,
+            priority="normal",
+            status="completed",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Done work",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="done-work",
+        )
+        diagnostic = compute_goal_diagnostic(goal)
+        self.assertEqual(diagnostic.status, "completed")
+
+    def test_goal_diagnostic_handles_low_signal_goal(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Low Signal Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        diagnostic = compute_goal_diagnostic(goal)
+        self.assertEqual(diagnostic.status, "low_signal")

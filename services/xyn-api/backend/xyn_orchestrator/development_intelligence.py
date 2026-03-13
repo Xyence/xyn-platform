@@ -2,11 +2,22 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from .execution_observability import ThreadTimelineEntry
-from .goal_progress import ThreadExecutionMetrics, ThreadProgressSnapshot
-from .models import CoordinationThread
+from .execution_observability import ThreadTimelineEntry, build_thread_timeline, serialize_thread_timeline
+from .goal_progress import (
+    GoalExecutionMetrics,
+    GoalHealthIndicators,
+    GoalProgressSnapshot,
+    ThreadExecutionMetrics,
+    ThreadProgressSnapshot,
+    compute_goal_execution_metrics,
+    compute_goal_health_indicators,
+    compute_goal_progress,
+    compute_thread_execution_metrics,
+    compute_thread_progress,
+)
+from .models import CoordinationThread, DevTask, Goal
 
 
 SUPERVISED_APPROVAL_EVENT_TYPES = {
@@ -36,6 +47,22 @@ class ThreadDiagnostic:
     evidence: List[str]
     suggested_human_review_action: Optional[str]
     provenance: ProvenanceAssessment
+
+
+@dataclass(frozen=True)
+class GoalDiagnosticThread:
+    thread_id: str
+    title: str
+    status: str
+
+
+@dataclass(frozen=True)
+class GoalDiagnostic:
+    status: str
+    observations: List[str]
+    contributing_threads: List[GoalDiagnosticThread]
+    evidence: List[str]
+    suggested_human_review_focus: Optional[str]
 
 
 def _assess_thread_provenance(
@@ -168,6 +195,174 @@ def compute_thread_diagnostic(
     )
 
 
+def build_thread_observability_bundle(
+    thread: CoordinationThread,
+    *,
+    runtime_detail_lookup: Optional[Callable[[DevTask], Optional[Dict[str, Any]]]] = None,
+) -> Dict[str, object]:
+    progress = compute_thread_progress(thread)
+    metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=runtime_detail_lookup)
+    recent_artifacts: List[Dict[str, Any]] = []
+    recent_runs: List[Dict[str, Any]] = []
+    seen_run_ids: set[str] = set()
+    for task in thread.work_items.all().order_by("-updated_at", "-created_at")[:20]:
+        detail = runtime_detail_lookup(task) if callable(runtime_detail_lookup) else None
+        if not isinstance(detail, dict):
+            continue
+        run_payload = {
+            "id": str(detail.get("id") or detail.get("run_id") or ""),
+            "status": detail.get("status"),
+            "summary": detail.get("summary"),
+            "failure_reason": detail.get("failure_reason"),
+            "escalation_reason": detail.get("escalation_reason"),
+            "started_at": detail.get("started_at"),
+            "completed_at": detail.get("completed_at"),
+        }
+        run_id = str(run_payload.get("id") or "").strip()
+        if run_id and run_id not in seen_run_ids:
+            recent_runs.append(run_payload)
+            seen_run_ids.add(run_id)
+        artifacts = detail.get("artifacts") if isinstance(detail.get("artifacts"), list) else []
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            recent_artifacts.append(
+                {
+                    "id": str(artifact.get("artifact_id") or artifact.get("id") or "").strip(),
+                    "run_id": run_id or None,
+                    "work_item_id": str(task.work_item_id or task.id),
+                    "artifact_type": str(artifact.get("artifact_type") or artifact.get("kind") or "").strip() or None,
+                    "label": str(artifact.get("label") or artifact.get("name") or artifact.get("artifact_type") or "artifact"),
+                    "uri": str(artifact.get("uri") or "").strip() or None,
+                    "created_at": artifact.get("created_at"),
+                    "metadata": artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {},
+                }
+            )
+            if len(recent_artifacts) >= 20:
+                break
+        if len(recent_artifacts) >= 20 and len(recent_runs) >= 10:
+            break
+    timeline_entries = build_thread_timeline(thread, runtime_detail_lookup=runtime_detail_lookup)
+    diagnostic = compute_thread_diagnostic(
+        thread,
+        progress=progress,
+        metrics=metrics,
+        timeline=timeline_entries,
+        recent_runs=recent_runs,
+        recent_artifacts=recent_artifacts,
+    )
+    return {
+        "progress": progress,
+        "metrics": metrics,
+        "recent_runs": recent_runs,
+        "recent_artifacts": recent_artifacts,
+        "timeline_entries": timeline_entries,
+        "timeline": serialize_thread_timeline(timeline_entries)[-100:],
+        "diagnostic": diagnostic,
+    }
+
+
+def compute_goal_diagnostic(
+    goal: Goal,
+    *,
+    runtime_detail_lookup: Optional[Callable[[DevTask], Optional[Dict[str, Any]]]] = None,
+) -> GoalDiagnostic:
+    progress = compute_goal_progress(goal)
+    metrics = compute_goal_execution_metrics(goal, runtime_detail_lookup=runtime_detail_lookup)
+    health = compute_goal_health_indicators(goal, runtime_detail_lookup=runtime_detail_lookup)
+    thread_bundles = [
+        (thread, build_thread_observability_bundle(thread, runtime_detail_lookup=runtime_detail_lookup))
+        for thread in goal.threads.all().order_by("created_at", "id")
+    ]
+    observations: List[str] = []
+    evidence: List[str] = []
+    contributing_threads: List[GoalDiagnosticThread] = []
+    suggested_focus: Optional[str] = None
+
+    slow_threads = [
+        thread
+        for thread, bundle in thread_bundles
+        if getattr(bundle["diagnostic"], "status", "") == "slow"
+    ]
+    blocked_threads = [
+        thread
+        for thread, bundle in thread_bundles
+        if getattr(bundle["diagnostic"], "status", "") == "blocked"
+    ]
+    ambiguous_threads = [
+        thread
+        for thread, bundle in thread_bundles
+        if getattr(bundle["diagnostic"], "provenance").ambiguous_runtime_evidence
+    ]
+
+    status = "healthy"
+    if progress.goal_progress_status == "completed":
+        status = "completed"
+        observations.append("All currently tracked work for this goal is complete.")
+        evidence.append(f"{progress.completed_work_items} work item(s) are completed and no unfinished work remains.")
+    elif blocked_threads or progress.goal_progress_status == "stalled":
+        status = "blocked"
+        observations.append("Blocked thread state is preventing smooth forward progress on the goal.")
+        evidence.append(f"{health.blocked_threads} blocked thread(s) and {progress.blocked_work_items} blocked work item(s) are present.")
+        contributing_threads = [
+            GoalDiagnosticThread(thread_id=str(thread.id), title=str(thread.title), status="blocked")
+            for thread in blocked_threads[:5]
+        ]
+        suggested_focus = "Review the blocked threads and clear dependency or review constraints before approving more work."
+    elif health.active_threads >= 3 and progress.completed_work_items <= 1:
+        status = "fragmented"
+        observations.append("Work is spread across several active threads with limited completed output.")
+        evidence.append(f"{health.active_threads} active thread(s) are in progress with only {progress.completed_work_items} completed work item(s).")
+        contributing_threads = [
+            GoalDiagnosticThread(thread_id=str(thread.id), title=str(thread.title), status=str(bundle["progress"].thread_status))
+            for thread, bundle in thread_bundles[:5]
+        ]
+        suggested_focus = "Reduce fragmentation by finishing one active thread before widening concurrency."
+    elif health.recent_artifacts >= 4 and progress.completed_work_items <= 1:
+        status = "high_activity_low_progress"
+        observations.append("Recent artifact activity is high relative to completed work.")
+        evidence.append(f"{health.recent_artifacts} recent artifact(s) were observed with only {progress.completed_work_items} completed work item(s).")
+        suggested_focus = "Inspect recent artifacts to see whether the thread is revising outputs without landing completed work."
+    elif slow_threads:
+        status = "slow"
+        observations.append("At least one active thread is running slower than the baseline threshold.")
+        evidence.append(f"{len(slow_threads)} slow thread(s) were detected from execution duration metrics.")
+        contributing_threads = [
+            GoalDiagnosticThread(thread_id=str(thread.id), title=str(thread.title), status="slow")
+            for thread in slow_threads[:5]
+        ]
+        suggested_focus = "Inspect the slow threads before approving broader parallel work."
+    elif not goal.threads.exists() or (metrics.total_completed_work_items == 0 and not health.recent_artifacts):
+        status = "low_signal"
+        observations.append("There is not enough execution evidence yet to explain this goal confidently.")
+        evidence.append("The goal has sparse thread, run, or artifact history.")
+        suggested_focus = "Review the initial thread and work-item structure before interpreting progress."
+    else:
+        observations.append("The goal shows active development without a dominant diagnostic issue.")
+        evidence.append(
+            f"{metrics.total_completed_work_items} work item(s) completed across {health.active_threads} active and {health.blocked_threads} blocked thread(s)."
+        )
+        suggested_focus = "Continue supervising the next recommended slice."
+
+    if ambiguous_threads:
+        evidence.append(
+            f"{len(ambiguous_threads)} thread(s) include runtime history whose supervised queue provenance is not fully attributable from durable signals."
+        )
+        if not contributing_threads:
+            contributing_threads = [
+                GoalDiagnosticThread(thread_id=str(thread.id), title=str(thread.title), status="runtime_provenance_ambiguous")
+                for thread in ambiguous_threads[:5]
+            ]
+
+    return GoalDiagnostic(
+        status=status,
+        observations=observations,
+        contributing_threads=contributing_threads,
+        evidence=evidence,
+        suggested_human_review_focus=suggested_focus,
+    )
+
+
 def serialize_thread_diagnostic(diagnostic: ThreadDiagnostic) -> Dict[str, object]:
     return {
         "status": diagnostic.status,
@@ -182,4 +377,21 @@ def serialize_thread_diagnostic(diagnostic: ThreadDiagnostic) -> Dict[str, objec
             "evidence": diagnostic.provenance.evidence,
             "summary": diagnostic.provenance.summary,
         },
+    }
+
+
+def serialize_goal_diagnostic(diagnostic: GoalDiagnostic) -> Dict[str, object]:
+    return {
+        "status": diagnostic.status,
+        "observations": diagnostic.observations,
+        "contributing_threads": [
+            {
+                "thread_id": item.thread_id,
+                "title": item.title,
+                "status": item.status,
+            }
+            for item in diagnostic.contributing_threads
+        ],
+        "evidence": diagnostic.evidence,
+        "suggested_human_review_focus": diagnostic.suggested_human_review_focus,
     }

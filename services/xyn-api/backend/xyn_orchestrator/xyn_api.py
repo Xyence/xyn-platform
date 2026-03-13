@@ -160,7 +160,12 @@ from .goal_progress import (
     compute_thread_progress,
 )
 from .execution_observability import build_artifact_evolution, build_thread_timeline, serialize_thread_timeline
-from .development_intelligence import compute_thread_diagnostic, serialize_thread_diagnostic
+from .development_intelligence import (
+    build_thread_observability_bundle,
+    compute_goal_diagnostic,
+    serialize_goal_diagnostic,
+    serialize_thread_diagnostic,
+)
 from .artifact_packages import (
     ArtifactPackageValidationError,
     export_artifact_package,
@@ -25525,6 +25530,9 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
     health = compute_goal_health_indicators(goal, runtime_detail_lookup=_project_runtime_status_to_task)
     recommendation = recommend_next_slice(goal)
     development_loop_summary = compute_goal_development_loop_summary(goal, recommendation=recommendation)
+    goal_diagnostic = serialize_goal_diagnostic(
+        compute_goal_diagnostic(goal, runtime_detail_lookup=_project_runtime_status_to_task)
+    )
     recommendation_actions = [
         {
             "type": action.type,
@@ -25560,6 +25568,7 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             "blocked_threads": health.blocked_threads,
             "recent_artifacts": health.recent_artifacts,
         },
+        "goal_diagnostic": goal_diagnostic,
         "recommended_next_slice": {
             "recommendation_id": recommendation.recommendation_id,
             "goal_id": recommendation.goal_id,
@@ -27963,38 +27972,9 @@ def _coordination_thread_summary(thread: CoordinationThread) -> Dict[str, Any]:
 
 def _coordination_thread_detail(thread: CoordinationThread) -> Dict[str, Any]:
     work_items = [_serialize_work_item_summary(task) for task in thread.work_items.all().order_by("-updated_at", "-created_at")[:100]]
-    recent_artifacts: List[Dict[str, Any]] = []
-    recent_runs: List[Dict[str, Any]] = []
-    seen_run_ids: set[str] = set()
-    for task in thread.work_items.all().order_by("-updated_at", "-created_at")[:20]:
-        detail = _project_runtime_status_to_task(task)
-        if not isinstance(detail, dict):
-            continue
-        run_payload = _serialize_runtime_run_for_dev_task(detail)
-        run_id = str(run_payload.get("id") or "").strip()
-        if run_id and run_id not in seen_run_ids:
-            recent_runs.append(run_payload)
-            seen_run_ids.add(run_id)
-        for artifact in _serialize_runtime_artifacts_for_thread(detail, work_item_id=task.work_item_id or str(task.id)):
-            recent_artifacts.append(dict(artifact))
-            if len(recent_artifacts) >= 20:
-                break
-        if len(recent_artifacts) >= 20 and len(recent_runs) >= 10:
-            break
-    progress = compute_thread_progress(thread)
-    metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=_project_runtime_status_to_task)
-    timeline_entries = build_thread_timeline(thread, runtime_detail_lookup=_project_runtime_status_to_task)
-    timeline = serialize_thread_timeline(timeline_entries)[-100:]
-    diagnostic = serialize_thread_diagnostic(
-        compute_thread_diagnostic(
-            thread,
-            progress=progress,
-            metrics=metrics,
-            timeline=timeline_entries,
-            recent_runs=recent_runs,
-            recent_artifacts=recent_artifacts,
-        )
-    )
+    bundle = build_thread_observability_bundle(thread, runtime_detail_lookup=_project_runtime_status_to_task)
+    progress = bundle["progress"]
+    metrics = bundle["metrics"]
     return {
         **_coordination_thread_summary(thread),
         "thread_progress_status": progress.thread_status,
@@ -28008,10 +27988,10 @@ def _coordination_thread_detail(thread: CoordinationThread) -> Dict[str, Any]:
             "blocked_work_items": metrics.blocked_work_items,
         },
         "work_items": work_items,
-        "recent_runs": recent_runs,
-        "recent_artifacts": recent_artifacts,
-        "timeline": timeline,
-        "thread_diagnostic": diagnostic,
+        "recent_runs": bundle["recent_runs"],
+        "recent_artifacts": bundle["recent_artifacts"],
+        "timeline": bundle["timeline"],
+        "thread_diagnostic": serialize_thread_diagnostic(bundle["diagnostic"]),
     }
 
 
