@@ -191,9 +191,9 @@ class EpicDIntentEngineTests(unittest.TestCase):
             context=ResolutionContext(workspace_id="ws-1"),
         )
         self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
-        self.assertEqual(envelope.intent_type, IntentType.CREATE_GOAL.value)
-        self.assertEqual(envelope.action_payload.get("goal_type"), "build_system")
-        self.assertIn("real estate deal finder", str(envelope.action_payload.get("title") or "").lower())
+        self.assertEqual(envelope.intent_type, IntentType.GENERATE_APPLICATION_PLAN.value)
+        self.assertEqual(envelope.action_payload.get("factory_key"), "ai_real_estate_deal_finder")
+        self.assertIn("deal finder", str(envelope.action_payload.get("application_name") or "").lower())
         self.assertEnvelopeStable(envelope)
 
     def test_list_application_factories_resolves(self):
@@ -1912,7 +1912,8 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["status"], "DraftReady")
         self.assertEqual((payload.get("result") or {}).get("goal", {}).get("id"), "goal-1")
-        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "goal_detail")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "composer_detail")
+        self.assertEqual(((payload.get("next_actions") or [])[0].get("params") or {}).get("goal_id"), "goal-1")
 
     def test_execute_conversation_action_show_goal_returns_goal_progress_summary(self):
         goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder")
@@ -1947,7 +1948,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
                     "action_type": "show_goal",
                     "thread_id": "thread-1",
                     "payload": {"action_payload": {"summary_mode": "goal_progress_summary"}},
-                    "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
+                    "target_object": {"kind": "goal", "id": "goal-1", "workspace_id": "ws-1"},
                 },
                 prompt="how close are we to finishing this goal?",
                 request_id="req-1",
@@ -1984,7 +1985,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
                     "action_type": "show_goal",
                     "thread_id": "thread-1",
                     "payload": {"action_payload": {"summary_mode": "goal_diagnostic_summary"}},
-                    "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
+                    "target_object": {"kind": "goal", "id": "goal-1", "workspace_id": "ws-1"},
                 },
                 prompt="why is this goal stalled?",
                 request_id="req-1",
@@ -2021,7 +2022,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
                     "action_type": "show_goal",
                     "thread_id": "thread-1",
                     "payload": {"action_payload": {"summary_mode": "goal_insight_summary"}},
-                    "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
+                    "target_object": {"kind": "goal", "id": "goal-1", "workspace_id": "ws-1"},
                 },
                 prompt="what changed in this goal recently?",
                 request_id="req-1",
@@ -2205,7 +2206,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
                     "action_type": "recommend_next_slice",
                     "thread_id": "thread-1",
                     "payload": {"action_payload": {}},
-                    "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
+                    "target_object": {"kind": "goal", "id": "goal-1", "workspace_id": "ws-1"},
                 },
                 prompt="what should we build next?",
                 request_id="req-1",
@@ -2288,7 +2289,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
                     "action_type": "approve_recommendation",
                     "thread_id": "thread-1",
                     "payload": {"action_payload": {"recommendation_id": "rec:v1:goal-1:thread-1:task-1:queue_first_slice:abcd1234"}},
-                    "target_object": {"id": "goal-1", "workspace_id": "ws-1"},
+                    "target_object": {"kind": "goal", "id": "goal-1", "workspace_id": "ws-1"},
                 },
                 prompt="approve the next slice",
                 request_id="req-1",
@@ -2332,6 +2333,8 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["summary"], "Reviewing XCO thread Listing Data Ingestion.")
         self.assertEqual((payload.get("result") or {}).get("thread", {}).get("id"), "thread-1")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "composer_detail")
+        self.assertEqual(((payload.get("next_actions") or [])[0].get("params") or {}).get("thread_id"), "thread-1")
 
     def test_execute_conversation_action_resume_thread_uses_review_gate(self):
         thread = SimpleNamespace(id="thread-1", title="Listing Data Ingestion")
@@ -2420,7 +2423,8 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["application_plan_id"], "plan-1")
-        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "application_plan_detail")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "composer_detail")
+        self.assertEqual(((payload.get("next_actions") or [])[0].get("params") or {}).get("application_plan_id"), "plan-1")
 
     def test_execute_conversation_action_apply_application_plan_returns_application_panel_action_without_dispatch(self):
         application_plan = SimpleNamespace(id="plan-1", workspace_id="ws-1", refresh_from_db=lambda: None)
@@ -2458,9 +2462,45 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["application_id"], "app-1")
-        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "application_detail")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "composer_detail")
+        params = ((payload.get("next_actions") or [])[0].get("params") or {})
+        self.assertEqual(params.get("application_id"), "app-1")
+        self.assertEqual(params.get("application_plan_id"), "plan-1")
         mock_apply.assert_called_once()
         mock_dispatch.assert_not_called()
+
+    def test_open_composer_intent_resolves_and_opens_composer_panel(self):
+        engine = IntentResolutionEngine(
+            proposal_provider=_FakeProvider(),
+            contracts=_registry(),
+        )
+        envelope = engine.resolve_intent(
+            user_message="open the composer",
+            context=ResolutionContext(workspace_id="ws-1"),
+        )
+        self.assertEqual(envelope.intent_type, IntentType.OPEN_COMPOSER.value)
+        self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
+        self.assertIsInstance(envelope.action_payload, dict)
+
+        response = intent_api._execute_conversation_action(
+            identity=SimpleNamespace(id="user-1"),
+            user=SimpleNamespace(id="user-1"),
+            workspace=SimpleNamespace(id="ws-1"),
+            action={
+                "action_type": "open_composer",
+                "thread_id": "thread-1",
+                "payload": {"action_payload": {}},
+                "target_object": {"workspace_id": "ws-1"},
+            },
+            prompt="open the composer",
+            request_id="req-1",
+            intent_payload={"intent_type": "open_composer"},
+            prompt_interpretation={"intent_type": "open_composer"},
+        )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "composer_detail")
 
     def test_resolve_route_preserves_legacy_app_builder_flow_without_epic_d_intent(self):
         request = self.factory.post(

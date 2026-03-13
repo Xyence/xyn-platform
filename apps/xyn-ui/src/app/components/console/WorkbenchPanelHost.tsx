@@ -5,6 +5,7 @@ import {
   executeAppPalettePrompt,
   getApplication,
   getApplicationPlan,
+  getComposerState,
   getGoal,
   getArtifactConsoleDetailBySlug,
   getArtifactConsoleFilesBySlug,
@@ -16,6 +17,7 @@ import {
   getRuntimeRunCanvasApi,
   getWorkItem,
   getWorkQueue,
+  generateApplicationPlan,
   listGoals,
   listCoordinationThreads,
   listWorkItems,
@@ -39,6 +41,7 @@ import type {
   ArtifactConsoleFileRow,
   ArtifactStructuredQuery,
   CanvasTableResponse,
+  ComposerState,
   CoordinationThreadDetail,
   CoordinationThreadSummary,
   GoalDetail,
@@ -67,6 +70,7 @@ import { toWorkspacePath } from "../../routing/workspaceRouting";
 
 export type ConsolePanelKey =
   | "platform_settings"
+  | "composer_detail"
   | "goal_list"
   | "goal_detail"
   | "application_plan_detail"
@@ -2998,8 +3002,404 @@ function ApplicationDetailPanel({
   );
 }
 
+function ComposerDetailPanel({
+  workspaceId,
+  factoryKey,
+  applicationPlanId,
+  applicationId,
+  goalId,
+  threadId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  workspaceId: string;
+  factoryKey?: string;
+  applicationPlanId?: string;
+  applicationId?: string;
+  goalId?: string;
+  threadId?: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [payload, setPayload] = useState<ComposerState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [objective, setObjective] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getComposerState({
+          workspace_id: workspaceId,
+          factory_key: factoryKey,
+          application_plan_id: applicationPlanId,
+          application_id: applicationId,
+          goal_id: goalId,
+          thread_id: threadId,
+        });
+        if (!active) return;
+        setPayload(next);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load composer state");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [applicationId, applicationPlanId, factoryKey, goalId, threadId, workspaceId]);
+
+  useEffect(() => {
+    onTitleChange?.("Composer");
+  }, [onTitleChange]);
+
+  const openComposer = (params?: Record<string, unknown>) =>
+    onOpenPanel("composer_detail", {
+      workspace_id: workspaceId,
+      ...(params || {}),
+    });
+
+  async function handleGeneratePlan(targetFactoryKey?: string) {
+    const objectiveText = objective.trim();
+    if (!objectiveText) {
+      setMessage("Enter an application objective before generating a plan.");
+      return;
+    }
+    try {
+      const response = await generateApplicationPlan({
+        workspace_id: workspaceId,
+        objective: objectiveText,
+        factory_key: targetFactoryKey || factoryKey || undefined,
+        application_name: payload?.selected_factory?.name ? objectiveText : undefined,
+      });
+      setMessage(`Generated reviewable plan for ${response.name}.`);
+      openComposer({
+        application_plan_id: response.id,
+        factory_key: response.source_factory_key || targetFactoryKey || factoryKey || undefined,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to generate application plan");
+    }
+  }
+
+  async function handleApplyPlan(id: string) {
+    try {
+      const response = await applyApplicationPlan(id);
+      setMessage(
+        response.status === "applied"
+          ? `Applied ${response.application.name} into durable goals, threads, and work items.`
+          : `${response.application.name} was already applied.`
+      );
+      openComposer({
+        application_plan_id: response.application_plan.id,
+        application_id: response.application.id,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to apply application plan");
+    }
+  }
+
+  async function handleApproveNextSlice(goal: GoalDetail, recommendationId?: string | null) {
+    try {
+      const response = await reviewGoal(goal.id, "approve_and_queue", recommendationId);
+      setMessage(response.status === "approved" ? "Approved and queued the next slice." : response.status.replace(/_/g, " "));
+      openComposer({ goal_id: goal.id, application_id: goal.application_id || undefined });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to approve the next slice");
+    }
+  }
+
+  async function handleThreadReview(thread: CoordinationThreadDetail, reviewAction: "resume_thread" | "queue_next_slice" | "mark_thread_completed") {
+    try {
+      const response = await reviewCoordinationThread(thread.id, reviewAction);
+      setMessage(response.summary || response.status.replace(/_/g, " "));
+      openComposer({
+        thread_id: thread.id,
+        goal_id: thread.goal?.id || goalId,
+        application_id: applicationId || payload?.goal?.application_id || undefined,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to review thread");
+    }
+  }
+
+  if (loading) return <p className="muted">Loading composer…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Composer state unavailable.</p>;
+
+  const selectedFactory = payload.selected_factory;
+  const selectedGoal = payload.goal;
+  const selectedThread = payload.thread;
+  const selectedApplication = payload.application;
+  const selectedPlan = payload.application_plan;
+  const recommendation =
+    selectedGoal && selectedGoal.recommendation && typeof selectedGoal.recommendation === "object"
+      ? selectedGoal.recommendation
+      : null;
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <div className="field-label">Stage</div>
+            <div className="field-value">{payload.stage.replace(/_/g, " ")}</div>
+          </div>
+        </div>
+        <div className="inline-action-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
+          {payload.breadcrumbs.map((crumb, index) => (
+            <button
+              key={`${crumb.kind}:${crumb.id || index}`}
+              type="button"
+              className="ghost sm"
+              onClick={() => {
+                if (crumb.kind === "composer") openComposer();
+                else if (crumb.kind === "factory" && crumb.id) openComposer({ factory_key: crumb.id });
+                else if (crumb.kind === "application_plan" && crumb.id) openComposer({ application_plan_id: crumb.id });
+                else if (crumb.kind === "application" && crumb.id) openComposer({ application_id: crumb.id });
+                else if (crumb.kind === "goal" && crumb.id) openComposer({ goal_id: crumb.id });
+                else if (crumb.kind === "thread" && crumb.id) openComposer({ thread_id: crumb.id });
+              }}
+            >
+              {crumb.label}
+            </button>
+          ))}
+        </div>
+        {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
+      </section>
+
+      {(payload.stage === "factory_discovery" || payload.stage === "plan_review") && (
+        <section className="card">
+          <div className="field-label">Application Objective</div>
+          <textarea
+            className="input"
+            value={objective}
+            onChange={(event) => setObjective(event.target.value)}
+            placeholder="Describe the application you want Xyn to plan."
+            rows={4}
+          />
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            <button type="button" className="ghost sm" onClick={() => handleGeneratePlan(selectedFactory?.key)}>
+              Generate Plan
+            </button>
+          </div>
+        </section>
+      )}
+
+      {(payload.stage === "factory_discovery" || payload.stage === "plan_review") && (
+        <section className="card">
+          <div className="field-label">Factory Catalog</div>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Factory</th>
+                  <th>Description</th>
+                  <th>Use Case</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {payload.factory_catalog.map((factory) => (
+                  <tr key={factory.key}>
+                    <td>{factory.name}</td>
+                    <td>{factory.description}</td>
+                    <td>{factory.use_case || "—"}</td>
+                    <td>
+                      <button type="button" className="ghost sm" onClick={() => openComposer({ factory_key: factory.key })}>
+                        Select
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {selectedPlan ? (
+        <section className="card">
+          <div className="detail-grid">
+            <div><div className="field-label">Plan</div><div className="field-value">{selectedPlan.name}</div></div>
+            <div><div className="field-label">Factory</div><div className="field-value">{selectedPlan.factory?.name || selectedPlan.source_factory_key}</div></div>
+            <div><div className="field-label">Status</div><div className="field-value">{selectedPlan.status}</div></div>
+            <div><div className="field-label">Goals</div><div className="field-value">{selectedPlan.generated_goals.length}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{selectedPlan.summary}</p>
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            <button type="button" className="ghost sm" disabled={selectedPlan.status === "applied"} onClick={() => handleApplyPlan(selectedPlan.id)}>
+              Apply Plan
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {selectedApplication ? (
+        <section className="card">
+          <div className="detail-grid">
+            <div><div className="field-label">Application</div><div className="field-value">{selectedApplication.name}</div></div>
+            <div><div className="field-label">Factory</div><div className="field-value">{selectedApplication.factory?.name || selectedApplication.source_factory_key}</div></div>
+            <div><div className="field-label">Status</div><div className="field-value">{selectedApplication.status}</div></div>
+            <div><div className="field-label">Goals</div><div className="field-value">{selectedApplication.goals.length}</div></div>
+          </div>
+          {selectedApplication.portfolio_state?.recommended_goal ? (
+            <InlineMessage
+              tone="info"
+              title={`Recommended Goal: ${selectedApplication.portfolio_state.recommended_goal.title}`}
+              body={selectedApplication.portfolio_state.recommended_goal.summary}
+            />
+          ) : null}
+        </section>
+      ) : null}
+
+      {payload.related_goals.length ? (
+        <section className="card">
+          <div className="field-label">{selectedApplication ? "Goals" : "Related Goals"}</div>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Goal</th>
+                  <th>Status</th>
+                  <th>Progress</th>
+                  <th>Threads</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {payload.related_goals.map((goal) => (
+                  <tr key={goal.id}>
+                    <td>{goal.title}</td>
+                    <td>{goal.planning_status}</td>
+                    <td>{goal.goal_progress_status || "—"}</td>
+                    <td>{goal.thread_count}</td>
+                    <td>
+                      <button type="button" className="ghost sm" onClick={() => openComposer({ application_id: selectedApplication?.id, goal_id: goal.id })}>
+                        Focus Goal
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {selectedGoal ? (
+        <section className="card">
+          <div className="detail-grid">
+            <div><div className="field-label">Goal</div><div className="field-value">{selectedGoal.title}</div></div>
+            <div><div className="field-label">Planning Status</div><div className="field-value">{selectedGoal.planning_status}</div></div>
+            <div><div className="field-label">Progress</div><div className="field-value">{selectedGoal.goal_progress?.goal_progress_status || "—"}</div></div>
+            <div><div className="field-label">Threads</div><div className="field-value">{selectedGoal.threads.length}</div></div>
+          </div>
+          {recommendation ? (
+            <InlineMessage
+              tone="info"
+              title={`Recommended Next Slice${recommendation.thread_title ? `: ${recommendation.thread_title}` : ""}`}
+              body={recommendation.reasoning_summary || recommendation.summary || ""}
+            />
+          ) : null}
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={!recommendation}
+              onClick={() => recommendation && handleApproveNextSlice(selectedGoal, String(recommendation.recommendation_id || ""))}
+            >
+              Approve Next Slice
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {payload.related_threads.length ? (
+        <section className="card">
+          <div className="field-label">{selectedGoal ? "Threads" : "Related Threads"}</div>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Thread</th>
+                  <th>Status</th>
+                  <th>Ready</th>
+                  <th>Blocked</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {payload.related_threads.map((thread) => (
+                  <tr key={thread.id}>
+                    <td>{thread.title}</td>
+                    <td>{thread.status}</td>
+                    <td>{thread.queued_work_items}</td>
+                    <td>{thread.awaiting_review_work_items + thread.failed_work_items}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        onClick={() =>
+                          openComposer({
+                            application_id: selectedApplication?.id || selectedGoal?.application_id || undefined,
+                            goal_id: selectedGoal?.id || thread.goal?.id || undefined,
+                            thread_id: thread.id,
+                          })
+                        }
+                      >
+                        Focus Thread
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {selectedThread ? (
+        <section className="card">
+          <div className="detail-grid">
+            <div><div className="field-label">Thread</div><div className="field-value">{selectedThread.title}</div></div>
+            <div><div className="field-label">Status</div><div className="field-value">{selectedThread.status}</div></div>
+            <div><div className="field-label">Completed</div><div className="field-value">{selectedThread.work_items_completed}</div></div>
+            <div><div className="field-label">Blocked</div><div className="field-value">{selectedThread.work_items_blocked}</div></div>
+          </div>
+          {selectedThread.thread_diagnostic?.summary ? (
+            <InlineMessage tone="info" title="Thread Diagnostic" body={selectedThread.thread_diagnostic.summary} />
+          ) : null}
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            <button type="button" className="ghost sm" onClick={() => handleThreadReview(selectedThread, "resume_thread")}>Resume Thread</button>
+            <button type="button" className="ghost sm" onClick={() => handleThreadReview(selectedThread, "queue_next_slice")}>Queue Next Slice</button>
+            <button type="button" className="ghost sm" onClick={() => handleThreadReview(selectedThread, "mark_thread_completed")}>Mark Thread Completed</button>
+          </div>
+        </section>
+      ) : null}
+
+      {payload.portfolio_context ? (
+        <section className="card">
+          <div className="field-label">Portfolio Context</div>
+          <div className="detail-grid">
+            <div><div className="field-label">Goals</div><div className="field-value">{payload.portfolio_context.goals.length}</div></div>
+            <div><div className="field-label">Insights</div><div className="field-value">{payload.portfolio_context.insights.length}</div></div>
+            <div><div className="field-label">Recommended Goal</div><div className="field-value">{payload.portfolio_context.recommended_goal?.title || "—"}</div></div>
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
 const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   platform_settings: "Platform Settings",
+  composer_detail: "Composer",
   workspaces: "Workspaces",
   goal_list: "Goals",
   goal_detail: "Goal",
@@ -3100,6 +3500,21 @@ export default function WorkbenchPanelHost({
 
     if (panel.key === "platform_settings") {
       return <PlatformSettingsPanel />;
+    }
+
+    if (panel.key === "composer_detail") {
+      return (
+        <ComposerDetailPanel
+          workspaceId={workspaceId}
+          factoryKey={String(panel.params?.factory_key || "") || undefined}
+          applicationPlanId={String(panel.params?.application_plan_id || "") || undefined}
+          applicationId={String(panel.params?.application_id || "") || undefined}
+          goalId={String(panel.params?.goal_id || "") || undefined}
+          threadId={String(panel.params?.thread_id || "") || undefined}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
+        />
+      );
     }
 
     if (panel.key === "workspaces") {

@@ -2522,6 +2522,54 @@ export type ApplicationDetail = ApplicationSummary & {
   portfolio_state?: GoalPortfolioState;
 };
 
+export type ComposerAction = {
+  type: string;
+  label: string;
+  enabled?: boolean;
+  target_kind?: string;
+  target_id?: string | null;
+  params?: Record<string, unknown>;
+};
+
+export type ComposerBreadcrumb = {
+  kind: string;
+  label: string;
+  id?: string | null;
+};
+
+export type ComposerStage =
+  | "factory_discovery"
+  | "plan_review"
+  | "plan_applied"
+  | "application_overview"
+  | "goal_focus"
+  | "thread_focus";
+
+export type ComposerState = {
+  workspace_id: string;
+  stage: ComposerStage;
+  context: {
+    factory_key?: string | null;
+    application_plan_id?: string | null;
+    application_id?: string | null;
+    goal_id?: string | null;
+    thread_id?: string | null;
+  };
+  factory_catalog: ApplicationFactorySummary[];
+  selected_factory?: ApplicationFactorySummary | null;
+  application_plans: ApplicationPlanSummary[];
+  applications: ApplicationSummary[];
+  application_plan?: ApplicationPlanDetail | null;
+  application?: ApplicationDetail | null;
+  goal?: GoalDetail | null;
+  thread?: CoordinationThreadDetail | null;
+  related_goals: GoalSummary[];
+  related_threads: CoordinationThreadSummary[];
+  portfolio_context?: GoalPortfolioState | null;
+  breadcrumbs: ComposerBreadcrumb[];
+  available_actions: ComposerAction[];
+};
+
 export type GoalDetail = GoalSummary & {
   threads: CoordinationThreadSummary[];
   work_items: WorkItemSummary[];

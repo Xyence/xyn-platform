@@ -838,6 +838,10 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const inferInstanceKey = useCallback((key: string, params?: Record<string, unknown>): string => {
+    if (key === "composer_detail") {
+      const scopedWorkspaceId = String(params?.workspace_id || workspaceId || "").trim();
+      return `composer:${scopedWorkspaceId || "workspace"}`;
+    }
     if (key === "artifact_detail" || key === "artifact_raw_json" || key === "artifact_files") {
       return `artifact:${String(params?.slug || "")}`;
     }

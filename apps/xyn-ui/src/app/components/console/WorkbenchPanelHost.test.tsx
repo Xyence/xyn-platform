@@ -12,6 +12,8 @@ const apiMocks = vi.hoisted(() => ({
   reviewGoal: vi.fn(),
   getApplicationPlan: vi.fn(),
   applyApplicationPlan: vi.fn(),
+  getComposerState: vi.fn(),
+  generateApplicationPlan: vi.fn(),
   getApplication: vi.fn(),
   reviewCoordinationThread: vi.fn(),
   listCoordinationThreads: vi.fn(),
@@ -52,6 +54,8 @@ vi.mock("../../../api/xyn", async () => {
     reviewGoal: apiMocks.reviewGoal,
     getApplicationPlan: apiMocks.getApplicationPlan,
     applyApplicationPlan: apiMocks.applyApplicationPlan,
+    getComposerState: apiMocks.getComposerState,
+    generateApplicationPlan: apiMocks.generateApplicationPlan,
     getApplication: apiMocks.getApplication,
     reviewCoordinationThread: apiMocks.reviewCoordinationThread,
     listCoordinationThreads: apiMocks.listCoordinationThreads,
@@ -466,6 +470,92 @@ describe("WorkbenchPanelHost entity refresh", () => {
       ),
     );
     expect(screen.getByText("Approved and queued the recommended slice.")).toBeInTheDocument();
+  });
+
+  it("loads composer discovery state with factory catalog", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "factory_discovery",
+      context: { factory_key: null, application_plan_id: null, application_id: null, goal_id: null, thread_id: null },
+      factory_catalog: [
+        { key: "ai_real_estate_deal_finder", name: "AI Real Estate Deal Finder", description: "Deal sourcing workflow", use_case: "real estate" },
+      ],
+      application_plans: [],
+      applications: [],
+      related_goals: [],
+      related_threads: [],
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalledWith({ workspace_id: "ws-1" }));
+    expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Generate Plan" })).toBeInTheDocument();
+  });
+
+  it("loads composer plan review state and applies plans through the existing plan seam", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "plan_review",
+      context: { factory_key: "ai_real_estate_deal_finder", application_plan_id: "plan-1", application_id: null, goal_id: null, thread_id: null },
+      factory_catalog: [],
+      selected_factory: { key: "ai_real_estate_deal_finder", name: "AI Real Estate Deal Finder", description: "Deal sourcing workflow", use_case: "real estate" },
+      application_plans: [],
+      applications: [],
+      application_plan: {
+        id: "plan-1",
+        name: "Deal Finder",
+        status: "review",
+        source_factory_key: "ai_real_estate_deal_finder",
+        summary: "Reviewable plan",
+        generated_goals: [{ title: "Listing and Property Foundation", planning_summary: "Start with ingestion", threads: [], work_items: [] }],
+        factory: { key: "ai_real_estate_deal_finder", name: "AI Real Estate Deal Finder", description: "Deal sourcing workflow", use_case: "real estate" },
+      },
+      related_goals: [],
+      related_threads: [],
+      breadcrumbs: [{ kind: "composer", label: "Composer" }, { kind: "application_plan", label: "Deal Finder", id: "plan-1" }],
+      available_actions: [{ type: "apply_plan", label: "Apply Plan", enabled: true, target_kind: "application_plan", target_id: "plan-1" }],
+    });
+    apiMocks.applyApplicationPlan.mockResolvedValue({
+      status: "applied",
+      application: { id: "app-1", name: "Deal Finder", status: "active", source_factory_key: "ai_real_estate_deal_finder", summary: "Deal Finder", goal_count: 1, goals: [] },
+      application_plan: { id: "plan-1", name: "Deal Finder", status: "applied", source_factory_key: "ai_real_estate_deal_finder", summary: "Reviewable plan", generated_goals: [] },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1", application_plan_id: "plan-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText(/plan review/i)).toBeInTheDocument());
+    expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
+    await act(async () => {
+      screen.getByRole("button", { name: "Apply Plan" }).click();
+    });
+    await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
+    await waitFor(() =>
+      expect(onOpenPanel).toHaveBeenCalledWith({
+        key: "composer_detail",
+        params: { workspace_id: "ws-1", application_plan_id: "plan-1", application_id: "app-1" },
+      })
+    );
   });
 
   it("loads XCO thread detail with work item, run, artifact, and timeline navigation", async () => {
@@ -1298,7 +1388,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
-    await waitFor(() => expect(screen.getByText("Deal Finder")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Application")).toBeInTheDocument());
+    expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
     expect(screen.getByText("Listing and Property Foundation")).toBeInTheDocument();
     expect(screen.getByText("Active Goals")).toBeInTheDocument();
   });
@@ -1317,5 +1408,152 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "Platform Settings" })).toBeInTheDocument();
+  });
+
+  it("loads composer discovery state with factory catalog", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "factory_discovery",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [
+        {
+          key: "ai_real_estate_deal_finder",
+          name: "AI Real Estate Deal Finder",
+          description: "Plans a real estate deal finder MVP.",
+          use_case: "real_estate",
+          generated_goal_families: ["listing_ingestion", "deal_scoring"],
+          assumptions: ["Bias toward MVP-first slices."],
+        },
+      ],
+      selected_factory: null,
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-1", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() =>
+      expect(apiMocks.getComposerState).toHaveBeenCalledWith({
+        workspace_id: "ws-1",
+        factory_key: undefined,
+        application_plan_id: undefined,
+        application_id: undefined,
+        goal_id: undefined,
+        thread_id: undefined,
+      })
+    );
+    expect(screen.getByText(/factory discovery/i)).toBeInTheDocument();
+    expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
+  });
+
+  it("loads composer plan review state and applies plans through the existing apply seam", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "plan_review",
+      context: {
+        factory_key: "ai_real_estate_deal_finder",
+        application_plan_id: "plan-1",
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [],
+      selected_factory: {
+        key: "ai_real_estate_deal_finder",
+        name: "AI Real Estate Deal Finder",
+        description: "Plans a real estate deal finder MVP.",
+        use_case: "real_estate",
+        generated_goal_families: ["listing_ingestion"],
+        assumptions: ["Bias toward MVP-first slices."],
+      },
+      application_plans: [],
+      applications: [],
+      application_plan: {
+        id: "plan-1",
+        name: "Deal Finder",
+        summary: "A reviewable MVP plan.",
+        status: "review",
+        source_factory_key: "ai_real_estate_deal_finder",
+        generated_goals: [{ title: "Listing and Property Foundation" }],
+        generated_threads: [],
+        generated_work_items: [],
+        resolution_notes: [],
+        planning_output: { goal_count: 1 },
+      },
+      application: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [
+        { kind: "composer", label: "Composer" },
+        { kind: "factory", label: "AI Real Estate Deal Finder", id: "ai_real_estate_deal_finder" },
+        { kind: "application_plan", label: "Deal Finder", id: "plan-1" },
+      ],
+      available_actions: [{ action_type: "apply_plan", label: "Apply Plan", enabled: true, target_kind: "application_plan", target_id: "plan-1" }],
+    });
+    apiMocks.applyApplicationPlan.mockResolvedValue({
+      status: "applied",
+      application: { id: "app-1", name: "Deal Finder" },
+      application_plan: { id: "plan-1" },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_plan_id: "plan-1", factory_key: "ai_real_estate_deal_finder" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText(/plan review/i)).toBeInTheDocument());
+    expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
+    await act(async () => {
+      screen.getByRole("button", { name: /apply plan/i }).click();
+    });
+    await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "composer_detail",
+        params: expect.objectContaining({
+          workspace_id: "ws-1",
+          application_plan_id: "plan-1",
+          application_id: "app-1",
+        }),
+      })
+    );
   });
 });

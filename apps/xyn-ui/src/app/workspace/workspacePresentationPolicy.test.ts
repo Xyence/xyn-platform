@@ -48,6 +48,8 @@ describe("workspacePresentationPolicy", () => {
     expect(friendlyTitleForKey("jobs_list")).toBe("Jobs List");
     expect(panelAffinityForKey("artifact_detail")).toBe("artifacts");
     expect(panelAffinityForKey("palette_result")).toBe("conversation");
+    expect(friendlyTitleForKey("composer_detail")).toBe("Composer");
+    expect(panelAffinityForKey("composer_detail")).toBe("application");
     expect(friendlyTitleForKey("thread_detail")).toBe("Thread");
     expect(panelAffinityForKey("thread_list")).toBe("operations");
     expect(friendlyTitleForKey("goal_detail")).toBe("Goal");

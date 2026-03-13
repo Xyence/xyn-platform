@@ -46,6 +46,7 @@ import type {
   GoalDetail,
   GoalListResponse,
   ApplicationFactorySummary,
+  ComposerState,
   ApplicationPlanDetail,
   ApplicationSummary,
   ApplicationDetail,
@@ -4270,6 +4271,26 @@ export async function listApplicationFactories(): Promise<{ factories: Applicati
     credentials: "include",
   });
   return handle<{ factories: ApplicationFactorySummary[] }>(response);
+}
+
+export async function getComposerState(params: {
+  workspace_id: string;
+  factory_key?: string;
+  application_plan_id?: string;
+  application_id?: string;
+  goal_id?: string;
+  thread_id?: string;
+}): Promise<ComposerState> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/composer/state`);
+  url.searchParams.set("workspace_id", params.workspace_id);
+  if (params.factory_key) url.searchParams.set("factory_key", params.factory_key);
+  if (params.application_plan_id) url.searchParams.set("application_plan_id", params.application_plan_id);
+  if (params.application_id) url.searchParams.set("application_id", params.application_id);
+  if (params.goal_id) url.searchParams.set("goal_id", params.goal_id);
+  if (params.thread_id) url.searchParams.set("thread_id", params.thread_id);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<ComposerState>(response);
 }
 
 export async function listApplicationPlans(workspaceId: string): Promise<{ application_plans: ApplicationPlanDetail[] }> {

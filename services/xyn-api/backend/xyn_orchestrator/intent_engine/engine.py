@@ -983,6 +983,25 @@ class IntentResolutionEngine:
                 resolution_notes=["application factory catalog requested"],
             )
 
+        if re.search(r"\b(open|show)\s+(?:the\s+)?composer\b", lowered) or re.search(r"\btake me back to the plan\b", lowered):
+            action_payload = {"reference": text}
+            if conversation_context.active_application_plan_id:
+                action_payload["application_plan_id"] = str(conversation_context.active_application_plan_id)
+            if conversation_context.active_application_id:
+                action_payload["application_id"] = str(conversation_context.active_application_id)
+            if conversation_context.active_goal_id:
+                action_payload["goal_id"] = str(conversation_context.active_goal_id)
+            if conversation_context.active_coordination_thread_id:
+                action_payload["thread_id"] = str(conversation_context.active_coordination_thread_id)
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.OPEN_COMPOSER,
+                target_context={"workspace_id": workspace_id},
+                action_payload=action_payload,
+                confidence=0.9,
+                resolution_notes=["composer navigation requested"],
+            )
+
         generate_match = re.search(
             r"\b(?:build|create|generate)\b.+\b(?:application plan|application|console|portal|finder)\b",
             lowered,

@@ -949,6 +949,7 @@ def _prompt_interpretation_from_intent(
         "summarize_plan": ("show", "Summarize plan"),
         "queue_first_slice": ("queue", "Queue first slice"),
         "list_application_factories": ("show", "List application factories"),
+        "open_composer": ("show", "Open composer"),
         "generate_application_plan": ("plan", "Generate application plan"),
         "apply_application_plan": ("apply", "Apply application plan"),
         "show_application": ("show", "Show application"),
@@ -1270,6 +1271,7 @@ def _conversation_action_from_intent(
             IntentType.LIST_GOALS.value: ConversationActionType.LIST_GOALS.value,
             IntentType.SHOW_GOAL.value: ConversationActionType.SHOW_GOAL.value,
             IntentType.LIST_APPLICATION_FACTORIES.value: ConversationActionType.LIST_APPLICATION_FACTORIES.value,
+            IntentType.OPEN_COMPOSER.value: ConversationActionType.OPEN_COMPOSER.value,
             IntentType.GENERATE_APPLICATION_PLAN.value: ConversationActionType.GENERATE_APPLICATION_PLAN.value,
             IntentType.APPLY_APPLICATION_PLAN.value: ConversationActionType.APPLY_APPLICATION_PLAN.value,
             IntentType.SHOW_APPLICATION.value: ConversationActionType.SHOW_APPLICATION.value,
@@ -25868,6 +25870,223 @@ def _serialize_application_detail(application: Application) -> Dict[str, Any]:
     }
 
 
+def _composer_stage_for_context(
+    *,
+    application_plan: Optional[ApplicationPlan],
+    application: Optional[Application],
+    goal: Optional[Goal],
+    thread: Optional[CoordinationThread],
+) -> str:
+    if thread is not None:
+        return "thread_focus"
+    if goal is not None:
+        return "goal_focus"
+    if application is not None and application_plan is not None:
+        return "plan_applied"
+    if application is not None:
+        return "application_overview"
+    if application_plan is not None:
+        return "plan_review"
+    return "factory_discovery"
+
+
+def _serialize_composer_action(
+    *,
+    action_type: str,
+    label: str,
+    enabled: bool = True,
+    target_kind: str = "",
+    target_id: Optional[str] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "type": action_type,
+        "label": label,
+        "enabled": enabled,
+    }
+    if target_kind:
+        payload["target_kind"] = target_kind
+    if target_id is not None:
+        payload["target_id"] = target_id
+    if params:
+        payload["params"] = params
+    return payload
+
+
+def _composer_breadcrumbs(
+    *,
+    selected_factory: Optional[ApplicationFactoryDefinition],
+    application_plan: Optional[ApplicationPlan],
+    application: Optional[Application],
+    goal: Optional[Goal],
+    thread: Optional[CoordinationThread],
+) -> List[Dict[str, Any]]:
+    breadcrumbs: List[Dict[str, Any]] = [{"kind": "composer", "label": "Composer"}]
+    if selected_factory is not None:
+        breadcrumbs.append({"kind": "factory", "label": selected_factory.name, "id": selected_factory.key})
+    if application_plan is not None:
+        breadcrumbs.append({"kind": "application_plan", "label": application_plan.name, "id": str(application_plan.id)})
+    if application is not None:
+        breadcrumbs.append({"kind": "application", "label": application.name, "id": str(application.id)})
+    if goal is not None:
+        breadcrumbs.append({"kind": "goal", "label": goal.title, "id": str(goal.id)})
+    if thread is not None:
+        breadcrumbs.append({"kind": "thread", "label": thread.title, "id": str(thread.id)})
+    return breadcrumbs
+
+
+def _serialize_composer_state(
+    *,
+    workspace: Workspace,
+    factory_key: str = "",
+    application_plan: Optional[ApplicationPlan] = None,
+    application: Optional[Application] = None,
+    goal: Optional[Goal] = None,
+    thread: Optional[CoordinationThread] = None,
+) -> Dict[str, Any]:
+    if thread is not None and goal is None and thread.goal_id:
+        goal = thread.goal
+    if goal is not None and application is None and goal.application_id:
+        application = goal.application
+    if application_plan is not None and application is None and application_plan.application_id:
+        application = application_plan.application
+    selected_factory = get_application_factory(factory_key) if factory_key else None
+    stage = _composer_stage_for_context(
+        application_plan=application_plan,
+        application=application,
+        goal=goal,
+        thread=thread,
+    )
+    factory_catalog = [_serialize_application_factory_summary(definition) for definition in list_application_factories()]
+    recent_plans = list(
+        ApplicationPlan.objects.filter(workspace=workspace)
+        .select_related("application", "requested_by")
+        .order_by("-updated_at", "-created_at")[:10]
+    )
+    recent_applications = list(
+        Application.objects.filter(workspace=workspace)
+        .select_related("requested_by")
+        .prefetch_related("goals")
+        .order_by("-updated_at", "-created_at")[:10]
+    )
+    related_goals: List[Dict[str, Any]] = []
+    related_threads: List[Dict[str, Any]] = []
+    portfolio_context: Optional[Dict[str, Any]] = None
+    if application is not None:
+        application_detail = _serialize_application_detail(application)
+        related_goals = application_detail.get("goals") if isinstance(application_detail.get("goals"), list) else []
+        goal_objects = list(
+            CoordinationThread.objects.filter(goal__application=application)
+            .select_related("goal", "owner")
+            .order_by("-updated_at", "-created_at")[:50]
+        )
+        related_threads = [_coordination_thread_summary(item) for item in goal_objects]
+        portfolio_context = application_detail.get("portfolio_state") if isinstance(application_detail.get("portfolio_state"), dict) else None
+    elif goal is not None:
+        goal_detail = _serialize_goal_detail(goal)
+        related_goals = [_serialize_goal_summary(goal)]
+        related_threads = goal_detail.get("threads") if isinstance(goal_detail.get("threads"), list) else []
+        portfolio_context = _build_goal_portfolio_payload([goal])
+    elif thread is not None:
+        related_threads = [_coordination_thread_summary(thread)]
+        if goal is not None:
+            related_goals = [_serialize_goal_summary(goal)]
+            portfolio_context = _build_goal_portfolio_payload([goal])
+    else:
+        goal_objects = list(Goal.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:20])
+        related_goals = [_serialize_goal_summary(item) for item in goal_objects]
+        portfolio_context = _build_goal_portfolio_payload(goal_objects)
+        if goal_objects:
+            related_threads = [
+                _coordination_thread_summary(item)
+                for item in CoordinationThread.objects.filter(goal__in=goal_objects)
+                .select_related("goal", "owner")
+                .order_by("-updated_at", "-created_at")[:20]
+            ]
+    available_actions: List[Dict[str, Any]] = []
+    if selected_factory is not None and application_plan is None and application is None:
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="generate_plan",
+                label="Generate Plan",
+                target_kind="factory",
+                target_id=selected_factory.key,
+            )
+        )
+    if application_plan is not None and stage in {"plan_review", "plan_applied"}:
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="apply_plan",
+                label="Apply Plan",
+                enabled=application is None,
+                target_kind="application_plan",
+                target_id=str(application_plan.id),
+            )
+        )
+    if application is not None:
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="open_application",
+                label="Open Application",
+                target_kind="application",
+                target_id=str(application.id),
+            )
+        )
+    if goal is not None and isinstance((_serialize_goal_detail(goal).get("recommendation") or {}), dict):
+        goal_detail = _serialize_goal_detail(goal)
+        recommendation = goal_detail.get("recommendation") if isinstance(goal_detail.get("recommendation"), dict) else {}
+        recommendation_id = str(recommendation.get("recommendation_id") or "").strip() or None
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="approve_next_slice",
+                label="Approve Next Slice",
+                enabled=bool(recommendation),
+                target_kind="goal",
+                target_id=str(goal.id),
+                params={"recommendation_id": recommendation_id} if recommendation_id else None,
+            )
+        )
+    if thread is not None:
+        available_actions.extend(
+            [
+                _serialize_composer_action(action_type="review_thread", label="Review Thread", target_kind="thread", target_id=str(thread.id)),
+                _serialize_composer_action(action_type="resume_thread", label="Resume Thread", target_kind="thread", target_id=str(thread.id)),
+                _serialize_composer_action(action_type="queue_next_slice", label="Queue Next Slice", target_kind="thread", target_id=str(thread.id)),
+                _serialize_composer_action(action_type="mark_thread_completed", label="Mark Thread Completed", target_kind="thread", target_id=str(thread.id)),
+            ]
+        )
+    return {
+        "workspace_id": str(workspace.id),
+        "stage": stage,
+        "context": {
+            "factory_key": selected_factory.key if selected_factory else None,
+            "application_plan_id": str(application_plan.id) if application_plan else None,
+            "application_id": str(application.id) if application else None,
+            "goal_id": str(goal.id) if goal else None,
+            "thread_id": str(thread.id) if thread else None,
+        },
+        "factory_catalog": factory_catalog,
+        "selected_factory": _serialize_application_factory_summary(selected_factory) if selected_factory else None,
+        "application_plans": [_serialize_application_plan_summary(plan) for plan in recent_plans],
+        "applications": [_serialize_application_summary(app) for app in recent_applications],
+        "application_plan": _serialize_application_plan_detail(application_plan) if application_plan else None,
+        "application": _serialize_application_detail(application) if application else None,
+        "goal": _serialize_goal_detail(goal) if goal else None,
+        "thread": _coordination_thread_detail(thread) if thread else None,
+        "related_goals": related_goals,
+        "related_threads": related_threads,
+        "portfolio_context": portfolio_context,
+        "breadcrumbs": _composer_breadcrumbs(
+            selected_factory=selected_factory,
+            application_plan=application_plan,
+            application=application,
+            goal=goal,
+            thread=thread,
+        ),
+        "available_actions": available_actions,
+    }
+
+
 def _build_goal_portfolio_payload(goals: List[Goal]) -> Dict[str, Any]:
     portfolio_rows = build_goal_portfolio_state(goals, runtime_detail_lookup=_project_runtime_status_to_task)
     portfolio_insights = compute_portfolio_insights(goals, runtime_detail_lookup=_project_runtime_status_to_task)
@@ -26302,7 +26521,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"thread": _coordination_thread_summary(thread)},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "thread_id": str(thread.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26374,7 +26593,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"thread": detail},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "thread_id": str(thread.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26421,7 +26640,7 @@ def _execute_conversation_action(
                 "operation_result": True,
                 "result": {"thread": detail},
                 "next_actions": [
-                    {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
+                    {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "thread_id": str(thread.id)}}
                 ],
                 "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
             }
@@ -26435,6 +26654,7 @@ def _execute_conversation_action(
         ConversationActionType.LIST_GOALS.value,
         ConversationActionType.SHOW_GOAL.value,
         ConversationActionType.LIST_APPLICATION_FACTORIES.value,
+        ConversationActionType.OPEN_COMPOSER.value,
         ConversationActionType.GENERATE_APPLICATION_PLAN.value,
         ConversationActionType.APPLY_APPLICATION_PLAN.value,
         ConversationActionType.SHOW_APPLICATION.value,
@@ -26476,6 +26696,40 @@ def _execute_conversation_action(
                     "conversation_action": action,
                     "operation_result": True,
                     "result": {"factories": rows},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.OPEN_COMPOSER.value:
+            params = {
+                "workspace_id": str(workspace.id),
+            }
+            if action_payload.get("factory_key"):
+                params["factory_key"] = str(action_payload.get("factory_key"))
+            if action_payload.get("application_plan_id"):
+                params["application_plan_id"] = str(action_payload.get("application_plan_id"))
+            if action_payload.get("application_id"):
+                params["application_id"] = str(action_payload.get("application_id"))
+            if action_payload.get("goal_id"):
+                params["goal_id"] = str(action_payload.get("goal_id"))
+            if action_payload.get("thread_id"):
+                params["thread_id"] = str(action_payload.get("thread_id"))
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": "Opening the unified composer.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"workspace_id": str(workspace.id)},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": params}
+                    ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
             )
@@ -26517,7 +26771,16 @@ def _execute_conversation_action(
                     },
                     "application_plan_id": str(plan.id),
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "application_plan_detail", "label": "Open Application Plan", "params": {"application_plan_id": str(plan.id)}}
+                        {
+                            "action": "OpenPanel",
+                            "panel_key": "composer_detail",
+                            "label": "Open Composer",
+                            "params": {
+                                "workspace_id": str(workspace.id),
+                                "factory_key": str(plan.source_factory_key or action_payload.get("factory_key") or ""),
+                                "application_plan_id": str(plan.id),
+                            },
+                        }
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26573,7 +26836,16 @@ def _execute_conversation_action(
                     "application_id": str(application.id),
                     "application_plan_id": str(application_plan.id),
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "application_detail", "label": "Open Application", "params": {"application_id": str(application.id)}}
+                        {
+                            "action": "OpenPanel",
+                            "panel_key": "composer_detail",
+                            "label": "Open Composer",
+                            "params": {
+                                "workspace_id": str(workspace.id),
+                                "application_id": str(application.id),
+                                "application_plan_id": str(application_plan.id),
+                            },
+                        }
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26610,7 +26882,12 @@ def _execute_conversation_action(
                     "result": {"application": detail},
                     "application_id": str(application.id),
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "application_detail", "label": "Open Application", "params": {"application_id": str(application.id)}}
+                        {
+                            "action": "OpenPanel",
+                            "panel_key": "composer_detail",
+                            "label": "Open Composer",
+                            "params": {"workspace_id": str(workspace.id), "application_id": str(application.id)},
+                        }
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26656,7 +26933,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"goals": goals, "portfolio_state": portfolio_state},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_list", "label": "Open Goals", "params": {"workspace_id": str(workspace.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26699,7 +26976,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"goal": detail},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26775,7 +27052,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"goal": detail, "queue_seed": approval.get("queue_seed")},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26804,8 +27081,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"goal": detail, "queue_seed": seeded},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}},
-                        {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(seeded.get("thread_id") or "")}},
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id), "thread_id": str(seeded.get("thread_id") or "")}},
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26854,7 +27130,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"goal": detail, "recommendation": recommendation_payload},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26893,7 +27169,7 @@ def _execute_conversation_action(
                 "operation_result": True,
                 "result": {"goal": detail},
                 "next_actions": [
-                    {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                    {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id)}}
                 ],
                 "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
             }
@@ -28012,6 +28288,65 @@ def application_detail(request: HttpRequest, application_id: str) -> JsonRespons
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     return JsonResponse(_serialize_application_detail(application))
+
+
+@login_required
+def composer_state(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, _ = _goal_queryset(identity, workspace_id)
+    factory_key = str(request.GET.get("factory_key") or "").strip()
+    application_plan_id = str(request.GET.get("application_plan_id") or "").strip()
+    application_id = str(request.GET.get("application_id") or "").strip()
+    goal_id = str(request.GET.get("goal_id") or "").strip()
+    thread_id = str(request.GET.get("thread_id") or "").strip()
+    application_plan: Optional[ApplicationPlan] = None
+    application: Optional[Application] = None
+    goal: Optional[Goal] = None
+    thread: Optional[CoordinationThread] = None
+    if application_plan_id:
+        application_plan = (
+            ApplicationPlan.objects.filter(id=application_plan_id, workspace=workspace)
+            .select_related("application", "requested_by")
+            .first()
+        )
+    if application_id:
+        application = (
+            Application.objects.filter(id=application_id, workspace=workspace)
+            .select_related("requested_by")
+            .prefetch_related("goals")
+            .first()
+        )
+    if goal_id:
+        goal = (
+            Goal.objects.filter(id=goal_id, workspace=workspace)
+            .select_related("application", "requested_by")
+            .prefetch_related("threads__work_items", "work_items")
+            .first()
+        )
+    if thread_id:
+        thread = (
+            CoordinationThread.objects.filter(id=thread_id, workspace=workspace)
+            .select_related("goal", "goal__application", "owner")
+            .prefetch_related("work_items")
+            .first()
+        )
+    return JsonResponse(
+        _serialize_composer_state(
+            workspace=workspace,
+            factory_key=factory_key,
+            application_plan=application_plan,
+            application=application,
+            goal=goal,
+            thread=thread,
+        )
+    )
 
 
 def _review_coordination_thread(

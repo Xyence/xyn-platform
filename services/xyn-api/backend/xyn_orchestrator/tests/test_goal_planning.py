@@ -30,6 +30,7 @@ from xyn_orchestrator.xyn_api import (
     application_factories_collection,
     application_plan_apply,
     application_plans_collection,
+    composer_state,
     goal_decompose,
     goal_detail,
     goal_review,
@@ -456,6 +457,108 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(payload["goals"][0]["application_id"], str(application.id))
         self.assertIn("portfolio_state", payload)
         self.assertEqual(len(payload["portfolio_state"]["goals"]), 1)
+
+    def test_composer_state_defaults_to_factory_discovery(self):
+        request = self._request("/xyn/api/composer/state", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = composer_state(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["stage"], "factory_discovery")
+        self.assertGreaterEqual(len(payload["factory_catalog"]), 1)
+        self.assertIsNone(payload["context"]["application_plan_id"])
+
+    def test_composer_state_returns_plan_review_for_application_plan_context(self):
+        plan = ApplicationPlan.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Reviewable plan",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="review",
+            request_objective="Build an AI real estate deal finder",
+            plan_fingerprint=f"plan-{uuid.uuid4().hex}",
+            plan_json={"application_name": "Deal Finder"},
+        )
+        request = self._request(
+            "/xyn/api/composer/state",
+            data={"workspace_id": str(self.workspace.id), "application_plan_id": str(plan.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = composer_state(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["stage"], "plan_review")
+        self.assertEqual((payload["application_plan"] or {}).get("id"), str(plan.id))
+
+    def test_composer_state_returns_application_goal_and_thread_focus(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Listing and Property Foundation",
+            description="Initial MVP slice",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+            planning_status="decomposed",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Listing Data Ingestion",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+
+        application_request = self._request(
+            "/xyn/api/composer/state",
+            data={"workspace_id": str(self.workspace.id), "application_id": str(application.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            application_response = composer_state(application_request)
+        application_payload = json.loads(application_response.content)
+        self.assertEqual(application_response.status_code, 200)
+        self.assertEqual(application_payload["stage"], "application_overview")
+        self.assertEqual((application_payload["application"] or {}).get("id"), str(application.id))
+
+        goal_request = self._request(
+            "/xyn/api/composer/state",
+            data={"workspace_id": str(self.workspace.id), "goal_id": str(goal.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            goal_response = composer_state(goal_request)
+        goal_payload = json.loads(goal_response.content)
+        self.assertEqual(goal_response.status_code, 200)
+        self.assertEqual(goal_payload["stage"], "goal_focus")
+        self.assertEqual((goal_payload["goal"] or {}).get("id"), str(goal.id))
+
+        thread_request = self._request(
+            "/xyn/api/composer/state",
+            data={"workspace_id": str(self.workspace.id), "thread_id": str(thread.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            thread_response = composer_state(thread_request)
+        thread_payload = json.loads(thread_response.content)
+        self.assertEqual(thread_response.status_code, 200)
+        self.assertEqual(thread_payload["stage"], "thread_focus")
+        self.assertEqual((thread_payload["thread"] or {}).get("id"), str(thread.id))
 
     def test_recommend_next_slice_includes_stable_recommendation_id_for_unchanged_state(self):
         goal = Goal.objects.create(

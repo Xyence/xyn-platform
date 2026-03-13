@@ -66,6 +66,20 @@ describe("panelFactory", () => {
     expect(spec.params).toMatchObject({ goal_id: "goal-123" });
   });
 
+  it("creates and restores composer detail panels through the registry path", () => {
+    const panel = createWorkspacePanel({
+      panel_type: "composer_detail",
+      object_id: "ws-1",
+      workspace_id: "ws-1",
+      creation_source: "conversation_action",
+    });
+
+    const spec = openPanel(panel);
+    expect(spec.key).toBe("composer_detail");
+    expect(spec.title).toBe("Composer");
+    expect(spec.params).toMatchObject({ workspace_id: "ws-1" });
+  });
+
   it("creates and restores application plan detail panels through the registry path", () => {
     const panel = createWorkspacePanel({
       panel_type: "application_plan_detail",
