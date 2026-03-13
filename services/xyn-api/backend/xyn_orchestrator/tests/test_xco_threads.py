@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
+from xyn_orchestrator.development_intelligence import compute_thread_diagnostic
 from xyn_orchestrator.execution_observability import build_thread_timeline, serialize_thread_timeline
 from xyn_orchestrator.goal_progress import compute_thread_execution_metrics, compute_thread_progress
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, UserIdentity, Workspace, WorkspaceMembership
@@ -385,6 +386,149 @@ class XcoThreadTests(TestCase):
         self.assertEqual(payload["metrics"]["total_completed_work_items"], 1)
         self.assertEqual(payload["metrics"]["failed_work_items"], 1)
         self.assertEqual(payload["metrics"]["blocked_work_items"], 1)
+
+    def test_thread_diagnostic_detects_slow_execution_from_duration_metrics(self):
+        thread = self._create_thread(title="Slow Thread", status="active")
+        finished = self._create_task(
+            thread,
+            title="Slow task",
+            status="completed",
+            work_item_id="wi-slow",
+            runtime_run_id=uuid.uuid4(),
+        )
+        metrics = compute_thread_execution_metrics(
+            thread,
+            runtime_detail_lookup=lambda candidate: {
+                "id": "run-slow",
+                "run_id": "run-slow",
+                "status": "completed",
+                "started_at": "2026-03-12T10:00:00Z",
+                "completed_at": "2026-03-12T10:45:00Z",
+            }
+            if candidate.id == finished.id
+            else None,
+        )
+        timeline = build_thread_timeline(
+            thread,
+            runtime_detail_lookup=lambda candidate: {
+                "id": "run-slow",
+                "run_id": "run-slow",
+                "status": "completed",
+                "started_at": timezone.now() - timezone.timedelta(minutes=45),
+                "completed_at": timezone.now(),
+            }
+            if candidate.id == finished.id
+            else None,
+        )
+        diagnostic = compute_thread_diagnostic(
+            thread,
+            progress=compute_thread_progress(thread),
+            metrics=metrics,
+            timeline=timeline,
+            recent_runs=[{"id": "run-slow", "status": "completed"}],
+            recent_artifacts=[],
+        )
+        self.assertEqual(diagnostic.status, "slow")
+        self.assertIn("Average run duration is 2700 seconds.", diagnostic.evidence)
+
+    def test_thread_diagnostic_detects_repeated_failures(self):
+        thread = self._create_thread(title="Failing Thread", status="active")
+        self._create_task(thread, title="Fail 1", status="failed", work_item_id="wi-fail-1")
+        self._create_task(thread, title="Fail 2", status="failed", work_item_id="wi-fail-2")
+        diagnostic = compute_thread_diagnostic(
+            thread,
+            progress=compute_thread_progress(thread),
+            metrics=compute_thread_execution_metrics(thread),
+            timeline=build_thread_timeline(thread),
+            recent_runs=[{"id": "run-1", "status": "failed"}, {"id": "run-2", "status": "failed"}],
+            recent_artifacts=[],
+        )
+        self.assertEqual(diagnostic.status, "unstable")
+        self.assertTrue(any("failed" in entry.lower() for entry in diagnostic.evidence))
+
+    def test_thread_diagnostic_detects_blocked_state(self):
+        thread = self._create_thread(title="Blocked Thread", status="paused")
+        self._create_task(thread, title="Blocked", status="queued", work_item_id="wi-blocked")
+        diagnostic = compute_thread_diagnostic(
+            thread,
+            progress=compute_thread_progress(thread),
+            metrics=compute_thread_execution_metrics(thread),
+            timeline=build_thread_timeline(thread),
+            recent_runs=[],
+            recent_artifacts=[],
+        )
+        self.assertEqual(diagnostic.status, "blocked")
+        self.assertIn("blocked work item", " ".join(diagnostic.evidence).lower())
+
+    def test_thread_diagnostic_detects_high_artifact_churn(self):
+        thread = self._create_thread(title="Churn Thread", status="active")
+        self._create_task(thread, title="Artifact work", status="completed", work_item_id="wi-artifact")
+        diagnostic = compute_thread_diagnostic(
+            thread,
+            progress=compute_thread_progress(thread),
+            metrics=compute_thread_execution_metrics(thread),
+            timeline=build_thread_timeline(thread),
+            recent_runs=[{"id": "run-1", "status": "completed"}],
+            recent_artifacts=[
+                {"artifact_type": "patch", "label": "Patch Output"},
+                {"artifact_type": "patch", "label": "Patch Output"},
+                {"artifact_type": "patch", "label": "Patch Output"},
+            ],
+        )
+        self.assertEqual(diagnostic.status, "unstable")
+        self.assertTrue(any("artifact family" in entry.lower() for entry in diagnostic.evidence))
+
+    def test_thread_diagnostic_marks_runtime_history_as_provenance_ambiguous_without_queue_evidence(self):
+        thread = self._create_thread(title="Ambiguous Provenance", status="active")
+        self._create_task(thread, title="Runtime work", status="running", work_item_id="wi-runtime", runtime_run_id=uuid.uuid4())
+        timeline = build_thread_timeline(
+            thread,
+            runtime_detail_lookup=lambda _candidate: {
+                "id": "run-ambiguous",
+                "run_id": "run-ambiguous",
+                "status": "running",
+                "started_at": timezone.now() - timezone.timedelta(minutes=2),
+            },
+        )
+        diagnostic = compute_thread_diagnostic(
+            thread,
+            progress=compute_thread_progress(thread),
+            metrics=compute_thread_execution_metrics(thread),
+            timeline=timeline,
+            recent_runs=[{"id": "run-ambiguous", "status": "running"}],
+            recent_artifacts=[],
+        )
+        self.assertEqual(diagnostic.provenance.provenance_status, "runtime_provenance_ambiguous")
+        self.assertTrue(diagnostic.provenance.ambiguous_runtime_evidence)
+
+    def test_thread_detail_includes_thread_diagnostic(self):
+        thread = self._create_thread(title="Diagnostic Detail", status="active")
+        finished = self._create_task(
+            thread,
+            title="Finished task",
+            status="completed",
+            work_item_id="wi-finished",
+            runtime_run_id=uuid.uuid4(),
+        )
+        request = self._request(f"/xyn/api/threads/{thread.id}")
+        with self._auth_patches()[0], mock.patch(
+            "xyn_orchestrator.xyn_api._project_runtime_status_to_task",
+            side_effect=lambda candidate: {
+                "id": "run-diagnostic",
+                "run_id": "run-diagnostic",
+                "status": "completed",
+                "started_at": "2026-03-12T10:00:00Z",
+                "completed_at": "2026-03-12T10:45:00Z",
+                "summary": "Long-running change",
+            }
+            if candidate.id == finished.id
+            else None,
+        ):
+            response = thread_detail(request, str(thread.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["thread_diagnostic"]["status"], "slow")
+        self.assertIn("provenance", payload["thread_diagnostic"])
 
     def test_thread_summary_exposes_computed_progress_counts(self):
         thread = self._create_thread(title="Summary Thread", status="active")

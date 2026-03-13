@@ -160,6 +160,7 @@ from .goal_progress import (
     compute_thread_progress,
 )
 from .execution_observability import build_artifact_evolution, build_thread_timeline, serialize_thread_timeline
+from .development_intelligence import compute_thread_diagnostic, serialize_thread_diagnostic
 from .artifact_packages import (
     ArtifactPackageValidationError,
     export_artifact_package,
@@ -27980,15 +27981,37 @@ def _coordination_thread_detail(thread: CoordinationThread) -> Dict[str, Any]:
                 break
         if len(recent_artifacts) >= 20 and len(recent_runs) >= 10:
             break
-    timeline = serialize_thread_timeline(
-        build_thread_timeline(thread, runtime_detail_lookup=_project_runtime_status_to_task)
-    )[-100:]
+    progress = compute_thread_progress(thread)
+    metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=_project_runtime_status_to_task)
+    timeline_entries = build_thread_timeline(thread, runtime_detail_lookup=_project_runtime_status_to_task)
+    timeline = serialize_thread_timeline(timeline_entries)[-100:]
+    diagnostic = serialize_thread_diagnostic(
+        compute_thread_diagnostic(
+            thread,
+            progress=progress,
+            metrics=metrics,
+            timeline=timeline_entries,
+            recent_runs=recent_runs,
+            recent_artifacts=recent_artifacts,
+        )
+    )
     return {
         **_coordination_thread_summary(thread),
+        "thread_progress_status": progress.thread_status,
+        "work_items_completed": progress.work_items_completed,
+        "work_items_ready": progress.work_items_ready,
+        "work_items_blocked": progress.work_items_blocked,
+        "metrics": {
+            "average_run_duration_seconds": metrics.average_run_duration_seconds,
+            "total_completed_work_items": metrics.total_completed_work_items,
+            "failed_work_items": metrics.failed_work_items,
+            "blocked_work_items": metrics.blocked_work_items,
+        },
         "work_items": work_items,
         "recent_runs": recent_runs,
         "recent_artifacts": recent_artifacts,
         "timeline": timeline,
+        "thread_diagnostic": diagnostic,
     }
 
 
