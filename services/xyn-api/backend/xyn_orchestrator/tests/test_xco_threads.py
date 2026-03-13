@@ -17,17 +17,22 @@ from xyn_orchestrator.xyn_api import _dispatch_next_queue_item, _update_thread_s
 class XcoThreadTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
+        suffix = uuid.uuid4().hex[:8]
         user_model = get_user_model()
-        self.user = user_model.objects.create_user(username="xco-admin", email="xco@example.com", password="password")
+        self.user = user_model.objects.create_user(
+            username=f"xco-admin-{suffix}",
+            email=f"xco-{suffix}@example.com",
+            password="password",
+        )
         self.user.is_staff = True
         self.user.save(update_fields=["is_staff"])
         self.identity = UserIdentity.objects.create(
             provider="oidc",
             issuer="https://issuer.example.com",
-            subject="xco-admin",
-            email="xco@example.com",
+            subject=f"xco-admin-{suffix}",
+            email=f"xco-{suffix}@example.com",
         )
-        self.workspace = Workspace.objects.create(name="XCO Workspace", slug="xco-workspace")
+        self.workspace = Workspace.objects.create(name="XCO Workspace", slug=f"xco-workspace-{suffix}")
         WorkspaceMembership.objects.create(
             workspace=self.workspace,
             user_identity=self.identity,
@@ -281,6 +286,62 @@ class XcoThreadTests(TestCase):
         self.assertEqual(metrics.failed_work_items, 1)
         self.assertEqual(metrics.blocked_work_items, 1)
 
+    def test_thread_execution_metrics_handle_zero_runs(self):
+        thread = self._create_thread(title="No Runs Metrics", status="active")
+        self._create_task(thread, title="Queued task", status="queued", work_item_id="wi-queued")
+        metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(metrics.average_run_duration_seconds, 0)
+        self.assertEqual(metrics.total_completed_work_items, 0)
+        self.assertEqual(metrics.failed_work_items, 0)
+        self.assertEqual(metrics.blocked_work_items, 0)
+
+    def test_thread_execution_metrics_handle_failed_only_runtime_history(self):
+        thread = self._create_thread(title="Failed Runs Metrics", status="active")
+        task_a = self._create_task(thread, title="Fail A", status="failed", work_item_id="wi-fail-a")
+        task_b = self._create_task(thread, title="Fail B", status="failed", work_item_id="wi-fail-b")
+
+        def runtime_detail_lookup(task):
+            started = "2026-03-12T10:00:00Z" if task.id == task_a.id else "2026-03-12T11:00:00Z"
+            completed = "2026-03-12T10:02:00Z" if task.id == task_a.id else "2026-03-12T11:03:00Z"
+            return {"started_at": started, "completed_at": completed, "status": "failed"}
+
+        metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=runtime_detail_lookup)
+        self.assertEqual(metrics.average_run_duration_seconds, 150)
+        self.assertEqual(metrics.total_completed_work_items, 0)
+        self.assertEqual(metrics.failed_work_items, 2)
+        self.assertEqual(metrics.blocked_work_items, 0)
+
+    def test_thread_execution_metrics_handle_blocked_work_without_execution(self):
+        thread = self._create_thread(title="Blocked Without Execution", status="paused")
+        self._create_task(
+            thread,
+            title="Blocked task",
+            status="queued",
+            work_item_id="wi-blocked",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(metrics.average_run_duration_seconds, 0)
+        self.assertEqual(metrics.total_completed_work_items, 0)
+        self.assertEqual(metrics.failed_work_items, 0)
+        self.assertEqual(metrics.blocked_work_items, 1)
+
+    def test_thread_execution_metrics_handle_extreme_duration_variance(self):
+        thread = self._create_thread(title="Variance Thread", status="active")
+        fast = self._create_task(thread, title="Fast", status="completed", work_item_id="wi-fast")
+        slow = self._create_task(thread, title="Slow", status="completed", work_item_id="wi-slow")
+
+        def runtime_detail_lookup(task):
+            if task.id == fast.id:
+                return {"started_at": "2026-03-12T10:00:00Z", "completed_at": "2026-03-12T10:01:00Z", "status": "completed"}
+            if task.id == slow.id:
+                return {"started_at": "2026-03-12T11:00:00Z", "completed_at": "2026-03-12T12:00:00Z", "status": "completed"}
+            return None
+
+        metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=runtime_detail_lookup)
+        self.assertEqual(metrics.average_run_duration_seconds, 1830)
+        self.assertEqual(metrics.total_completed_work_items, 2)
+
     def test_build_thread_timeline_reconstructs_ordered_lifecycle_from_durable_state(self):
         thread = self._create_thread(title="Timeline Thread")
         task = self._create_task(thread, title="Implement scheduler", status="completed", work_item_id="wi-timeline")
@@ -322,6 +383,76 @@ class XcoThreadTests(TestCase):
         blocked = [entry for entry in timeline if entry["event_type"] == "work_item_blocked"]
         self.assertEqual(len(blocked), 1)
         self.assertEqual(blocked[0]["work_item_id"], "wi-blocked")
+
+    def test_build_thread_timeline_uses_stable_order_for_identical_timestamps(self):
+        thread = self._create_thread(title="Equal Timestamp Timeline")
+        task_a = self._create_task(thread, title="Task A", status="completed", work_item_id="wi-a")
+        task_b = self._create_task(thread, title="Task B", status="completed", work_item_id="wi-b")
+        shared = timezone.now() - timezone.timedelta(minutes=5)
+        DevTask.objects.filter(id__in=[task_a.id, task_b.id]).update(created_at=shared, updated_at=shared)
+
+        def runtime_detail_lookup(task):
+            return {
+                "id": f"run-{task.work_item_id}",
+                "run_id": f"run-{task.work_item_id}",
+                "status": "completed",
+                "started_at": shared,
+                "completed_at": shared,
+                "summary": f"{task.title} completed",
+            }
+
+        first = serialize_thread_timeline(build_thread_timeline(thread, runtime_detail_lookup=runtime_detail_lookup))
+        second = serialize_thread_timeline(build_thread_timeline(thread, runtime_detail_lookup=runtime_detail_lookup))
+        self.assertEqual(
+            [(entry["event_type"], entry["work_item_id"], entry["run_id"], entry["id"]) for entry in first],
+            [(entry["event_type"], entry["work_item_id"], entry["run_id"], entry["id"]) for entry in second],
+        )
+        self.assertEqual(
+            [(entry["event_type"], entry["work_item_id"]) for entry in first],
+            [
+                ("work_item_completed", "wi-a"),
+                ("work_item_completed", "wi-b"),
+                ("work_item_queued", "wi-a"),
+                ("work_item_queued", "wi-b"),
+                ("work_item_running", "wi-a"),
+                ("work_item_running", "wi-b"),
+            ],
+        )
+
+    def test_build_thread_timeline_orders_blocked_before_completed_when_timestamp_matches(self):
+        thread = self._create_thread(title="Blocked and Completed")
+        blocked_task = self._create_task(
+            thread,
+            title="Blocked",
+            status="queued",
+            work_item_id="wi-blocked",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        completed_task = self._create_task(thread, title="Completed", status="completed", work_item_id="wi-completed")
+        shared = timezone.now() - timezone.timedelta(minutes=2)
+        DevTask.objects.filter(id__in=[blocked_task.id, completed_task.id]).update(created_at=shared, updated_at=shared)
+
+        timeline = serialize_thread_timeline(
+            build_thread_timeline(
+                thread,
+                runtime_detail_lookup=lambda task: {
+                    "id": "run-completed",
+                    "run_id": "run-completed",
+                    "status": "completed",
+                    "started_at": shared,
+                    "completed_at": shared,
+                }
+                if task.id == completed_task.id
+                else None,
+            )
+        )
+        same_timestamp_entries = [
+            entry for entry in timeline if entry["created_at"] == shared and entry["event_type"] in {"work_item_blocked", "work_item_completed"}
+        ]
+        self.assertEqual(
+            [(entry["event_type"], entry["work_item_id"]) for entry in same_timestamp_entries],
+            [("work_item_blocked", "wi-blocked"), ("work_item_completed", "wi-completed")],
+        )
 
     def test_thread_detail_returns_computed_execution_timeline(self):
         thread = self._create_thread(title="Detail Timeline")
