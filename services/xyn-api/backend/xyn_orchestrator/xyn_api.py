@@ -159,6 +159,7 @@ from .goal_progress import (
     compute_thread_execution_metrics,
     compute_thread_progress,
 )
+from .portfolio_intelligence import build_goal_portfolio_row, build_goal_portfolio_state
 from .execution_observability import build_artifact_evolution, build_thread_timeline, serialize_thread_timeline
 from .development_intelligence import (
     build_artifact_analysis_context,
@@ -25563,6 +25564,7 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
     progress = compute_goal_progress(goal)
     metrics = compute_goal_execution_metrics(goal, runtime_detail_lookup=_project_runtime_status_to_task)
     health = compute_goal_health_indicators(goal, runtime_detail_lookup=_project_runtime_status_to_task)
+    portfolio_row = build_goal_portfolio_row(goal, runtime_detail_lookup=_project_runtime_status_to_task)
     recommendation = recommend_next_slice(goal)
     development_loop_summary = compute_goal_development_loop_summary(goal, recommendation=recommendation)
     development_insights = serialize_development_insights(
@@ -25605,6 +25607,12 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             "active_threads": health.active_threads,
             "blocked_threads": health.blocked_threads,
             "recent_artifacts": health.recent_artifacts,
+        },
+        "coordination_priority": {
+            "value": portfolio_row.coordination_priority.value,
+            "reasons": portfolio_row.coordination_priority.reasons,
+            "recent_execution_count": portfolio_row.recent_execution_count,
+            "health_status": portfolio_row.health_status,
         },
         "development_insights": development_insights,
         "goal_diagnostic": goal_diagnostic,
@@ -27326,8 +27334,52 @@ def goals_collection(request: HttpRequest) -> JsonResponse:
     goal_type = str(request.GET.get("goal_type") or "").strip().lower()
     if goal_type:
         qs = qs.filter(goal_type=goal_type)
-    rows = [_serialize_goal_summary(goal) for goal in qs.order_by("-updated_at", "-created_at")]
-    return _paginate(request, rows, "goals")
+    ordered_goals = list(qs.order_by("-updated_at", "-created_at"))
+    portfolio_rows = build_goal_portfolio_state(ordered_goals, runtime_detail_lookup=_project_runtime_status_to_task)
+    portfolio_by_goal_id = {row.goal_id: row for row in portfolio_rows}
+    rows: List[Dict[str, Any]] = []
+    for goal in ordered_goals:
+        payload = _serialize_goal_summary(goal)
+        portfolio_row = portfolio_by_goal_id.get(str(goal.id))
+        if portfolio_row:
+            payload["goal_progress"] = {
+                "goal_progress_status": portfolio_row.goal_progress_status,
+                "progress_percent": portfolio_row.progress_percent,
+            }
+            payload["coordination_priority"] = {
+                "value": portfolio_row.coordination_priority.value,
+                "reasons": portfolio_row.coordination_priority.reasons,
+                "recent_execution_count": portfolio_row.recent_execution_count,
+                "health_status": portfolio_row.health_status,
+                "active_threads": portfolio_row.active_threads,
+                "blocked_threads": portfolio_row.blocked_threads,
+            }
+        rows.append(payload)
+    response = _paginate(request, rows, "goals")
+    if not isinstance(response, JsonResponse):
+        return response
+    payload = json.loads(response.content)
+    payload["portfolio_state"] = {
+        "goals": [
+            {
+                "goal_id": row.goal_id,
+                "title": row.title,
+                "planning_status": row.planning_status,
+                "goal_progress_status": row.goal_progress_status,
+                "progress_percent": row.progress_percent,
+                "health_status": row.health_status,
+                "active_threads": row.active_threads,
+                "blocked_threads": row.blocked_threads,
+                "recent_execution_count": row.recent_execution_count,
+                "coordination_priority": {
+                    "value": row.coordination_priority.value,
+                    "reasons": row.coordination_priority.reasons,
+                },
+            }
+            for row in portfolio_rows
+        ]
+    }
+    return JsonResponse(payload, status=response.status_code)
 
 
 @csrf_exempt

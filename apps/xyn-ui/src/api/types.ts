@@ -2380,6 +2380,18 @@ export type GoalSummary = {
   resolution_notes: string[];
   thread_count: number;
   work_item_count: number;
+  goal_progress?: {
+    goal_progress_status: string;
+    progress_percent: number;
+  };
+  coordination_priority?: {
+    value: string;
+    reasons: string[];
+    recent_execution_count?: number;
+    health_status?: string;
+    active_threads?: number;
+    blocked_threads?: number;
+  };
   created_at: string;
   updated_at: string;
 };
@@ -2439,6 +2451,12 @@ export type GoalDetail = GoalSummary & {
     blocked_threads: number;
     recent_artifacts: number;
   };
+  coordination_priority?: {
+    value: string;
+    reasons: string[];
+    recent_execution_count: number;
+    health_status: string;
+  };
   goal_diagnostic?: {
     status: string;
     observations: string[];
@@ -2478,7 +2496,26 @@ export type GoalDetail = GoalSummary & {
   recommendation?: GoalRecommendation | null;
 };
 
-export type GoalListResponse = PaginatedResponse<GoalSummary, "goals">;
+export type GoalListResponse = PaginatedResponse<GoalSummary, "goals"> & {
+  portfolio_state?: GoalPortfolioState;
+};
+export type GoalPortfolioState = {
+  goals: Array<{
+    goal_id: string;
+    title: string;
+    planning_status: string;
+    goal_progress_status: string;
+    progress_percent: number;
+    health_status: string;
+    active_threads: number;
+    blocked_threads: number;
+    recent_execution_count: number;
+    coordination_priority: {
+      value: string;
+      reasons: string[];
+    };
+  }>;
+};
 
 export type WorkQueueItem = {
   thread_id: string;
