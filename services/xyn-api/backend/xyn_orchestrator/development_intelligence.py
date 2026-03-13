@@ -77,6 +77,13 @@ class ArtifactAnalysis:
     provenance: ProvenanceAssessment
 
 
+@dataclass(frozen=True)
+class DevelopmentInsight:
+    key: str
+    summary: str
+    evidence: List[str]
+
+
 def _assess_thread_provenance(
     thread: CoordinationThread,
     *,
@@ -558,3 +565,115 @@ def serialize_artifact_analysis(analysis: ArtifactAnalysis) -> Dict[str, object]
             "summary": analysis.provenance.summary,
         },
     }
+
+
+def compute_goal_development_insights(
+    goal: Goal,
+    *,
+    runtime_detail_lookup: Optional[Callable[[DevTask], Optional[Dict[str, Any]]]] = None,
+) -> List[DevelopmentInsight]:
+    goal_diagnostic = compute_goal_diagnostic(goal, runtime_detail_lookup=runtime_detail_lookup)
+    metrics = compute_goal_execution_metrics(goal, runtime_detail_lookup=runtime_detail_lookup)
+    health = compute_goal_health_indicators(goal, runtime_detail_lookup=runtime_detail_lookup)
+    thread_bundles = [
+        build_thread_observability_bundle(thread, runtime_detail_lookup=runtime_detail_lookup)
+        for thread in goal.threads.all().order_by("created_at", "id")
+    ]
+
+    insights: List[DevelopmentInsight] = []
+    if goal_diagnostic.status == "completed":
+        insights.append(
+            DevelopmentInsight(
+                key="goal_complete",
+                summary="The goal is effectively complete and does not need another execution slice right now.",
+                evidence=list(goal_diagnostic.evidence),
+            )
+        )
+        return insights
+
+    blocked_threads = [
+        bundle for bundle in thread_bundles if getattr(bundle["diagnostic"], "status", "") == "blocked"
+    ]
+    unstable_threads = [
+        bundle for bundle in thread_bundles if getattr(bundle["diagnostic"], "status", "") == "unstable"
+    ]
+    slow_threads = [
+        bundle for bundle in thread_bundles if getattr(bundle["diagnostic"], "status", "") == "slow"
+    ]
+    ambiguous_threads = [
+        bundle
+        for bundle in thread_bundles
+        if getattr(bundle["diagnostic"], "provenance").ambiguous_runtime_evidence
+    ]
+
+    if blocked_threads:
+        insights.append(
+            DevelopmentInsight(
+                key="blocked_work_dominates",
+                summary="Blocked work is constraining current progress more than additional execution capacity would help.",
+                evidence=[f"{len(blocked_threads)} blocked thread(s) are currently limiting forward progress."] + list(goal_diagnostic.evidence[:2]),
+            )
+        )
+    if unstable_threads:
+        insights.append(
+            DevelopmentInsight(
+                key="failure_cluster",
+                summary="Recent execution failures cluster in a small set of threads and should be reviewed before widening work.",
+                evidence=[f"{len(unstable_threads)} thread(s) show repeated failures or churn."] + [item for bundle in unstable_threads[:2] for item in getattr(bundle["diagnostic"], "evidence", [])[:1]],
+            )
+        )
+    if slow_threads:
+        average_durations = [
+            int(getattr(bundle["metrics"], "average_run_duration_seconds", 0) or 0)
+            for bundle in slow_threads
+            if int(getattr(bundle["metrics"], "average_run_duration_seconds", 0) or 0) > 0
+        ]
+        insights.append(
+            DevelopmentInsight(
+                key="elevated_run_duration",
+                summary="Average execution time is elevated on active threads, which may be slowing delivery.",
+                evidence=[f"{len(slow_threads)} slow thread(s) were detected."] + ([f"Observed slow-thread average duration: {sum(average_durations) // len(average_durations)} seconds."] if average_durations else []),
+            )
+        )
+    if health.recent_artifacts >= 4 and metrics.total_completed_work_items <= 1:
+        insights.append(
+            DevelopmentInsight(
+                key="high_activity_low_completion",
+                summary="Artifact activity is high relative to completed work, suggesting revision without much completion gain.",
+                evidence=[
+                    f"{health.recent_artifacts} recent artifact(s) were produced with only {metrics.total_completed_work_items} completed work item(s)."
+                ],
+            )
+        )
+    if ambiguous_threads:
+        insights.append(
+            DevelopmentInsight(
+                key="provenance_ambiguous",
+                summary="Some observed runtime activity is visible, but its supervised queue provenance is not fully attributable from durable signals.",
+                evidence=[f"{len(ambiguous_threads)} thread(s) include runtime history without explicit queue-dispatch evidence."],
+            )
+        )
+    if not insights:
+        insights.append(
+            DevelopmentInsight(
+                key="low_signal" if goal_diagnostic.status == "low_signal" else "steady_progress",
+                summary=(
+                    "There is not enough execution evidence yet to explain a dominant issue."
+                    if goal_diagnostic.status == "low_signal"
+                    else "Development activity appears steady without a dominant operational issue right now."
+                ),
+                evidence=list(goal_diagnostic.evidence[:2]),
+            )
+        )
+    return insights
+
+
+def serialize_development_insights(insights: List[DevelopmentInsight]) -> List[Dict[str, object]]:
+    return [
+        {
+            "key": insight.key,
+            "summary": insight.summary,
+            "evidence": insight.evidence,
+        }
+        for insight in insights
+    ]

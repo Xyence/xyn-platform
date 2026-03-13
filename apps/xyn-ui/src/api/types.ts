@@ -2425,6 +2425,11 @@ export type GoalDetail = GoalSummary & {
     blocked_threads: number;
     recent_artifacts: number;
   };
+  development_insights?: Array<{
+    key: string;
+    summary: string;
+    evidence: string[];
+  }>;
   development_loop_summary?: {
     goal_status: string;
     threads: Array<{

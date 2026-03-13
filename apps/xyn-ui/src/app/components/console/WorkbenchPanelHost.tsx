@@ -971,6 +971,25 @@ function GoalDetailPanel({
           </div>
         </section>
       ) : null}
+      {payload.development_insights?.length ? (
+        <section className="card">
+          <div className="card-header"><div><p className="muted">Development Insights</p></div></div>
+          <div className="detail-list">
+            {payload.development_insights.map((insight) => (
+              <div key={insight.key} style={{ marginBottom: 12 }}>
+                <div className="field-value">{insight.summary}</div>
+                {insight.evidence.length ? (
+                  <ul className="detail-list">
+                    {insight.evidence.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
       <section className="card">
         <div className="card-header"><div><p className="muted">Threads</p></div></div>
         <div className="canvas-table-wrap">

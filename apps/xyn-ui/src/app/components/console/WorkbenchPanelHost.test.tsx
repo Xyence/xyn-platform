@@ -361,6 +361,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
         blocked_threads: 0,
         recent_artifacts: 1,
       },
+      development_insights: [
+        {
+          key: "steady_progress",
+          summary: "Development activity appears steady without a dominant operational issue right now.",
+          evidence: ["1 work item completed across 1 active and 0 blocked thread(s)."],
+        },
+      ],
     });
 
     render(
@@ -378,6 +385,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("Listing Data Ingestion").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Development Loop")).toBeInTheDocument();
     expect(screen.getByText("Goal Health")).toBeInTheDocument();
+    expect(screen.getByText("Development Insights")).toBeInTheDocument();
+    expect(screen.getByText("Development activity appears steady without a dominant operational issue right now.")).toBeInTheDocument();
     expect(screen.getByText("33%")).toBeInTheDocument();
     expect(screen.getAllByText("Active Threads").length).toBeGreaterThan(0);
     expect(screen.getByText("Artifacts Produced")).toBeInTheDocument();

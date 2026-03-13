@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 
 from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
-from xyn_orchestrator.development_intelligence import compute_goal_diagnostic
+from xyn_orchestrator.development_intelligence import compute_goal_development_insights, compute_goal_diagnostic
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import goal_decompose, goal_detail, goal_review, goals_collection
@@ -1377,6 +1377,8 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(payload["goal_health"]["blocked_threads"], 1)
         self.assertEqual(payload["goal_health"]["recent_artifacts"], 1)
         self.assertEqual(payload["goal_diagnostic"]["status"], "blocked")
+        self.assertTrue(payload["development_insights"])
+        self.assertEqual(payload["development_insights"][0]["key"], "blocked_work_dominates")
 
     def test_goal_diagnostic_detects_blocked_goal_due_to_blocked_threads(self):
         goal = Goal.objects.create(
@@ -1576,3 +1578,136 @@ class GoalPlanningTests(TestCase):
         )
         diagnostic = compute_goal_diagnostic(goal)
         self.assertEqual(diagnostic.status, "low_signal")
+
+    def test_goal_development_insights_detect_failure_cluster_and_blocked_work(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Insight Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="normal",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        unstable_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Unstable Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked slice",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-slice",
+            dependency_work_item_ids=["missing"],
+        )
+        failing_task = DevTask.objects.create(
+            title="Unstable slice",
+            description="",
+            task_type="codegen",
+            status="awaiting_review",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=unstable_thread,
+            work_item_id="unstable-slice",
+            runtime_run_id=uuid.uuid4(),
+        )
+        second_failing_task = DevTask.objects.create(
+            title="Unstable slice 2",
+            description="",
+            task_type="codegen",
+            status="awaiting_review",
+            priority=2,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=unstable_thread,
+            work_item_id="unstable-slice-2",
+            runtime_run_id=uuid.uuid4(),
+        )
+
+        def runtime_detail_lookup(candidate):
+            if candidate.id == failing_task.id:
+                return {
+                    "id": "run-unstable",
+                    "run_id": "run-unstable",
+                    "status": "failed",
+                    "started_at": "2026-03-12T10:00:00Z",
+                    "completed_at": "2026-03-12T11:00:00Z",
+                    "artifacts": [
+                        {"id": "artifact-1", "artifact_type": "summary", "label": "Summary 1"},
+                        {"id": "artifact-2", "artifact_type": "summary", "label": "Summary 2"},
+                    ],
+                }
+            if candidate.id == second_failing_task.id:
+                return {
+                    "id": "run-unstable-2",
+                    "run_id": "run-unstable-2",
+                    "status": "blocked",
+                    "started_at": "2026-03-12T11:00:00Z",
+                    "completed_at": "2026-03-12T11:30:00Z",
+                    "artifacts": [
+                        {"id": "artifact-3", "artifact_type": "summary", "label": "Summary 3"},
+                        {"id": "artifact-4", "artifact_type": "summary", "label": "Summary 4"},
+                    ],
+                }
+            return None
+
+        insights = compute_goal_development_insights(goal, runtime_detail_lookup=runtime_detail_lookup)
+        keys = [item.key for item in insights]
+        self.assertIn("blocked_work_dominates", keys)
+        self.assertIn("failure_cluster", keys)
+
+    def test_goal_development_insights_degrade_to_low_signal_when_evidence_is_sparse(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Sparse Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        insights = compute_goal_development_insights(goal)
+        self.assertEqual(len(insights), 1)
+        self.assertEqual(insights[0].key, "low_signal")

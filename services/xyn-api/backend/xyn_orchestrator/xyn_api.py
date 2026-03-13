@@ -164,8 +164,10 @@ from .development_intelligence import (
     build_artifact_analysis_context,
     build_thread_observability_bundle,
     compute_artifact_analysis,
+    compute_goal_development_insights,
     compute_goal_diagnostic,
     serialize_artifact_analysis,
+    serialize_development_insights,
     serialize_goal_diagnostic,
     serialize_thread_diagnostic,
 )
@@ -25547,6 +25549,9 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
     health = compute_goal_health_indicators(goal, runtime_detail_lookup=_project_runtime_status_to_task)
     recommendation = recommend_next_slice(goal)
     development_loop_summary = compute_goal_development_loop_summary(goal, recommendation=recommendation)
+    development_insights = serialize_development_insights(
+        compute_goal_development_insights(goal, runtime_detail_lookup=_project_runtime_status_to_task)
+    )
     goal_diagnostic = serialize_goal_diagnostic(
         compute_goal_diagnostic(goal, runtime_detail_lookup=_project_runtime_status_to_task)
     )
@@ -25585,6 +25590,7 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             "blocked_threads": health.blocked_threads,
             "recent_artifacts": health.recent_artifacts,
         },
+        "development_insights": development_insights,
         "goal_diagnostic": goal_diagnostic,
         "recommended_next_slice": {
             "recommendation_id": recommendation.recommendation_id,
