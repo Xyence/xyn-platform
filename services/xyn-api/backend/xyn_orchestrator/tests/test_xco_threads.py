@@ -500,6 +500,8 @@ class XcoThreadTests(TestCase):
         )
         self.assertEqual(diagnostic.provenance.provenance_status, "runtime_provenance_ambiguous")
         self.assertTrue(diagnostic.provenance.ambiguous_runtime_evidence)
+        self.assertIn("not fully attributable", diagnostic.provenance.summary)
+        self.assertNotIn("queued through the supervised loop", diagnostic.provenance.summary.lower())
 
     def test_thread_detail_includes_thread_diagnostic(self):
         thread = self._create_thread(title="Diagnostic Detail", status="active")

@@ -458,6 +458,8 @@ class ArtifactAnalysisTests(SimpleTestCase):
         )
         self.assertTrue(analysis.provenance.ambiguous_runtime_evidence)
         self.assertEqual(analysis.provenance.provenance_status, "runtime_provenance_ambiguous")
+        self.assertIn("not fully attributable", analysis.provenance.summary)
+        self.assertNotIn("queued through the supervised loop", analysis.provenance.summary.lower())
 
     def test_work_item_alias_endpoints_return_work_item_shapes(self):
         request = self.factory.get("/xyn/api/work-items")

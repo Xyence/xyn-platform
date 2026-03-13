@@ -1711,3 +1711,60 @@ class GoalPlanningTests(TestCase):
         insights = compute_goal_development_insights(goal)
         self.assertEqual(len(insights), 1)
         self.assertEqual(insights[0].key, "low_signal")
+
+    def test_goal_diagnostic_reports_ambiguous_runtime_provenance_conservatively(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Ambiguous Runtime Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            title="Runtime Refactor",
+            description="",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+            goal=goal,
+        )
+        task = DevTask.objects.create(
+            title="Runtime work",
+            description="",
+            task_type="codegen",
+            status="running",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="runtime-work",
+            runtime_run_id=uuid.uuid4(),
+        )
+
+        def runtime_detail_lookup(candidate):
+            if candidate.id != task.id:
+                return None
+            return {
+                "id": "run-ambiguous",
+                "run_id": "run-ambiguous",
+                "status": "running",
+                "started_at": "2026-03-12T10:00:00Z",
+                "completed_at": None,
+                "artifacts": [],
+            }
+
+        diagnostic = compute_goal_diagnostic(goal, runtime_detail_lookup=runtime_detail_lookup)
+        self.assertTrue(any("not fully attributable" in item for item in diagnostic.evidence))
+        self.assertFalse(any("queued through the supervised loop" in item.lower() for item in diagnostic.evidence))
