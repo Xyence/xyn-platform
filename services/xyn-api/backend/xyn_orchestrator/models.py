@@ -2133,6 +2133,34 @@ class EnvironmentAppState(models.Model):
         return f"{self.environment.slug}:{self.app_id}"
 
 
+class ManagedRepository(models.Model):
+    AUTH_MODE_CHOICES = [
+        ("", "Default"),
+        ("local", "Local"),
+        ("https_token", "HTTPS token"),
+        ("ssh", "SSH"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    slug = models.SlugField(max_length=120, unique=True)
+    display_name = models.CharField(max_length=200, blank=True)
+    remote_url = models.TextField()
+    default_branch = models.CharField(max_length=120, default="main")
+    is_active = models.BooleanField(default=True)
+    auth_mode = models.CharField(max_length=32, blank=True, default="", choices=AUTH_MODE_CHOICES)
+    metadata_json = models.JSONField(null=True, blank=True)
+    local_cache_relpath = models.CharField(max_length=240, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["slug"]
+
+    def __str__(self) -> str:
+        return self.display_name or self.slug
+
+
 class DevTask(models.Model):
     STATUS_CHOICES = [
         ("queued", "Queued"),
@@ -2754,7 +2782,7 @@ class Application(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["workspace", "plan_fingerprint"],
-                condition=~Q(plan_fingerprint=""),
+                condition=Q(plan_fingerprint__gt=""),
                 name="uniq_application_plan_fingerprint_per_workspace",
             )
         ]
@@ -2794,7 +2822,7 @@ class ApplicationPlan(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["workspace", "plan_fingerprint"],
-                condition=~Q(plan_fingerprint=""),
+                condition=Q(plan_fingerprint__gt=""),
                 name="uniq_application_plan_fingerprint_review_per_workspace",
             )
         ]

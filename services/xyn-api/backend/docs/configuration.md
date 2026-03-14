@@ -22,6 +22,8 @@
 Current behavior:
 - durable run/deployment artifacts are routed through the managed artifact root
 - active codegen workspaces are materialized under the managed workspace root
+- registered repository caches are materialized under `XYN_WORKSPACE_ROOT/repositories/cache`
+- per-task repository working copies are materialized under the managed task workspace and cloned from that cache
 - local durable artifact storage remains filesystem-backed today, with the storage seam left explicit for later object-storage support
 
 ## Compatibility Behavior

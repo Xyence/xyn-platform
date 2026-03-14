@@ -16,6 +16,7 @@ import boto3
 import requests
 from botocore.exceptions import BotoCoreError, ClientError
 from jsonschema import Draft202012Validator, RefResolver
+from .managed_repositories import ManagedRepositoryError, materialize_repository_workspace
 from .managed_storage import codegen_task_workspace, store_local_artifact, resolve_local_artifact_path
 from .video_explainer import render_video, sanitize_payload
 
@@ -195,7 +196,7 @@ def _validate_schema(payload: Dict[str, Any], filename: str) -> List[str]:
     return errors
 
 
-def _ensure_repo_workspace(repo: Dict[str, Any], workspace_root: str) -> str:
+def _clone_repo_workspace_direct(repo: Dict[str, Any], workspace_root: str) -> str:
     os.makedirs(workspace_root, exist_ok=True)
     repo_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(repo["name"] or "").strip()).strip(".-") or "repo"
     repo_dir = os.path.join(workspace_root, repo_name)
@@ -214,6 +215,13 @@ def _ensure_repo_workspace(repo: Dict[str, Any], workspace_root: str) -> str:
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr or proc.stdout or "git clone failed")
     return repo_dir
+
+
+def _ensure_repo_workspace(repo: Dict[str, Any], workspace_root: str) -> str:
+    try:
+        return str(materialize_repository_workspace(repo, workspace_root=workspace_root, refresh=True, reset=False))
+    except ManagedRepositoryError:
+        return _clone_repo_workspace_direct(repo, workspace_root)
 
 
 def _git_cmd(repo_dir: str, cmd: str) -> int:
