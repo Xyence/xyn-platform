@@ -2290,6 +2290,25 @@ export type DevTaskSummary = {
       action?: string | null;
     } | null;
   };
+  change_set?: {
+    available: boolean;
+    status: string;
+    has_changes: boolean;
+    source?: "workspace" | "artifact" | null;
+    repository_slug?: string | null;
+    changed_file_count: number;
+    files: Array<{
+      path: string;
+      change_type: string;
+      status_code?: string | null;
+      previous_path?: string | null;
+      patch_available: boolean;
+    }>;
+    patch_available: boolean;
+    patch_artifact_name?: string | null;
+    patch_artifact_url?: string | null;
+    message: string;
+  };
   thread_id?: string | null;
   thread_title?: string | null;
   goal_id?: string | null;
@@ -2320,6 +2339,10 @@ export type DevTaskDetail = DevTaskSummary & {
   last_error?: string;
   execution_brief?: Record<string, unknown> | null;
   execution_brief_history?: Array<Record<string, unknown>>;
+  change_set?: DevTaskSummary["change_set"] & {
+    workspace_path?: string | null;
+    diff_text?: string | null;
+  };
   context_packs?: Array<{
     id: string;
     name: string;

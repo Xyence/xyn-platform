@@ -183,6 +183,10 @@ from .execution_recovery import (
     record_execution_failure_snapshot,
     serialize_dev_task_recovery_state,
 )
+from .execution_changes import (
+    resolve_dev_task_change_set,
+    serialize_dev_task_change_summary,
+)
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -25795,6 +25799,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
     brief_review = serialize_execution_brief_review(task)
     queue_state = serialize_dev_task_queue_state(task, normalized_status=status)
     recovery_state = serialize_dev_task_recovery_state(task, execution_summary=execution_payload["execution_summary"])
+    change_set = serialize_dev_task_change_summary(task, execution_payload=execution_payload)
     return {
         "id": str(task.id),
         "work_item_id": task.work_item_id or str(task.id),
@@ -25817,6 +25822,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "execution_queue": queue_state,
         "execution_run": execution_payload["execution_summary"],
         "execution_recovery": recovery_state,
+        "change_set": change_set,
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
         "goal_id": str(task.goal_id) if task.goal_id else None,
@@ -26537,6 +26543,7 @@ def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
     run_payload = execution_payload["run_payload"]
     artifacts_payload = execution_payload["artifacts_payload"]
     commands_payload = execution_payload["commands_payload"]
+    change_set = resolve_dev_task_change_set(task, execution_payload=execution_payload, include_diff=True)
     return {
         **_serialize_work_item_summary(task, runtime_detail=runtime_detail),
         "input_artifact_key": task.input_artifact_key,
@@ -26555,6 +26562,7 @@ def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
         "goal_detail": _serialize_goal_summary(task.goal) if task.goal_id else None,
         "execution_brief": task.execution_brief if isinstance(task.execution_brief, dict) else None,
         "execution_brief_history": task.execution_brief_history if isinstance(task.execution_brief_history, list) else [],
+        "change_set": change_set,
         "result_run_detail": run_payload,
         "result_run_artifacts": artifacts_payload,
         "result_run_commands": commands_payload,

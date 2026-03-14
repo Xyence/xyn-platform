@@ -190,6 +190,24 @@ function ExecutionRunSummary({ item }: { item: Pick<WorkItemSummary, "execution_
   );
 }
 
+function ChangeSetSummary({ item }: { item: Pick<WorkItemSummary, "change_set"> }) {
+  const changeSet = item.change_set;
+  if (!changeSet?.available) return <span className="muted">Unavailable</span>;
+  if (!changeSet.has_changes) return <span className="muted">No changes</span>;
+  const fileCount = changeSet.changed_file_count || changeSet.files.length || 0;
+  const filePreview = changeSet.files
+    .slice(0, 2)
+    .map((file) => file.path)
+    .filter(Boolean)
+    .join(", ");
+  return (
+    <div>
+      <div>{fileCount} file{fileCount === 1 ? "" : "s"} changed</div>
+      <div className="muted small">{filePreview || changeSet.message}</div>
+    </div>
+  );
+}
+
 type CanvasQuery = {
   entity: string;
   filters: Array<{ field: string; op: string; value: unknown }>;
@@ -1183,6 +1201,7 @@ function GoalDetailPanel({
                 <th>Thread</th>
                 <th>Repo</th>
                 <th>Execution</th>
+                <th>Changes</th>
                 <th>Brief</th>
                 <th>Actions</th>
               </tr>
@@ -1195,11 +1214,12 @@ function GoalDetailPanel({
                   <td>{item.thread_title || "—"}</td>
                   <td>{item.target_repo || "—"}</td>
                   <td><ExecutionRunSummary item={item} /></td>
+                  <td><ChangeSetSummary item={item} /></td>
                   <td><BriefReviewSummary item={item} /></td>
                   <td><button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>Work Item</button></td>
                 </tr>
               ))}
-              {!payload.work_items.length ? <tr><td colSpan={7} className="muted">No work items planned yet.</td></tr> : null}
+              {!payload.work_items.length ? <tr><td colSpan={8} className="muted">No work items planned yet.</td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -1593,6 +1613,7 @@ function ThreadDetailPanel({
                 <th>Status</th>
                 <th>Repo</th>
                 <th>Execution</th>
+                <th>Changes</th>
                 <th>Brief</th>
                 <th>Actions</th>
               </tr>
@@ -1604,6 +1625,7 @@ function ThreadDetailPanel({
                   <td>{item.status}</td>
                   <td>{item.target_repo || "—"}</td>
                   <td><ExecutionRunSummary item={item} /></td>
+                  <td><ChangeSetSummary item={item} /></td>
                   <td><BriefReviewSummary item={item} /></td>
                   <td>
                     <div className="inline-action-row">
@@ -1621,7 +1643,7 @@ function ThreadDetailPanel({
               ))}
               {!payload.work_items.length ? (
                 <tr>
-                  <td colSpan={6} className="muted">
+                  <td colSpan={7} className="muted">
                     No work items are attached to this thread yet.
                   </td>
                 </tr>
@@ -1875,6 +1897,7 @@ function WorkItemDetailPanel({
   const queue = payload.execution_queue;
   const execution = payload.execution_run;
   const recovery = payload.execution_recovery;
+  const changeSet = payload.change_set;
 
   return (
     <div className="ems-panel-body">
@@ -2018,6 +2041,38 @@ function WorkItemDetailPanel({
           </div>
         ) : null}
       </section>
+      {changeSet ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Workspace Changes</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Change State</div><div className="field-value">{titleCaseLabel(changeSet.status || "unavailable")}</div></div>
+            <div><div className="field-label">Source</div><div className="field-value">{changeSet.source ? titleCaseLabel(changeSet.source) : "—"}</div></div>
+            <div><div className="field-label">Repository</div><div className="field-value">{changeSet.repository_slug || payload.target_repo || "—"}</div></div>
+            <div><div className="field-label">Changed Files</div><div className="field-value">{changeSet.changed_file_count || 0}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{changeSet.message}</p>
+          {changeSet.files?.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Changed Files</div>
+              <div className="field-value">
+                {changeSet.files.map((file) => `${titleCaseLabel(file.change_type)}: ${file.path}`).join(", ")}
+              </div>
+            </div>
+          ) : null}
+          {changeSet.patch_artifact_name ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Patch Artifact</div>
+              <div className="field-value">{changeSet.patch_artifact_name}</div>
+            </div>
+          ) : null}
+          {changeSet.diff_text ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Diff</div>
+              <pre className="field-value" style={{ whiteSpace: "pre-wrap", overflowX: "auto", maxHeight: 420 }}>{changeSet.diff_text}</pre>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       {recovery ? (
         <section className="card" style={{ marginTop: 12 }}>
           <div className="card-header"><h3>Recovery</h3></div>

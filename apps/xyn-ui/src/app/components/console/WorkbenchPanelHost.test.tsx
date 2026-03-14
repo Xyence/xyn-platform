@@ -361,6 +361,17 @@ describe("WorkbenchPanelHost entity refresh", () => {
           title: "Identify the first listing source and capture the ingestion contract",
           status: "queued",
           target_repo: "xyn-platform",
+          change_set: {
+            available: true,
+            status: "changed",
+            has_changes: true,
+            source: "workspace",
+            repository_slug: "xyn-platform",
+            changed_file_count: 1,
+            files: [{ path: "services/ingestion.py", change_type: "modified", patch_available: true }],
+            patch_available: true,
+            message: "1 file changed in the managed workspace.",
+          },
           execution_brief_review: {
             has_brief: true,
             review_state: "draft",
@@ -501,6 +512,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("in_progress").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Artifacts")).toBeInTheDocument();
     expect(screen.getAllByText("Identify the first listing source and capture the ingestion contract").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("1 file changed")).toBeInTheDocument();
     expect(screen.getByText("Draft · blocked")).toBeInTheDocument();
     expect(screen.getByText("Execution brief review is required before coding execution can proceed.")).toBeInTheDocument();
     expect(screen.getAllByText("1").length).toBeGreaterThanOrEqual(1);
@@ -898,6 +910,21 @@ describe("WorkbenchPanelHost entity refresh", () => {
         artifact_labels: [],
         message: "No execution run has been dispatched yet.",
       },
+      change_set: {
+        available: true,
+        status: "changed",
+        has_changes: true,
+        source: "workspace",
+        repository_slug: "xyn-platform",
+        changed_file_count: 2,
+        files: [
+          { path: "services/scheduler.py", change_type: "modified", patch_available: true },
+          { path: "services/queue.py", change_type: "added", patch_available: true },
+        ],
+        patch_available: true,
+        message: "2 files changed in the managed workspace.",
+        diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
+      },
       execution_brief: {
         schema_version: "v1",
         revision: 2,
@@ -963,6 +990,21 @@ describe("WorkbenchPanelHost entity refresh", () => {
         artifact_count: 0,
         artifact_labels: [],
         message: "No execution run has been dispatched yet.",
+      },
+      change_set: {
+        available: true,
+        status: "changed",
+        has_changes: true,
+        source: "workspace",
+        repository_slug: "xyn-platform",
+        changed_file_count: 2,
+        files: [
+          { path: "services/scheduler.py", change_type: "modified", patch_available: true },
+          { path: "services/queue.py", change_type: "added", patch_available: true },
+        ],
+        patch_available: true,
+        message: "2 files changed in the managed workspace.",
+        diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
       },
       execution_brief: {
         schema_version: "v1",
@@ -1035,6 +1077,21 @@ describe("WorkbenchPanelHost entity refresh", () => {
           artifact_labels: [],
           message: "Task has been dispatched and is waiting to start.",
         },
+        change_set: {
+          available: true,
+          status: "changed",
+          has_changes: true,
+          source: "workspace",
+          repository_slug: "xyn-platform",
+          changed_file_count: 2,
+          files: [
+            { path: "services/scheduler.py", change_type: "modified", patch_available: true },
+            { path: "services/queue.py", change_type: "added", patch_available: true },
+          ],
+          patch_available: true,
+          message: "2 files changed in the managed workspace.",
+          diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
+        },
         execution_brief: {
           schema_version: "v1",
           revision: 2,
@@ -1060,10 +1117,14 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("Execution brief review is required before coding execution can proceed.").length).toBeGreaterThan(0);
     expect(screen.getByText("Execution Brief Review")).toBeInTheDocument();
     expect(screen.getByText("Execution Run")).toBeInTheDocument();
+    expect(screen.getByText("Workspace Changes")).toBeInTheDocument();
     expect(screen.getByText("Execution Blocked")).toBeInTheDocument();
     expect(screen.getByText("Implement scheduler via the bounded handoff")).toBeInTheDocument();
     expect(screen.getByText("No execution run has been dispatched yet.")).toBeInTheDocument();
     expect(screen.getByText("Not Run")).toBeInTheDocument();
+    expect(screen.getByText("2 files changed in the managed workspace.")).toBeInTheDocument();
+    expect(screen.getByText(/Modified: services\/scheduler\.py/)).toBeInTheDocument();
+    expect(screen.getByText(/diff --git a\/services\/scheduler\.py b\/services\/scheduler\.py/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Dispatch Task" })).not.toBeInTheDocument();
 
     await act(async () => {
