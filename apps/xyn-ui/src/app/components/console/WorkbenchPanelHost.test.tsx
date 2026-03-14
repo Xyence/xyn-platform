@@ -21,6 +21,8 @@ const apiMocks = vi.hoisted(() => ({
   getWorkQueue: vi.fn(),
   dispatchNextWorkQueueItem: vi.fn(),
   dispatchWorkItem: vi.fn(),
+  retryDevTask: vi.fn(),
+  requeueDevTask: vi.fn(),
   listRuntimeRunsCanvasApi: vi.fn(),
   getRuntimeRunCanvasApi: vi.fn(),
   listWorkItems: vi.fn(),
@@ -66,6 +68,8 @@ vi.mock("../../../api/xyn", async () => {
     getWorkQueue: apiMocks.getWorkQueue,
     dispatchNextWorkQueueItem: apiMocks.dispatchNextWorkQueueItem,
     dispatchWorkItem: apiMocks.dispatchWorkItem,
+    retryDevTask: apiMocks.retryDevTask,
+    requeueDevTask: apiMocks.requeueDevTask,
     listRuntimeRunsCanvasApi: apiMocks.listRuntimeRunsCanvasApi,
     getRuntimeRunCanvasApi: apiMocks.getRuntimeRunCanvasApi,
     listWorkItems: apiMocks.listWorkItems,
@@ -1087,6 +1091,315 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Dispatched wi-1.")).toBeInTheDocument();
     expect(screen.getByText("Latest execution run: run-1 · workspace ws-1")).toBeInTheDocument();
     expect(screen.getByText("Task has been dispatched and is waiting to start.")).toBeInTheDocument();
+  });
+
+  it("shows recovery state and supports retry and requeue from work item detail", async () => {
+    apiMocks.getWorkItem.mockResolvedValueOnce({
+      id: "task-2",
+      work_item_id: "wi-2",
+      title: "Recover failed scheduler task",
+      description: "Retry after the last failed coding run.",
+      status: "failed",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      runtime_run_id: "run-failed",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 1,
+      max_attempts: 2,
+      has_execution_brief: true,
+      execution_brief_revision: 1,
+      execution_brief_history_count: 0,
+      execution_brief_review_state: "approved",
+      execution_brief_review_notes: "Approved for retry",
+      execution_queue: {
+        queue_ready: false,
+        dispatchable: false,
+        dispatched: false,
+        blocked: false,
+        status: "terminal",
+        reason: "status_failed",
+        message: "Task is failed and is no longer dispatchable.",
+      },
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "approved",
+        revision: 1,
+        history_count: 0,
+        summary: "Recover failed scheduler task",
+        objective: "Retry the failed coding work.",
+        target_repository_slug: "xyn-platform",
+        target_branch: "develop",
+        gated: true,
+        ready: true,
+        blocked: false,
+        blocked_reason: null,
+        blocked_message: "Execution brief is ready for execution.",
+        review_notes: "Approved for retry",
+        available_actions: ["reject", "regenerate"],
+      },
+      execution_run: {
+        has_run: true,
+        run_id: "run-failed",
+        source: "runtime",
+        state: "failed",
+        raw_status: "failed",
+        validation_status: "failed",
+        summary: "Tests failed",
+        error: "tests_failed",
+        started_at: "2026-03-14T12:00:00Z",
+        finished_at: "2026-03-14T12:05:00Z",
+        artifact_count: 1,
+        artifact_labels: ["failure.log"],
+        message: "Tests failed",
+      },
+      execution_recovery: {
+        retryable: true,
+        requeueable: true,
+        in_flight: false,
+        failed: true,
+        blocked: false,
+        status: "retryable",
+        reason: null,
+        message: "Execution failed and can be retried now or returned to the queue.",
+        available_actions: ["retry_now", "requeue"],
+        last_failure: {
+          run_id: "run-failed",
+          source: "runtime",
+          state: "failed",
+          summary: "Tests failed",
+          error: "tests_failed",
+          finished_at: "2026-03-14T12:05:00Z",
+          recorded_at: "2026-03-14T12:05:01Z",
+          action: null,
+        },
+      },
+    });
+    apiMocks.retryDevTask.mockResolvedValue({
+      status: "queued",
+      run_id: "run-retry",
+      work_item: {
+        id: "task-2",
+        work_item_id: "wi-2",
+        title: "Recover failed scheduler task",
+        description: "Retry after the last failed coding run.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        runtime_run_id: "run-retry",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 1,
+        max_attempts: 2,
+        execution_queue: {
+          queue_ready: false,
+          dispatchable: false,
+          dispatched: true,
+          blocked: false,
+          status: "dispatched",
+          reason: "in_flight",
+          message: "Task has already been dispatched and is in progress.",
+        },
+        execution_run: {
+          has_run: true,
+          run_id: "run-retry",
+          source: "runtime",
+          state: "queued",
+          raw_status: "queued",
+          validation_status: "pending",
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "Task has been dispatched and is waiting to start.",
+        },
+        execution_recovery: {
+          retryable: false,
+          requeueable: false,
+          in_flight: true,
+          failed: false,
+          blocked: true,
+          status: "in_flight",
+          reason: "in_flight",
+          message: "Execution is already in progress and cannot be retried or requeued.",
+          available_actions: [],
+          last_failure: {
+            run_id: "run-failed",
+            source: "runtime",
+            state: "failed",
+            summary: "Tests failed",
+            error: "tests_failed",
+            finished_at: "2026-03-14T12:05:00Z",
+            recorded_at: "2026-03-14T12:05:01Z",
+            action: "retry",
+          },
+        },
+      },
+    });
+    apiMocks.requeueDevTask.mockResolvedValue({
+      status: "queued",
+      work_item: {
+        id: "task-2",
+        work_item_id: "wi-2",
+        title: "Recover failed scheduler task",
+        description: "Retry after the last failed coding run.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 1,
+        max_attempts: 2,
+        execution_queue: {
+          queue_ready: true,
+          dispatchable: true,
+          dispatched: false,
+          blocked: false,
+          status: "queue_ready",
+          reason: null,
+          message: "Task is approved and ready for queue dispatch.",
+        },
+        execution_run: {
+          has_run: false,
+          run_id: null,
+          source: null,
+          state: "not_started",
+          raw_status: null,
+          validation_status: "not_run",
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "No execution run has been dispatched yet.",
+        },
+        execution_recovery: {
+          retryable: false,
+          requeueable: false,
+          in_flight: false,
+          failed: false,
+          blocked: false,
+          status: "requeued",
+          reason: "requeued",
+          message: "Task has been returned to the execution queue after a failed run.",
+          available_actions: [],
+          last_failure: {
+            run_id: "run-failed",
+            source: "runtime",
+            state: "failed",
+            summary: "Tests failed",
+            error: "tests_failed",
+            finished_at: "2026-03-14T12:05:00Z",
+            recorded_at: "2026-03-14T12:05:01Z",
+            action: "requeue",
+          },
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail-recovery", panel_type: "detail", instance_key: "work-item:task-2", key: "work_item_detail", params: { work_item_id: "task-2" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getWorkItem).toHaveBeenCalledWith("task-2"));
+    expect(screen.getByText("Recovery")).toBeInTheDocument();
+    expect(screen.getByText("Execution failed and can be retried now or returned to the queue.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry Now" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Requeue" })).toBeEnabled();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Retry Now" }).click();
+    });
+    await waitFor(() => expect(apiMocks.retryDevTask).toHaveBeenCalledWith("task-2"));
+    expect(screen.getByText("Retried wi-2 as run run-retry.")).toBeInTheDocument();
+    expect(screen.getByText("Execution is already in progress and cannot be retried or requeued.")).toBeInTheDocument();
+
+    apiMocks.getWorkItem.mockResolvedValueOnce({
+      id: "task-2",
+      work_item_id: "wi-2",
+      title: "Recover failed scheduler task",
+      description: "Retry after the last failed coding run.",
+      status: "failed",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 1,
+      max_attempts: 2,
+      execution_queue: {
+        queue_ready: false,
+        dispatchable: false,
+        dispatched: false,
+        blocked: false,
+        status: "terminal",
+        reason: "status_failed",
+        message: "Task is failed and is no longer dispatchable.",
+      },
+      execution_run: {
+        has_run: true,
+        run_id: "run-failed",
+        source: "runtime",
+        state: "failed",
+        raw_status: "failed",
+        validation_status: "failed",
+        summary: "Tests failed",
+        error: "tests_failed",
+        started_at: "2026-03-14T12:00:00Z",
+        finished_at: "2026-03-14T12:05:00Z",
+        artifact_count: 1,
+        artifact_labels: ["failure.log"],
+        message: "Tests failed",
+      },
+      execution_recovery: {
+        retryable: true,
+        requeueable: true,
+        in_flight: false,
+        failed: true,
+        blocked: false,
+        status: "retryable",
+        reason: null,
+        message: "Execution failed and can be retried now or returned to the queue.",
+        available_actions: ["retry_now", "requeue"],
+        last_failure: {
+          run_id: "run-failed",
+          source: "runtime",
+          state: "failed",
+          summary: "Tests failed",
+          error: "tests_failed",
+          finished_at: "2026-03-14T12:05:00Z",
+          recorded_at: "2026-03-14T12:05:01Z",
+          action: null,
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail-requeue", panel_type: "detail", instance_key: "work-item:task-2-requeue", key: "work_item_detail", params: { work_item_id: "task-2" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getWorkItem).toHaveBeenCalledWith("task-2"));
+    await act(async () => {
+      const buttons = screen.getAllByRole("button", { name: "Requeue" });
+      buttons[buttons.length - 1].click();
+    });
+    await waitFor(() => expect(apiMocks.requeueDevTask).toHaveBeenCalledWith("task-2"));
+    expect(screen.getByText("Returned wi-2 to the queue.")).toBeInTheDocument();
+    expect(screen.getByText("Task has been returned to the execution queue after a failed run.")).toBeInTheDocument();
   });
 
   it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {

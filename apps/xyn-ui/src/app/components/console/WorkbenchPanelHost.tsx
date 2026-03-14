@@ -29,8 +29,10 @@ import {
   queryArtifactCanvasTable,
   queryEmsDevicesCanvasTable,
   queryEmsRegistrationsCanvasTable,
+  requeueDevTask,
   reviewCoordinationThread,
   reviewGoal,
+  retryDevTask,
   updateWorkItem,
 } from "../../../api/xyn";
 import type {
@@ -162,14 +164,23 @@ function executionRunLabel(item: Pick<WorkItemSummary, "execution_run">): string
   return titleCaseLabel(execution.state || execution.raw_status || "unknown");
 }
 
-function ExecutionRunSummary({ item }: { item: Pick<WorkItemSummary, "execution_run"> }) {
+function ExecutionRunSummary({ item }: { item: Pick<WorkItemSummary, "execution_run" | "execution_recovery"> }) {
   const execution = item.execution_run;
   if (!execution?.has_run) {
+    if (item.execution_recovery?.last_failure) {
+      return (
+        <div>
+          <div>Not run</div>
+          <div className="muted small">{item.execution_recovery.message}</div>
+        </div>
+      );
+    }
     return <span className="muted">Not run</span>;
   }
   const detailParts = [
     execution.validation_status ? titleCaseLabel(execution.validation_status) : "",
     execution.artifact_count ? `${execution.artifact_count} artifact${execution.artifact_count === 1 ? "" : "s"}` : "",
+    item.execution_recovery?.retryable ? "Retryable" : "",
   ].filter(Boolean);
   return (
     <div>
@@ -1827,12 +1838,43 @@ function WorkItemDetailPanel({
     }
   }
 
+  async function handleRetryTask() {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await retryDevTask(workItemId);
+      setPayload(response.work_item || (await getWorkItem(workItemId)));
+      setActionState({
+        status: "idle",
+        message: response.run_id
+          ? `Retried ${String(payload?.work_item_id || workItemId)} as run ${response.run_id}.`
+          : "Retried work item.",
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to retry work item" });
+    }
+  }
+
+  async function handleRequeueTask() {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await requeueDevTask(workItemId);
+      setPayload(response.work_item || (await getWorkItem(workItemId)));
+      setActionState({
+        status: "idle",
+        message: response.status === "queued" ? `Returned ${String(payload?.work_item_id || workItemId)} to the queue.` : response.status,
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to requeue work item" });
+    }
+  }
+
   if (loading) return <p className="muted">Loading work item…</p>;
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Work item not found.</p>;
   const review = payload.execution_brief_review;
   const queue = payload.execution_queue;
   const execution = payload.execution_run;
+  const recovery = payload.execution_recovery;
 
   return (
     <div className="ems-panel-body">
@@ -1976,6 +2018,47 @@ function WorkItemDetailPanel({
           </div>
         ) : null}
       </section>
+      {recovery ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Recovery</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Recovery Status</div><div className="field-value">{titleCaseLabel(recovery.status)}</div></div>
+            <div><div className="field-label">Retryable</div><div className="field-value">{recovery.retryable ? "yes" : "no"}</div></div>
+            <div><div className="field-label">Requeueable</div><div className="field-value">{recovery.requeueable ? "yes" : "no"}</div></div>
+            <div><div className="field-label">In Flight</div><div className="field-value">{recovery.in_flight ? "yes" : "no"}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{recovery.message}</p>
+          {actionState.message ? <p className="muted" style={{ marginTop: 12 }}>{actionState.message}</p> : null}
+          {recovery.last_failure ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Last Failure</div>
+              <div className="field-value">
+                {recovery.last_failure.summary || recovery.last_failure.error || "Failure snapshot available."}
+              </div>
+              {recovery.last_failure.run_id ? (
+                <div className="muted small" style={{ marginTop: 6 }}>
+                  Run {recovery.last_failure.run_id}
+                  {recovery.last_failure.action ? ` · recorded before ${recovery.last_failure.action}` : ""}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {(recovery.retryable || recovery.requeueable) ? (
+            <div className="inline-action-row" style={{ marginTop: 12 }}>
+              {recovery.retryable ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={handleRetryTask}>
+                  Retry Now
+                </button>
+              ) : null}
+              {recovery.requeueable ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={handleRequeueTask}>
+                  Requeue
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       {payload.result_run_artifacts?.length ? (
         <section className="card" style={{ marginTop: 12 }}>
           <div className="card-header"><h3>Artifacts</h3></div>

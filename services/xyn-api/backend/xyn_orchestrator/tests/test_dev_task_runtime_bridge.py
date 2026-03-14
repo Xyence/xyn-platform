@@ -13,6 +13,7 @@ from xyn_orchestrator.xyn_api import (
     _load_dev_task_runtime_source,
     blueprint_dev_tasks,
     dev_task_detail,
+    dev_task_requeue,
     dev_task_retry,
     dev_task_run,
 )
@@ -650,6 +651,22 @@ class DevTaskRuntimeBridgeTests(TestCase):
             if method == "POST" and path == "/api/v1/runtime/runs":
                 seen["post"] += 1
                 return _FakeResponse(body={"id": new_runtime_run_id, "status": "queued"})
+            if method == "GET" and path == f"/api/v1/runs/{new_runtime_run_id}":
+                return _FakeResponse(
+                    body={
+                        "id": new_runtime_run_id,
+                        "run_id": new_runtime_run_id,
+                        "status": "queued",
+                        "summary": None,
+                        "failure_reason": None,
+                        "escalation_reason": None,
+                        "prompt_payload": {"target": {"workspace_id": str(self.workspace.id), "repo": "xyn-platform", "branch": "develop"}},
+                    }
+                )
+            if method == "GET" and path == f"/api/v1/runs/{new_runtime_run_id}/steps":
+                return _FakeResponse(body=[])
+            if method == "GET" and path == f"/api/v1/runs/{new_runtime_run_id}/artifacts":
+                return _FakeResponse(body=[])
             raise AssertionError(f"unexpected call {method} {path}")
 
         with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
@@ -661,8 +678,111 @@ class DevTaskRuntimeBridgeTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(payload["run_id"], new_runtime_run_id)
         self.assertEqual(seen["post"], 1)
+        self.assertEqual(payload["work_item"]["execution_recovery"]["retryable"], False)
         self.task.refresh_from_db()
         self.assertEqual(str(self.task.runtime_run_id), new_runtime_run_id)
+        self.assertEqual(
+            (self.task.execution_policy or {}).get("recovery", {}).get("last_failure", {}).get("run_id"),
+            str(runtime_run_id),
+        )
+
+    def test_retry_rejects_in_flight_runtime_task(self):
+        runtime_run_id = uuid.uuid4()
+        self.task.runtime_run_id = runtime_run_id
+        self.task.runtime_workspace_id = self.workspace.id
+        self.task.status = "running"
+        self.task.save(update_fields=["runtime_run_id", "runtime_workspace_id", "status", "updated_at"])
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}/retry")
+
+        def _seed_api_request(*, method, path, workspace_id="", workspace_slug="", payload=None, timeout=20):
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}":
+                return _FakeResponse(
+                    body={
+                        "id": str(runtime_run_id),
+                        "run_id": str(runtime_run_id),
+                        "status": "running",
+                        "summary": "Still running",
+                        "prompt_payload": {"target": {"workspace_id": str(self.workspace.id), "repo": "xyn-platform", "branch": "develop"}},
+                    }
+                )
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/steps":
+                return _FakeResponse(body=[])
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/artifacts":
+                return _FakeResponse(body=[])
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request", side_effect=_seed_api_request
+        ):
+            response = dev_task_retry(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertIn("already in progress", payload["error"])
+
+    def test_requeue_clears_failed_runtime_run_and_returns_task_to_queue(self):
+        runtime_run_id = uuid.uuid4()
+        self.task.runtime_run_id = runtime_run_id
+        self.task.runtime_workspace_id = self.workspace.id
+        self.task.status = "failed"
+        self.task.last_error = "tests_failed"
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Recover the scheduler",
+            "objective": "Retry the bounded code change.",
+        }
+        self.task.execution_brief_review_state = "approved"
+        self.task.execution_policy = {"require_brief_approval": True}
+        self.task.save(
+            update_fields=[
+                "runtime_run_id",
+                "runtime_workspace_id",
+                "status",
+                "last_error",
+                "execution_brief",
+                "execution_brief_review_state",
+                "execution_policy",
+                "updated_at",
+            ]
+        )
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}/requeue")
+
+        def _seed_api_request(*, method, path, workspace_id="", workspace_slug="", payload=None, timeout=20):
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}":
+                return _FakeResponse(
+                    body={
+                        "id": str(runtime_run_id),
+                        "run_id": str(runtime_run_id),
+                        "status": "failed",
+                        "summary": "Unit tests failed",
+                        "failure_reason": "tests_failed",
+                        "prompt_payload": {"target": {"workspace_id": str(self.workspace.id), "repo": "xyn-platform", "branch": "develop"}},
+                    }
+                )
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/steps":
+                return _FakeResponse(body=[])
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/artifacts":
+                return _FakeResponse(body=[])
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request", side_effect=_seed_api_request
+        ):
+            response = dev_task_requeue(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["status"], "queued")
+        self.assertEqual(payload["work_item"]["status"], "queued")
+        self.assertTrue(payload["work_item"]["execution_queue"]["queue_ready"])
+        self.assertEqual(payload["work_item"]["execution_recovery"]["status"], "requeued")
+        self.task.refresh_from_db()
+        self.assertIsNone(self.task.runtime_run_id)
+        self.assertEqual(self.task.status, "queued")
+        self.assertEqual(
+            (self.task.execution_policy or {}).get("recovery", {}).get("last_failure", {}).get("run_id"),
+            str(runtime_run_id),
+        )
 
     def test_conversation_execution_context_uses_durable_task_and_artifact_state(self):
         runtime_run_id = uuid.uuid4()

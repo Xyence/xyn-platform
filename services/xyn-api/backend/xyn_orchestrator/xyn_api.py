@@ -178,6 +178,11 @@ from .execution_queue import (
     select_next_dispatchable_queue_entry,
     serialize_dev_task_queue_state,
 )
+from .execution_recovery import (
+    evaluate_dev_task_recovery_state,
+    record_execution_failure_snapshot,
+    serialize_dev_task_recovery_state,
+)
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -25789,6 +25794,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
     status = _canonical_work_item_status(str((detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
     brief_review = serialize_execution_brief_review(task)
     queue_state = serialize_dev_task_queue_state(task, normalized_status=status)
+    recovery_state = serialize_dev_task_recovery_state(task, execution_summary=execution_payload["execution_summary"])
     return {
         "id": str(task.id),
         "work_item_id": task.work_item_id or str(task.id),
@@ -25810,6 +25816,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "execution_brief_review": brief_review,
         "execution_queue": queue_state,
         "execution_run": execution_payload["execution_summary"],
+        "execution_recovery": recovery_state,
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
         "goal_id": str(task.goal_id) if task.goal_id else None,
@@ -26552,6 +26559,29 @@ def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
         "result_run_artifacts": artifacts_payload,
         "result_run_commands": commands_payload,
     }
+
+
+def _requeue_dev_task(
+    task: DevTask,
+    *,
+    user,
+    execution_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    recovery = evaluate_dev_task_recovery_state(task, execution_summary=execution_summary)
+    if not recovery.requeueable:
+        raise ValueError(recovery.message)
+    record_execution_failure_snapshot(
+        task,
+        execution_summary=execution_summary,
+        action="requeue",
+        recorded_at=timezone.now().isoformat(),
+    )
+    task.runtime_run_id = None
+    task.result_run = None
+    task.status = "queued"
+    task.updated_by = user
+    task.save(update_fields=["execution_policy", "runtime_run_id", "result_run", "status", "updated_by", "updated_at"])
+    return {"status": "queued"}
 
 
 def _execute_conversation_action(
@@ -27629,7 +27659,9 @@ def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -
     task.last_error = ""
     task.target_repo = str(((payload.get("target") or {}) if isinstance(payload.get("target"), dict) else {}).get("repo") or task.target_repo or "")
     task.target_branch = str(((payload.get("target") or {}) if isinstance(payload.get("target"), dict) else {}).get("branch") or task.target_branch or "")
-    task.execution_policy = (payload.get("policy") if isinstance(payload.get("policy"), dict) else {}) or task.execution_policy or {}
+    next_policy = (payload.get("policy") if isinstance(payload.get("policy"), dict) else {}) or {}
+    current_policy = task.execution_policy if isinstance(task.execution_policy, dict) else {}
+    task.execution_policy = {**current_policy, **next_policy} if current_policy else (next_policy or {})
     task.locked_by = ""
     task.locked_at = None
     task.updated_by = user
@@ -29127,34 +29159,45 @@ def dev_task_retry(request: HttpRequest, task_id: str) -> JsonResponse:
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     task = get_object_or_404(DevTask, id=task_id)
+    execution_payload = _resolve_dev_task_execution_payload(task)
+    recovery = evaluate_dev_task_recovery_state(task, execution_summary=execution_payload["execution_summary"])
+    if not recovery.retryable:
+        return JsonResponse({"error": recovery.message}, status=409)
     if _dev_task_uses_epic_c_runtime(task):
-        runtime_detail = _project_runtime_status_to_task(task)
-        current_status = str((runtime_detail or {}).get("status") or task.status).strip().lower()
-        if current_status not in {"failed", "blocked", "canceled", "completed"}:
-            return JsonResponse({"error": "Task not retryable"}, status=409)
         workspace = _dev_task_runtime_workspace(identity, task, request=request)
         if not workspace:
             return JsonResponse({"error": "workspace context is required for Epic C runtime submission"}, status=400)
         try:
+            record_execution_failure_snapshot(
+                task,
+                execution_summary=execution_payload["execution_summary"],
+                action="retry",
+                recorded_at=timezone.now().isoformat(),
+            )
             result = _submit_dev_task_runtime_run(task, workspace=workspace, user=request.user)
         except ValueError as exc:
             task.status = "awaiting_review"
             task.last_error = str(exc)
             task.updated_by = request.user
-            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+            task.save(update_fields=["execution_policy", "status", "last_error", "updated_by", "updated_at"])
             return JsonResponse({"error": str(exc)}, status=409)
         except RuntimeError as exc:
             task.status = "failed"
             task.last_error = str(exc)
             task.updated_by = request.user
-            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+            task.save(update_fields=["execution_policy", "status", "last_error", "updated_by", "updated_at"])
             return JsonResponse({"error": str(exc)}, status=502)
-        return JsonResponse(result)
-    if task.status not in {"failed", "canceled"}:
-        return JsonResponse({"error": "Task not retryable"}, status=409)
+        task.refresh_from_db()
+        return JsonResponse({"status": "queued", "run_id": result.get("run_id"), "work_item": _serialize_work_item_detail(task)})
+    record_execution_failure_snapshot(
+        task,
+        execution_summary=execution_payload["execution_summary"],
+        action="retry",
+        recorded_at=timezone.now().isoformat(),
+    )
     task.status = "queued"
     task.updated_by = request.user
-    task.save(update_fields=["status", "updated_by", "updated_at"])
+    task.save(update_fields=["execution_policy", "status", "updated_by", "updated_at"])
     run = Run.objects.create(
         entity_type="dev_task",
         entity_id=task.id,
@@ -29173,8 +29216,30 @@ def dev_task_retry(request: HttpRequest, task_id: str) -> JsonResponse:
     mode = _async_mode()
     if mode == "redis":
         _enqueue_job("xyn_orchestrator.worker_tasks.run_dev_task", str(task.id), "worker")
-        return JsonResponse({"run_id": str(run.id), "status": "queued"})
-    return JsonResponse({"run_id": str(run.id), "status": "pending"})
+        task.refresh_from_db()
+        return JsonResponse({"run_id": str(run.id), "status": "queued", "work_item": _serialize_work_item_detail(task)})
+    task.refresh_from_db()
+    return JsonResponse({"run_id": str(run.id), "status": "pending", "work_item": _serialize_work_item_detail(task)})
+
+
+@csrf_exempt
+@login_required
+def dev_task_requeue(request: HttpRequest, task_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    task = get_object_or_404(DevTask, id=task_id)
+    execution_payload = _resolve_dev_task_execution_payload(task)
+    try:
+        result = _requeue_dev_task(task, user=request.user, execution_summary=execution_payload["execution_summary"])
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=409)
+    task.refresh_from_db()
+    return JsonResponse({"status": result["status"], "work_item": _serialize_work_item_detail(task)})
 
 
 @csrf_exempt

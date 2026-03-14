@@ -4477,7 +4477,16 @@ export async function retryDevTask(id: string): Promise<{ run_id: string; status
     method: "POST",
     credentials: "include",
   });
-  return handle<{ run_id: string; status: string }>(response);
+  return handle<{ run_id: string; status: string; work_item?: WorkItemDetail }>(response);
+}
+
+export async function requeueDevTask(id: string): Promise<{ status: string; work_item?: WorkItemDetail }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/requeue`, {
+    method: "POST",
+    credentials: "include",
+  });
+  return handle<{ status: string; work_item?: WorkItemDetail }>(response);
 }
 
 export async function cancelDevTask(id: string): Promise<{ status: string }> {

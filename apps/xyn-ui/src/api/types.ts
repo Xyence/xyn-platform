@@ -2269,6 +2269,27 @@ export type DevTaskSummary = {
     artifact_labels: string[];
     message: string;
   };
+  execution_recovery?: {
+    retryable: boolean;
+    requeueable: boolean;
+    in_flight: boolean;
+    failed: boolean;
+    blocked: boolean;
+    status: string;
+    reason?: string | null;
+    message: string;
+    available_actions: string[];
+    last_failure?: {
+      run_id?: string | null;
+      source?: string | null;
+      state?: string | null;
+      summary?: string | null;
+      error?: string | null;
+      finished_at?: string | null;
+      recorded_at?: string | null;
+      action?: string | null;
+    } | null;
+  };
   thread_id?: string | null;
   thread_title?: string | null;
   goal_id?: string | null;
