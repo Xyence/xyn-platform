@@ -20269,14 +20269,15 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         return JsonResponse(response_payload)
 
     operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
-    generated_runtime_target = _workspace_runtime_target(operator_workspace, "net-inventory") if operator_workspace else None
-    generated_artifact_issue = _workspace_generated_artifact_issue(operator_workspace, "net-inventory") if operator_workspace else None
+    generated_workspace = operator_workspace if isinstance(operator_workspace, Workspace) else None
+    generated_runtime_target = _workspace_runtime_target(generated_workspace, "net-inventory") if generated_workspace else None
+    generated_artifact_issue = _workspace_generated_artifact_issue(generated_workspace, "net-inventory") if generated_workspace else None
     if (
-        operator_workspace
+        generated_workspace
         and generated_runtime_target
         and generated_artifact_issue
         and _looks_like_generated_crud_prompt(message)
-        and not _match_generated_app_evolution_command(message, operator_workspace)
+        and not _match_generated_app_evolution_command(message, generated_workspace)
     ):
         response_payload = {
             "status": "ValidationError",
@@ -20469,7 +20470,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         ),
     )
     epic_d_payload = epic_d_intent.model_dump(mode="json")
-    generated_app_evolution = _match_generated_app_evolution_command(message, operator_workspace) if operator_workspace else None
+    generated_app_evolution = _match_generated_app_evolution_command(message, generated_workspace) if generated_workspace else None
     prompt_interpretation = _prompt_interpretation_from_intent(
         message=message,
         intent_payload=epic_d_payload,
@@ -20680,13 +20681,13 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
 
     # Preserved legacy generated-app and draft-routing behavior below this point.
     # These flows intentionally remain outside Epic D until they are migrated.
-    generated_capability_manifest = _workspace_installed_capability_manifest(operator_workspace, "net-inventory") if operator_workspace else None
+    generated_capability_manifest = _workspace_installed_capability_manifest(generated_workspace, "net-inventory") if generated_workspace else None
     if (
-        operator_workspace
+        generated_workspace
         and generated_runtime_target
         and generated_artifact_issue
         and _looks_like_generated_crud_prompt(message)
-        and not _match_generated_app_evolution_command(message, operator_workspace)
+        and not _match_generated_app_evolution_command(message, generated_workspace)
     ):
         response_payload = {
             "status": "ValidationError",
@@ -20721,13 +20722,13 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             prompt=message,
             capability_manifest=generated_capability_manifest,
             runtime_base_url=str(generated_runtime_target.get("runtime_base_url") or ""),
-            workspace=operator_workspace,
+            workspace=generated_workspace,
         )
-        if operator_workspace and generated_runtime_target and generated_capability_manifest
+        if generated_workspace and generated_runtime_target and generated_capability_manifest
         else None
     )
-    if operator_workspace and generated_runtime_target and generated_capability_manifest and generated_structured:
-        generated_artifact = _installed_generated_artifact(operator_workspace, "net-inventory")
+    if generated_workspace and generated_runtime_target and generated_capability_manifest and generated_structured:
+        generated_artifact = _installed_generated_artifact(generated_workspace, "net-inventory")
         normalized = _normalized_generated_operation(generated_structured)
         contract = generated_structured.get("contract") if isinstance(generated_structured.get("contract"), dict) else {}
         trace = [
@@ -20753,7 +20754,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             "summary": f'Will execute generated app {normalized.get("operation") or "operation"} for {normalized.get("entity_key") or "entity"}.',
             "draft_payload": {
                 "__operation": "execute_generated_app_crud",
-                "workspace_id": str(operator_workspace.id),
+                "workspace_id": str(generated_workspace.id),
                 "raw_prompt": message,
                 "structured_operation": normalized,
             },
@@ -20778,7 +20779,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 status="completed",
                 prompt=message,
                 request_type="intent.resolve",
-                workspace_id=str(operator_workspace.id),
+                workspace_id=str(generated_workspace.id),
                 summary=response_payload["summary"],
                 trace=trace,
                 structured_operation=normalized,
@@ -20794,7 +20795,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             "summary": "Will create and submit a revision draft for the installed generated app.",
             "draft_payload": {
                 "__operation": "evolve_app_intent_draft",
-                "workspace_id": str(operator_workspace.id),
+                "workspace_id": str(generated_workspace.id),
                 "title": str(generated_app_evolution.get("title") or "Generated App"),
                 "raw_prompt": str(generated_app_evolution.get("raw_prompt") or message),
                 "initial_intent": generated_app_evolution.get("initial_intent") if isinstance(generated_app_evolution.get("initial_intent"), dict) else {},
@@ -20830,7 +20831,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 status="completed",
                 prompt=message,
                 request_type="intent.resolve",
-                workspace_id=str(operator_workspace.id),
+                workspace_id=str(generated_workspace.id),
                 summary=response_payload["summary"],
                 thread_id=context_thread_id,
             )
