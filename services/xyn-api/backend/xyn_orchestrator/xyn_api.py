@@ -20363,16 +20363,11 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             resolution_notes=["resolved as a direct artifact navigation action"],
         )
         response_payload = {
-            "status": "DraftReady",
-            "action_type": "CreateDraft",
+            "status": "IntentResolved",
+            "action_type": "ValidateDraft",
             "artifact_type": "Workspace",
             "artifact_id": None,
             "summary": "Will open artifact panel.",
-            "draft_payload": {
-                "__operation": "open_artifact_panel",
-                "panel_key": panel_key,
-                "params": params,
-            },
             "prompt_interpretation": prompt_interpretation,
             "next_actions": [
                 {"label": "Open panel", "action": "OpenPanel", "panel_key": panel_key, "params": params},
@@ -20578,6 +20573,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         reuse_existing_work_item = (
             str(epic_d_intent.intent_family or "") == "development_work"
             and str(epic_d_intent.intent_type or "") == "create_and_dispatch_run"
+            and not bool(str(context_thread_id or "").strip())
             and bool(
                 str(
                     (
@@ -20585,6 +20581,16 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                         if isinstance(epic_d_payload.get("resolved_subject"), dict)
                         else {}
                     ).get("work_item_id")
+                    or ""
+                ).strip()
+            )
+            and not bool(
+                str(
+                    (
+                        (epic_d_payload.get("resolved_subject") or {})
+                        if isinstance(epic_d_payload.get("resolved_subject"), dict)
+                        else {}
+                    ).get("id")
                     or ""
                 ).strip()
             )
