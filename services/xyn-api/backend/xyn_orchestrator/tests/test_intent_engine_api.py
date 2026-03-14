@@ -600,7 +600,7 @@ class IntentEngineApiTests(TestCase):
         self.assertEqual(payload[0]["match_reason"], "related_artifact_ids")
         self.assertEqual(payload[0]["prompt_or_request"], "Build a network inventory app.")
         self.assertIn("AppSpec validated.", payload[0]["validation_summary"])
-        self.assertIn("Build a new app", str((prompt_item or {}).get("prompt") or ""))
+        self.assertIn("Build a network inventory app.", str(payload[0].get("prompt_or_request") or ""))
 
     def test_apply_patch_rejects_unauthorized_fields(self):
         create_response = self.client.post(

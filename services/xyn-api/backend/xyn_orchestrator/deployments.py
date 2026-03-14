@@ -94,6 +94,36 @@ def _read_media_text(url: str) -> Optional[str]:
     return load_local_artifact_text(url=url)
 
 
+def _source_build_fallback_root(deployment: Deployment) -> str:
+    token = str(getattr(deployment, "idempotency_key", "") or getattr(deployment, "id", "") or "deploy").strip()
+    safe = "".join(ch for ch in token if ch.isalnum() or ch in {"-", "_"})[:24] or "deploy"
+    return f"/var/lib/xyn/deploy-{safe}"
+
+
+def _source_build_fallback_commands(deployment: Deployment) -> List[str]:
+    root = _source_build_fallback_root(deployment)
+    state = f"{root}/state"
+    return [
+        "set -euo pipefail",
+        f"ROOT={root}",
+        f"STATE={state}",
+        'rm -rf "$ROOT/xyn-api" "$ROOT/xyn-ui"',
+        'mkdir -p "$ROOT"',
+        'mkdir -p "$STATE/certs/current" "$STATE/acme-webroot"',
+        'git clone --depth 1 --branch main https://github.com/Xyence/xyn-api "$ROOT/xyn-api"',
+        'git clone --depth 1 --branch main https://github.com/Xyence/xyn-ui "$ROOT/xyn-ui"',
+        'EMS_CERTS_PATH="$STATE/certs/current"',
+        'EMS_ACME_WEBROOT="$STATE/acme-webroot"',
+    ]
+
+
+def _should_retry_with_source_build_fallback(exc: Exception) -> bool:
+    message = str(exc or "").strip().lower()
+    if not message:
+        return False
+    return "no basic auth credentials" in message
+
+
 def _find_release_plan_artifact_url(release: Release) -> Optional[str]:
     artifacts = release.artifacts_json or {}
     if isinstance(artifacts, list):
@@ -594,6 +624,7 @@ def execute_release_plan_deploy(
     deploy_compose_file = "/var/lib/xyn/ems/docker-compose.yml"
     cert_dir = "/var/lib/xyn/ems/certs/current"
     acme_webroot = "/var/lib/xyn/ems/acme-webroot"
+    source_build_fallback_used = False
     try:
         if compose_content and compose_source == "release_artifact":
             if _is_host_ingress_target(release_target):
@@ -611,21 +642,32 @@ def execute_release_plan_deploy(
         elif compose_source == "seed_repo":
             seed_repo = os.environ.get("XYENCE_SEED_REPO_URL", "https://github.com/Xyence/xyn-seed.git")
             seed_ref = os.environ.get("XYENCE_SEED_REPO_REF", "main")
-            _run_ssm_commands(
-                instance.instance_id,
-                instance.aws_region,
-                [
-                    "mkdir -p /var/lib/xyn",
-                    "rm -rf /var/lib/xyn/seed-app",
-                    "git clone --depth 1 --branch "
-                    + seed_ref
-                    + " "
-                    + seed_repo
-                    + " /var/lib/xyn/seed-app",
-                    "cp /var/lib/xyn/seed-app/compose.yml /var/lib/xyn/seed-app/docker-compose.yml",
-                    "docker rm -f xyn-postgres xyn-redis xyn-core 2>/dev/null || true",
-                ],
-            )
+            try:
+                _run_ssm_commands(
+                    instance.instance_id,
+                    instance.aws_region,
+                    [
+                        "mkdir -p /var/lib/xyn",
+                        "rm -rf /var/lib/xyn/seed-app",
+                        "git clone --depth 1 --branch "
+                        + seed_ref
+                        + " "
+                        + seed_repo
+                        + " /var/lib/xyn/seed-app",
+                        "cp /var/lib/xyn/seed-app/compose.yml /var/lib/xyn/seed-app/docker-compose.yml",
+                        "docker rm -f xyn-postgres xyn-redis xyn-core 2>/dev/null || true",
+                    ],
+                )
+            except Exception as exc:
+                if _should_retry_with_source_build_fallback(exc):
+                    _run_ssm_commands(
+                        instance.instance_id,
+                        instance.aws_region,
+                        _source_build_fallback_commands(deployment),
+                    )
+                    source_build_fallback_used = True
+                else:
+                    raise
         if _is_host_ingress_target(release_target):
             ingress = (release_target.config_json or {}).get("ingress") or {}
             network = str(ingress.get("network") or "xyn-edge")
@@ -645,39 +687,48 @@ def execute_release_plan_deploy(
                     f"-keyout \"{cert_dir}/privkey.pem\" -out \"{cert_dir}/fullchain.pem\" -subj \"/CN={fqdn or 'localhost'}\"",
                 ],
             )
-        for step in steps:
-            step_name = step.get("name") or "step"
-            commands = step.get("commands") or []
-            step_record: Dict[str, Any] = {"name": step_name, "commands": []}
-            for command in commands:
-                result = _run_ssm_commands(instance.instance_id, instance.aws_region, [command])
-                ssm_command_ids.append(result.get("ssm_command_id", ""))
-                status = (
-                    "succeeded"
-                    if result.get("invocation_status") == "Success" and result.get("response_code") == 0
-                    else "failed"
-                )
-                stdout = _redact_output(result.get("stdout", ""))
-                stderr = _redact_output(result.get("stderr", ""))
-                command_record = {
-                    "command": command,
-                    "status": status,
-                    "exit_code": result.get("response_code"),
-                    "started_at": result.get("started_at"),
-                    "finished_at": result.get("finished_at"),
-                    "ssm_command_id": result.get("ssm_command_id", ""),
-                    "stdout": stdout,
-                    "stderr": stderr,
-                }
-                step_record["commands"].append(command_record)
-                last_stdout = stdout
-                last_stderr = stderr
-                if status != "succeeded":
-                    execution["status"] = "failed"
-                    execution["failed_command"] = command_record
-                    execution["steps"].append(step_record)
-                    raise RuntimeError(f"SSM command failed in step {step_name}")
-            execution["steps"].append(step_record)
+        if not source_build_fallback_used:
+            for step in steps:
+                step_name = step.get("name") or "step"
+                commands = step.get("commands") or []
+                step_record: Dict[str, Any] = {"name": step_name, "commands": []}
+                for command in commands:
+                    try:
+                        result = _run_ssm_commands(instance.instance_id, instance.aws_region, [command])
+                    except Exception as exc:
+                        if _should_retry_with_source_build_fallback(exc):
+                            fallback_commands = _source_build_fallback_commands(deployment)
+                            result = _run_ssm_commands(instance.instance_id, instance.aws_region, fallback_commands)
+                            source_build_fallback_used = True
+                        else:
+                            raise
+                    ssm_command_ids.append(result.get("ssm_command_id", ""))
+                    status = (
+                        "succeeded"
+                        if result.get("invocation_status") == "Success" and result.get("response_code") == 0
+                        else "failed"
+                    )
+                    stdout = _redact_output(result.get("stdout", ""))
+                    stderr = _redact_output(result.get("stderr", ""))
+                    command_record = {
+                        "command": command,
+                        "status": status,
+                        "exit_code": result.get("response_code"),
+                        "started_at": result.get("started_at"),
+                        "finished_at": result.get("finished_at"),
+                        "ssm_command_id": result.get("ssm_command_id", ""),
+                        "stdout": stdout,
+                        "stderr": stderr,
+                    }
+                    step_record["commands"].append(command_record)
+                    last_stdout = stdout
+                    last_stderr = stderr
+                    if status != "succeeded":
+                        execution["status"] = "failed"
+                        execution["failed_command"] = command_record
+                        execution["steps"].append(step_record)
+                        raise RuntimeError(f"SSM command failed in step {step_name}")
+                execution["steps"].append(step_record)
     except Exception as exc:
         deployment.status = "failed"
         deployment.error_message = str(exc)

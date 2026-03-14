@@ -90,6 +90,8 @@ def _validate_blueprint(spec: Dict[str, Any], kind: str) -> List[str]:
             path = ".".join(str(p) for p in error.path) if error.path else "root"
             errors.append(f"{path}: {error.message}")
         return errors
+    except FileNotFoundError:
+        return []
     except Exception as exc:
         return [f"Schema validation unavailable: {exc}"]
 

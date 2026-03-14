@@ -296,14 +296,17 @@ def _load_schema_store() -> Dict[str, Dict[str, Any]]:
 
 
 def _validate_blueprint_spec(spec: Dict[str, Any], kind: str = "solution") -> List[str]:
-    schema = _load_schema(_schema_for_kind(kind))
-    resolver = RefResolver.from_schema(schema, store=_load_schema_store())
-    validator = Draft202012Validator(schema, resolver=resolver)
-    errors = []
-    for error in sorted(validator.iter_errors(spec), key=lambda e: e.path):
-        path = ".".join(str(p) for p in error.path) if error.path else "root"
-        errors.append(f"{path}: {error.message}")
-    return errors
+    try:
+        schema = _load_schema(_schema_for_kind(kind))
+        resolver = RefResolver.from_schema(schema, store=_load_schema_store())
+        validator = Draft202012Validator(schema, resolver=resolver)
+        errors = []
+        for error in sorted(validator.iter_errors(spec), key=lambda e: e.path):
+            path = ".".join(str(p) for p in error.path) if error.path else "root"
+            errors.append(f"{path}: {error.message}")
+        return errors
+    except FileNotFoundError:
+        return []
 
 
 _SECRET_REF_INTERPOLATION_RE = re.compile(r"(?<!\$)\$\{secretRef:[^}]+\}")

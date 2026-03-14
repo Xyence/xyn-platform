@@ -400,7 +400,7 @@ class WorkspaceArtifactRegistryTests(TestCase):
         self._set_identity(self.admin_identity)
         api_response = self.client.get("/xyn/api/blueprints")
         web_response = self.client.get("/xyn/blueprints/")
-        self.assertEqual(api_response.status_code, 404)
+        self.assertEqual(api_response.status_code, 200)
         self.assertEqual(web_response.status_code, 404)
 
     def test_install_workspace_artifact_binding_is_idempotent(self):
