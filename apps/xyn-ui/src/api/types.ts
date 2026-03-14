@@ -2245,6 +2245,15 @@ export type DevTaskSummary = {
     review_notes?: string | null;
     available_actions: string[];
   };
+  execution_queue?: {
+    queue_ready: boolean;
+    dispatchable: boolean;
+    dispatched: boolean;
+    blocked: boolean;
+    status: string;
+    reason?: string | null;
+    message: string;
+  };
   thread_id?: string | null;
   thread_title?: string | null;
   goal_id?: string | null;
@@ -2711,6 +2720,15 @@ export type WorkQueueItem = {
   task_id: string;
   thread_priority: string;
   thread_title: string;
+  queue_state?: {
+    queue_ready: boolean;
+    dispatchable: boolean;
+    dispatched: boolean;
+    blocked: boolean;
+    status: string;
+    reason?: string | null;
+    message: string;
+  } | null;
 };
 
 export type WorkQueueResponse = {

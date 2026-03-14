@@ -128,22 +128,28 @@ function titleCaseLabel(value: string): string {
     .join(" ");
 }
 
-function briefReviewLabel(item: Pick<WorkItemSummary, "execution_brief_review">): string {
+function briefReviewLabel(item: Pick<WorkItemSummary, "execution_brief_review" | "execution_queue">): string {
   const review = item.execution_brief_review;
+  const queue = item.execution_queue;
   if (!review?.has_brief) return "No brief";
   const state = titleCaseLabel(review.review_state || "draft");
-  return review.blocked ? `${state} · blocked` : state;
+  if (queue?.dispatched) return `${state} · dispatched`;
+  if (queue?.queue_ready) return `${state} · ready for dispatch`;
+  return review.blocked || queue?.blocked ? `${state} · blocked` : state;
 }
 
-function BriefReviewSummary({ item }: { item: Pick<WorkItemSummary, "execution_brief_review"> }) {
+function BriefReviewSummary({ item }: { item: Pick<WorkItemSummary, "execution_brief_review" | "execution_queue"> }) {
   const review = item.execution_brief_review;
+  const queue = item.execution_queue;
   if (!review?.has_brief) {
+    if (queue?.queue_ready) return <span>Ready for dispatch</span>;
+    if (queue?.dispatched) return <span>Dispatched</span>;
     return <span className="muted">No brief</span>;
   }
   return (
     <div>
       <div>{briefReviewLabel(item)}</div>
-      {review.blocked_message ? <div className="muted small">{review.blocked_message}</div> : null}
+      <div className="muted small">{queue?.message || review.blocked_message || "—"}</div>
     </div>
   );
 }
@@ -1300,6 +1306,7 @@ function ThreadListPanel({
                 <th>Priority</th>
                 <th>Work Item</th>
                 <th>Task ID</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody>
@@ -1309,11 +1316,12 @@ function ThreadListPanel({
                   <td>{entry.thread_priority}</td>
                   <td>{entry.work_item_id}</td>
                   <td>{entry.task_id}</td>
+                  <td>{entry.queue_state?.message || "Ready for dispatch"}</td>
                 </tr>
               ))}
               {!queue?.items?.length ? (
                 <tr>
-                  <td colSpan={4} className="muted">
+                  <td colSpan={5} className="muted">
                     No eligible work items are currently queued.
                   </td>
                 </tr>
@@ -1727,6 +1735,7 @@ function WorkItemDetailPanel({
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Work item not found.</p>;
   const review = payload.execution_brief_review;
+  const queue = payload.execution_queue;
 
   return (
     <div className="ems-panel-body">
@@ -1742,6 +1751,18 @@ function WorkItemDetailPanel({
       </div>
       {payload.description ? <p>{payload.description}</p> : null}
       {payload.last_error ? <InlineMessage tone="warn" title="Last error" body={payload.last_error} /> : null}
+      {queue ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Execution Queue</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Queue Status</div><div className="field-value">{titleCaseLabel(queue.status)}</div></div>
+            <div><div className="field-label">Dispatchable</div><div className="field-value">{queue.dispatchable ? "yes" : "no"}</div></div>
+            <div><div className="field-label">Blocked</div><div className="field-value">{queue.blocked ? "yes" : "no"}</div></div>
+            <div><div className="field-label">In Flight</div><div className="field-value">{queue.dispatched ? "yes" : "no"}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{queue.message}</p>
+        </section>
+      ) : null}
       {review?.has_brief ? (
         <section className="card" style={{ marginTop: 12 }}>
           <div className="card-header"><h3>Execution Brief Review</h3></div>

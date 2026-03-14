@@ -828,6 +828,15 @@ describe("WorkbenchPanelHost entity refresh", () => {
       execution_brief_history_count: 1,
       execution_brief_review_state: "draft",
       execution_brief_review_notes: "Needs explicit approval",
+      execution_queue: {
+        queue_ready: false,
+        dispatchable: false,
+        dispatched: false,
+        blocked: true,
+        status: "blocked",
+        reason: "brief_not_ready",
+        message: "Execution brief review is required before coding execution can proceed.",
+      },
       execution_brief_review: {
         has_brief: true,
         review_state: "draft",
@@ -870,6 +879,15 @@ describe("WorkbenchPanelHost entity refresh", () => {
       execution_brief_history_count: 1,
       execution_brief_review_state: "approved",
       execution_brief_review_notes: "Approved for coding",
+      execution_queue: {
+        queue_ready: true,
+        dispatchable: true,
+        dispatched: false,
+        blocked: false,
+        status: "queue_ready",
+        reason: null,
+        message: "Task is approved and ready for queue dispatch.",
+      },
       execution_brief_review: {
         has_brief: true,
         review_state: "approved",
@@ -907,6 +925,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getWorkItem).toHaveBeenCalledWith("task-1"));
+    expect(screen.getByText("Execution Queue")).toBeInTheDocument();
+    expect(screen.getAllByText("Execution brief review is required before coding execution can proceed.").length).toBeGreaterThan(0);
     expect(screen.getByText("Execution Brief Review")).toBeInTheDocument();
     expect(screen.getByText("Execution Blocked")).toBeInTheDocument();
     expect(screen.getByText("Implement scheduler via the bounded handoff")).toBeInTheDocument();
@@ -921,6 +941,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
         execution_brief_revision_reason: undefined,
       }),
     );
+    expect(screen.getByText("Task is approved and ready for queue dispatch.")).toBeInTheDocument();
+    expect(screen.getByText("Queue Ready")).toBeInTheDocument();
     expect(screen.getByText("Execution Ready")).toBeInTheDocument();
     expect(screen.getByText("Execution brief is ready for execution.")).toBeInTheDocument();
     expect(screen.getByText("Execution brief Approve.")).toBeInTheDocument();

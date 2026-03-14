@@ -172,6 +172,11 @@ from .execution_briefs import (
     serialize_execution_brief_review,
     valid_execution_brief_review_transition,
 )
+from .execution_queue import (
+    evaluate_dev_task_queue_state,
+    select_next_dispatchable_queue_entry,
+    serialize_dev_task_queue_state,
+)
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -25608,6 +25613,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
     detail = runtime_detail or _project_runtime_status_to_task(task)
     status = _canonical_work_item_status(str((detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
     brief_review = serialize_execution_brief_review(task)
+    queue_state = serialize_dev_task_queue_state(task, normalized_status=status)
     return {
         "id": str(task.id),
         "work_item_id": task.work_item_id or str(task.id),
@@ -25627,6 +25633,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "execution_brief_reviewed_at": task.execution_brief_reviewed_at,
         "execution_brief_reviewed_by": str(task.execution_brief_reviewed_by_id) if task.execution_brief_reviewed_by_id else None,
         "execution_brief_review": brief_review,
+        "execution_queue": queue_state,
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
         "goal_id": str(task.goal_id) if task.goal_id else None,
@@ -28668,32 +28675,43 @@ def xco_queue_collection(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "workspace_id is required"}, status=400)
     workspace, qs = _coordination_thread_queryset(identity, workspace_id)
     task_lookup = _coordination_task_lookup_factory(str(workspace.id))
+    queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
     for thread in qs:
         _update_thread_status_from_tasks(thread)
     entries = derive_work_queue(threads=qs, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
-    items = [
-        {
-            "thread_id": entry.thread_id,
-            "work_item_id": entry.work_item_id,
-            "task_id": entry.task_id,
-            "thread_priority": entry.thread_priority,
-            "thread_title": entry.thread_title,
-        }
-        for entry in entries
-    ]
+    items = []
+    for entry in entries:
+        task = queue_task_lookup(entry.task_id)
+        if task is None:
+            continue
+        normalized_status = _xco_status_lookup(task)
+        queue_state = evaluate_dev_task_queue_state(task, normalized_status=normalized_status)
+        if not queue_state.dispatchable:
+            continue
+        items.append(
+            {
+                "thread_id": entry.thread_id,
+                "work_item_id": entry.work_item_id,
+                "task_id": entry.task_id,
+                "thread_priority": entry.thread_priority,
+                "thread_title": entry.thread_title,
+                "queue_state": serialize_dev_task_queue_state(task, normalized_status=normalized_status),
+            }
+        )
     return JsonResponse({"workspace_id": str(workspace.id), "items": items})
 
 
 def _dispatch_next_queue_item(*, workspace: Workspace, user, identity: UserIdentity) -> Dict[str, Any]:
     _, qs = _coordination_thread_queryset(identity, str(workspace.id))
     task_lookup = _coordination_task_lookup_factory(str(workspace.id))
+    queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
     for thread in qs:
         _update_thread_status_from_tasks(thread)
     queue = derive_work_queue(threads=qs, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
-    if not queue:
-        raise RuntimeError("no eligible work items in the XCO queue")
-    next_entry = queue[0]
-    task = get_object_or_404(DevTask, id=next_entry.task_id)
+    selected = select_next_dispatchable_queue_entry(queue, task_lookup=queue_task_lookup, status_lookup=_xco_status_lookup)
+    if not selected:
+        raise RuntimeError("no approved work items are ready for dispatch")
+    next_entry, task, _ = selected
     thread = task.coordination_thread
     if thread and thread.status == "queued":
         transition_thread_status(thread, "active", work_item=task, payload={"reason": "dispatch"})

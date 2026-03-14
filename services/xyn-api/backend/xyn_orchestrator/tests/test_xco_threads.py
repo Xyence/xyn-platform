@@ -214,10 +214,33 @@ class XcoThreadTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(payload["items"][0]["work_item_id"], "wi-queue")
         self.assertEqual(payload["items"][0]["thread_priority"], "critical")
+        self.assertEqual(payload["items"][0]["queue_state"]["status"], "queue_ready")
+
+    def test_xco_queue_endpoint_excludes_gated_unapproved_work(self):
+        thread = self._create_thread(priority="critical")
+        self._create_task(
+            thread,
+            work_item_id="wi-needs-review",
+            execution_brief={"schema_version": "v1", "summary": "Blocked handoff"},
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request("/xyn/api/xco/queue", data={"workspace_id": str(self.workspace.id)})
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = xco_queue_collection(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["items"], [])
 
     def test_dispatch_next_queue_item_creates_runtime_dispatch_and_events(self):
         thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
-        task = self._create_task(thread, work_item_id="wi-dispatch")
+        task = self._create_task(
+            thread,
+            work_item_id="wi-dispatch",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
 
         with mock.patch(
             "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
@@ -234,6 +257,32 @@ class XcoThreadTests(TestCase):
         self.assertIn("run_dispatched_from_queue", event_types)
         task.refresh_from_db()
         self.assertEqual(str(task.coordination_thread_id), str(thread.id))
+
+    def test_dispatch_next_queue_item_skips_unapproved_work(self):
+        blocked_thread = self._create_thread(status="queued", priority="critical", execution_policy={"auto_resume": True}, title="Blocked")
+        self._create_task(
+            blocked_thread,
+            work_item_id="wi-blocked",
+            execution_brief={"schema_version": "v1", "summary": "Needs review"},
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
+        )
+        ready_thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True}, title="Ready")
+        ready_task = self._create_task(
+            ready_thread,
+            work_item_id="wi-ready",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        with mock.patch(
+            "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
+            return_value={"run_id": "run-ready", "status": "queued", "work_item_id": "wi-ready"},
+        ):
+            result = _dispatch_next_queue_item(workspace=self.workspace, user=self.user, identity=self.identity)
+        self.assertEqual(result["work_item_id"], "wi-ready")
+        ready_task.refresh_from_db()
+        self.assertEqual(str(ready_task.coordination_thread_id), str(ready_thread.id))
 
     def test_thread_progress_reports_not_started_when_no_work_exists(self):
         thread = self._create_thread(title="Empty")

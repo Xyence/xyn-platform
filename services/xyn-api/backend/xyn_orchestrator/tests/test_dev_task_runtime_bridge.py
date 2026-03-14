@@ -339,6 +339,7 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(payload["target_branch"], "develop")
         self.assertEqual(payload["execution_policy"], {"auto_continue": True})
         self.assertEqual(payload["execution_brief_review_state"], "draft")
+        self.assertEqual(payload["execution_queue"]["status"], "queue_ready")
 
     def test_work_item_detail_exposes_execution_brief(self):
         self.task.execution_brief = {
@@ -362,6 +363,7 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(payload["execution_brief_review"]["summary"], "Bounded handoff")
         self.assertFalse(payload["execution_brief_review"]["blocked"])
         self.assertIn("approve", payload["execution_brief_review"]["available_actions"])
+        self.assertTrue(payload["execution_queue"]["queue_ready"])
 
     def test_dev_task_detail_patch_updates_execution_brief_review_state(self):
         self.task.execution_brief = {
