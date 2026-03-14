@@ -27,6 +27,7 @@ import {
   listAppBuilderArtifacts,
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
+  publishDevTask,
   queryArtifactCanvasTable,
   queryEmsDevicesCanvasTable,
   queryEmsRegistrationsCanvasTable,
@@ -1915,7 +1916,7 @@ function WorkItemDetailPanel({
     try {
       setActionState({ status: "submitting", message: null });
       const response = await retryDevTask(workItemId);
-      setPayload(response.work_item || (await getWorkItem(workItemId)));
+      setPayload(await getWorkItem(workItemId));
       setActionState({
         status: "idle",
         message: response.run_id
