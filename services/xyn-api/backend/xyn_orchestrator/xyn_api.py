@@ -2666,6 +2666,10 @@ def _ensure_default_article_categories_and_bindings() -> None:
         slug="guide",
         defaults={"name": "Guide", "description": "Guides and route-bound in-app docs", "enabled": True},
     )
+    ArticleCategory.objects.get_or_create(
+        slug="demo",
+        defaults={"name": "Demo", "description": "Demo and explainer content", "enabled": True},
+    )
     web, _ = ArticleCategory.objects.get_or_create(
         slug="web",
         defaults={"name": "Web", "description": "Public website articles", "enabled": True},
@@ -3437,11 +3441,23 @@ def _resolve_context_packs_for_purpose(
             deduped.append(row)
         return deduped
 
-    default_rows: List[ContextPack] = []
+    purpose_default_rows: List[ContextPack] = []
+    purpose_default = AgentPurpose.objects.filter(slug=purpose_slug).first()
+    if purpose_default and isinstance(purpose_default.default_context_pack_refs_json, list):
+        purpose_default_rows, default_err = _resolve_many(purpose_default.default_context_pack_refs_json)
+        if default_err:
+            return [], "purpose_default", "", default_err, "extend", []
+
+    agent_default_rows: List[ContextPack] = []
     if agent and isinstance(agent.context_pack_refs_json, list):
-        default_rows, default_err = _resolve_many(agent.context_pack_refs_json)
+        agent_default_rows, default_err = _resolve_many(agent.context_pack_refs_json)
         if default_err:
             return [], "agent_default", "", default_err, "extend", []
+
+    default_rows = _dedupe(purpose_default_rows + agent_default_rows)
+    default_sources = {str(row.id): "purpose_default" for row in purpose_default_rows}
+    for row in agent_default_rows:
+        default_sources.setdefault(str(row.id), "agent_default")
 
     if override_present:
         override_refs = raw_override
@@ -3468,13 +3484,14 @@ def _resolve_context_packs_for_purpose(
         refs_with_source: List[Dict[str, Any]] = []
         override_ids = {str(item.id) for item in rows}
         for ref in resolved.get("refs", []):
-            source = "override" if str(ref.get("id") or "") in override_ids else "agent_default"
+            source = "override" if str(ref.get("id") or "") in override_ids else default_sources.get(str(ref.get("id") or ""), "agent_default")
             refs_with_source.append({**ref, "source": source})
         return merged_rows, "override", resolved.get("hash", ""), None, override_mode, refs_with_source
 
     resolved = _resolve_context_pack_list(default_rows)
-    refs_with_source = [{**ref, "source": "agent_default"} for ref in resolved.get("refs", [])]
-    return default_rows, "agent_default", resolved.get("hash", ""), None, "extend", refs_with_source
+    refs_with_source = [{**ref, "source": default_sources.get(str(ref.get("id") or ""), "agent_default")} for ref in resolved.get("refs", [])]
+    source = "agent_default" if agent_default_rows else "purpose_default" if purpose_default_rows else "agent_default"
+    return default_rows, source, resolved.get("hash", ""), None, "extend", refs_with_source
 
 
 def _effective_video_ai_config(artifact: Artifact) -> Dict[str, Any]:
@@ -3586,7 +3603,10 @@ def _create_render_package_artifact(
     title = f"{article.title} Render Package"
     slug = _normalize_artifact_slug(
         "",
-        fallback_title=f"{article.slug or slugify(article.title) or 'article'}-render-package-{timezone.now().strftime('%Y%m%d%H%M%S')}",
+        fallback_title=(
+            f"{article.slug or slugify(article.title) or 'article'}-render-package-"
+            f"{(input_snapshot_hash or spec_snapshot_hash or uuid.uuid4().hex)[:12]}"
+        ),
     )
     render_package = Artifact.objects.create(
         workspace=article.workspace,
@@ -6975,7 +6995,10 @@ def auth_login(request: HttpRequest) -> HttpResponse:
     token_login_enabled = mode == "token"
     login_error = str(request.GET.get("error") or "").strip()
     login_email = str(request.GET.get("email") or "").strip()
-    if mode == "oidc" and client:
+    env = _resolve_environment(request)
+    has_env_oidc = bool(env and _get_oidc_env_config(env))
+    effective_mode = "oidc" if client or has_env_oidc else mode
+    if client:
         config = _build_oidc_config_payload(client)
         providers = config.get("providers") or []
         if not providers and config.get("allowed_providers"):
@@ -6995,7 +7018,7 @@ def auth_login(request: HttpRequest) -> HttpResponse:
             "default_provider_id": config.get("defaultProviderId"),
             "branding": branding,
             "login_title": f"Sign in to {branding.get('display_name') or app_id}",
-            "auth_mode": mode,
+            "auth_mode": effective_mode,
             "local_login_enabled": local_login_enabled,
             "token_login_enabled": token_login_enabled,
             "login_error": login_error,
@@ -7006,7 +7029,7 @@ def auth_login(request: HttpRequest) -> HttpResponse:
         response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response["Pragma"] = "no-cache"
         return response
-    if mode == "oidc":
+    if mode == "oidc" or has_env_oidc:
         return _start_env_fallback_login(request, app_id=app_id, return_to=return_to)
     branding = _merge_branding_for_app(app_id)
     context = {
@@ -7016,7 +7039,7 @@ def auth_login(request: HttpRequest) -> HttpResponse:
         "default_provider_id": "",
         "branding": branding,
         "login_title": f"Sign in to {branding.get('display_name') or app_id}",
-        "auth_mode": mode,
+        "auth_mode": effective_mode,
         "local_login_enabled": local_login_enabled,
         "token_login_enabled": token_login_enabled,
         "login_error": login_error,
@@ -7391,8 +7414,6 @@ def workspace_auth_callback_api(request: HttpRequest, workspace_id: str) -> Http
 
 @csrf_exempt
 def auth_callback(request: HttpRequest) -> HttpResponse:
-    if _auth_mode() != "oidc":
-        return _auth_state_error(request, reason="oidc callback requested while XYN_AUTH_MODE is not oidc")
     provider_id = request.session.get("oidc_provider_id")
     state = request.POST.get("state") if request.method == "POST" else request.GET.get("state")
     if not provider_id:
@@ -7428,10 +7449,10 @@ def auth_callback(request: HttpRequest) -> HttpResponse:
         )
     env = _resolve_environment(request)
     if not env:
-        return JsonResponse({"error": "environment not found"}, status=404)
+        return _auth_state_error(request, reason="environment not found")
     config = _get_oidc_env_config(env)
     if not config:
-        return JsonResponse({"error": "OIDC not configured"}, status=500)
+        return _auth_state_error(request, reason="OIDC not configured")
     issuer = config.get("issuer_url")
     client_id = config.get("client_id")
     secret_ref = config.get("client_secret_ref") or {}
@@ -8460,6 +8481,17 @@ def _sanitize_return_to(raw_value: str, request: HttpRequest, client: Optional[A
         return fallback
     split = urlsplit(value)
     if split.scheme or split.netloc:
+        if split.scheme != "https" or not split.netloc or not client:
+            return fallback
+        allowed_redirects = client.redirect_uris_json if isinstance(client.redirect_uris_json, list) else []
+        requested_host = str(split.hostname or "").strip().lower()
+        for redirect_uri in allowed_redirects:
+            redirect_split = urlsplit(str(redirect_uri or "").strip())
+            allowed_host = str(redirect_split.hostname or "").strip().lower()
+            if not allowed_host:
+                continue
+            if requested_host == allowed_host or requested_host.endswith(f".{allowed_host}"):
+                return urlunsplit(split)
         return fallback
     if not value.startswith("/") or value.startswith("//"):
         return fallback
@@ -9606,7 +9638,7 @@ def validate_artifact(artifact: Artifact) -> Tuple[str, List[str]]:
         latest = _latest_artifact_revision(artifact)
         content = latest.content_json if latest and isinstance(latest.content_json, dict) else {}
         if not str(content.get("body_markdown") or "").strip():
-            errors.append("article body_markdown is required")
+            warnings.append("article body_markdown is empty")
         if not str(content.get("summary") or "").strip():
             warnings.append("article summary is empty")
     elif slug == "workflow":
@@ -9998,6 +10030,11 @@ def _raw_path_to_key(raw_path: str) -> str:
     return normalized
 
 
+def _raw_path_is_invalid(raw_path: str) -> bool:
+    normalized = str(raw_path or "").strip().replace("\\", "/")
+    return any(part == ".." for part in normalized.split("/"))
+
+
 def _artifact_raw_entries(file_map: Dict[str, bytes], directory: str) -> List[Dict[str, Any]]:
     directory = f"/{_raw_path_to_key(directory)}".rstrip("/")
     if directory == "":
@@ -10025,12 +10062,22 @@ def _artifact_raw_entries(file_map: Dict[str, bytes], directory: str) -> List[Di
     return sorted(entries.values(), key=lambda row: (row["kind"] != "dir", str(row["name"]).lower()))
 
 
+def _require_artifact_debug_view(request: HttpRequest) -> Tuple[Optional[UserIdentity], Optional[JsonResponse]]:
+    identity = _require_authenticated(request)
+    if not identity:
+        return None, JsonResponse({"error": "not authenticated"}, status=401)
+    if not _is_platform_admin(identity):
+        return identity, JsonResponse({"error": "forbidden"}, status=403)
+    return identity, None
+
+
 @csrf_exempt
 def artifact_raw_metadata(request: HttpRequest, artifact_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     artifact = get_object_or_404(Artifact.objects.select_related("type"), id=artifact_id)
     return JsonResponse(
         {
@@ -10056,8 +10103,9 @@ def artifact_raw_metadata(request: HttpRequest, artifact_id: str) -> JsonRespons
 def artifact_raw_artifact_json(request: HttpRequest, artifact_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     artifact = get_object_or_404(Artifact.objects.select_related("type"), id=artifact_id)
     return JsonResponse(_artifact_raw_payload(artifact))
 
@@ -10066,10 +10114,13 @@ def artifact_raw_artifact_json(request: HttpRequest, artifact_id: str) -> JsonRe
 def artifact_raw_files(request: HttpRequest, artifact_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     artifact = get_object_or_404(Artifact, id=artifact_id)
     directory = str(request.GET.get("path") or "/")
+    if _raw_path_is_invalid(directory):
+        return JsonResponse({"error": "invalid path"}, status=400)
     file_map = _artifact_raw_file_map(artifact)
     return JsonResponse({"path": directory, "entries": _artifact_raw_entries(file_map, directory)})
 
@@ -10078,12 +10129,15 @@ def artifact_raw_files(request: HttpRequest, artifact_id: str) -> JsonResponse:
 def artifact_raw_file(request: HttpRequest, artifact_id: str) -> HttpResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     artifact = get_object_or_404(Artifact, id=artifact_id)
     raw_path = str(request.GET.get("path") or "").strip()
     if not raw_path:
         return JsonResponse({"error": "path is required"}, status=400)
+    if _raw_path_is_invalid(raw_path):
+        return JsonResponse({"error": "invalid path"}, status=400)
     key = _raw_path_to_key(raw_path)
     blob = _artifact_raw_file_map(artifact).get(key)
     if blob is None:
@@ -10217,8 +10271,9 @@ def artifact_by_slug_files(request: HttpRequest, artifact_slug: str) -> JsonResp
 def artifact_package_raw_manifest(request: HttpRequest, package_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     package = get_object_or_404(ArtifactPackage, id=package_id)
     return JsonResponse({"manifest": package.manifest if isinstance(package.manifest, dict) else {}})
 
@@ -10227,8 +10282,9 @@ def artifact_package_raw_manifest(request: HttpRequest, package_id: str) -> Json
 def artifact_package_raw_tree(request: HttpRequest, package_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     package = get_object_or_404(ArtifactPackage, id=package_id)
     manifest = package.manifest if isinstance(package.manifest, dict) else {}
     artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
@@ -10247,12 +10303,15 @@ def artifact_package_raw_tree(request: HttpRequest, package_id: str) -> JsonResp
 def artifact_package_raw_file(request: HttpRequest, package_id: str) -> HttpResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     package = get_object_or_404(ArtifactPackage, id=package_id)
     path_value = str(request.GET.get("path") or "").strip()
     if not path_value:
         return JsonResponse({"error": "path is required"}, status=400)
+    if _raw_path_is_invalid(path_value):
+        return JsonResponse({"error": "invalid path"}, status=400)
     key = _raw_path_to_key(path_value)
     manifest = package.manifest if isinstance(package.manifest, dict) else {}
     if key == "manifest.json":
@@ -13346,11 +13405,23 @@ def _process_video_render(video_render: VideoRender) -> VideoRender:
     render_mode = str(provider_cfg.get("rendering_mode") or "").strip().lower()
     provider_configured = bool(raw_result.get("provider_configured")) if isinstance(raw_result, dict) else False
     has_video_asset = any(str((asset or {}).get("type") or "").strip().lower() == "video" for asset in (assets or []))
+    has_export_package = any(str((asset or {}).get("type") or "").strip().lower() == "export_package" for asset in (assets or []))
     requires_external_output = render_mode in {"render_via_adapter", "render_via_endpoint", "render_via_model_config"}
+    normalized_outcome = str((raw_result or {}).get("outcome") or "").strip().lower() if isinstance(raw_result, dict) else ""
     finished_at = timezone.now()
     video_render.provider = provider or "unknown"
-    if requires_external_output and (not provider_configured or not has_video_asset):
+    video_render.export_package_generated = has_export_package
+    if normalized_outcome == "filtered":
+        video_render.status = "filtered"
+        video_render.outcome = "filtered"
+        video_render.provider_filtered_count = int((raw_result or {}).get("provider_filtered_count") or 0)
+        reasons = (raw_result or {}).get("provider_filtered_reasons")
+        video_render.provider_filtered_reasons = reasons if isinstance(reasons, list) else []
+        video_render.error_message = str((raw_result or {}).get("message") or "")
+        video_render.error_details_json = {}
+    elif requires_external_output and (not provider_configured or not has_video_asset):
         video_render.status = "failed"
+        video_render.outcome = "failed"
         message = str((raw_result or {}).get("message") or "Render did not produce a video asset")
         video_render.error_message = message
         video_render.error_details_json = {
@@ -13360,6 +13431,7 @@ def _process_video_render(video_render: VideoRender) -> VideoRender:
         }
     else:
         video_render.status = "succeeded"
+        video_render.outcome = "succeeded"
         video_render.error_message = ""
         video_render.error_details_json = {}
     video_render.completed_at = finished_at
@@ -13369,6 +13441,10 @@ def _process_video_render(video_render: VideoRender) -> VideoRender:
         update_fields=[
             "provider",
             "status",
+            "outcome",
+            "provider_filtered_count",
+            "provider_filtered_reasons",
+            "export_package_generated",
             "completed_at",
             "result_payload_json",
             "output_assets",
@@ -13382,7 +13458,7 @@ def _process_video_render(video_render: VideoRender) -> VideoRender:
         **(spec.get("generation") if isinstance(spec.get("generation"), dict) else {}),
         "provider": video_render.provider,
         "model_name": video_render.model_name or "",
-        "status": "failed" if video_render.status == "failed" else "succeeded",
+        "status": "failed" if video_render.status == "failed" else ("filtered" if video_render.status == "filtered" else "succeeded"),
         "last_render_id": str(video_render.id),
         "spec_snapshot_hash": video_render.spec_snapshot_hash or "",
         "input_snapshot_hash": video_render.input_snapshot_hash or "",
@@ -15025,6 +15101,7 @@ def tour_detail(request: HttpRequest, tour_slug: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     _ensure_workflow_artifact_type()
+    default_payload = _default_tour_payload(tour_slug)
     artifact = (
         Artifact.objects.filter(
             type__slug=WORKFLOW_ARTIFACT_TYPE_SLUG,
@@ -15036,7 +15113,9 @@ def tour_detail(request: HttpRequest, tour_slug: str) -> JsonResponse:
         .first()
     )
     if not artifact:
-        return JsonResponse({"error": "tour not found"}, status=404)
+        if default_payload.get("error"):
+            return JsonResponse({"error": "tour not found"}, status=404)
+        return JsonResponse(default_payload)
     if not _can_view_workflow(identity, artifact):
         return JsonResponse({"error": "forbidden"}, status=403)
     spec = _normalize_workflow_spec(
@@ -24284,11 +24363,11 @@ def release_plan_detail(request: HttpRequest, plan_id: str) -> JsonResponse:
         return staff_error
     plan = get_object_or_404(ReleasePlan, id=plan_id)
     if request.method == "PATCH":
-        identity = _require_authenticated(request)
-        if not identity:
-            return JsonResponse({"error": "not authenticated"}, status=401)
         payload = _parse_json(request)
         target_fqn = str(payload.get("target_fqn") or plan.target_fqn or "")
+        identity = _require_authenticated(request) if target_fqn in _control_plane_app_ids() else None
+        if target_fqn in _control_plane_app_ids() and not identity:
+            return JsonResponse({"error": "not authenticated"}, status=401)
         if target_fqn in _control_plane_app_ids() and not _is_platform_architect(identity):
             return JsonResponse({"error": "platform_architect role required for control plane plans"}, status=403)
         if "environment_id" in payload and not payload.get("environment_id"):
@@ -24363,6 +24442,12 @@ def release_plan_reconcile(request: HttpRequest) -> JsonResponse:
     plans = list(qs)
     changed: List[Dict[str, Any]] = []
     for plan in plans:
+        if _is_control_plane_plan(plan):
+            identity = _require_authenticated(request)
+            if not identity:
+                return JsonResponse({"error": "not authenticated"}, status=401)
+            if not _is_platform_architect(identity):
+                return JsonResponse({"error": "platform_architect role required for control plane plans"}, status=403)
         release, did_change = _reconcile_release_plan_alignment(
             plan,
             updated_by=request.user,
@@ -24517,9 +24602,21 @@ def _reconcile_release_plan_alignment(
     allow_state_fallback: bool = True,
     apply_changes: bool = True,
 ) -> Tuple[Optional[Release], bool]:
+    state_preferred = _preferred_release_for_plan_from_environment_state(plan) if allow_state_fallback else None
     preferred = _preferred_release_for_plan(plan, explicit_release_id=explicit_release_id)
-    if not preferred and allow_state_fallback:
-        preferred = _preferred_release_for_plan_from_environment_state(plan)
+    if state_preferred and (
+        explicit_release_id is None
+        and (
+            preferred is None
+            or (
+                plan.blueprint_id
+                and state_preferred.blueprint_id
+                and str(state_preferred.blueprint_id) == str(plan.blueprint_id)
+                and str(state_preferred.version or "") != str(plan.to_version or "")
+            )
+        )
+    ):
+        preferred = state_preferred
     selected_release_id = str(preferred.id) if preferred else (str(explicit_release_id) if explicit_release_id else None)
     to_version_changed = bool(preferred and plan.to_version != preferred.version)
     if preferred:
@@ -29525,10 +29622,18 @@ def _resolve_manifest_surface_path(manifest: Dict[str, Any], surface_path: str, 
     normalized = _normalize_surface_path(surface_path)
     if not normalized:
         return ""
+    if normalized.startswith("/app/"):
+        return normalized
+    if normalized.startswith("/apps/"):
+        if _manifest_ui_mount_scope(manifest) == "global":
+            return normalized
+        if workspace_id:
+            return f"{_workspace_prefix(workspace_id)}{normalized}"
+        return normalized
     if _manifest_ui_mount_scope(manifest) == "global":
         return normalized
     if workspace_id:
-        return to_workspace_path(workspace_id, normalized)
+        return f"{_workspace_prefix(workspace_id)}{normalized}"
     return normalized
 
 
@@ -29742,6 +29847,11 @@ def _resolved_capability_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
     return resolved
 
 
+def _manifest_payload(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    content = manifest.get("content") if isinstance(manifest.get("content"), dict) else {}
+    return content or manifest
+
+
 def _resolved_manifest_suggestions(artifact: Artifact, resolved: Dict[str, Any]) -> List[Dict[str, Any]]:
     artifact_slug = _artifact_slug(artifact) or str(artifact.id)
     rows: List[Dict[str, Any]] = []
@@ -29945,9 +30055,10 @@ def _article_docs_surface_path(artifact: Artifact, workspace_id: Optional[str]) 
 
 def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[str] = None) -> Dict[str, Any]:
     manifest = _load_artifact_manifest(artifact)
+    payload = _manifest_payload(manifest)
     resolved = _resolved_capability_manifest(manifest)
     contract_issue = _manifest_contract_issue_summary(artifact, resolved)
-    roles_raw = manifest.get("roles") if isinstance(manifest.get("roles"), list) else []
+    roles_raw = payload.get("roles") if isinstance(payload.get("roles"), list) else []
     roles: List[str] = []
     for role in roles_raw:
         if not isinstance(role, dict):
@@ -29957,20 +30068,20 @@ def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[st
             roles.append(role_name)
     unique_roles = sorted(set(roles))
     surfaces = {
-        "nav": _manifest_surface_entries(manifest, "nav", workspace_id=workspace_id),
-        "manage": _manifest_surface_entries(manifest, "manage", workspace_id=workspace_id),
-        "docs": _manifest_surface_entries(manifest, "docs", workspace_id=workspace_id),
+        "nav": _manifest_surface_entries(payload, "nav", workspace_id=workspace_id),
+        "manage": _manifest_surface_entries(payload, "manage", workspace_id=workspace_id),
+        "docs": _manifest_surface_entries(payload, "docs", workspace_id=workspace_id),
     }
-    suggestions = _manifest_suggestions(manifest, workspace_id=workspace_id)
+    suggestions = _manifest_suggestions(payload, workspace_id=workspace_id)
     if str(resolved.get("schema_version") or "").strip() == "xyn.capability_manifest.v1":
         suggestions = _resolved_manifest_suggestions(artifact, resolved)
         surfaces = _resolved_manifest_surfaces(resolved, workspace_id=workspace_id)
-    if contract_issue:
+    if contract_issue and not suggestions:
         suggestions = []
     summary = {
         "roles": unique_roles,
-        "ui_mount_scope": _manifest_ui_mount_scope(manifest),
-        "capability": _manifest_capability(manifest),
+        "ui_mount_scope": _manifest_ui_mount_scope(payload),
+        "capability": _manifest_capability(payload),
         "suggestions": suggestions,
         "entities": [] if contract_issue else _resolved_manifest_entities(resolved),
         "surfaces": surfaces,

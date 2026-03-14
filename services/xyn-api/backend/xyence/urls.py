@@ -765,10 +765,6 @@ if ENABLE_BLUEPRINTS_LEGACY:
         path("xyn/studio/blueprints/new", new_draft_session_view, name="blueprint-session-new"),
         path("xyn/blueprints/<uuid:blueprint_id>/", blueprint_detail_view, name="blueprint-detail"),
         path("xyn/studio/blueprints/draft-sessions/<uuid:session_id>/", blueprint_studio_view, name="blueprint-studio"),
-        path("xyn/api/blueprints", blueprints_collection),
-        path("xyn/api/blueprints/<uuid:blueprint_id>", blueprint_detail),
-        path("xyn/api/blueprints/<uuid:artifact_id>/revise", blueprint_revise),
-        path("xyn/api/blueprints/<uuid:artifact_id>/publish", blueprint_publish),
         path("xyn/api/blueprints/<uuid:blueprint_id>/archive", blueprint_archive),
         path("xyn/api/blueprints/<uuid:blueprint_id>/deprovision_plan", blueprint_deprovision_plan),
         path("xyn/api/blueprints/<uuid:blueprint_id>/deprovision", blueprint_deprovision),
@@ -802,6 +798,16 @@ if ENABLE_BLUEPRINTS_LEGACY:
         path("xyn/internal/draft-sessions/<uuid:session_id>/error", internal_draft_session_error),
         path("xyn/internal/draft-sessions/<uuid:session_id>/status", internal_draft_session_status),
     ]
+
+urlpatterns += [
+    path("xyn/api/blueprints/<uuid:artifact_id>/revise", blueprint_revise),
+    path("xyn/api/blueprints/<uuid:artifact_id>/publish", blueprint_publish),
+    path("xyn/api/blueprints/<uuid:blueprint_id>/archive", blueprint_archive),
+    path("xyn/api/blueprints/<uuid:blueprint_id>/deprovision_plan", blueprint_deprovision_plan),
+    path("xyn/api/blueprints/<uuid:blueprint_id>/deprovision", blueprint_deprovision),
+    path("xyn/api/artifacts/<uuid:artifact_id>/canonize-to-blueprint", artifact_canonize_to_blueprint),
+    path("xyn/api/artifacts/create-blueprint", artifacts_create_blueprint),
+]
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

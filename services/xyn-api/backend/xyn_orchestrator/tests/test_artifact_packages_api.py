@@ -481,6 +481,8 @@ class ArtifactPackagesApiTests(TestCase):
         payload = resolved.json()
         self.assertEqual(payload.get("surface", {}).get("key"), "detail")
         self.assertEqual(payload.get("params", {}).get("artifactId"), str(artifact.id))
+        preview = self.client.get(f"/xyn/api/artifacts/packages/{package_id}/raw/file", {"path": "/manifest.json"})
+        self.assertEqual(preview.status_code, 200, preview.content.decode())
         payload = preview.json()
         self.assertTrue(payload.get("inline"))
         self.assertIn("format_version", str(payload.get("content") or ""))
