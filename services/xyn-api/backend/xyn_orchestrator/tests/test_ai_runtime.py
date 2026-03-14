@@ -10,10 +10,27 @@ from xyn_orchestrator.ai_runtime import (
     invoke_model,
     resolve_ai_config,
 )
-from xyn_orchestrator.models import AgentDefinition, AgentDefinitionPurpose, AgentPurpose, ModelConfig, ModelProvider, ProviderCredential
+from xyn_orchestrator.models import AgentDefinition, AgentDefinitionPurpose, AgentPurpose, ContextPack, ModelConfig, ModelProvider, ProviderCredential
 
 
 class AiRuntimeTests(TestCase):
+    def setUp(self):
+        os.environ.setdefault("XYN_CREDENTIALS_ENCRYPTION_KEY", "V2S8x7lAB2BaN8A-14EvhA-gF1kq4KOlnS2vPc9vulE=")
+        for key in (
+            "XYN_AI_PROVIDER",
+            "XYN_AI_MODEL",
+            "XYN_OPENAI_API_KEY",
+            "XYN_GEMINI_API_KEY",
+            "XYN_ANTHROPIC_API_KEY",
+            "XYN_AI_PLANNING_PROVIDER",
+            "XYN_AI_PLANNING_MODEL",
+            "XYN_AI_PLANNING_API_KEY",
+            "XYN_AI_CODING_PROVIDER",
+            "XYN_AI_CODING_MODEL",
+            "XYN_AI_CODING_API_KEY",
+        ):
+            os.environ.pop(key, None)
+
     def test_bootstrap_uses_canonical_seed_ai_env(self):
         with patch.dict(
             os.environ,
@@ -28,6 +45,112 @@ class AiRuntimeTests(TestCase):
             default_assistant = AgentDefinition.objects.get(slug="default-assistant")
             self.assertEqual(default_assistant.model_config.provider.slug, "google")
             self.assertEqual(default_assistant.model_config.model_name, "gemini-2.0-flash")
+
+    def test_bootstrap_default_only_creates_default_agent_and_planning_purpose(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-only",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+        self.assertTrue(AgentPurpose.objects.filter(slug="planning").exists())
+        self.assertTrue(AgentDefinition.objects.filter(slug="default-assistant").exists())
+        self.assertFalse(AgentDefinition.objects.filter(slug="planning-assistant").exists())
+        self.assertFalse(AgentDefinition.objects.filter(slug="coding-assistant").exists())
+
+    def test_bootstrap_default_and_planning_creates_planning_agent(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+                "XYN_AI_PLANNING_PROVIDER": "anthropic",
+                "XYN_AI_PLANNING_MODEL": "claude-3-7-sonnet-latest",
+                "XYN_AI_PLANNING_API_KEY": "sk-plan-anthropic",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+        planning_agent = AgentDefinition.objects.get(slug="planning-assistant")
+        self.assertEqual(planning_agent.model_config.provider.slug, "anthropic")
+        self.assertTrue(planning_agent.purposes.filter(slug="planning").exists())
+
+    def test_bootstrap_default_and_coding_creates_coding_agent(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+                "XYN_AI_CODING_PROVIDER": "gemini",
+                "XYN_AI_CODING_MODEL": "gemini-2.0-flash",
+                "XYN_AI_CODING_API_KEY": "sk-code-gemini",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+        coding_agent = AgentDefinition.objects.get(slug="coding-assistant")
+        self.assertEqual(coding_agent.model_config.provider.slug, "google")
+        self.assertTrue(coding_agent.purposes.filter(slug="coding").exists())
+
+    def test_bootstrap_reuses_same_credential_for_default_planning_and_coding_when_provider_and_key_match(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-shared-openai",
+                "XYN_AI_PLANNING_PROVIDER": "openai",
+                "XYN_AI_PLANNING_MODEL": "gpt-5-mini",
+                "XYN_AI_PLANNING_API_KEY": "sk-shared-openai",
+                "XYN_AI_CODING_PROVIDER": "openai",
+                "XYN_AI_CODING_MODEL": "gpt-5.1-mini",
+                "XYN_AI_CODING_API_KEY": "sk-shared-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+        agents = {
+            slug: AgentDefinition.objects.get(slug=slug)
+            for slug in ("default-assistant", "planning-assistant", "coding-assistant")
+        }
+        credential_ids = {str(agent.model_config.credential_id) for agent in agents.values()}
+        self.assertEqual(len(credential_ids), 1)
+        self.assertEqual(ProviderCredential.objects.filter(provider__slug="openai").count(), 1)
+
+    def test_bootstrap_attaches_planning_and_coding_context_packs_idempotently(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+                "XYN_AI_PLANNING_PROVIDER": "openai",
+                "XYN_AI_PLANNING_MODEL": "gpt-5-mini",
+                "XYN_AI_PLANNING_API_KEY": "sk-plan-openai",
+                "XYN_AI_CODING_PROVIDER": "openai",
+                "XYN_AI_CODING_MODEL": "gpt-5.1-mini",
+                "XYN_AI_CODING_API_KEY": "sk-code-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+            ensure_default_ai_seeds()
+        planning_agent = AgentDefinition.objects.get(slug="planning-assistant")
+        coding_agent = AgentDefinition.objects.get(slug="coding-assistant")
+        planning_purpose = AgentPurpose.objects.get(slug="planning")
+        coding_purpose = AgentPurpose.objects.get(slug="coding")
+        self.assertTrue(planning_agent.context_pack_refs_json)
+        self.assertTrue(coding_agent.context_pack_refs_json)
+        self.assertTrue(planning_purpose.default_context_pack_refs_json)
+        self.assertTrue(coding_purpose.default_context_pack_refs_json)
+        self.assertEqual(ContextPack.objects.filter(name="xyn-planner-canon", purpose="planner").count(), 1)
+        self.assertEqual(ContextPack.objects.filter(name="xyn-coder-canon", purpose="coder").count(), 1)
 
     def test_assemble_system_prompt_preamble_only(self):
         self.assertEqual(assemble_system_prompt("", "Purpose preamble"), "Purpose preamble")
@@ -66,6 +189,7 @@ class AiRuntimeTests(TestCase):
 
     def test_resolve_ai_config_uses_provider_default_credential_when_model_credential_missing(self):
         provider, _ = ModelProvider.objects.get_or_create(slug="openai", defaults={"name": "OpenAI", "enabled": True})
+        ProviderCredential.objects.filter(provider=provider).delete()
         os.environ["XYN_TEST_OPENAI_KEY"] = "sk-runtime-test-1234"
         ProviderCredential.objects.create(
             provider=provider,
@@ -87,6 +211,48 @@ class AiRuntimeTests(TestCase):
         resolved = resolve_ai_config(agent_slug=agent.slug)
         self.assertEqual(resolved.get("provider"), "openai")
         self.assertEqual(resolved.get("api_key"), "sk-runtime-test-1234")
+
+    def test_resolve_ai_config_prefers_planning_agent_and_falls_back_to_default(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+            resolved = resolve_ai_config(purpose_slug="planning")
+            self.assertEqual(resolved.get("agent_slug"), "default-assistant")
+            os.environ["XYN_AI_PLANNING_PROVIDER"] = "anthropic"
+            os.environ["XYN_AI_PLANNING_MODEL"] = "claude-3-7-sonnet-latest"
+            os.environ["XYN_AI_PLANNING_API_KEY"] = "sk-plan-anthropic"
+            ensure_default_ai_seeds()
+            resolved = resolve_ai_config(purpose_slug="planning")
+        self.assertEqual(resolved.get("agent_slug"), "planning-assistant")
+        self.assertEqual(resolved.get("purpose"), "planning")
+
+    def test_resolve_ai_config_prefers_coding_agent_and_falls_back_to_default(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+            resolved = resolve_ai_config(purpose_slug="coding")
+            self.assertEqual(resolved.get("agent_slug"), "default-assistant")
+            os.environ["XYN_AI_CODING_PROVIDER"] = "gemini"
+            os.environ["XYN_AI_CODING_MODEL"] = "gemini-2.0-flash"
+            os.environ["XYN_AI_CODING_API_KEY"] = "sk-code-gemini"
+            ensure_default_ai_seeds()
+            resolved = resolve_ai_config(purpose_slug="coding")
+        self.assertEqual(resolved.get("agent_slug"), "coding-assistant")
+        self.assertEqual(resolved.get("purpose"), "coding")
 
     def test_extract_openai_response_text_from_output_content(self):
         payload = {

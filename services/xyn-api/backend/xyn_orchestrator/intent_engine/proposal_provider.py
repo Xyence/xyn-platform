@@ -47,7 +47,7 @@ class IntentProposalProvider(ABC):
 
 
 class LlmIntentProposalProvider(IntentProposalProvider):
-    PURPOSE_SLUG = "documentation"
+    PURPOSE_SLUG = "planning"
     CONTEXT_PACK_SLUG = "xyn-console-default"
     _CACHE_TTL_SECONDS = 60
     _context_cache: Dict[str, Any] = {"value": None, "expires_at": 0.0}

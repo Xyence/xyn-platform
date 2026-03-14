@@ -127,6 +127,12 @@ def bootstrap_runtime_env() -> None:
         os.environ["ANTHROPIC_API_KEY"] = os.environ["XYN_ANTHROPIC_API_KEY"]
     _apply_alias("XYN_AI_PROVIDER")
     _apply_alias("XYN_AI_MODEL")
+    _apply_alias("XYN_AI_PLANNING_PROVIDER")
+    _apply_alias("XYN_AI_PLANNING_MODEL")
+    _apply_alias("XYN_AI_PLANNING_API_KEY")
+    _apply_alias("XYN_AI_CODING_PROVIDER")
+    _apply_alias("XYN_AI_CODING_MODEL")
+    _apply_alias("XYN_AI_CODING_API_KEY")
     _apply_alias("XYN_DEFAULT_MODEL_PROVIDER", "XYN_AI_PROVIDER")
     _apply_alias("XYN_DEFAULT_MODEL_NAME", "XYN_AI_MODEL")
 

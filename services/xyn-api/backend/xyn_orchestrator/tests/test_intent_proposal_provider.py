@@ -13,6 +13,7 @@ from xyn_orchestrator.models import ContextPack
 class IntentProposalProviderTests(TestCase):
     def setUp(self):
         LlmIntentProposalProvider._context_cache = {"value": None, "expires_at": 0.0}
+        ContextPack.objects.filter(name="xyn-console-default", scope="global").delete()
 
     def test_missing_context_pack_raises_and_skips_model_call(self):
         provider = LlmIntentProposalProvider()
@@ -51,12 +52,13 @@ class IntentProposalProviderTests(TestCase):
                 "model": "fake-model",
             }
 
-        with patch("xyn_orchestrator.intent_engine.proposal_provider.resolve_ai_config", return_value={"model_name": "fake-model"}):
+        with patch("xyn_orchestrator.intent_engine.proposal_provider.resolve_ai_config", return_value={"model_name": "fake-model"}) as resolve_mock:
             with patch("xyn_orchestrator.intent_engine.proposal_provider.invoke_model", side_effect=_fake_invoke):
                 result = provider.propose(message="create explainer video")
 
         messages = captured.get("messages") or []
         developer_message = next((msg for msg in messages if isinstance(msg, dict) and msg.get("role") == "developer"), {})
+        resolve_mock.assert_called_with(purpose_slug="planning")
         self.assertIn("seeded-console-policy", str(developer_message.get("content") or ""))
         self.assertEqual(result.get("_context_pack_slug"), "xyn-console-default")
         self.assertTrue(str(result.get("_context_pack_hash") or "").strip())

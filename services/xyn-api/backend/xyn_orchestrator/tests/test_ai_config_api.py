@@ -114,6 +114,35 @@ class AiConfigApiTests(TestCase):
         coding_slugs = [item["slug"] for item in coding_agents.json()["agents"]]
         self.assertIn("default-assistant", coding_slugs)
 
+        planning_purposes = self.client.get("/xyn/api/ai/purposes")
+        self.assertEqual(planning_purposes.status_code, 200)
+        planning_slugs = [item["slug"] for item in planning_purposes.json()["purposes"]]
+        self.assertIn("planning", planning_slugs)
+
+    def test_bootstrap_status_reports_default_planning_and_coding_agents(self):
+        self._set_identity(self.admin_identity)
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+                "XYN_AI_PLANNING_PROVIDER": "anthropic",
+                "XYN_AI_PLANNING_MODEL": "claude-3-7-sonnet-latest",
+                "XYN_AI_PLANNING_API_KEY": "sk-plan-anthropic",
+                "XYN_AI_CODING_PROVIDER": "gemini",
+                "XYN_AI_CODING_MODEL": "gemini-2.0-flash",
+                "XYN_AI_CODING_API_KEY": "sk-code-gemini",
+            },
+            clear=False,
+        ):
+            response = self.client.get("/xyn/api/ai/bootstrap-status")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["default_agent"]
+        self.assertEqual(payload["default_agent_slug"], "default-assistant")
+        self.assertEqual(payload["planning_agent_slug"], "planning-assistant")
+        self.assertEqual(payload["coding_agent_slug"], "coding-assistant")
+
     @patch("xyn_orchestrator.xyn_api.invoke_model")
     def test_ai_invoke_uses_agent_and_returns_content(self, invoke_mock):
         self._set_identity(self.admin_identity)
@@ -276,7 +305,7 @@ class AiConfigApiTests(TestCase):
             ),
             content_type="application/json",
         )
-        response = self.client.get("/xyn/api/ai/activity?workspace_id=ws-1")
+        response = self.client.get("/xyn/api/ai/activity")
         self.assertEqual(response.status_code, 200)
         items = response.json().get("items") or []
         self.assertGreaterEqual(len(items), 1)

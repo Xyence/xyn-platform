@@ -2,6 +2,7 @@ import base64
 import hashlib
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -10,7 +11,10 @@ from cryptography.fernet import Fernet
 from .ai_compat import compute_effective_params
 from .models import (
     AgentDefinition,
+    AgentDefinitionPurpose,
     AgentPurpose,
+    ContextPack,
+    ModelConfig,
     ModelProvider,
     OpenAIConfig,
     ProviderCredential,
@@ -33,6 +37,44 @@ PROVIDER_MODEL_DEFAULTS = {
     "openai": "gpt-5-mini",
     "google": "gemini-2.0-flash",
     "anthropic": "claude-3-7-sonnet-latest",
+}
+BOOTSTRAP_ROLE_ENV_PREFIX = {
+    "planning": "XYN_AI_PLANNING",
+    "coding": "XYN_AI_CODING",
+}
+BOOTSTRAP_ROLE_AGENT_META = {
+    "default": {
+        "slug": "default-assistant",
+        "name": "Xyn Default Assistant",
+        "purposes": ("coding", "planning", "documentation"),
+        "is_default": True,
+    },
+    "planning": {
+        "slug": "planning-assistant",
+        "name": "Xyn Planning Assistant",
+        "purposes": ("planning",),
+        "is_default": False,
+    },
+    "coding": {
+        "slug": "coding-assistant",
+        "name": "Xyn Coding Assistant",
+        "purposes": ("coding",),
+        "is_default": False,
+    },
+}
+BOOTSTRAP_CONTEXT_PACK_SPECS = {
+    "planning": {
+        "name": "xyn-planner-canon",
+        "purpose": "planner",
+        "filename": "xyn-planner-canon.md",
+        "version": "1.0.0",
+    },
+    "coding": {
+        "name": "xyn-coder-canon",
+        "purpose": "coder",
+        "filename": "xyn-coder-canon.md",
+        "version": "1.0.0",
+    },
 }
 
 
@@ -129,6 +171,266 @@ def _read_provider_env_key(provider_slug: str) -> str:
     return ""
 
 
+def _normalize_provider_slug(provider_slug: str) -> str:
+    raw = str(provider_slug or "").strip().lower()
+    if raw in {"gemini", "google"}:
+        return "google"
+    if raw in {"openai", "anthropic"}:
+        return raw
+    return ""
+
+
+def _bootstrap_context_pack_root() -> Path:
+    return Path(__file__).resolve().parents[1] / "context_packs"
+
+
+def _serialize_context_pack_ref(pack: Optional[ContextPack]) -> Optional[Dict[str, Any]]:
+    if pack is None:
+        return None
+    return {
+        "id": str(pack.id),
+        "name": pack.name,
+        "purpose": pack.purpose,
+        "scope": pack.scope,
+        "version": pack.version,
+    }
+
+
+def _ensure_bootstrap_context_pack(role_slug: str) -> List[Dict[str, Any]]:
+    spec = BOOTSTRAP_CONTEXT_PACK_SPECS.get(role_slug)
+    if not spec:
+        return []
+    pack = (
+        ContextPack.objects.filter(
+            name=spec["name"],
+            purpose=spec["purpose"],
+            scope="global",
+            version=spec["version"],
+            namespace="",
+            project_key="",
+        )
+        .order_by("-is_active", "-updated_at")
+        .first()
+    )
+    content_path = _bootstrap_context_pack_root() / spec["filename"]
+    content = content_path.read_text(encoding="utf-8") if content_path.exists() else ""
+    defaults = {
+        "purpose": spec["purpose"],
+        "scope": "global",
+        "namespace": "",
+        "project_key": "",
+        "version": spec["version"],
+        "is_active": True,
+        "is_default": True,
+        "content_markdown": content,
+    }
+    if pack is None:
+        if not content:
+            return []
+        pack = ContextPack.objects.create(name=spec["name"], **defaults)
+    else:
+        update_fields: List[str] = []
+        for field, value in defaults.items():
+            if getattr(pack, field) != value and (field != "content_markdown" or content):
+                setattr(pack, field, value)
+                update_fields.append(field)
+        if update_fields:
+            update_fields.append("updated_at")
+            pack.save(update_fields=update_fields)
+    ref = _serialize_context_pack_ref(pack)
+    return [ref] if ref else []
+
+
+def _read_bootstrap_role_spec(role_slug: str) -> Optional[Dict[str, str]]:
+    if role_slug == "default":
+        provider_slug = _normalize_provider_slug(
+            os.environ.get("XYN_AI_PROVIDER")
+            or os.environ.get("XYN_DEFAULT_MODEL_PROVIDER")
+            or "openai"
+        )
+        if not provider_slug:
+            provider_slug = "openai"
+        model_name = str(
+            os.environ.get("XYN_AI_MODEL")
+            or os.environ.get("XYN_DEFAULT_MODEL_NAME")
+            or PROVIDER_MODEL_DEFAULTS.get(provider_slug, "gpt-5-mini")
+        ).strip()
+        api_key = _read_provider_env_key(provider_slug)
+        if not api_key and provider_slug == "openai":
+            legacy = OpenAIConfig.objects.first()
+            api_key = str(legacy.api_key if legacy else "").strip()
+        if not api_key:
+            return None
+        return {
+            "role": role_slug,
+            "provider_slug": provider_slug,
+            "model_name": model_name,
+            "api_key": api_key,
+        }
+
+    prefix = BOOTSTRAP_ROLE_ENV_PREFIX[role_slug]
+    raw_provider = str(os.environ.get(f"{prefix}_PROVIDER") or "").strip()
+    raw_model = str(os.environ.get(f"{prefix}_MODEL") or "").strip()
+    raw_key = str(os.environ.get(f"{prefix}_API_KEY") or "").strip()
+    if not raw_provider and not raw_model and not raw_key:
+        return None
+    if not raw_provider or not raw_model or not raw_key:
+        raise AiConfigError(
+            f"{prefix}_PROVIDER, {prefix}_MODEL, and {prefix}_API_KEY are required when configuring the {role_slug} bootstrap agent."
+        )
+    provider_slug = _normalize_provider_slug(raw_provider)
+    if not provider_slug:
+        raise AiConfigError(f"Unsupported provider '{raw_provider}' for {role_slug} bootstrap agent.")
+    return {
+        "role": role_slug,
+        "provider_slug": provider_slug,
+        "model_name": raw_model,
+        "api_key": raw_key,
+    }
+
+
+def _bootstrap_secret_logical_name(provider_slug: str, api_key: str) -> str:
+    fingerprint = hashlib.sha256(f"{provider_slug}:{api_key}".encode("utf-8")).hexdigest()[:12]
+    return normalize_secret_logical_name(f"ai/{provider_slug}/bootstrap/{fingerprint}/api_key")
+
+
+def _ensure_bootstrap_credential(
+    *,
+    provider: ModelProvider,
+    api_key: str,
+    credential_cache: Dict[tuple[str, str], ProviderCredential],
+) -> ProviderCredential:
+    fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    cache_key = (str(provider.id), fingerprint)
+    cached = credential_cache.get(cache_key)
+    if cached:
+        return cached
+
+    for credential in ProviderCredential.objects.filter(provider=provider, enabled=True).order_by("-is_default", "name", "-updated_at"):
+        if _credential_api_key(credential, provider.slug) == api_key:
+            credential_cache[cache_key] = credential
+            return credential
+
+    store = SecretStore.objects.filter(is_default=True).first()
+    if not store:
+        credential = ProviderCredential.objects.create(
+            provider=provider,
+            name=f"{provider.slug}-bootstrap-{fingerprint[:8]}",
+            auth_type="api_key",
+            api_key_encrypted=encrypt_api_key(api_key),
+            is_default=False,
+            enabled=True,
+        )
+        credential_cache[cache_key] = credential
+        return credential
+
+    logical = _bootstrap_secret_logical_name(provider.slug, api_key)
+    secret_ref = SecretRef.objects.filter(scope_kind="platform", scope_id__isnull=True, name=logical).first()
+    if not secret_ref:
+        secret_ref = SecretRef.objects.create(
+            name=logical,
+            scope_kind="platform",
+            scope_id=None,
+            store=store,
+            external_ref="pending",
+            type="secrets_manager",
+            description=f"{provider.slug} bootstrap AI API key",
+        )
+    try:
+        external_ref, metadata = write_secret_value(
+            store,
+            logical_name=logical,
+            scope_kind="platform",
+            scope_id=None,
+            scope_path_id=None,
+            secret_ref_id=str(secret_ref.id),
+            value=api_key,
+            description=f"{provider.slug} bootstrap AI API key",
+        )
+        secret_ref.external_ref = external_ref
+        secret_ref.metadata_json = {**(secret_ref.metadata_json or {}), **metadata}
+        secret_ref.save(update_fields=["external_ref", "metadata_json", "updated_at"])
+        credential = ProviderCredential.objects.create(
+            provider=provider,
+            name=f"{provider.slug}-bootstrap-{fingerprint[:8]}",
+            auth_type="api_key",
+            secret_ref=secret_ref,
+            is_default=False,
+            enabled=True,
+        )
+    except Exception:
+        credential = ProviderCredential.objects.create(
+            provider=provider,
+            name=f"{provider.slug}-bootstrap-{fingerprint[:8]}",
+            auth_type="env_ref",
+            env_var_name=PROVIDER_ENV_API_KEY.get(provider.slug, [""])[0] or "",
+            is_default=False,
+            enabled=True,
+        )
+    credential_cache[cache_key] = credential
+    return credential
+
+
+def _ensure_bootstrap_model_config(*, provider: ModelProvider, model_name: str, credential: ProviderCredential) -> ModelConfig:
+    existing = (
+        ModelConfig.objects.filter(provider=provider, model_name=model_name, credential=credential)
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+    if existing:
+        return existing
+    return ModelConfig.objects.create(
+        provider=provider,
+        credential=credential,
+        model_name=model_name,
+        temperature=float(os.environ.get("XYN_DEFAULT_MODEL_TEMPERATURE") or 0.2),
+        max_tokens=int(os.environ.get("XYN_DEFAULT_MODEL_MAX_TOKENS") or 1200),
+        top_p=float(os.environ.get("XYN_DEFAULT_MODEL_TOP_P") or 1.0),
+        enabled=True,
+    )
+
+
+def _resolve_runtime_agent_for_purpose(purpose_slug: str) -> Optional[AgentDefinition]:
+    purpose = str(purpose_slug or "").strip().lower()
+    if not purpose:
+        return (
+            AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
+            .filter(enabled=True, is_default=True)
+            .order_by("-updated_at", "slug")
+            .first()
+        )
+    purpose_default = (
+        AgentDefinitionPurpose.objects.select_related("agent_definition", "agent_definition__model_config__provider", "agent_definition__model_config__credential")
+        .filter(purpose__slug=purpose, is_default_for_purpose=True, agent_definition__enabled=True)
+        .order_by("agent_definition__slug")
+        .first()
+    )
+    if purpose_default:
+        return purpose_default.agent_definition
+    purpose_specific = (
+        AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
+        .filter(enabled=True, purposes__slug=purpose, is_default=False)
+        .order_by("-updated_at", "slug")
+        .first()
+    )
+    if purpose_specific:
+        return purpose_specific
+    fallback_default = (
+        AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
+        .filter(enabled=True, is_default=True)
+        .order_by("-updated_at", "slug")
+        .first()
+    )
+    if fallback_default:
+        return fallback_default
+    return (
+        AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
+        .filter(enabled=True, purposes__slug=purpose)
+        .order_by("-updated_at", "slug")
+        .first()
+    )
+
+
 def _credential_api_key(credential: Optional[ProviderCredential], provider_slug: str) -> str:
     if credential is None:
         return ""
@@ -184,12 +486,7 @@ def resolve_ai_config(*, purpose_slug: Optional[str] = None, agent_slug: Optiona
             .first()
         )
     if agent is None:
-        agent = (
-            AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
-            .filter(enabled=True, purposes__slug=purpose)
-            .order_by("-is_default", "slug")
-            .first()
-        )
+        agent = _resolve_runtime_agent_for_purpose(purpose)
     if not purpose:
         if agent:
             first_purpose = agent.purposes.order_by("slug").first()
@@ -427,151 +724,34 @@ def ensure_default_ai_seeds() -> None:
         provider, _ = ModelProvider.objects.get_or_create(slug=slug, defaults={"name": name, "enabled": enabled})
         provider_map[slug] = provider
 
-    provider_alias = str(
-        os.environ.get("XYN_AI_PROVIDER")
-        or os.environ.get("XYN_DEFAULT_MODEL_PROVIDER")
-        or "openai"
-    ).strip().lower()
-    provider_slug = "google" if provider_alias in {"google", "gemini"} else provider_alias
-    if provider_slug not in {"openai", "anthropic", "google"}:
-        provider_slug = "openai"
-    model_name = str(
-        os.environ.get("XYN_AI_MODEL")
-        or os.environ.get("XYN_DEFAULT_MODEL_NAME")
-        or PROVIDER_MODEL_DEFAULTS.get(provider_slug, "gpt-5-mini")
-    ).strip()
-    provider = provider_map.get(provider_slug) or provider_map.get("openai")
+    role_specs = {
+        role: spec
+        for role in ("default", "planning", "coding")
+        for spec in [ _read_bootstrap_role_spec(role) ]
+        if spec is not None
+    }
+    if "default" not in role_specs:
+        return
 
-    def _seed_bootstrap_credential(slug: str, provider_obj: Optional[ModelProvider]) -> Optional[ProviderCredential]:
-        if not provider_obj:
-            return None
-        existing_default = (
-            ProviderCredential.objects.filter(provider=provider_obj, is_default=True, enabled=True).order_by("-created_at").first()
+    credential_cache: Dict[tuple[str, str], ProviderCredential] = {}
+    role_models: Dict[str, ModelConfig] = {}
+    for role, spec in role_specs.items():
+        provider = provider_map.get(spec["provider_slug"])
+        if not provider:
+            continue
+        credential = _ensure_bootstrap_credential(
+            provider=provider,
+            api_key=spec["api_key"],
+            credential_cache=credential_cache,
         )
-        env_value = _read_provider_env_key(slug)
-        if not env_value and slug == "openai":
-            legacy = OpenAIConfig.objects.first()
-            env_value = str(legacy.api_key if legacy else "").strip()
-        if existing_default:
-            if existing_default.auth_type == "env_ref" and not str(existing_default.env_var_name or "").strip():
-                existing_default.env_var_name = PROVIDER_ENV_API_KEY.get(slug, [""])[0] or ""
-                existing_default.save(update_fields=["env_var_name", "updated_at"])
-            if existing_default.auth_type == "api_key" and env_value and existing_default.name == "codex-bootstrap":
-                store = SecretStore.objects.filter(is_default=True).first()
-                if store:
-                    logical = normalize_secret_logical_name(f"ai/{slug}/codex-bootstrap/api_key")
-                    secret_ref = existing_default.secret_ref
-                    if not secret_ref:
-                        secret_ref = SecretRef.objects.filter(scope_kind="platform", scope_id__isnull=True, name=logical).first()
-                    if not secret_ref:
-                        secret_ref = SecretRef.objects.create(
-                            name=logical,
-                            scope_kind="platform",
-                            scope_id=None,
-                            store=store,
-                            external_ref="pending",
-                            type="secrets_manager",
-                            description=f"{slug} bootstrap AI API key",
-                        )
-                    try:
-                        external_ref, metadata = write_secret_value(
-                            store,
-                            logical_name=logical,
-                            scope_kind="platform",
-                            scope_id=None,
-                            scope_path_id=None,
-                            secret_ref_id=str(secret_ref.id),
-                            value=env_value,
-                            description=f"{slug} bootstrap AI API key",
-                        )
-                        secret_ref.external_ref = external_ref
-                        secret_ref.metadata_json = {**(secret_ref.metadata_json or {}), **metadata}
-                        secret_ref.save(update_fields=["external_ref", "metadata_json", "updated_at"])
-                        existing_default.secret_ref = secret_ref
-                        existing_default.api_key_encrypted = None
-                        existing_default.save(update_fields=["secret_ref", "api_key_encrypted", "updated_at"])
-                    except Exception:
-                        logger.exception("Failed to refresh bootstrap credential secret for provider=%s", slug)
-            return existing_default
-        if not env_value:
-            return None
-        name = "codex-bootstrap"
-        existing_named = ProviderCredential.objects.filter(provider=provider_obj, name=name).first()
-        if existing_named:
-            if not existing_named.is_default:
-                existing_named.is_default = True
-                existing_named.enabled = True
-                existing_named.save(update_fields=["is_default", "enabled", "updated_at"])
-            return existing_named
-        store = SecretStore.objects.filter(is_default=True).first()
-        if not store:
-            return ProviderCredential.objects.create(
-                provider=provider_obj,
-                name=name,
-                auth_type="env_ref",
-                env_var_name=PROVIDER_ENV_API_KEY.get(slug, [""])[0] or "",
-                is_default=True,
-                enabled=True,
-            )
-        logical = normalize_secret_logical_name(f"ai/{slug}/{name}/api_key")
-        secret_ref = SecretRef.objects.filter(scope_kind="platform", scope_id__isnull=True, name=logical).first()
-        if not secret_ref:
-            secret_ref = SecretRef.objects.create(
-                name=logical,
-                scope_kind="platform",
-                scope_id=None,
-                store=store,
-                external_ref="pending",
-                type="secrets_manager",
-                description=f"{slug} bootstrap AI API key",
-            )
-        try:
-            external_ref, metadata = write_secret_value(
-                store,
-                logical_name=logical,
-                scope_kind="platform",
-                scope_id=None,
-                scope_path_id=None,
-                secret_ref_id=str(secret_ref.id),
-                value=env_value,
-                description=f"{slug} bootstrap AI API key",
-            )
-            secret_ref.external_ref = external_ref
-            secret_ref.metadata_json = {**(secret_ref.metadata_json or {}), **metadata}
-            secret_ref.save(update_fields=["external_ref", "metadata_json", "updated_at"])
-            return ProviderCredential.objects.create(
-                provider=provider_obj,
-                name=name,
-                auth_type="api_key",
-                secret_ref=secret_ref,
-                is_default=True,
-                enabled=True,
-            )
-        except Exception:
-            # Fall back to env_ref if store exists but isn't writable in this environment.
-            return ProviderCredential.objects.create(
-                provider=provider_obj,
-                name=name,
-                auth_type="env_ref",
-                env_var_name=PROVIDER_ENV_API_KEY.get(slug, [""])[0] or "",
-                is_default=True,
-                enabled=True,
-            )
+        model_config = _ensure_bootstrap_model_config(
+            provider=provider,
+            model_name=spec["model_name"],
+            credential=credential,
+        )
+        role_models[role] = model_config
 
-    _seed_bootstrap_credential("openai", provider_map.get("openai"))
-    _seed_bootstrap_credential("anthropic", provider_map.get("anthropic"))
-    _seed_bootstrap_credential("google", provider_map.get("google"))
-
-    default_model = None
-    if provider:
-        default_model = provider.model_configs.filter(model_name=model_name).order_by("created_at").first()
-        if default_model is None:
-            default_model = provider.model_configs.create(
-                model_name=model_name,
-                temperature=float(os.environ.get("XYN_DEFAULT_MODEL_TEMPERATURE") or 0.2),
-                max_tokens=int(os.environ.get("XYN_DEFAULT_MODEL_MAX_TOKENS") or 1200),
-                enabled=True,
-            )
+    default_model = role_models.get("default")
 
     coding, _ = AgentPurpose.objects.get_or_create(
         slug="coding",
@@ -582,6 +762,17 @@ def ensure_default_ai_seeds() -> None:
             "enabled": True,
             "preamble": "Purpose: coding. Focus on production-ready implementation guidance.",
             "model_config": default_model,
+        },
+    )
+    planning, _ = AgentPurpose.objects.get_or_create(
+        slug="planning",
+        defaults={
+            "name": "Planning",
+            "description": "Planning, decomposition, and implementation strategy tasks",
+            "status": "active",
+            "enabled": True,
+            "preamble": "Purpose: planning. Focus on decomposition, sequencing, and implementation guidance.",
+            "model_config": role_models.get("planning") or default_model,
         },
     )
     documentation, _ = AgentPurpose.objects.get_or_create(
@@ -602,7 +793,17 @@ def ensure_default_ai_seeds() -> None:
         coding.preamble = "Purpose: coding. Focus on production-ready implementation guidance."
     if default_model and coding.model_config_id != default_model.id:
         coding.model_config = default_model
-    coding.save(update_fields=["name", "preamble", "model_config", "updated_at"])
+    coding.default_context_pack_refs_json = _ensure_bootstrap_context_pack("coding")
+    coding.save(update_fields=["name", "preamble", "model_config", "default_context_pack_refs_json", "updated_at"])
+    if not planning.name:
+        planning.name = "Planning"
+    if not planning.preamble:
+        planning.preamble = "Purpose: planning. Focus on decomposition, sequencing, and implementation guidance."
+    planning_model = role_models.get("planning") or default_model
+    if planning_model and planning.model_config_id != planning_model.id:
+        planning.model_config = planning_model
+    planning.default_context_pack_refs_json = _ensure_bootstrap_context_pack("planning")
+    planning.save(update_fields=["name", "preamble", "model_config", "default_context_pack_refs_json", "updated_at"])
     if not documentation.name:
         documentation.name = "Documentation"
     if not documentation.preamble:
@@ -611,32 +812,58 @@ def ensure_default_ai_seeds() -> None:
         documentation.model_config = default_model
     documentation.save(update_fields=["name", "preamble", "model_config", "updated_at"])
 
-    assistant, _ = AgentDefinition.objects.get_or_create(
-        slug="default-assistant",
-        defaults={
-            "name": "Xyn Default Assistant",
-            "model_config": default_model,
-            "system_prompt_text": DEFAULT_ASSISTANT_PROMPT,
-            "is_default": True,
-            "enabled": True,
-        },
-    )
-    assistant.name = "Xyn Default Assistant"
-    if default_model and assistant.model_config_id != default_model.id:
-        assistant.model_config = default_model
-    if DEFAULT_ASSISTANT_PROMPT and not str(assistant.system_prompt_text or "").strip():
-        assistant.system_prompt_text = DEFAULT_ASSISTANT_PROMPT
-    assistant.is_default = True
-    assistant.enabled = True
-    update_fields = ["name", "model_config", "is_default", "enabled", "updated_at"]
-    if DEFAULT_ASSISTANT_PROMPT and not str(assistant.system_prompt_text or "").strip():
-        update_fields.append("system_prompt_text")
-    assistant.save(update_fields=update_fields)
-    AgentDefinition.objects.exclude(id=assistant.id).filter(is_default=True).update(is_default=False)
-    assistant.purposes.add(coding, documentation)
+    role_agents: Dict[str, AgentDefinition] = {}
+    for role, meta in BOOTSTRAP_ROLE_AGENT_META.items():
+        model_config = role_models.get(role)
+        if model_config is None:
+            continue
+        agent, _ = AgentDefinition.objects.get_or_create(
+            slug=meta["slug"],
+            defaults={
+                "name": meta["name"],
+                "model_config": model_config,
+                "system_prompt_text": DEFAULT_ASSISTANT_PROMPT if role == "default" else "",
+                "context_pack_refs_json": _ensure_bootstrap_context_pack(role) if role in {"planning", "coding"} else [],
+                "is_default": bool(meta["is_default"]),
+                "enabled": True,
+            },
+        )
+        update_fields = ["name", "model_config", "is_default", "enabled", "updated_at"]
+        if role in {"planning", "coding"}:
+            agent.context_pack_refs_json = _ensure_bootstrap_context_pack(role)
+            update_fields.append("context_pack_refs_json")
+        if role == "default" and DEFAULT_ASSISTANT_PROMPT and not str(agent.system_prompt_text or "").strip():
+            agent.system_prompt_text = DEFAULT_ASSISTANT_PROMPT
+            update_fields.append("system_prompt_text")
+        agent.name = meta["name"]
+        agent.model_config = model_config
+        agent.is_default = bool(meta["is_default"])
+        agent.enabled = True
+        agent.save(update_fields=update_fields)
+        desired_purposes = list(AgentPurpose.objects.filter(slug__in=meta["purposes"]))
+        AgentDefinitionPurpose.objects.filter(agent_definition=agent).exclude(purpose__in=desired_purposes).delete()
+        for purpose in desired_purposes:
+            AgentDefinitionPurpose.objects.get_or_create(agent_definition=agent, purpose=purpose)
+        role_agents[role] = agent
+    if "default" in role_agents:
+        AgentDefinition.objects.exclude(id=role_agents["default"].id).filter(is_default=True).update(is_default=False)
+    for purpose_slug, owner_role in {
+        "planning": "planning" if "planning" in role_agents else "default",
+        "coding": "coding" if "coding" in role_agents else "default",
+    }.items():
+        AgentDefinitionPurpose.objects.filter(purpose__slug=purpose_slug, is_default_for_purpose=True).exclude(
+            agent_definition=role_agents.get(owner_role)
+        ).update(is_default_for_purpose=False)
+        owner = role_agents.get(owner_role)
+        if owner:
+            link = AgentDefinitionPurpose.objects.filter(agent_definition=owner, purpose__slug=purpose_slug).first()
+            if link and not link.is_default_for_purpose:
+                link.is_default_for_purpose = True
+                link.save(update_fields=["is_default_for_purpose"])
     # Remove the legacy bootstrap agent to keep a single canonical default assistant.
-    AgentDefinition.objects.filter(slug="documentation-default").exclude(id=assistant.id).delete()
-    AgentDefinition.objects.filter(name__iexact="Documentation Default").exclude(id=assistant.id).delete()
+    if "default" in role_agents:
+        AgentDefinition.objects.filter(slug="documentation-default").exclude(id=role_agents["default"].id).delete()
+        AgentDefinition.objects.filter(name__iexact="Documentation Default").exclude(id=role_agents["default"].id).delete()
 
 
 def get_default_agent_bootstrap_status() -> Dict[str, Any]:
@@ -657,11 +884,9 @@ def get_default_agent_bootstrap_status() -> Dict[str, Any]:
         or PROVIDER_MODEL_DEFAULTS.get(provider_slug or "openai", "gpt-5-mini")
     ).strip()
     key_present = bool(_read_provider_env_key(provider_slug)) if provider_slug in PROVIDER_ENV_API_KEY else False
-    agent = (
-        AgentDefinition.objects.select_related("model_config__provider")
-        .filter(slug="default-assistant")
-        .first()
-    )
+    agent = AgentDefinition.objects.select_related("model_config__provider").filter(slug="default-assistant").first()
+    planning_agent = AgentDefinition.objects.select_related("model_config__provider").filter(slug="planning-assistant").first()
+    coding_agent = AgentDefinition.objects.select_related("model_config__provider").filter(slug="coding-assistant").first()
     return {
         "provider": provider_label or "none",
         "model": model_name if provider_label else "none",
@@ -669,4 +894,8 @@ def get_default_agent_bootstrap_status() -> Dict[str, Any]:
         "default_agent_id": str(agent.id) if agent else None,
         "default_agent_slug": agent.slug if agent else None,
         "default_agent_updated_at": agent.updated_at if agent else None,
+        "planning_agent_id": str(planning_agent.id) if planning_agent else None,
+        "planning_agent_slug": planning_agent.slug if planning_agent else None,
+        "coding_agent_id": str(coding_agent.id) if coding_agent else None,
+        "coding_agent_slug": coding_agent.slug if coding_agent else None,
     }
