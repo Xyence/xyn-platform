@@ -16524,7 +16524,12 @@ def app_palette_execute(request: HttpRequest) -> JsonResponse:
     runtime_target_record = _workspace_runtime_target(workspace, "net-inventory")
     generated_artifact_issue = _workspace_generated_artifact_issue(workspace, "net-inventory")
     capability_manifest = _workspace_installed_capability_manifest(workspace, "net-inventory")
-    if runtime_target_record and generated_artifact_issue and _looks_like_generated_crud_prompt(prompt):
+    if (
+        runtime_target_record
+        and generated_artifact_issue
+        and _looks_like_generated_crud_prompt(prompt)
+        and not _looks_like_generated_app_evolution_request(prompt)
+    ):
         result = _generated_app_invalid_contract_response(prompt=prompt, issue=generated_artifact_issue)
         _log_prompt_activity(
             request_id=request_id,
@@ -17858,6 +17863,8 @@ def _should_use_legacy_intake_fallback(prompt: str, *, context_artifact: Optiona
     text = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
     if not text:
         return False
+    if re.search(r"\b(create|make|start|new)\s+draft\b", text):
+        return True
     if re.search(r"^(show options|what categories|what formats|available categories|available formats)\b", text):
         return True
     if "context pack" in text and re.search(r"\b(add|set|update|rewrite|change|edit|patch)\b", text):
@@ -20261,7 +20268,13 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
     generated_runtime_target = _workspace_runtime_target(operator_workspace, "net-inventory") if operator_workspace else None
     generated_artifact_issue = _workspace_generated_artifact_issue(operator_workspace, "net-inventory") if operator_workspace else None
-    if operator_workspace and generated_runtime_target and generated_artifact_issue and _looks_like_generated_crud_prompt(message):
+    if (
+        operator_workspace
+        and generated_runtime_target
+        and generated_artifact_issue
+        and _looks_like_generated_crud_prompt(message)
+        and not _looks_like_generated_app_evolution_request(message)
+    ):
         response_payload = {
             "status": "ValidationError",
             "action_type": "CreateDraft",
@@ -20453,6 +20466,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         ),
     )
     epic_d_payload = epic_d_intent.model_dump(mode="json")
+    generated_app_evolution = _match_generated_app_evolution_command(message, operator_workspace) if operator_workspace else None
     prompt_interpretation = _prompt_interpretation_from_intent(
         message=message,
         intent_payload=epic_d_payload,
@@ -20469,7 +20483,10 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     # Epic D is authoritative only for the supported v1 families:
     # development_work, app_operation, and run_supervision. Everything below this
     # branch that does not return here is preserved legacy routing.
-    if epic_d_intent.needs_clarification or str(epic_d_intent.intent_type or "") != "unsupported_intent":
+    if (
+        (epic_d_intent.needs_clarification and not generated_app_evolution)
+        or str(epic_d_intent.intent_type or "") != "unsupported_intent"
+    ):
         if str(epic_d_intent.intent_family or "") == "app_operation" and str(epic_d_intent.intent_type or "") in {
             "create_record",
             "update_record",
@@ -20661,7 +20678,13 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     # Preserved legacy generated-app and draft-routing behavior below this point.
     # These flows intentionally remain outside Epic D until they are migrated.
     generated_capability_manifest = _workspace_installed_capability_manifest(operator_workspace, "net-inventory") if operator_workspace else None
-    if operator_workspace and generated_runtime_target and generated_artifact_issue and _looks_like_generated_crud_prompt(message):
+    if (
+        operator_workspace
+        and generated_runtime_target
+        and generated_artifact_issue
+        and _looks_like_generated_crud_prompt(message)
+        and not _looks_like_generated_app_evolution_request(message)
+    ):
         response_payload = {
             "status": "ValidationError",
             "action_type": "CreateDraft",
@@ -20759,7 +20782,6 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             )
         return JsonResponse(response_payload)
 
-    generated_app_evolution = _match_generated_app_evolution_command(message, operator_workspace) if operator_workspace else None
     if generated_app_evolution:
         response_payload = {
             "status": "DraftReady",
@@ -21285,7 +21307,12 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                 generated_artifact_issue = _workspace_generated_artifact_issue(workspace, "net-inventory")
                 capability_manifest = _workspace_installed_capability_manifest(workspace, "net-inventory")
                 raw_prompt = str(body_payload.get("raw_prompt") or payload.get("message") or "").strip()
-                if runtime_target_record and generated_artifact_issue and _looks_like_generated_crud_prompt(raw_prompt):
+                if (
+                    runtime_target_record
+                    and generated_artifact_issue
+                    and _looks_like_generated_crud_prompt(raw_prompt)
+                    and not _looks_like_generated_app_evolution_request(raw_prompt)
+                ):
                     _log_prompt_activity(
                         request_id=request_id,
                         identity=identity,
