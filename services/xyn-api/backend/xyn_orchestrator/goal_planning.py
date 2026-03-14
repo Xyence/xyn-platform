@@ -526,6 +526,8 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
                 "dependency_work_item_refs": list(work_item_def.dependency_work_item_refs),
                 "resolution_notes": list(plan.resolution_notes),
             },
+            revision=1,
+            revision_reason="initial_plan",
         )
         task = DevTask.objects.create(
             title=work_item_def.title[:240],
@@ -541,7 +543,9 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
             target_repo=target_repo,
             target_branch=target_branch,
             execution_brief=execution_brief,
-            execution_policy={},
+            execution_brief_history=[],
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
             goal=goal,
             coordination_thread=thread,
             work_item_id=f"goal-{goal.id.hex[:8]}-{slugify(work_item_def.title)[:60]}",

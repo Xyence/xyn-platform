@@ -83,8 +83,12 @@ class DevTaskRuntimeBridgeTests(TestCase):
             ]
         }
 
-    def _request(self, path: str, *, method: str = "post", query: dict | None = None):
-        request = getattr(self.factory, method.lower())(path, data=query or {})
+    def _request(self, path: str, *, method: str = "post", query: dict | None = None, data=None):
+        payload = data if data is not None else (query or {})
+        kwargs = {"data": payload}
+        if isinstance(payload, str):
+            kwargs["content_type"] = "application/json"
+        request = getattr(self.factory, method.lower())(path, **kwargs)
         request.user = self.user
         return request
 
@@ -134,6 +138,93 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(runtime_payload["context"]["metadata"]["execution_brief_source"], "fallback")
         self.assertEqual(runtime_payload["policy"]["max_retries"], 2)
         self.assertIn("report", runtime_payload["requested_outputs"])
+
+    def test_dev_task_run_blocks_gated_brief_until_approved(self):
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Implement Epic C bridge",
+            "objective": "Route development execution through the runtime bridge.",
+        }
+        self.task.execution_brief_review_state = "draft"
+        self.task.execution_policy = {"require_brief_approval": True}
+        self.task.save(update_fields=["execution_brief", "execution_brief_review_state", "execution_policy", "updated_at"])
+
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}/run")
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._download_artifact_json", return_value=self.plan_json
+        ), mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as seed_api_request:
+            response = dev_task_run(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertIn("review is required", payload["error"])
+        seed_api_request.assert_not_called()
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.status, "awaiting_review")
+
+    def test_dev_task_run_allows_gated_brief_when_approved(self):
+        runtime_run_id = str(uuid.uuid4())
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Implement Epic C bridge",
+            "objective": "Route development execution through the runtime bridge.",
+        }
+        self.task.execution_brief_review_state = "approved"
+        self.task.execution_policy = {"require_brief_approval": True}
+        self.task.save(update_fields=["execution_brief", "execution_brief_review_state", "execution_policy", "updated_at"])
+
+        def _seed_api_request(*, method, path, workspace_id="", workspace_slug="", payload=None, timeout=20):
+            self.assertEqual(method, "POST")
+            self.assertEqual(path, "/api/v1/runtime/runs")
+            return _FakeResponse(body={"id": runtime_run_id, "status": "queued"})
+
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}/run")
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._download_artifact_json", return_value=self.plan_json
+        ), mock.patch("xyn_orchestrator.xyn_api._seed_api_request", side_effect=_seed_api_request):
+            response = dev_task_run(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["run_id"], runtime_run_id)
+
+    def test_dev_task_run_uses_current_active_brief_after_revision(self):
+        runtime_run_id = str(uuid.uuid4())
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Current revised brief",
+            "revision": 2,
+            "objective": "Use the revised brief only.",
+        }
+        self.task.execution_brief_history = [
+            {
+                "revision": 1,
+                "brief": {"schema_version": "v1", "summary": "Old approved brief", "revision": 1},
+                "review_state": "approved",
+            }
+        ]
+        self.task.execution_brief_review_state = "draft"
+        self.task.execution_policy = {"require_brief_approval": True}
+        self.task.save(
+            update_fields=[
+                "execution_brief",
+                "execution_brief_history",
+                "execution_brief_review_state",
+                "execution_policy",
+                "updated_at",
+            ]
+        )
+
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}/run")
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._download_artifact_json", return_value=self.plan_json
+        ), mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as seed_api_request:
+            response = dev_task_run(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertIn("review is required", payload["error"])
+        seed_api_request.assert_not_called()
 
     def test_dev_task_runtime_payload_prefers_structured_execution_brief(self):
         self.task.execution_brief = {
@@ -247,6 +338,7 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(payload["target_repo"], "xyn-platform")
         self.assertEqual(payload["target_branch"], "develop")
         self.assertEqual(payload["execution_policy"], {"auto_continue": True})
+        self.assertEqual(payload["execution_brief_review_state"], "draft")
 
     def test_work_item_detail_exposes_execution_brief(self):
         self.task.execution_brief = {
@@ -256,13 +348,88 @@ class DevTaskRuntimeBridgeTests(TestCase):
             "implementation_intent": "Use the stored brief instead of inferring intent from description text alone.",
             "target": {"repository_slug": "xyn-platform", "branch": "develop"},
         }
-        self.task.save(update_fields=["execution_brief", "updated_at"])
+        self.task.execution_brief_review_state = "ready"
+        self.task.execution_brief_review_notes = "Ready for coding"
+        self.task.save(update_fields=["execution_brief", "execution_brief_review_state", "execution_brief_review_notes", "updated_at"])
         request = self._request(f"/xyn/api/dev-tasks/{self.task.id}", method="get")
         with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2]:
             response = dev_task_detail(request, str(self.task.id))
         payload = json.loads(response.content)
         self.assertEqual(payload["execution_brief"]["summary"], "Bounded handoff")
         self.assertTrue(payload["has_execution_brief"])
+        self.assertEqual(payload["execution_brief_review_state"], "ready")
+        self.assertEqual(payload["execution_brief_review_notes"], "Ready for coding")
+
+    def test_dev_task_detail_patch_updates_execution_brief_review_state(self):
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Bounded handoff",
+            "objective": "Implement the explicit handoff",
+        }
+        self.task.save(update_fields=["execution_brief", "updated_at"])
+        request = self._request(
+            f"/xyn/api/dev-tasks/{self.task.id}",
+            method="patch",
+            data=json.dumps(
+                {
+                "execution_brief_review_state": "approved",
+                "execution_brief_review_notes": "Reviewed and approved",
+                }
+            ),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2]:
+            response = dev_task_detail(request, str(self.task.id))
+        self.assertEqual(response.status_code, 200)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.execution_brief_review_state, "approved")
+        self.assertEqual(self.task.execution_brief_review_notes, "Reviewed and approved")
+        self.assertEqual(self.task.execution_brief_reviewed_by_id, self.user.id)
+
+    def test_dev_task_detail_patch_regenerates_execution_brief_and_supersedes_prior_version(self):
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Initial brief",
+            "revision": 1,
+            "objective": "Initial objective",
+        }
+        self.task.execution_brief_review_state = "rejected"
+        self.task.execution_brief_review_notes = "Needs clarification"
+        self.task.execution_policy = {"require_brief_approval": True}
+        self.task.save(
+            update_fields=[
+                "execution_brief",
+                "execution_brief_review_state",
+                "execution_brief_review_notes",
+                "execution_policy",
+                "updated_at",
+            ]
+        )
+        request = self._request(
+            f"/xyn/api/dev-tasks/{self.task.id}",
+            method="patch",
+            data=json.dumps(
+                {
+                    "execution_brief_action": "regenerate",
+                    "execution_brief_revision_reason": "review_rejected",
+                    "execution_brief_review_notes": "Clarified for another pass",
+                }
+            ),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._download_artifact_json", return_value=self.plan_json
+        ):
+            response = dev_task_detail(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 200)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.execution_brief["revision"], 2)
+        self.assertEqual(self.task.execution_brief["revision_reason"], "review_rejected")
+        self.assertEqual(self.task.execution_brief_review_state, "draft")
+        self.assertEqual(len(self.task.execution_brief_history), 1)
+        self.assertEqual(self.task.execution_brief_history[0]["brief"]["summary"], "Initial brief")
+        payload = json.loads(response.content)
+        self.assertEqual(payload["execution_brief_revision"], 2)
+        self.assertEqual(payload["execution_brief_history_count"], 1)
 
     def test_duplicate_run_request_reuses_active_runtime_run(self):
         runtime_run_id = uuid.uuid4()

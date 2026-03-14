@@ -2162,6 +2162,13 @@ class ManagedRepository(models.Model):
 
 
 class DevTask(models.Model):
+    EXECUTION_BRIEF_REVIEW_STATES = [
+        ("draft", "Draft"),
+        ("ready", "Ready"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+        ("superseded", "Superseded"),
+    ]
     STATUS_CHOICES = [
         ("queued", "Queued"),
         ("running", "Running"),
@@ -2196,6 +2203,13 @@ class DevTask(models.Model):
     target_repo = models.CharField(max_length=120, blank=True)
     target_branch = models.CharField(max_length=120, blank=True)
     execution_brief = models.JSONField(null=True, blank=True)
+    execution_brief_history = models.JSONField(default=list, blank=True)
+    execution_brief_review_state = models.CharField(max_length=20, choices=EXECUTION_BRIEF_REVIEW_STATES, default="draft")
+    execution_brief_review_notes = models.TextField(blank=True)
+    execution_brief_reviewed_at = models.DateTimeField(null=True, blank=True)
+    execution_brief_reviewed_by = models.ForeignKey(
+        "auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="dev_tasks_brief_reviewed"
+    )
     execution_policy = models.JSONField(null=True, blank=True)
     goal = models.ForeignKey("Goal", null=True, blank=True, on_delete=models.SET_NULL, related_name="work_items")
     coordination_thread = models.ForeignKey(

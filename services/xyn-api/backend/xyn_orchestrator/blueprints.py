@@ -64,6 +64,7 @@ from .deployments import (
     load_release_plan_json,
     maybe_trigger_rollback,
 )
+from .execution_briefs import ensure_execution_brief_ready
 from .managed_storage import delete_local_artifact, load_local_artifact_json, store_local_artifact
 from .artifact_links import ensure_blueprint_artifact, ensure_context_pack_artifact, ensure_draft_session_artifact, ensure_module_artifact
 
@@ -6326,6 +6327,8 @@ def internal_dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse
             "input_artifact_key": task.input_artifact_key,
             "target_instance_id": str(task.target_instance_id) if task.target_instance_id else None,
             "force": task.force,
+            "execution_brief_review_state": str(task.execution_brief_review_state or "draft"),
+            "has_execution_brief": isinstance(task.execution_brief, dict) and bool(task.execution_brief),
             "context_pack_refs": resolved.get("refs", []),
             "context_hash": resolved.get("hash", ""),
             "context": resolved.get("effective_context", ""),
@@ -6344,6 +6347,26 @@ def internal_dev_task_claim(request: HttpRequest, task_id: str) -> JsonResponse:
         return JsonResponse({"error": "Task not runnable"}, status=409)
     if task.task_type == "deploy_release_plan" and not task.target_instance_id:
         return JsonResponse({"error": "target_instance_id required for deploy_release_plan"}, status=400)
+    if task.task_type == "codegen":
+        try:
+            ensure_execution_brief_ready(task)
+        except ValueError as exc:
+            task.status = "awaiting_review"
+            task.last_error = str(exc)
+            task.locked_by = ""
+            task.locked_at = None
+            task.save(update_fields=["status", "last_error", "locked_by", "locked_at", "updated_at"])
+            return JsonResponse(
+                {
+                    "id": str(task.id),
+                    "task_type": task.task_type,
+                    "status": task.status,
+                    "work_item_id": task.work_item_id,
+                    "result_run": str(task.result_run_id) if task.result_run_id else None,
+                    "skip": True,
+                    "blocked_reason": str(exc),
+                }
+            )
     failed_deps = _failed_dependency_work_items(task)
     if failed_deps:
         blocked_reason = f"Blocked by failed dependencies: {', '.join(sorted(failed_deps))}"

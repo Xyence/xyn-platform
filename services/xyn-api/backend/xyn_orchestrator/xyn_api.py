@@ -163,7 +163,14 @@ from .application_factories import (
     list_application_factories,
 )
 from .development_targets import repo_target_payload_for_resolution, resolve_development_target
-from .execution_briefs import resolve_execution_brief
+from .execution_briefs import (
+    ensure_execution_brief_ready,
+    normalize_execution_brief_review_state,
+    regenerate_execution_brief,
+    replace_execution_brief,
+    resolve_execution_brief,
+    valid_execution_brief_review_transition,
+)
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -25611,6 +25618,12 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "target_branch": task.target_branch or None,
         "execution_policy": task.execution_policy or {},
         "has_execution_brief": isinstance(task.execution_brief, dict) and bool(task.execution_brief),
+        "execution_brief_revision": int(((task.execution_brief or {}) if isinstance(task.execution_brief, dict) else {}).get("revision") or 0),
+        "execution_brief_history_count": len(task.execution_brief_history if isinstance(task.execution_brief_history, list) else []),
+        "execution_brief_review_state": normalize_execution_brief_review_state(task.execution_brief_review_state),
+        "execution_brief_review_notes": task.execution_brief_review_notes or "",
+        "execution_brief_reviewed_at": task.execution_brief_reviewed_at,
+        "execution_brief_reviewed_by": str(task.execution_brief_reviewed_by_id) if task.execution_brief_reviewed_by_id else None,
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
         "goal_id": str(task.goal_id) if task.goal_id else None,
@@ -26389,6 +26402,7 @@ def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
         "thread_detail": _coordination_thread_summary(task.coordination_thread) if task.coordination_thread_id else None,
         "goal_detail": _serialize_goal_summary(task.goal) if task.goal_id else None,
         "execution_brief": task.execution_brief if isinstance(task.execution_brief, dict) else None,
+        "execution_brief_history": task.execution_brief_history if isinstance(task.execution_brief_history, list) else [],
         "result_run_detail": run_payload,
         "result_run_artifacts": artifacts_payload,
         "result_run_commands": commands_payload,
@@ -27452,6 +27466,8 @@ def _execute_conversation_action(
 
 
 def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -> Dict[str, Any]:
+    source = _load_dev_task_runtime_source(task)
+    ensure_execution_brief_ready(task, work_item=source["work_item"])
     payload = _build_dev_task_runtime_payload(task, workspace)
     response = _seed_api_request(method="POST", path="/api/v1/runtime/runs", payload=payload, timeout=30)
     content_type = str(response.headers.get("content-type") or "").lower()
@@ -27699,6 +27715,13 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
             target_repo=payload.get("target_repo") or target_resolution.repository_slug or "",
             target_branch=payload.get("target_branch") or target_resolution.branch or "",
             execution_brief=payload.get("execution_brief") if isinstance(payload.get("execution_brief"), dict) else None,
+            execution_brief_history=[],
+            execution_brief_review_state=(
+                normalize_execution_brief_review_state(payload.get("execution_brief_review_state"))
+                if isinstance(payload.get("execution_brief"), dict)
+                else "draft"
+            ),
+            execution_brief_review_notes=str(payload.get("execution_brief_review_notes") or ""),
             execution_policy=payload.get("execution_policy") if isinstance(payload.get("execution_policy"), dict) else None,
             coordination_thread=coordination_thread,
             dependency_work_item_ids=payload.get("dependency_work_item_ids") if isinstance(payload.get("dependency_work_item_ids"), list) else [],
@@ -28673,7 +28696,14 @@ def _dispatch_next_queue_item(*, workspace: Workspace, user, identity: UserIdent
         transition_thread_status(thread, "active", work_item=task, payload={"reason": "dispatch"})
     if thread:
         record_thread_event(thread=thread, event_type="work_item_promoted", work_item=task, payload={"work_item_id": task.work_item_id or str(task.id)})
-    result = _submit_dev_task_runtime_run(task, workspace=workspace, user=user)
+    try:
+        result = _submit_dev_task_runtime_run(task, workspace=workspace, user=user)
+    except ValueError as exc:
+        task.status = "awaiting_review"
+        task.last_error = str(exc)
+        task.updated_by = user
+        task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+        raise RuntimeError(str(exc))
     task.refresh_from_db()
     if thread:
         record_thread_event(
@@ -28716,6 +28746,61 @@ def dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse:
     if staff_error := _require_staff(request):
         return staff_error
     task = get_object_or_404(DevTask, id=task_id)
+    if request.method == "PATCH":
+        payload = _parse_json(request)
+        action = str(payload.get("execution_brief_action") or "").strip().lower()
+        update_fields: List[str] = []
+        if action in {"replace", "regenerate"}:
+            if action == "replace":
+                if not isinstance(payload.get("execution_brief"), dict):
+                    return JsonResponse({"error": "execution_brief object is required for replace"}, status=400)
+                replace_execution_brief(
+                    task,
+                    brief=payload.get("execution_brief") or {},
+                    replaced_by=request.user,
+                    replacement_reason=str(payload.get("execution_brief_revision_reason") or "replaced"),
+                    review_notes=str(payload.get("execution_brief_review_notes") or ""),
+                )
+            else:
+                source_work_item = None
+                try:
+                    source_work_item = _load_dev_task_runtime_source(task).get("work_item")
+                except ValueError:
+                    source_work_item = None
+                regenerate_execution_brief(
+                    task,
+                    work_item=source_work_item if isinstance(source_work_item, dict) else None,
+                    regenerated_by=request.user,
+                    regeneration_reason=str(payload.get("execution_brief_revision_reason") or "regenerated"),
+                    review_notes=str(payload.get("execution_brief_review_notes") or ""),
+                )
+            return JsonResponse(_serialize_work_item_detail(task))
+        if "execution_brief_review_state" in payload:
+            if not isinstance(task.execution_brief, dict) or not task.execution_brief:
+                return JsonResponse({"error": "execution brief is required before review state can be updated"}, status=409)
+            current_state = normalize_execution_brief_review_state(task.execution_brief_review_state)
+            next_state = normalize_execution_brief_review_state(payload.get("execution_brief_review_state"))
+            if not valid_execution_brief_review_transition(current_state, next_state):
+                return JsonResponse({"error": f"invalid execution brief review transition: {current_state} -> {next_state}"}, status=409)
+            if current_state != next_state:
+                task.execution_brief_review_state = next_state
+                task.execution_brief_reviewed_at = timezone.now()
+                task.execution_brief_reviewed_by = request.user
+                update_fields.extend(["execution_brief_review_state", "execution_brief_reviewed_at", "execution_brief_reviewed_by"])
+        if "execution_brief_review_notes" in payload:
+            task.execution_brief_review_notes = str(payload.get("execution_brief_review_notes") or "")
+            update_fields.append("execution_brief_review_notes")
+            if "execution_brief_review_state" not in payload:
+                task.execution_brief_reviewed_at = timezone.now()
+                task.execution_brief_reviewed_by = request.user
+                update_fields.extend(["execution_brief_reviewed_at", "execution_brief_reviewed_by"])
+        if update_fields:
+            task.updated_by = request.user
+            update_fields.extend(["updated_by", "updated_at"])
+            task.save(update_fields=list(dict.fromkeys(update_fields)))
+        return JsonResponse(_serialize_work_item_detail(task))
+    if request.method != "GET":
+        return JsonResponse({"error": "GET or PATCH required"}, status=405)
     return JsonResponse(_serialize_work_item_detail(task))
 
 
@@ -28745,6 +28830,10 @@ def dev_task_run(request: HttpRequest, task_id: str) -> JsonResponse:
         try:
             result = _submit_dev_task_runtime_run(task, workspace=workspace, user=request.user)
         except ValueError as exc:
+            task.status = "awaiting_review"
+            task.last_error = str(exc)
+            task.updated_by = request.user
+            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
             return JsonResponse({"error": str(exc)}, status=409)
         except RuntimeError as exc:
             task.status = "failed"
@@ -28807,6 +28896,10 @@ def dev_task_retry(request: HttpRequest, task_id: str) -> JsonResponse:
         try:
             result = _submit_dev_task_runtime_run(task, workspace=workspace, user=request.user)
         except ValueError as exc:
+            task.status = "awaiting_review"
+            task.last_error = str(exc)
+            task.updated_by = request.user
+            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
             return JsonResponse({"error": str(exc)}, status=409)
         except RuntimeError as exc:
             task.status = "failed"

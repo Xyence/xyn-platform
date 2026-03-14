@@ -174,6 +174,8 @@ class GoalPlanningTests(TestCase):
         self.assertIsNotNone(first_task)
         self.assertEqual((first_task.execution_brief or {}).get("schema_version"), "v1")
         self.assertEqual((first_task.execution_brief or {}).get("summary"), first_task.title)
+        self.assertEqual(first_task.execution_brief_review_state, "draft")
+        self.assertEqual(first_task.execution_policy, {"require_brief_approval": True})
         self.assertEqual(
             ((first_task.execution_brief or {}).get("source_context") or {}).get("planning_source"),
             "goal_plan",
