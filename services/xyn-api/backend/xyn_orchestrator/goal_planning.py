@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from django.utils.text import slugify
 
 from .development_targets import resolve_development_target
+from .execution_briefs import build_execution_brief
 from .goal_progress import compute_goal_progress, compute_thread_progress
 from .models import CoordinationThread, DevTask, Goal
 from .xco import THREAD_PRIORITY_ORDER, derive_work_queue
@@ -502,6 +503,30 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
         thread = created_threads.get(work_item_def.thread_title)
         if thread is None:
             continue
+        execution_brief = build_execution_brief(
+            summary=work_item_def.title,
+            objective=goal.planning_summary or goal.description or goal.title,
+            implementation_intent=work_item_def.description or work_item_def.title,
+            target=target,
+            allowed_areas=[thread.domain] if str(thread.domain or "").strip() else [],
+            acceptance_criteria=[],
+            validation_commands=[],
+            boundaries=[
+                "Keep changes scoped to this work item and thread.",
+                "Do not broaden implementation beyond the stated request without review.",
+            ],
+            source_context={
+                "planning_source": "goal_plan",
+                "goal_id": str(goal.id),
+                "goal_title": goal.title,
+                "thread_id": str(thread.id),
+                "thread_title": thread.title,
+                "work_item_title": work_item_def.title,
+                "work_item_sequence": int(work_item_def.sequence or 0),
+                "dependency_work_item_refs": list(work_item_def.dependency_work_item_refs),
+                "resolution_notes": list(plan.resolution_notes),
+            },
+        )
         task = DevTask.objects.create(
             title=work_item_def.title[:240],
             description=work_item_def.description,
@@ -515,6 +540,7 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
             intent_type="goal_planning",
             target_repo=target_repo,
             target_branch=target_branch,
+            execution_brief=execution_brief,
             execution_policy={},
             goal=goal,
             coordination_thread=thread,

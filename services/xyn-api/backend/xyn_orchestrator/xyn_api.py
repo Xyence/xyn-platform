@@ -163,6 +163,7 @@ from .application_factories import (
     list_application_factories,
 )
 from .development_targets import repo_target_payload_for_resolution, resolve_development_target
+from .execution_briefs import resolve_execution_brief
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -25352,23 +25353,43 @@ def _load_dev_task_runtime_source(task: DevTask) -> Dict[str, Any]:
 
 
 def _build_dev_task_runtime_prompt(task: DevTask, work_item: Dict[str, Any]) -> Dict[str, str]:
-    title = str(task.title or work_item.get("title") or task.work_item_id or f"Dev task {task.id}").strip()
+    handoff = resolve_execution_brief(task, work_item=work_item)
+    brief = handoff.brief if isinstance(handoff.brief, dict) else {}
+    title = str(brief.get("summary") or task.title or work_item.get("title") or task.work_item_id or f"Dev task {task.id}").strip()
     body_lines: List[str] = []
-    description = str(work_item.get("description") or work_item.get("summary") or "").strip()
-    if description:
-        body_lines.append(description)
-    acceptance = work_item.get("acceptance_criteria") if isinstance(work_item.get("acceptance_criteria"), list) else []
+    objective = str(brief.get("objective") or work_item.get("description") or work_item.get("summary") or "").strip()
+    implementation_intent = str(brief.get("implementation_intent") or "").strip()
+    if objective:
+        body_lines.append(objective)
+    if implementation_intent and implementation_intent != objective:
+        body_lines.append(f"Requested change: {implementation_intent}")
+    brief_target = brief.get("target") if isinstance(brief.get("target"), dict) else {}
+    repo_slug = str(brief_target.get("repository_slug") or "").strip()
+    repo_branch = str(brief_target.get("branch") or "").strip()
+    if repo_slug:
+        body_lines.append(f"Target repository: {repo_slug}{' @ ' + repo_branch if repo_branch else ''}")
+    scope = brief.get("scope") if isinstance(brief.get("scope"), dict) else {}
+    allowed_areas = scope.get("allowed_areas") if isinstance(scope.get("allowed_areas"), list) else []
+    allowed_files = scope.get("allowed_files") if isinstance(scope.get("allowed_files"), list) else []
+    if allowed_areas:
+        body_lines.append("Allowed areas:")
+        body_lines.extend(f"- {str(item).strip()}" for item in allowed_areas if str(item).strip())
+    if allowed_files:
+        body_lines.append("Allowed files:")
+        body_lines.extend(f"- {str(item).strip()}" for item in allowed_files if str(item).strip())
+    validation = brief.get("validation") if isinstance(brief.get("validation"), dict) else {}
+    acceptance = validation.get("acceptance_criteria") if isinstance(validation.get("acceptance_criteria"), list) else []
     if acceptance:
         body_lines.append("Acceptance criteria:")
         body_lines.extend(f"- {str(item).strip()}" for item in acceptance if str(item).strip())
-    verify_rows = work_item.get("verify") if isinstance(work_item.get("verify"), list) else []
-    if verify_rows:
+    validation_commands = validation.get("commands") if isinstance(validation.get("commands"), list) else []
+    if validation_commands:
         body_lines.append("Validation commands:")
-        body_lines.extend(
-            f"- {str(row.get('command') or '').strip()}"
-            for row in verify_rows
-            if isinstance(row, dict) and str(row.get("command") or "").strip()
-        )
+        body_lines.extend(f"- {str(command).strip()}" for command in validation_commands if str(command).strip())
+    boundaries = brief.get("boundaries") if isinstance(brief.get("boundaries"), list) else []
+    if boundaries:
+        body_lines.append("Boundaries:")
+        body_lines.extend(f"- {str(item).strip()}" for item in boundaries if str(item).strip())
     if not body_lines:
         body_lines.append(title)
     return {"title": title, "body": "\n".join(body_lines).strip()}
@@ -25377,6 +25398,7 @@ def _build_dev_task_runtime_prompt(task: DevTask, work_item: Dict[str, Any]) -> 
 def _build_dev_task_runtime_payload(task: DevTask, workspace: Workspace) -> Dict[str, Any]:
     source = _load_dev_task_runtime_source(task)
     work_item = source["work_item"]
+    handoff = resolve_execution_brief(task, work_item=work_item)
     prompt = _build_dev_task_runtime_prompt(task, work_item)
     requested_outputs = ["patch", "log", "summary"]
     verify_rows = work_item.get("verify") if isinstance(work_item.get("verify"), list) else []
@@ -25416,6 +25438,8 @@ def _build_dev_task_runtime_payload(task: DevTask, workspace: Workspace) -> Dict
                 "task_type": str(task.task_type or ""),
                 "source_entity_type": str(task.source_entity_type or ""),
                 "source_entity_id": str(task.source_entity_id or ""),
+                "execution_brief": handoff.brief,
+                "execution_brief_source": handoff.source_kind,
             },
         },
         "policy": {
@@ -25586,6 +25610,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "target_repo": task.target_repo or None,
         "target_branch": task.target_branch or None,
         "execution_policy": task.execution_policy or {},
+        "has_execution_brief": isinstance(task.execution_brief, dict) and bool(task.execution_brief),
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
         "goal_id": str(task.goal_id) if task.goal_id else None,
@@ -26363,6 +26388,7 @@ def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
         ],
         "thread_detail": _coordination_thread_summary(task.coordination_thread) if task.coordination_thread_id else None,
         "goal_detail": _serialize_goal_summary(task.goal) if task.goal_id else None,
+        "execution_brief": task.execution_brief if isinstance(task.execution_brief, dict) else None,
         "result_run_detail": run_payload,
         "result_run_artifacts": artifacts_payload,
         "result_run_commands": commands_payload,
@@ -27672,6 +27698,7 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
             intent_type=payload.get("intent_type", ""),
             target_repo=payload.get("target_repo") or target_resolution.repository_slug or "",
             target_branch=payload.get("target_branch") or target_resolution.branch or "",
+            execution_brief=payload.get("execution_brief") if isinstance(payload.get("execution_brief"), dict) else None,
             execution_policy=payload.get("execution_policy") if isinstance(payload.get("execution_policy"), dict) else None,
             coordination_thread=coordination_thread,
             dependency_work_item_ids=payload.get("dependency_work_item_ids") if isinstance(payload.get("dependency_work_item_ids"), list) else [],

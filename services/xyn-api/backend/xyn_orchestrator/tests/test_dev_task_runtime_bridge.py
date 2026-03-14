@@ -7,6 +7,7 @@ from django.test import RequestFactory, TestCase
 
 from xyn_orchestrator.models import Application, DevTask, Goal, ManagedRepository, Run, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import (
+    _build_dev_task_runtime_payload,
     _conversation_execution_context,
     _load_dev_task_runtime_source,
     blueprint_dev_tasks,
@@ -130,8 +131,35 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(runtime_payload["target"]["workspace_id"], str(self.workspace.id))
         self.assertEqual(runtime_payload["prompt"]["title"], "Implement Epic C bridge")
         self.assertIn("Route development execution through Epic C runtime runs.", runtime_payload["prompt"]["body"])
+        self.assertEqual(runtime_payload["context"]["metadata"]["execution_brief_source"], "fallback")
         self.assertEqual(runtime_payload["policy"]["max_retries"], 2)
         self.assertIn("report", runtime_payload["requested_outputs"])
+
+    def test_dev_task_runtime_payload_prefers_structured_execution_brief(self):
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Implement Epic C runtime bridge",
+            "objective": "Route coding execution through the runtime bridge.",
+            "implementation_intent": "Update the bridge layer and keep the change scoped to runtime submission.",
+            "target": {"repository_slug": "xyn-platform", "branch": "develop"},
+            "scope": {"allowed_areas": ["runtime bridge"], "allowed_files": []},
+            "validation": {
+                "acceptance_criteria": ["Submit to runtime API", "Preserve work item identity"],
+                "commands": ["python -m unittest xyn_orchestrator.tests.test_dev_task_runtime_bridge"],
+            },
+            "boundaries": ["Do not broaden the change beyond the bridge seam."],
+            "source_context": {"planning_source": "goal_plan"},
+        }
+        self.task.save(update_fields=["execution_brief", "updated_at"])
+        with mock.patch("xyn_orchestrator.xyn_api._download_artifact_json", return_value=self.plan_json):
+            payload = _build_dev_task_runtime_payload(self.task, self.workspace)
+        self.assertEqual(payload["prompt"]["title"], "Implement Epic C runtime bridge")
+        self.assertIn("Requested change: Update the bridge layer and keep the change scoped to runtime submission.", payload["prompt"]["body"])
+        self.assertIn("Target repository: xyn-platform @ develop", payload["prompt"]["body"])
+        self.assertIn("Allowed areas:", payload["prompt"]["body"])
+        self.assertIn("Validation commands:", payload["prompt"]["body"])
+        self.assertEqual(payload["context"]["metadata"]["execution_brief_source"], "task_execution_brief")
+        self.assertEqual(payload["context"]["metadata"]["execution_brief"]["summary"], "Implement Epic C runtime bridge")
 
     def test_load_dev_task_runtime_source_prefers_application_target_repository(self):
         repository = ManagedRepository.objects.create(
@@ -219,6 +247,22 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(payload["target_repo"], "xyn-platform")
         self.assertEqual(payload["target_branch"], "develop")
         self.assertEqual(payload["execution_policy"], {"auto_continue": True})
+
+    def test_work_item_detail_exposes_execution_brief(self):
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Bounded handoff",
+            "objective": "Implement the explicit handoff",
+            "implementation_intent": "Use the stored brief instead of inferring intent from description text alone.",
+            "target": {"repository_slug": "xyn-platform", "branch": "develop"},
+        }
+        self.task.save(update_fields=["execution_brief", "updated_at"])
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}", method="get")
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2]:
+            response = dev_task_detail(request, str(self.task.id))
+        payload = json.loads(response.content)
+        self.assertEqual(payload["execution_brief"]["summary"], "Bounded handoff")
+        self.assertTrue(payload["has_execution_brief"])
 
     def test_duplicate_run_request_reuses_active_runtime_run(self):
         runtime_run_id = uuid.uuid4()

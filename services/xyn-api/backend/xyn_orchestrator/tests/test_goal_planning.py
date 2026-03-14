@@ -170,6 +170,18 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(all(thread.goal_id == goal.id for thread in goal.threads.all()))
         self.assertTrue(all(task.goal_id == goal.id for task in goal.work_items.all()))
         self.assertTrue(goal.work_items.filter(coordination_thread__title="Property Model and CRUD").exists())
+        first_task = goal.work_items.order_by("priority", "created_at", "id").first()
+        self.assertIsNotNone(first_task)
+        self.assertEqual((first_task.execution_brief or {}).get("schema_version"), "v1")
+        self.assertEqual((first_task.execution_brief or {}).get("summary"), first_task.title)
+        self.assertEqual(
+            ((first_task.execution_brief or {}).get("source_context") or {}).get("planning_source"),
+            "goal_plan",
+        )
+        self.assertEqual(
+            (((first_task.execution_brief or {}).get("target") or {}).get("goal_id")),
+            str(goal.id),
+        )
 
     def test_goal_decompose_endpoint_persists_plan(self):
         goal = Goal.objects.create(
@@ -438,6 +450,10 @@ class GoalPlanningTests(TestCase):
         application = Application.objects.get(id=json.loads(apply_response.content)["application"]["id"])
         self.assertEqual(application.target_repository_id, repository.id)
         self.assertTrue(DevTask.objects.filter(goal__application=application, target_repo="shine-app", target_branch="main").exists())
+        task = DevTask.objects.filter(goal__application=application, target_repo="shine-app", target_branch="main").order_by("created_at").first()
+        self.assertIsNotNone(task)
+        self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("repository_slug"), "shine-app")
+        self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("branch"), "main")
 
     def test_application_detail_groups_goals_and_reuses_portfolio_state(self):
         plan = ApplicationPlan.objects.create(

@@ -2195,6 +2195,7 @@ class DevTask(models.Model):
     intent_type = models.CharField(max_length=80, blank=True)
     target_repo = models.CharField(max_length=120, blank=True)
     target_branch = models.CharField(max_length=120, blank=True)
+    execution_brief = models.JSONField(null=True, blank=True)
     execution_policy = models.JSONField(null=True, blank=True)
     goal = models.ForeignKey("Goal", null=True, blank=True, on_delete=models.SET_NULL, related_name="work_items")
     coordination_thread = models.ForeignKey(
