@@ -2254,6 +2254,21 @@ export type DevTaskSummary = {
     reason?: string | null;
     message: string;
   };
+  execution_run?: {
+    has_run: boolean;
+    run_id?: string | null;
+    source?: "runtime" | "result" | null;
+    state: string;
+    raw_status?: string | null;
+    validation_status?: string | null;
+    summary?: string | null;
+    error?: string | null;
+    started_at?: string | null;
+    finished_at?: string | null;
+    artifact_count: number;
+    artifact_labels: string[];
+    message: string;
+  };
   thread_id?: string | null;
   thread_title?: string | null;
   goal_id?: string | null;

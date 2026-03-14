@@ -25610,8 +25610,182 @@ def _serialize_runtime_artifacts_for_thread(detail: Dict[str, Any], *, work_item
     return artifacts
 
 
-def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _normalize_execution_run_state(
+    *,
+    run_status: Any,
+    task_status: str,
+    has_runtime_run: bool,
+) -> str:
+    token = str(run_status or "").strip().lower()
+    if token in {"queued", "pending"}:
+        return "queued"
+    if token in {"running", "in_progress"}:
+        return "running"
+    if token in {"completed", "succeeded"}:
+        return "completed"
+    if token in {"failed", "error"}:
+        return "failed"
+    if token in {"blocked", "awaiting_review", "paused"}:
+        return "awaiting_review"
+    canonical = _canonical_work_item_status(task_status)
+    if canonical in {"running", "completed", "awaiting_review"}:
+        return canonical
+    if has_runtime_run:
+        return "queued"
+    return "not_started"
+
+
+def _validation_status_for_execution_run(
+    *,
+    execution_state: str,
+    commands_payload: List[Dict[str, Any]],
+    failure_reason: str,
+    escalation_reason: str,
+) -> str:
+    command_statuses = {
+        str(item.get("status") or "").strip().lower()
+        for item in commands_payload
+        if isinstance(item, dict)
+    }
+    if escalation_reason or execution_state == "awaiting_review":
+        return "needs_review"
+    if "failed" in command_statuses or failure_reason or execution_state == "failed":
+        return "failed"
+    if execution_state == "completed":
+        return "passed"
+    if execution_state in {"queued", "running"}:
+        return "pending"
+    return "not_run"
+
+
+def _execution_run_message(
+    *,
+    execution_state: str,
+    summary: str,
+    error: str,
+) -> str:
+    if summary:
+        return summary
+    if error:
+        return error
+    if execution_state == "queued":
+        return "Task has been dispatched and is waiting to start."
+    if execution_state == "running":
+        return "Execution is in progress."
+    if execution_state == "completed":
+        return "Execution completed successfully."
+    if execution_state == "failed":
+        return "Execution failed."
+    if execution_state == "awaiting_review":
+        return "Execution completed and requires review."
+    return "No execution run has been dispatched yet."
+
+
+def _resolve_dev_task_execution_payload(
+    task: DevTask,
+    *,
+    runtime_detail: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     detail = runtime_detail or _project_runtime_status_to_task(task)
+    run_payload: Optional[Dict[str, Any]] = None
+    artifacts_payload: List[Dict[str, Any]] = []
+    commands_payload: List[Dict[str, Any]] = []
+    source: Optional[str] = None
+    if detail:
+        run_payload = _serialize_runtime_run_for_dev_task(detail)
+        artifacts_payload = _serialize_runtime_artifacts_for_dev_task(detail)
+        source = "runtime"
+    elif task.result_run_id and task.result_run is not None:
+        result_run = task.result_run
+        run_payload = {
+            "id": str(result_run.id),
+            "status": result_run.status,
+            "summary": result_run.summary,
+            "error": result_run.error,
+            "log_text": result_run.log_text,
+            "started_at": result_run.started_at,
+            "finished_at": result_run.finished_at,
+            "failure_reason": "",
+            "escalation_reason": "",
+        }
+        artifacts_payload = [
+            {
+                "id": str(artifact.id),
+                "name": artifact.name,
+                "kind": artifact.kind,
+                "url": artifact.url,
+                "metadata": artifact.metadata_json,
+                "created_at": artifact.created_at,
+            }
+            for artifact in result_run.artifacts.all().order_by("created_at")
+        ]
+        commands_payload = [
+            {
+                "id": str(cmd.id),
+                "step_name": cmd.step_name,
+                "command_index": cmd.command_index,
+                "shell": cmd.shell,
+                "status": cmd.status,
+                "exit_code": cmd.exit_code,
+                "started_at": cmd.started_at,
+                "finished_at": cmd.finished_at,
+                "ssm_command_id": cmd.ssm_command_id,
+                "stdout": cmd.stdout,
+                "stderr": cmd.stderr,
+            }
+            for cmd in result_run.command_executions.all().order_by("created_at")
+        ]
+        source = "result"
+
+    run_summary = str((run_payload or {}).get("summary") or "").strip()
+    failure_reason = str((run_payload or {}).get("failure_reason") or "").strip()
+    escalation_reason = str((run_payload or {}).get("escalation_reason") or "").strip()
+    error = str((run_payload or {}).get("error") or escalation_reason or failure_reason or "").strip()
+    execution_state = _normalize_execution_run_state(
+        run_status=(run_payload or {}).get("status"),
+        task_status=str(task.status or ""),
+        has_runtime_run=bool(task.runtime_run_id),
+    )
+    execution_summary = {
+        "has_run": bool(run_payload),
+        "run_id": str((run_payload or {}).get("id") or "") or None,
+        "source": source,
+        "state": execution_state,
+        "raw_status": str((run_payload or {}).get("status") or "").strip() or None,
+        "validation_status": _validation_status_for_execution_run(
+            execution_state=execution_state,
+            commands_payload=commands_payload,
+            failure_reason=failure_reason,
+            escalation_reason=escalation_reason,
+        ),
+        "summary": run_summary or None,
+        "error": error or None,
+        "started_at": (run_payload or {}).get("started_at"),
+        "finished_at": (run_payload or {}).get("finished_at"),
+        "artifact_count": len(artifacts_payload),
+        "artifact_labels": [
+            str(item.get("name") or item.get("kind") or "artifact")
+            for item in artifacts_payload[:3]
+            if isinstance(item, dict)
+        ],
+        "message": _execution_run_message(
+            execution_state=execution_state,
+            summary=run_summary,
+            error=error,
+        ),
+    }
+    return {
+        "runtime_detail": detail,
+        "run_payload": run_payload,
+        "artifacts_payload": artifacts_payload,
+        "commands_payload": commands_payload,
+        "execution_summary": execution_summary,
+    }
+
+
+def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    execution_payload = _resolve_dev_task_execution_payload(task, runtime_detail=runtime_detail)
+    detail = execution_payload["runtime_detail"]
     status = _canonical_work_item_status(str((detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
     brief_review = serialize_execution_brief_review(task)
     queue_state = serialize_dev_task_queue_state(task, normalized_status=status)
@@ -25635,6 +25809,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "execution_brief_reviewed_by": str(task.execution_brief_reviewed_by_id) if task.execution_brief_reviewed_by_id else None,
         "execution_brief_review": brief_review,
         "execution_queue": queue_state,
+        "execution_run": execution_payload["execution_summary"],
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
         "goal_id": str(task.goal_id) if task.goal_id else None,
@@ -26350,52 +26525,11 @@ def _runtime_run_artifact_detail_for_conversation(
 
 
 def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
-    result_run = task.result_run
-    run_payload = None
-    artifacts_payload = []
-    commands_payload = []
-    runtime_detail = _project_runtime_status_to_task(task)
-    if runtime_detail:
-        run_payload = _serialize_runtime_run_for_dev_task(runtime_detail)
-        artifacts_payload = _serialize_runtime_artifacts_for_dev_task(runtime_detail)
-        commands_payload = []
-    elif result_run:
-        run_payload = {
-            "id": str(result_run.id),
-            "status": result_run.status,
-            "summary": result_run.summary,
-            "error": result_run.error,
-            "log_text": result_run.log_text,
-            "started_at": result_run.started_at,
-            "finished_at": result_run.finished_at,
-        }
-        artifacts_payload = [
-            {
-                "id": str(artifact.id),
-                "name": artifact.name,
-                "kind": artifact.kind,
-                "url": artifact.url,
-                "metadata": artifact.metadata_json,
-                "created_at": artifact.created_at,
-            }
-            for artifact in result_run.artifacts.all().order_by("created_at")
-        ]
-        commands_payload = [
-            {
-                "id": str(cmd.id),
-                "step_name": cmd.step_name,
-                "command_index": cmd.command_index,
-                "shell": cmd.shell,
-                "status": cmd.status,
-                "exit_code": cmd.exit_code,
-                "started_at": cmd.started_at,
-                "finished_at": cmd.finished_at,
-                "ssm_command_id": cmd.ssm_command_id,
-                "stdout": cmd.stdout,
-                "stderr": cmd.stderr,
-            }
-            for cmd in result_run.command_executions.all().order_by("created_at")
-        ]
+    execution_payload = _resolve_dev_task_execution_payload(task)
+    runtime_detail = execution_payload["runtime_detail"]
+    run_payload = execution_payload["run_payload"]
+    artifacts_payload = execution_payload["artifacts_payload"]
+    commands_payload = execution_payload["commands_payload"]
     return {
         **_serialize_work_item_summary(task, runtime_detail=runtime_detail),
         "input_artifact_key": task.input_artifact_key,

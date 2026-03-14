@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 import uuid
 from unittest import mock
@@ -5,7 +6,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 
-from xyn_orchestrator.models import Application, DevTask, Goal, ManagedRepository, Run, UserIdentity, Workspace, WorkspaceMembership
+from xyn_orchestrator.models import Application, DevTask, Goal, ManagedRepository, Run, RunArtifact, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import (
     _build_dev_task_runtime_payload,
     _conversation_execution_context,
@@ -558,6 +559,11 @@ class DevTaskRuntimeBridgeTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(payload["status"], "awaiting_review")
         self.assertEqual(payload["runtime_run_id"], str(runtime_run_id))
+        self.assertEqual(payload["execution_run"]["run_id"], str(runtime_run_id))
+        self.assertEqual(payload["execution_run"]["state"], "awaiting_review")
+        self.assertEqual(payload["execution_run"]["validation_status"], "needs_review")
+        self.assertEqual(payload["execution_run"]["artifact_count"], 1)
+        self.assertEqual(payload["execution_run"]["artifact_labels"], ["final_summary.md"])
         self.assertEqual(payload["result_run_detail"]["summary"], "Need review")
         self.assertEqual(payload["result_run_detail"]["failure_reason"], "contract_violation")
         self.assertEqual(payload["result_run_detail"]["escalation_reason"], "human_review_required")
@@ -565,6 +571,54 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.task.refresh_from_db()
         self.assertEqual(self.task.status, "awaiting_review")
         self.assertEqual(self.task.last_error, "human_review_required")
+
+    def test_dev_task_detail_reports_not_started_execution_when_no_run_exists(self):
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}", method="get")
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2]:
+            response = dev_task_detail(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["execution_run"]["has_run"], False)
+        self.assertEqual(payload["execution_run"]["state"], "not_started")
+        self.assertEqual(payload["execution_run"]["validation_status"], "not_run")
+        self.assertEqual(payload["execution_run"]["artifact_count"], 0)
+        self.assertEqual(payload["execution_run"]["message"], "No execution run has been dispatched yet.")
+
+    def test_dev_task_detail_uses_result_run_summary_when_runtime_run_missing(self):
+        result_run = Run.objects.create(
+            entity_type="dev_task",
+            entity_id=self.task.id,
+            status="succeeded",
+            summary="Implemented scheduler seam",
+            created_by=self.user,
+            started_at=dt.datetime(2026, 3, 12, 15, 0, tzinfo=dt.timezone.utc),
+            finished_at=dt.datetime(2026, 3, 12, 15, 5, tzinfo=dt.timezone.utc),
+        )
+        RunArtifact.objects.create(
+            run=result_run,
+            name="final_summary.md",
+            kind="summary",
+            url="https://example.com/final_summary.md",
+            metadata_json={},
+        )
+        self.task.result_run = result_run
+        self.task.status = "completed"
+        self.task.save(update_fields=["result_run", "status", "updated_at"])
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}", method="get")
+
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2]:
+            response = dev_task_detail(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["execution_run"]["has_run"], True)
+        self.assertEqual(payload["execution_run"]["source"], "result")
+        self.assertEqual(payload["execution_run"]["state"], "completed")
+        self.assertEqual(payload["execution_run"]["validation_status"], "passed")
+        self.assertEqual(payload["execution_run"]["artifact_count"], 1)
+        self.assertEqual(payload["execution_run"]["summary"], "Implemented scheduler seam")
+        self.assertEqual(payload["result_run_detail"]["summary"], "Implemented scheduler seam")
 
     def test_retry_submits_new_runtime_run_after_terminal_status(self):
         runtime_run_id = uuid.uuid4()

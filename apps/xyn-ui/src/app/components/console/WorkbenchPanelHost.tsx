@@ -156,6 +156,29 @@ function BriefReviewSummary({ item }: { item: Pick<WorkItemSummary, "execution_b
   );
 }
 
+function executionRunLabel(item: Pick<WorkItemSummary, "execution_run">): string {
+  const execution = item.execution_run;
+  if (!execution?.has_run) return "Not run";
+  return titleCaseLabel(execution.state || execution.raw_status || "unknown");
+}
+
+function ExecutionRunSummary({ item }: { item: Pick<WorkItemSummary, "execution_run"> }) {
+  const execution = item.execution_run;
+  if (!execution?.has_run) {
+    return <span className="muted">Not run</span>;
+  }
+  const detailParts = [
+    execution.validation_status ? titleCaseLabel(execution.validation_status) : "",
+    execution.artifact_count ? `${execution.artifact_count} artifact${execution.artifact_count === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  return (
+    <div>
+      <div>{executionRunLabel(item)}</div>
+      <div className="muted small">{detailParts.length ? detailParts.join(" · ") : execution.message}</div>
+    </div>
+  );
+}
+
 type CanvasQuery = {
   entity: string;
   filters: Array<{ field: string; op: string; value: unknown }>;
@@ -1148,6 +1171,7 @@ function GoalDetailPanel({
                 <th>Status</th>
                 <th>Thread</th>
                 <th>Repo</th>
+                <th>Execution</th>
                 <th>Brief</th>
                 <th>Actions</th>
               </tr>
@@ -1159,11 +1183,12 @@ function GoalDetailPanel({
                   <td>{item.status}</td>
                   <td>{item.thread_title || "—"}</td>
                   <td>{item.target_repo || "—"}</td>
+                  <td><ExecutionRunSummary item={item} /></td>
                   <td><BriefReviewSummary item={item} /></td>
                   <td><button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>Work Item</button></td>
                 </tr>
               ))}
-              {!payload.work_items.length ? <tr><td colSpan={6} className="muted">No work items planned yet.</td></tr> : null}
+              {!payload.work_items.length ? <tr><td colSpan={7} className="muted">No work items planned yet.</td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -1556,7 +1581,7 @@ function ThreadDetailPanel({
                 <th>Title</th>
                 <th>Status</th>
                 <th>Repo</th>
-                <th>Run</th>
+                <th>Execution</th>
                 <th>Brief</th>
                 <th>Actions</th>
               </tr>
@@ -1567,15 +1592,15 @@ function ThreadDetailPanel({
                   <td>{item.title}</td>
                   <td>{item.status}</td>
                   <td>{item.target_repo || "—"}</td>
-                  <td>{item.runtime_run_id || "—"}</td>
+                  <td><ExecutionRunSummary item={item} /></td>
                   <td><BriefReviewSummary item={item} /></td>
                   <td>
                     <div className="inline-action-row">
                       <button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>
                         Work Item
                       </button>
-                      {item.runtime_run_id ? (
-                        <button type="button" className="ghost sm" onClick={() => onOpenPanel("run_detail", { run_id: item.runtime_run_id })}>
+                      {item.execution_run?.run_id ? (
+                        <button type="button" className="ghost sm" onClick={() => onOpenPanel("run_detail", { run_id: item.execution_run?.run_id })}>
                           Run
                         </button>
                       ) : null}
@@ -1807,6 +1832,7 @@ function WorkItemDetailPanel({
   if (!payload) return <p className="muted">Work item not found.</p>;
   const review = payload.execution_brief_review;
   const queue = payload.execution_queue;
+  const execution = payload.execution_run;
 
   return (
     <div className="ems-panel-body">
@@ -1896,29 +1922,60 @@ function WorkItemDetailPanel({
           </div>
         </section>
       ) : null}
-      {payload.runtime_run_id ? (
-        <div className="inline-actions" style={{ marginTop: 8 }}>
-          {payload.thread_detail?.id ? (
-            <button
-              type="button"
-              className="ghost sm"
-              onClick={() => onOpenPanel("thread_detail", { thread_id: payload.thread_detail?.id })}
-            >
-              Open Thread
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="ghost sm"
-            onClick={() => onOpenPanel("run_detail", { run_id: payload.runtime_run_id })}
-          >
-            Open Run
-          </button>
-          <span className="muted small">
-            Latest runtime run: {payload.runtime_run_id}{workspaceId ? ` · workspace ${workspaceId}` : ""}
-          </span>
+      <section className="card" style={{ marginTop: 12 }}>
+        <div className="card-header"><h3>Execution Run</h3></div>
+        <div className="detail-grid">
+          <div><div className="field-label">Execution State</div><div className="field-value">{executionRunLabel(payload)}</div></div>
+          <div><div className="field-label">Validation</div><div className="field-value">{titleCaseLabel(execution?.validation_status || "not_run")}</div></div>
+          <div><div className="field-label">Run ID</div><div className="field-value">{execution?.run_id || "—"}</div></div>
+          <div><div className="field-label">Artifacts</div><div className="field-value">{execution?.artifact_count || 0}</div></div>
+          <div><div className="field-label">Started</div><div className="field-value">{execution?.started_at || "—"}</div></div>
+          <div><div className="field-label">Finished</div><div className="field-value">{execution?.finished_at || "—"}</div></div>
         </div>
-      ) : null}
+        <p className="muted" style={{ marginTop: 12 }}>{execution?.message || "No execution run has been dispatched yet."}</p>
+        {execution?.summary ? (
+          <div style={{ marginTop: 12 }}>
+            <div className="field-label">Result Summary</div>
+            <div className="field-value">{execution.summary}</div>
+          </div>
+        ) : null}
+        {execution?.error ? (
+          <InlineMessage tone={execution.state === "failed" ? "warn" : "info"} title="Execution Notes" body={execution.error} />
+        ) : null}
+        {execution?.artifact_labels?.length ? (
+          <div style={{ marginTop: 12 }}>
+            <div className="field-label">Artifact Preview</div>
+            <div className="field-value">{execution.artifact_labels.join(", ")}</div>
+          </div>
+        ) : null}
+        {execution?.has_run ? (
+          <div className="inline-actions" style={{ marginTop: 8 }}>
+            {payload.thread_detail?.id ? (
+              <button
+                type="button"
+                className="ghost sm"
+                onClick={() => onOpenPanel("thread_detail", { thread_id: payload.thread_detail?.id })}
+              >
+                Open Thread
+              </button>
+            ) : null}
+            {execution.run_id ? (
+              <button
+                type="button"
+                className="ghost sm"
+                onClick={() => onOpenPanel("run_detail", { run_id: execution.run_id })}
+              >
+                Open Run
+              </button>
+            ) : null}
+            {execution.run_id ? (
+              <span className="muted small">
+                Latest execution run: {execution.run_id}{workspaceId ? ` · workspace ${workspaceId}` : ""}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
       {payload.result_run_artifacts?.length ? (
         <section className="card" style={{ marginTop: 12 }}>
           <div className="card-header"><h3>Artifacts</h3></div>

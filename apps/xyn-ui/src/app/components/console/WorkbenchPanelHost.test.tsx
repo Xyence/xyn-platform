@@ -879,6 +879,21 @@ describe("WorkbenchPanelHost entity refresh", () => {
         review_notes: "Needs explicit approval",
         available_actions: ["mark_ready", "approve", "reject", "regenerate"],
       },
+      execution_run: {
+        has_run: false,
+        run_id: null,
+        source: null,
+        state: "not_started",
+        raw_status: null,
+        validation_status: "not_run",
+        summary: null,
+        error: null,
+        started_at: null,
+        finished_at: null,
+        artifact_count: 0,
+        artifact_labels: [],
+        message: "No execution run has been dispatched yet.",
+      },
       execution_brief: {
         schema_version: "v1",
         revision: 2,
@@ -929,6 +944,21 @@ describe("WorkbenchPanelHost entity refresh", () => {
         blocked_message: "Execution brief is ready for execution.",
         review_notes: "Approved for coding",
         available_actions: ["reject", "regenerate"],
+      },
+      execution_run: {
+        has_run: false,
+        run_id: null,
+        source: null,
+        state: "not_started",
+        raw_status: null,
+        validation_status: "not_run",
+        summary: null,
+        error: null,
+        started_at: null,
+        finished_at: null,
+        artifact_count: 0,
+        artifact_labels: [],
+        message: "No execution run has been dispatched yet.",
       },
       execution_brief: {
         schema_version: "v1",
@@ -986,6 +1016,21 @@ describe("WorkbenchPanelHost entity refresh", () => {
           review_notes: "Approved for coding",
           available_actions: ["reject", "regenerate"],
         },
+        execution_run: {
+          has_run: true,
+          run_id: "run-1",
+          source: "runtime",
+          state: "queued",
+          raw_status: "queued",
+          validation_status: "pending",
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "Task has been dispatched and is waiting to start.",
+        },
         execution_brief: {
           schema_version: "v1",
           revision: 2,
@@ -1010,8 +1055,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Execution Queue")).toBeInTheDocument();
     expect(screen.getAllByText("Execution brief review is required before coding execution can proceed.").length).toBeGreaterThan(0);
     expect(screen.getByText("Execution Brief Review")).toBeInTheDocument();
+    expect(screen.getByText("Execution Run")).toBeInTheDocument();
     expect(screen.getByText("Execution Blocked")).toBeInTheDocument();
     expect(screen.getByText("Implement scheduler via the bounded handoff")).toBeInTheDocument();
+    expect(screen.getByText("No execution run has been dispatched yet.")).toBeInTheDocument();
+    expect(screen.getByText("Not Run")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Dispatch Task" })).not.toBeInTheDocument();
 
     await act(async () => {
@@ -1037,6 +1085,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(apiMocks.dispatchWorkItem).toHaveBeenCalledWith("task-1", "ws-1"));
     expect(screen.getByText("Task has already been dispatched and is in progress.")).toBeInTheDocument();
     expect(screen.getByText("Dispatched wi-1.")).toBeInTheDocument();
+    expect(screen.getByText("Latest execution run: run-1 · workspace ws-1")).toBeInTheDocument();
+    expect(screen.getByText("Task has been dispatched and is waiting to start.")).toBeInTheDocument();
   });
 
   it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {
