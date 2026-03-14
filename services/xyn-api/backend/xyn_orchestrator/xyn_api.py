@@ -24832,9 +24832,12 @@ def _resolved_release_plan_for_release(
     release: Release,
     *,
     plan_index: Optional[Dict[tuple[str, str], ReleasePlan]] = None,
+    allow_stale_direct_link: bool = False,
 ) -> Optional[ReleasePlan]:
     if release.release_plan_id and release.release_plan:
         linked = release.release_plan
+        if allow_stale_direct_link:
+            return linked
         if (
             linked.to_version == release.version
             and (not linked.blueprint_id or not release.blueprint_id or str(linked.blueprint_id) == str(release.blueprint_id))
@@ -24937,7 +24940,7 @@ def releases_bulk_delete(request: HttpRequest) -> JsonResponse:
         if not release:
             skipped.append({"id": rid, "reason": "not_found"})
             continue
-        resolved_plan = _resolved_release_plan_for_release(release)
+        resolved_plan = _resolved_release_plan_for_release(release, allow_stale_direct_link=True)
         if release.status == "published" and resolved_plan:
             skipped.append({"id": rid, "reason": "published_with_release_plan"})
             continue
@@ -25004,7 +25007,7 @@ def release_detail(request: HttpRequest, release_id: str) -> JsonResponse:
                 release.save(update_fields=["build_state", "updated_at"])
         return JsonResponse({"id": str(release.id), "build_run_id": build_run_id})
     if request.method == "DELETE":
-        if release.status == "published" and _resolved_release_plan_for_release(release):
+        if release.status == "published" and _resolved_release_plan_for_release(release, allow_stale_direct_link=True):
             return JsonResponse(
                 {"error": "published releases linked to a release plan cannot be deleted"},
                 status=400,
