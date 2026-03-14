@@ -16528,7 +16528,7 @@ def app_palette_execute(request: HttpRequest) -> JsonResponse:
         runtime_target_record
         and generated_artifact_issue
         and _looks_like_generated_crud_prompt(prompt)
-        and not _looks_like_generated_app_evolution_request(prompt)
+        and not _match_generated_app_evolution_command(prompt, workspace)
     ):
         result = _generated_app_invalid_contract_response(prompt=prompt, issue=generated_artifact_issue)
         _log_prompt_activity(
@@ -17197,6 +17197,9 @@ def _match_generated_app_evolution_command(message: str, workspace: Workspace) -
     if len(contexts) != 1:
         return None
     context = contexts[0]
+    current_app_spec = context.get("current_app_spec") if isinstance(context.get("current_app_spec"), dict) else {}
+    if not current_app_spec:
+        return None
     fields = _extract_app_intent_fields(message)
     current_app_summary = context.get("current_app_summary") if isinstance(context.get("current_app_summary"), dict) else {}
     current_entities = current_app_summary.get("entities") if isinstance(current_app_summary.get("entities"), list) else []
@@ -17229,7 +17232,7 @@ def _match_generated_app_evolution_command(message: str, workspace: Workspace) -
         "raw_prompt": str(fields.get("raw_prompt") or message),
         "revision_anchor": revision_anchor,
         "current_app_summary": current_app_summary,
-        "current_app_spec": context.get("current_app_spec") if isinstance(context.get("current_app_spec"), dict) else {},
+        "current_app_spec": current_app_spec,
         "latest_appspec_ref": latest_appspec_ref,
     }
 
@@ -20273,7 +20276,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         and generated_runtime_target
         and generated_artifact_issue
         and _looks_like_generated_crud_prompt(message)
-        and not _looks_like_generated_app_evolution_request(message)
+        and not _match_generated_app_evolution_command(message, operator_workspace)
     ):
         response_payload = {
             "status": "ValidationError",
@@ -20683,7 +20686,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         and generated_runtime_target
         and generated_artifact_issue
         and _looks_like_generated_crud_prompt(message)
-        and not _looks_like_generated_app_evolution_request(message)
+        and not _match_generated_app_evolution_command(message, operator_workspace)
     ):
         response_payload = {
             "status": "ValidationError",
@@ -21311,7 +21314,7 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     runtime_target_record
                     and generated_artifact_issue
                     and _looks_like_generated_crud_prompt(raw_prompt)
-                    and not _looks_like_generated_app_evolution_request(raw_prompt)
+                    and not _match_generated_app_evolution_command(raw_prompt, workspace)
                 ):
                     _log_prompt_activity(
                         request_id=request_id,
