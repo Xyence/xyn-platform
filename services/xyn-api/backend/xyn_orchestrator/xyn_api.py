@@ -20554,7 +20554,21 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                     thread_id=context_thread_id,
                 )
             return JsonResponse(response_payload)
-        if conversation_action:
+        reuse_existing_work_item = (
+            str(epic_d_intent.intent_family or "") == "development_work"
+            and str(epic_d_intent.intent_type or "") == "create_and_dispatch_run"
+            and bool(
+                str(
+                    (
+                        (epic_d_payload.get("resolved_subject") or {})
+                        if isinstance(epic_d_payload.get("resolved_subject"), dict)
+                        else {}
+                    ).get("work_item_id")
+                    or ""
+                ).strip()
+            )
+        )
+        if conversation_action and not reuse_existing_work_item:
             response_payload = {
                 "status": "DraftReady",
                 "action_type": "CreateDraft",
