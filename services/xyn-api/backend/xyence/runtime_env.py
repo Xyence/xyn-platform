@@ -96,7 +96,10 @@ def bootstrap_runtime_env() -> None:
     _apply_alias("XYN_JOBS_REDIS_URL", "XYENCE_JOBS_REDIS_URL", default="redis://redis:6379/0")
     _apply_alias("XYN_ASYNC_JOBS_MODE", "XYENCE_ASYNC_JOBS_MODE", default="redis")
     _apply_alias("XYN_INTERNAL_BASE_URL", "XYENCE_INTERNAL_BASE_URL", default="http://backend:8000")
-    _apply_alias("XYN_MEDIA_ROOT", "XYENCE_MEDIA_ROOT", default="/app/media")
+    _apply_alias("XYN_MEDIA_ROOT", "XYN_ARTIFACT_ROOT", "XYENCE_MEDIA_ROOT", "XYENCE_ARTIFACT_ROOT", default="/app/media")
+    _apply_alias("XYN_ARTIFACT_ROOT", "XYENCE_ARTIFACT_ROOT", "XYN_MEDIA_ROOT", "XYENCE_MEDIA_ROOT", default="/app/media")
+    _apply_alias("XYN_WORKSPACE_ROOT", "XYENCE_CODEGEN_WORKDIR", default="/app/workspaces")
+    _apply_alias("XYN_WORKSPACE_RETENTION_DAYS", default="14")
     _apply_alias("XYN_DEPLOYMENT_STALE_SECONDS", "XYENCE_DEPLOYMENT_STALE_SECONDS", default="900")
     _apply_alias("XYN_RUNTIME_SUBSTRATE", "XYENCE_RUNTIME_SUBSTRATE", default="auto")
 
@@ -143,6 +146,8 @@ def bootstrap_runtime_env() -> None:
         "XYENCE_ASYNC_JOBS_MODE": "XYN_ASYNC_JOBS_MODE",
         "XYENCE_INTERNAL_BASE_URL": "XYN_INTERNAL_BASE_URL",
         "XYENCE_MEDIA_ROOT": "XYN_MEDIA_ROOT",
+        "XYENCE_ARTIFACT_ROOT": "XYN_ARTIFACT_ROOT",
+        "XYENCE_CODEGEN_WORKDIR": "XYN_WORKSPACE_ROOT",
         "XYENCE_DEPLOYMENT_STALE_SECONDS": "XYN_DEPLOYMENT_STALE_SECONDS",
         "XYENCE_RUNTIME_SUBSTRATE": "XYN_RUNTIME_SUBSTRATE",
     }

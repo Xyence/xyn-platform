@@ -22,6 +22,7 @@ from .models import (
     ReleaseTarget,
     RunArtifact,
 )
+from .managed_storage import load_local_artifact_json, load_local_artifact_text, store_local_artifact
 
 
 CONTROL_PLANE_APP_IDS = {"xyn-api", "xyn-ui", "xyn-seed", "xyn-worker"}
@@ -86,36 +87,11 @@ def hash_release_plan(plan: Dict[str, Any]) -> str:
 
 
 def _read_media_json(url: str) -> Optional[Dict[str, Any]]:
-    if not url:
-        return None
-    file_path = ""
-    if url.startswith("/media/"):
-        file_path = os.path.join(settings.MEDIA_ROOT, url.replace("/media/", ""))
-    elif settings.MEDIA_URL and url.startswith(settings.MEDIA_URL):
-        suffix = url.replace(settings.MEDIA_URL, "").lstrip("/")
-        file_path = os.path.join(settings.MEDIA_ROOT, suffix)
-    if not file_path or not os.path.exists(file_path):
-        return None
-    try:
-        with open(file_path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except json.JSONDecodeError:
-        return None
+    return load_local_artifact_json(url=url)
 
 
 def _read_media_text(url: str) -> Optional[str]:
-    if not url:
-        return None
-    file_path = ""
-    if url.startswith("/media/"):
-        file_path = os.path.join(settings.MEDIA_ROOT, url.replace("/media/", ""))
-    elif settings.MEDIA_URL and url.startswith(settings.MEDIA_URL):
-        suffix = url.replace(settings.MEDIA_URL, "").lstrip("/")
-        file_path = os.path.join(settings.MEDIA_ROOT, suffix)
-    if not file_path or not os.path.exists(file_path):
-        return None
-    with open(file_path, "r", encoding="utf-8") as handle:
-        return handle.read()
+    return load_local_artifact_text(url=url)
 
 
 def _find_release_plan_artifact_url(release: Release) -> Optional[str]:
@@ -217,16 +193,8 @@ def _run_ssm_commands(instance_id: str, region: str, commands: List[str]) -> Dic
 
 
 def _write_deployment_artifact(deployment: Deployment, filename: str, content: str | dict | list) -> str:
-    artifacts_root = os.path.join(settings.MEDIA_ROOT, "deployment_artifacts", str(deployment.id))
-    os.makedirs(artifacts_root, exist_ok=True)
-    file_path = os.path.join(artifacts_root, filename)
-    if isinstance(content, (dict, list)):
-        serialized = json.dumps(content, indent=2)
-    else:
-        serialized = content
-    with open(file_path, "w", encoding="utf-8") as handle:
-        handle.write(serialized)
-    return f"{settings.MEDIA_URL.rstrip('/')}/deployment_artifacts/{deployment.id}/{filename}"
+    stored = store_local_artifact("deployment_artifacts", deployment.id, filename, content)
+    return stored.url
 
 
 TLS_TASK_IDS = {"tls.acme_http01", "ingress.nginx_tls_configure", "verify.public_https"}

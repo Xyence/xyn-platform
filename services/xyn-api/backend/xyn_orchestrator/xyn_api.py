@@ -4823,7 +4823,14 @@ def _default_platform_config() -> Dict[str, Any]:
                 {
                     "name": "local",
                     "type": "local",
-                    "local": {"base_path": os.environ.get("XYN_UPLOADS_LOCAL_PATH", "/tmp/xyn-uploads")},
+                    "local": {
+                        "base_path": (
+                            os.environ.get("XYN_UPLOADS_LOCAL_PATH")
+                            or os.environ.get("XYN_ARTIFACT_ROOT")
+                            or os.environ.get("XYN_MEDIA_ROOT")
+                            or "/tmp/xyn-uploads"
+                        )
+                    },
                 }
             ],
         },

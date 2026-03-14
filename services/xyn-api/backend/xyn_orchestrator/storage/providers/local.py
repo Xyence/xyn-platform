@@ -15,7 +15,15 @@ class LocalStorageProvider:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config or {}
-        self.base_path = Path(str(self.config.get("base_path") or os.environ.get("XYN_UPLOADS_LOCAL_PATH") or "/tmp/xyn-uploads"))
+        self.base_path = Path(
+            str(
+                self.config.get("base_path")
+                or os.environ.get("XYN_UPLOADS_LOCAL_PATH")
+                or os.environ.get("XYN_ARTIFACT_ROOT")
+                or os.environ.get("XYN_MEDIA_ROOT")
+                or "/tmp/xyn-uploads"
+            )
+        )
 
     def store_attachment_bytes(
         self,

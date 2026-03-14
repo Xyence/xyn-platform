@@ -32,6 +32,9 @@ services:
       XYN_ASYNC_JOBS_MODE: ${XYN_ASYNC_JOBS_MODE:-redis}
       XYN_JOBS_REDIS_URL: ${XYN_JOBS_REDIS_URL:-redis://redis:6379/0}
       XYN_INTERNAL_TOKEN: ${XYN_INTERNAL_TOKEN:-change-me}
+      XYN_ARTIFACT_ROOT: /app/media
+      XYN_WORKSPACE_ROOT: /app/workspaces
+      XYN_WORKSPACE_RETENTION_DAYS: ${XYN_WORKSPACE_RETENTION_DAYS:-14}
       XYN_RUNTIME_SUBSTRATE: ${XYN_RUNTIME_SUBSTRATE:-auto}
       XYN_LOCAL_INSTANCE_NAME: ${XYN_LOCAL_INSTANCE_NAME:-}
       XYN_LOCAL_INSTANCE_ID: ${XYN_LOCAL_INSTANCE_ID:-}
@@ -68,6 +71,7 @@ services:
       - redis
     volumes:
       - backend_media:/app/media
+      - backend_workspaces:/app/workspaces
       - backend_static:/app/staticfiles
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/ubuntu/src/xyn-contracts:/xyn-contracts:ro
@@ -95,7 +99,10 @@ services:
       XYN_INTERNAL_BASE_URL: http://backend:8000
       XYN_INTERNAL_TOKEN: ${XYN_INTERNAL_TOKEN:-change-me}
       XYENCE_INTERNAL_TOKEN: ${XYENCE_INTERNAL_TOKEN:-change-me}
+      XYN_ARTIFACT_ROOT: /app/media
       XYN_MEDIA_ROOT: /app/media
+      XYN_WORKSPACE_ROOT: /app/workspaces
+      XYN_WORKSPACE_RETENTION_DAYS: ${XYN_WORKSPACE_RETENTION_DAYS:-14}
       XYN_DEPLOYMENT_REQUEST_TIMEOUT_SECONDS: ${XYN_DEPLOYMENT_REQUEST_TIMEOUT_SECONDS:-1200}
       XYN_DEPLOYMENT_POLL_MAX_SECONDS: ${XYN_DEPLOYMENT_POLL_MAX_SECONDS:-1200}
       XYN_DEPLOYMENT_POLL_INTERVAL_SECONDS: ${XYN_DEPLOYMENT_POLL_INTERVAL_SECONDS:-2}
@@ -110,6 +117,7 @@ services:
       - /home/ubuntu/src/xyn-contracts:/xyn-contracts:ro
       - /home/ubuntu/central-xyence-io-9d049e62e994.json:/secrets/gcp-speech.json:ro
       - backend_media:/app/media
+      - backend_workspaces:/app/workspaces
       - /var/run/docker.sock:/var/run/docker.sock
 
   nginx:
@@ -180,6 +188,9 @@ volumes:
     external: true
   backend_media:
     name: xyence-web_backend_media
+    external: true
+  backend_workspaces:
+    name: xyence-web_backend_workspaces
     external: true
   backend_static:
     name: xyence-web_backend_static
