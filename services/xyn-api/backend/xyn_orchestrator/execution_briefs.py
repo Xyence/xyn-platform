@@ -42,6 +42,46 @@ class ExecutionBriefReadiness:
     message: str
 
 
+def execution_brief_available_actions(task: DevTask) -> List[str]:
+    brief = task.execution_brief if isinstance(task.execution_brief, dict) else {}
+    if not brief:
+        return []
+    state = normalize_execution_brief_review_state(getattr(task, "execution_brief_review_state", "draft"))
+    if state == "draft":
+        return ["mark_ready", "approve", "reject", "regenerate"]
+    if state == "ready":
+        return ["approve", "reject", "regenerate"]
+    if state == "approved":
+        return ["reject", "regenerate"]
+    if state == "rejected":
+        return ["mark_ready", "approve", "regenerate"]
+    return []
+
+
+def serialize_execution_brief_review(task: DevTask, *, work_item: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    resolution = resolve_execution_brief(task, work_item=work_item)
+    readiness = execution_brief_readiness(task, work_item=work_item)
+    brief = resolution.brief if isinstance(resolution.brief, dict) else {}
+    target = brief.get("target") if isinstance(brief.get("target"), dict) else {}
+    return {
+        "has_brief": readiness.structured_brief,
+        "review_state": readiness.review_state,
+        "revision": resolution.revision,
+        "history_count": len(resolution.history),
+        "summary": _clean_text(brief.get("summary")) or None,
+        "objective": _clean_text(brief.get("objective")) or None,
+        "target_repository_slug": _clean_text(target.get("repository_slug")) or None,
+        "target_branch": _clean_text(target.get("branch")) or None,
+        "gated": readiness.gated,
+        "ready": readiness.executable,
+        "blocked": not readiness.executable,
+        "blocked_reason": readiness.reason,
+        "blocked_message": readiness.message,
+        "review_notes": _clean_text(getattr(task, "execution_brief_review_notes", "")) or None,
+        "available_actions": execution_brief_available_actions(task),
+    }
+
+
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -392,4 +432,3 @@ def regenerate_execution_brief(
         replacement_reason=regeneration_reason,
         review_notes=review_notes,
     )
-

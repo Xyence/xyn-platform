@@ -169,6 +169,7 @@ from .execution_briefs import (
     regenerate_execution_brief,
     replace_execution_brief,
     resolve_execution_brief,
+    serialize_execution_brief_review,
     valid_execution_brief_review_transition,
 )
 from .goal_progress import (
@@ -25606,6 +25607,7 @@ def _serialize_runtime_artifacts_for_thread(detail: Dict[str, Any], *, work_item
 def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     detail = runtime_detail or _project_runtime_status_to_task(task)
     status = _canonical_work_item_status(str((detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
+    brief_review = serialize_execution_brief_review(task)
     return {
         "id": str(task.id),
         "work_item_id": task.work_item_id or str(task.id),
@@ -25624,6 +25626,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "execution_brief_review_notes": task.execution_brief_review_notes or "",
         "execution_brief_reviewed_at": task.execution_brief_reviewed_at,
         "execution_brief_reviewed_by": str(task.execution_brief_reviewed_by_id) if task.execution_brief_reviewed_by_id else None,
+        "execution_brief_review": brief_review,
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
         "goal_id": str(task.goal_id) if task.goal_id else None,
@@ -28749,6 +28752,13 @@ def dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse:
     if request.method == "PATCH":
         payload = _parse_json(request)
         action = str(payload.get("execution_brief_action") or "").strip().lower()
+        action_state_map = {
+            "mark_ready": "ready",
+            "approve": "approved",
+            "reject": "rejected",
+        }
+        if action in action_state_map and "execution_brief_review_state" not in payload:
+            payload["execution_brief_review_state"] = action_state_map[action]
         update_fields: List[str] = []
         if action in {"replace", "regenerate"}:
             if action == "replace":

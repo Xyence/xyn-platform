@@ -4201,6 +4201,26 @@ export async function getWorkItem(id: string): Promise<WorkItemDetail> {
   return handle<WorkItemDetail>(response);
 }
 
+export async function updateWorkItem(
+  id: string,
+  payload: {
+    execution_brief_action?: "mark_ready" | "approve" | "reject" | "regenerate" | "replace";
+    execution_brief_review_state?: string;
+    execution_brief_review_notes?: string;
+    execution_brief_revision_reason?: string;
+    execution_brief?: Record<string, unknown>;
+  }
+): Promise<WorkItemDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/work-items/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<WorkItemDetail>(response);
+}
+
 export async function listGoals(workspaceId: string, planningStatus?: string): Promise<GoalListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/goals`);

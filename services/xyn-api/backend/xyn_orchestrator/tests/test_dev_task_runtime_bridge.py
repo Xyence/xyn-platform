@@ -359,6 +359,9 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertTrue(payload["has_execution_brief"])
         self.assertEqual(payload["execution_brief_review_state"], "ready")
         self.assertEqual(payload["execution_brief_review_notes"], "Ready for coding")
+        self.assertEqual(payload["execution_brief_review"]["summary"], "Bounded handoff")
+        self.assertFalse(payload["execution_brief_review"]["blocked"])
+        self.assertIn("approve", payload["execution_brief_review"]["available_actions"])
 
     def test_dev_task_detail_patch_updates_execution_brief_review_state(self):
         self.task.execution_brief = {
@@ -384,6 +387,29 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(self.task.execution_brief_review_state, "approved")
         self.assertEqual(self.task.execution_brief_review_notes, "Reviewed and approved")
         self.assertEqual(self.task.execution_brief_reviewed_by_id, self.user.id)
+
+    def test_dev_task_detail_patch_supports_review_action_aliases(self):
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Bounded handoff",
+            "objective": "Implement the explicit handoff",
+        }
+        self.task.execution_brief_review_state = "draft"
+        self.task.execution_policy = {"require_brief_approval": True}
+        self.task.save(update_fields=["execution_brief", "execution_brief_review_state", "execution_policy", "updated_at"])
+        request = self._request(
+            f"/xyn/api/dev-tasks/{self.task.id}",
+            method="patch",
+            data=json.dumps({"execution_brief_action": "approve"}),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2]:
+            response = dev_task_detail(request, str(self.task.id))
+        self.assertEqual(response.status_code, 200)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.execution_brief_review_state, "approved")
+        payload = json.loads(response.content)
+        self.assertEqual(payload["execution_brief_review"]["review_state"], "approved")
+        self.assertTrue(payload["execution_brief_review"]["ready"])
 
     def test_dev_task_detail_patch_regenerates_execution_brief_and_supersedes_prior_version(self):
         self.task.execution_brief = {

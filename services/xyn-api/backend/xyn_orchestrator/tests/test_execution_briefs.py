@@ -5,6 +5,7 @@ from django.test import TestCase
 
 from xyn_orchestrator.execution_briefs import (
     execution_brief_readiness,
+    serialize_execution_brief_review,
     normalize_execution_brief_review_state,
     regenerate_execution_brief,
     replace_execution_brief,
@@ -159,3 +160,33 @@ class ExecutionBriefTests(TestCase):
         self.assertEqual(resolved.revision, 2)
         self.assertEqual(len(resolved.history), 1)
         self.assertFalse(readiness.executable)
+
+    def test_serialize_execution_brief_review_exposes_blocked_state_and_actions(self):
+        task = self._task(
+            execution_brief={
+                "schema_version": "v1",
+                "summary": "Review the runtime bridge handoff",
+                "objective": "Keep the change scoped to the runtime bridge.",
+                "revision": 2,
+                "target": {"repository_slug": "xyn-platform", "branch": "develop"},
+            },
+            execution_brief_history=[
+                {
+                    "revision": 1,
+                    "brief": {"schema_version": "v1", "summary": "Old brief", "revision": 1},
+                    "review_state": "rejected",
+                }
+            ],
+            execution_brief_review_state="draft",
+            execution_brief_review_notes="Needs an explicit boundary",
+            execution_policy={"require_brief_approval": True},
+        )
+        review = serialize_execution_brief_review(task)
+        self.assertTrue(review["has_brief"])
+        self.assertTrue(review["blocked"])
+        self.assertEqual(review["blocked_reason"], "brief_not_ready")
+        self.assertEqual(review["revision"], 2)
+        self.assertEqual(review["history_count"], 1)
+        self.assertEqual(review["target_repository_slug"], "xyn-platform")
+        self.assertIn("mark_ready", review["available_actions"])
+        self.assertIn("approve", review["available_actions"])

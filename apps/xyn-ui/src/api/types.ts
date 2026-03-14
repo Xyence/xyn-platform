@@ -2221,6 +2221,30 @@ export type DevTaskSummary = {
   target_repo?: string | null;
   target_branch?: string | null;
   execution_policy?: Record<string, unknown>;
+  has_execution_brief?: boolean;
+  execution_brief_revision?: number;
+  execution_brief_history_count?: number;
+  execution_brief_review_state?: string;
+  execution_brief_review_notes?: string;
+  execution_brief_reviewed_at?: string | null;
+  execution_brief_reviewed_by?: string | null;
+  execution_brief_review?: {
+    has_brief: boolean;
+    review_state: string;
+    revision: number;
+    history_count: number;
+    summary?: string | null;
+    objective?: string | null;
+    target_repository_slug?: string | null;
+    target_branch?: string | null;
+    gated: boolean;
+    ready: boolean;
+    blocked: boolean;
+    blocked_reason?: string | null;
+    blocked_message?: string | null;
+    review_notes?: string | null;
+    available_actions: string[];
+  };
   thread_id?: string | null;
   thread_title?: string | null;
   goal_id?: string | null;
@@ -2249,6 +2273,8 @@ export type DevTaskSummary = {
 export type DevTaskDetail = DevTaskSummary & {
   input_artifact_key?: string;
   last_error?: string;
+  execution_brief?: Record<string, unknown> | null;
+  execution_brief_history?: Array<Record<string, unknown>>;
   context_packs?: Array<{
     id: string;
     name: string;

@@ -23,6 +23,7 @@ const apiMocks = vi.hoisted(() => ({
   getRuntimeRunCanvasApi: vi.fn(),
   listWorkItems: vi.fn(),
   getWorkItem: vi.fn(),
+  updateWorkItem: vi.fn(),
   getRuntimeRunArtifactContent: vi.fn(),
 }));
 
@@ -65,6 +66,7 @@ vi.mock("../../../api/xyn", async () => {
     getRuntimeRunCanvasApi: apiMocks.getRuntimeRunCanvasApi,
     listWorkItems: apiMocks.listWorkItems,
     getWorkItem: apiMocks.getWorkItem,
+    updateWorkItem: apiMocks.updateWorkItem,
     getRuntimeRunArtifactContent: apiMocks.getRuntimeRunArtifactContent,
   };
 });
@@ -330,6 +332,23 @@ describe("WorkbenchPanelHost entity refresh", () => {
           title: "Identify the first listing source and capture the ingestion contract",
           status: "queued",
           target_repo: "xyn-platform",
+          execution_brief_review: {
+            has_brief: true,
+            review_state: "draft",
+            revision: 1,
+            history_count: 0,
+            summary: "Bound the listing-ingestion coding handoff",
+            objective: "Keep the first slice focused on the ingestion contract.",
+            target_repository_slug: "xyn-platform",
+            target_branch: "develop",
+            gated: true,
+            ready: false,
+            blocked: true,
+            blocked_reason: "brief_not_ready",
+            blocked_message: "Execution brief review is required before coding execution can proceed.",
+            review_notes: "Needs human review",
+            available_actions: ["mark_ready", "approve", "reject", "regenerate"],
+          },
           task_type: "codegen",
           priority: 100,
           attempts: 0,
@@ -453,6 +472,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("in_progress").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Artifacts")).toBeInTheDocument();
     expect(screen.getAllByText("Identify the first listing source and capture the ingestion contract").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Draft · blocked")).toBeInTheDocument();
+    expect(screen.getByText("Execution brief review is required before coding execution can proceed.")).toBeInTheDocument();
     expect(screen.getAllByText("1").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Queue the next smallest slice from Listing Data Ingestion.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve and Queue" })).toBeEnabled();
@@ -693,6 +714,23 @@ describe("WorkbenchPanelHost entity refresh", () => {
           status: "running",
           target_repo: "xyn-platform",
           runtime_run_id: "run-1",
+          execution_brief_review: {
+            has_brief: true,
+            review_state: "approved",
+            revision: 2,
+            history_count: 1,
+            summary: "Implement scheduler handoff",
+            objective: "Keep the scheduler change scoped.",
+            target_repository_slug: "xyn-platform",
+            target_branch: "develop",
+            gated: true,
+            ready: true,
+            blocked: false,
+            blocked_reason: null,
+            blocked_message: "Execution brief is ready for execution.",
+            review_notes: "Approved for execution",
+            available_actions: ["reject", "regenerate"],
+          },
           task_type: "codegen",
           priority: 0,
           attempts: 0,
@@ -761,6 +799,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Avg Run Duration")).toBeInTheDocument();
     expect(screen.getByText("120s")).toBeInTheDocument();
     expect(screen.getByText("Scheduler refactor is running")).toBeInTheDocument();
+    expect(screen.getByText("Approved")).toBeInTheDocument();
+    expect(screen.getByText("Execution brief is ready for execution.")).toBeInTheDocument();
 
     await act(async () => {
       screen.getByRole("button", { name: "Queue Next Slice" }).click();
@@ -768,6 +808,122 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(apiMocks.reviewCoordinationThread).toHaveBeenCalledWith("thread-1", "queue_next_slice"));
     expect(screen.getByText("Approved the next slice for Runtime Refactor.")).toBeInTheDocument();
+  });
+
+  it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {
+    apiMocks.getWorkItem.mockResolvedValue({
+      id: "task-1",
+      work_item_id: "wi-1",
+      title: "Implement scheduler",
+      description: "Use the stored brief instead of inferring intent.",
+      status: "awaiting_review",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 0,
+      max_attempts: 2,
+      has_execution_brief: true,
+      execution_brief_revision: 2,
+      execution_brief_history_count: 1,
+      execution_brief_review_state: "draft",
+      execution_brief_review_notes: "Needs explicit approval",
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "draft",
+        revision: 2,
+        history_count: 1,
+        summary: "Implement scheduler via the bounded handoff",
+        objective: "Keep changes inside the scheduler seam.",
+        target_repository_slug: "xyn-platform",
+        target_branch: "develop",
+        gated: true,
+        ready: false,
+        blocked: true,
+        blocked_reason: "brief_not_ready",
+        blocked_message: "Execution brief review is required before coding execution can proceed.",
+        review_notes: "Needs explicit approval",
+        available_actions: ["mark_ready", "approve", "reject", "regenerate"],
+      },
+      execution_brief: {
+        schema_version: "v1",
+        revision: 2,
+        summary: "Implement scheduler via the bounded handoff",
+        objective: "Keep changes inside the scheduler seam.",
+      },
+      execution_brief_history: [{ revision: 1 }],
+    });
+    apiMocks.updateWorkItem.mockResolvedValue({
+      id: "task-1",
+      work_item_id: "wi-1",
+      title: "Implement scheduler",
+      description: "Use the stored brief instead of inferring intent.",
+      status: "queued",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 0,
+      max_attempts: 2,
+      has_execution_brief: true,
+      execution_brief_revision: 2,
+      execution_brief_history_count: 1,
+      execution_brief_review_state: "approved",
+      execution_brief_review_notes: "Approved for coding",
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "approved",
+        revision: 2,
+        history_count: 1,
+        summary: "Implement scheduler via the bounded handoff",
+        objective: "Keep changes inside the scheduler seam.",
+        target_repository_slug: "xyn-platform",
+        target_branch: "develop",
+        gated: true,
+        ready: true,
+        blocked: false,
+        blocked_reason: null,
+        blocked_message: "Execution brief is ready for execution.",
+        review_notes: "Approved for coding",
+        available_actions: ["reject", "regenerate"],
+      },
+      execution_brief: {
+        schema_version: "v1",
+        revision: 2,
+        summary: "Implement scheduler via the bounded handoff",
+        objective: "Keep changes inside the scheduler seam.",
+      },
+      execution_brief_history: [{ revision: 1 }],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail", panel_type: "detail", instance_key: "work-item:task-1", key: "work_item_detail", params: { work_item_id: "task-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getWorkItem).toHaveBeenCalledWith("task-1"));
+    expect(screen.getByText("Execution Brief Review")).toBeInTheDocument();
+    expect(screen.getByText("Execution Blocked")).toBeInTheDocument();
+    expect(screen.getByText("Implement scheduler via the bounded handoff")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Approve" }).click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.updateWorkItem).toHaveBeenCalledWith("task-1", {
+        execution_brief_action: "approve",
+        execution_brief_revision_reason: undefined,
+      }),
+    );
+    expect(screen.getByText("Execution Ready")).toBeInTheDocument();
+    expect(screen.getByText("Execution brief is ready for execution.")).toBeInTheDocument();
+    expect(screen.getByText("Execution brief Approve.")).toBeInTheDocument();
   });
 
   it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {

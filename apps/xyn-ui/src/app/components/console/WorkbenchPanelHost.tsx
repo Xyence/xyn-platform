@@ -29,6 +29,7 @@ import {
   queryEmsRegistrationsCanvasTable,
   reviewCoordinationThread,
   reviewGoal,
+  updateWorkItem,
 } from "../../../api/xyn";
 import type {
   AppBuilderArtifact,
@@ -118,6 +119,34 @@ export type ConsolePanelSpec = {
 type PanelProps = {
   onOpenPanel: (panelKey: ConsolePanelKey, params?: Record<string, unknown>) => void;
 };
+
+function titleCaseLabel(value: string): string {
+  return String(value || "")
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function briefReviewLabel(item: Pick<WorkItemSummary, "execution_brief_review">): string {
+  const review = item.execution_brief_review;
+  if (!review?.has_brief) return "No brief";
+  const state = titleCaseLabel(review.review_state || "draft");
+  return review.blocked ? `${state} · blocked` : state;
+}
+
+function BriefReviewSummary({ item }: { item: Pick<WorkItemSummary, "execution_brief_review"> }) {
+  const review = item.execution_brief_review;
+  if (!review?.has_brief) {
+    return <span className="muted">No brief</span>;
+  }
+  return (
+    <div>
+      <div>{briefReviewLabel(item)}</div>
+      {review.blocked_message ? <div className="muted small">{review.blocked_message}</div> : null}
+    </div>
+  );
+}
 
 type CanvasQuery = {
   entity: string;
@@ -1111,6 +1140,7 @@ function GoalDetailPanel({
                 <th>Status</th>
                 <th>Thread</th>
                 <th>Repo</th>
+                <th>Brief</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -1121,10 +1151,11 @@ function GoalDetailPanel({
                   <td>{item.status}</td>
                   <td>{item.thread_title || "—"}</td>
                   <td>{item.target_repo || "—"}</td>
+                  <td><BriefReviewSummary item={item} /></td>
                   <td><button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>Work Item</button></td>
                 </tr>
               ))}
-              {!payload.work_items.length ? <tr><td colSpan={5} className="muted">No work items planned yet.</td></tr> : null}
+              {!payload.work_items.length ? <tr><td colSpan={6} className="muted">No work items planned yet.</td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -1462,6 +1493,7 @@ function ThreadDetailPanel({
                 <th>Status</th>
                 <th>Repo</th>
                 <th>Run</th>
+                <th>Brief</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -1472,6 +1504,7 @@ function ThreadDetailPanel({
                   <td>{item.status}</td>
                   <td>{item.target_repo || "—"}</td>
                   <td>{item.runtime_run_id || "—"}</td>
+                  <td><BriefReviewSummary item={item} /></td>
                   <td>
                     <div className="inline-action-row">
                       <button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>
@@ -1488,7 +1521,7 @@ function ThreadDetailPanel({
               ))}
               {!payload.work_items.length ? (
                 <tr>
-                  <td colSpan={5} className="muted">
+                  <td colSpan={6} className="muted">
                     No work items are attached to this thread yet.
                   </td>
                 </tr>
@@ -1648,31 +1681,52 @@ function WorkItemDetailPanel({
   const [payload, setPayload] = useState<WorkItemDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionState, setActionState] = useState<{ status: "idle" | "submitting"; message: string | null }>({
+    status: "idle",
+    message: null,
+  });
+
+  async function loadWorkItem(active = true) {
+    try {
+      setLoading(true);
+      setError(null);
+      const next = await getWorkItem(workItemId);
+      if (!active) return;
+      setPayload(next);
+    } catch (err) {
+      if (!active) return;
+      setError(err instanceof Error ? err.message : "Failed to load work item");
+    } finally {
+      if (active) setLoading(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const next = await getWorkItem(workItemId);
-        if (!active) return;
-        setPayload(next);
-      } catch (err) {
-        if (!active) return;
-        setError(err instanceof Error ? err.message : "Failed to load work item");
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
+    void loadWorkItem(active);
     return () => {
       active = false;
     };
   }, [workItemId]);
 
+  async function handleBriefAction(action: "mark_ready" | "approve" | "reject" | "regenerate") {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const next = await updateWorkItem(workItemId, {
+        execution_brief_action: action,
+        execution_brief_revision_reason: action === "regenerate" ? "review_feedback" : undefined,
+      });
+      setPayload(next);
+      setActionState({ status: "idle", message: action === "regenerate" ? "Execution brief regenerated." : `Execution brief ${titleCaseLabel(action)}.` });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to update execution brief" });
+    }
+  }
+
   if (loading) return <p className="muted">Loading work item…</p>;
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Work item not found.</p>;
+  const review = payload.execution_brief_review;
 
   return (
     <div className="ems-panel-body">
@@ -1688,6 +1742,61 @@ function WorkItemDetailPanel({
       </div>
       {payload.description ? <p>{payload.description}</p> : null}
       {payload.last_error ? <InlineMessage tone="warn" title="Last error" body={payload.last_error} /> : null}
+      {review?.has_brief ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Execution Brief Review</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">State</div><div className="field-value">{titleCaseLabel(review.review_state)}</div></div>
+            <div><div className="field-label">Revision</div><div className="field-value">{review.revision || 0}</div></div>
+            <div><div className="field-label">History</div><div className="field-value">{review.history_count || 0}</div></div>
+            <div><div className="field-label">Target</div><div className="field-value">{review.target_repository_slug ? `${review.target_repository_slug}${review.target_branch ? ` @ ${review.target_branch}` : ""}` : "—"}</div></div>
+          </div>
+          {review.summary ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Summary</div>
+              <div className="field-value">{review.summary}</div>
+            </div>
+          ) : null}
+          {review.objective ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Objective</div>
+              <div className="field-value">{review.objective}</div>
+            </div>
+          ) : null}
+          {review.blocked_message ? (
+            <InlineMessage tone={review.blocked ? "warn" : "info"} title={review.blocked ? "Execution Blocked" : "Execution Ready"} body={review.blocked_message} />
+          ) : null}
+          {review.review_notes ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Review Notes</div>
+              <div className="field-value">{review.review_notes}</div>
+            </div>
+          ) : null}
+          {actionState.message ? <p className="muted" style={{ marginTop: 12 }}>{actionState.message}</p> : null}
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            {review.available_actions.includes("mark_ready") ? (
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleBriefAction("mark_ready")}>
+                Mark Ready
+              </button>
+            ) : null}
+            {review.available_actions.includes("approve") ? (
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleBriefAction("approve")}>
+                Approve
+              </button>
+            ) : null}
+            {review.available_actions.includes("reject") ? (
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleBriefAction("reject")}>
+                Reject
+              </button>
+            ) : null}
+            {review.available_actions.includes("regenerate") ? (
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleBriefAction("regenerate")}>
+                Regenerate
+              </button>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
       {payload.runtime_run_id ? (
         <div className="inline-actions" style={{ marginTop: 8 }}>
           {payload.thread_detail?.id ? (
