@@ -19,6 +19,8 @@ const apiMocks = vi.hoisted(() => ({
   listCoordinationThreads: vi.fn(),
   getCoordinationThread: vi.fn(),
   getWorkQueue: vi.fn(),
+  dispatchNextWorkQueueItem: vi.fn(),
+  dispatchWorkItem: vi.fn(),
   listRuntimeRunsCanvasApi: vi.fn(),
   getRuntimeRunCanvasApi: vi.fn(),
   listWorkItems: vi.fn(),
@@ -62,6 +64,8 @@ vi.mock("../../../api/xyn", async () => {
     listCoordinationThreads: apiMocks.listCoordinationThreads,
     getCoordinationThread: apiMocks.getCoordinationThread,
     getWorkQueue: apiMocks.getWorkQueue,
+    dispatchNextWorkQueueItem: apiMocks.dispatchNextWorkQueueItem,
+    dispatchWorkItem: apiMocks.dispatchWorkItem,
     listRuntimeRunsCanvasApi: apiMocks.listRuntimeRunsCanvasApi,
     getRuntimeRunCanvasApi: apiMocks.getRuntimeRunCanvasApi,
     listWorkItems: apiMocks.listWorkItems,
@@ -163,8 +167,22 @@ describe("WorkbenchPanelHost entity refresh", () => {
           task_id: "task-1",
           thread_priority: "high",
           thread_title: "Runtime Refactor",
+          queue_state: {
+            queue_ready: true,
+            dispatchable: true,
+            dispatched: false,
+            blocked: false,
+            status: "queue_ready",
+            reason: null,
+            message: "Task is approved and ready for queue dispatch.",
+          },
         },
       ],
+    });
+    apiMocks.dispatchNextWorkQueueItem.mockResolvedValue({
+      status: "dispatched",
+      queue_item: { thread_id: "thread-1", work_item_id: "wi-1", task_id: "task-1" },
+      run_id: "run-1",
     });
 
     render(
@@ -181,6 +199,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(apiMocks.getWorkQueue).toHaveBeenCalledWith("ws-1"));
     await waitFor(() => expect(screen.getAllByText("Runtime Refactor")).toHaveLength(2));
     expect(screen.getByText("wi-1")).toBeInTheDocument();
+    expect(screen.getByText("Task is approved and ready for queue dispatch.")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Dispatch Next" }).click();
+    });
+    await waitFor(() => expect(apiMocks.dispatchNextWorkQueueItem).toHaveBeenCalledWith("ws-1"));
+    expect(screen.getByText("Dispatched wi-1.")).toBeInTheDocument();
   });
 
   it("loads durable goals and opens goal detail targets", async () => {
@@ -913,6 +938,63 @@ describe("WorkbenchPanelHost entity refresh", () => {
       },
       execution_brief_history: [{ revision: 1 }],
     });
+    apiMocks.dispatchWorkItem.mockResolvedValue({
+      status: "dispatched",
+      queue_item: { thread_id: "thread-1", work_item_id: "wi-1", task_id: "task-1" },
+      run_id: "run-1",
+      work_item: {
+        id: "task-1",
+        work_item_id: "wi-1",
+        title: "Implement scheduler",
+        description: "Use the stored brief instead of inferring intent.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        runtime_run_id: "run-1",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 0,
+        max_attempts: 2,
+        has_execution_brief: true,
+        execution_brief_revision: 2,
+        execution_brief_history_count: 1,
+        execution_brief_review_state: "approved",
+        execution_brief_review_notes: "Approved for coding",
+        execution_queue: {
+          queue_ready: false,
+          dispatchable: false,
+          dispatched: true,
+          blocked: false,
+          status: "dispatched",
+          reason: "in_flight",
+          message: "Task has already been dispatched and is in progress.",
+        },
+        execution_brief_review: {
+          has_brief: true,
+          review_state: "approved",
+          revision: 2,
+          history_count: 1,
+          summary: "Implement scheduler via the bounded handoff",
+          objective: "Keep changes inside the scheduler seam.",
+          target_repository_slug: "xyn-platform",
+          target_branch: "develop",
+          gated: true,
+          ready: true,
+          blocked: false,
+          blocked_reason: null,
+          blocked_message: "Execution brief is ready for execution.",
+          review_notes: "Approved for coding",
+          available_actions: ["reject", "regenerate"],
+        },
+        execution_brief: {
+          schema_version: "v1",
+          revision: 2,
+          summary: "Implement scheduler via the bounded handoff",
+          objective: "Keep changes inside the scheduler seam.",
+        },
+        execution_brief_history: [{ revision: 1 }],
+      },
+    });
 
     render(
       <MemoryRouter>
@@ -930,6 +1012,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Execution Brief Review")).toBeInTheDocument();
     expect(screen.getByText("Execution Blocked")).toBeInTheDocument();
     expect(screen.getByText("Implement scheduler via the bounded handoff")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Dispatch Task" })).not.toBeInTheDocument();
 
     await act(async () => {
       screen.getByRole("button", { name: "Approve" }).click();
@@ -946,6 +1029,14 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Execution Ready")).toBeInTheDocument();
     expect(screen.getByText("Execution brief is ready for execution.")).toBeInTheDocument();
     expect(screen.getByText("Execution brief Approve.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dispatch Task" })).toBeEnabled();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Dispatch Task" }).click();
+    });
+    await waitFor(() => expect(apiMocks.dispatchWorkItem).toHaveBeenCalledWith("task-1", "ws-1"));
+    expect(screen.getByText("Task has already been dispatched and is in progress.")).toBeInTheDocument();
+    expect(screen.getByText("Dispatched wi-1.")).toBeInTheDocument();
   });
 
   it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {

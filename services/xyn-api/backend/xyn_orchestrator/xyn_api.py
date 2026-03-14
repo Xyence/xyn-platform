@@ -174,6 +174,7 @@ from .execution_briefs import (
 )
 from .execution_queue import (
     evaluate_dev_task_queue_state,
+    find_dispatchable_queue_entry,
     select_next_dispatchable_queue_entry,
     serialize_dev_task_queue_state,
 )
@@ -28742,6 +28743,52 @@ def _dispatch_next_queue_item(*, workspace: Workspace, user, identity: UserIdent
     }
 
 
+def _dispatch_selected_queue_item(*, workspace: Workspace, task: DevTask, user, identity: UserIdentity) -> Dict[str, Any]:
+    _, qs = _coordination_thread_queryset(identity, str(workspace.id))
+    task_lookup = _coordination_task_lookup_factory(str(workspace.id))
+    queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
+    for thread in qs:
+        _update_thread_status_from_tasks(thread)
+    queue = derive_work_queue(threads=qs, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
+    selected = find_dispatchable_queue_entry(
+        queue,
+        task_id=str(task.id),
+        task_lookup=queue_task_lookup,
+        status_lookup=_xco_status_lookup,
+    )
+    if not selected:
+        raise RuntimeError("selected work item is not ready for queue dispatch")
+    entry, selected_task, _ = selected
+    thread = selected_task.coordination_thread
+    if thread and thread.status == "queued":
+        transition_thread_status(thread, "active", work_item=selected_task, payload={"reason": "dispatch"})
+    if thread:
+        record_thread_event(thread=thread, event_type="work_item_promoted", work_item=selected_task, payload={"work_item_id": selected_task.work_item_id or str(selected_task.id)})
+    try:
+        result = _submit_dev_task_runtime_run(selected_task, workspace=workspace, user=user)
+    except ValueError as exc:
+        selected_task.status = "awaiting_review"
+        selected_task.last_error = str(exc)
+        selected_task.updated_by = user
+        selected_task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+        raise RuntimeError(str(exc))
+    selected_task.refresh_from_db()
+    if thread:
+        record_thread_event(
+            thread=thread,
+            event_type="run_dispatched_from_queue",
+            work_item=selected_task,
+            run_id=str(selected_task.runtime_run_id or ""),
+            payload={"run_id": str(selected_task.runtime_run_id or ""), "work_item_id": selected_task.work_item_id or str(selected_task.id)},
+        )
+    return {
+        "thread_id": entry.thread_id,
+        "work_item_id": entry.work_item_id,
+        "task_id": entry.task_id,
+        "run_id": result.get("run_id"),
+    }
+
+
 @csrf_exempt
 @login_required
 def xco_dispatch_next(request: HttpRequest) -> JsonResponse:
@@ -28760,6 +28807,39 @@ def xco_dispatch_next(request: HttpRequest) -> JsonResponse:
     except RuntimeError:
         return JsonResponse({"status": "idle", "summary": "No eligible work items in the XCO queue."})
     return JsonResponse({"status": "dispatched", "queue_item": {"thread_id": result["thread_id"], "work_item_id": result["work_item_id"], "task_id": result["task_id"]}, "run_id": result.get("run_id")})
+
+
+@csrf_exempt
+@login_required
+def dev_task_dispatch(request: HttpRequest, task_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, _ = _coordination_thread_queryset(identity, workspace_id)
+    task = get_object_or_404(DevTask, id=task_id)
+    if not task.coordination_thread_id or str(task.coordination_thread.workspace_id) != str(workspace.id):
+        return JsonResponse({"error": "work item is not part of the selected workspace queue"}, status=404)
+    try:
+        result = _dispatch_selected_queue_item(workspace=workspace, task=task, user=request.user, identity=identity)
+    except RuntimeError as exc:
+        return JsonResponse({"error": str(exc)}, status=409)
+    task.refresh_from_db()
+    return JsonResponse(
+        {
+            "status": "dispatched",
+            "queue_item": {"thread_id": result["thread_id"], "work_item_id": result["work_item_id"], "task_id": result["task_id"]},
+            "run_id": result.get("run_id"),
+            "work_item": _serialize_work_item_detail(task),
+        }
+    )
 
 
 @login_required

@@ -4444,6 +4444,20 @@ export async function dispatchNextWorkQueueItem(workspaceId: string): Promise<{ 
   return handle<{ status: string; queue_item?: Record<string, unknown>; run_id?: string }>(response);
 }
 
+export async function dispatchWorkItem(
+  id: string,
+  workspaceId: string
+): Promise<{ status: string; queue_item?: Record<string, unknown>; run_id?: string; work_item?: WorkItemDetail }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/dispatch`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify({ workspace_id: workspaceId }),
+  });
+  return handle<{ status: string; queue_item?: Record<string, unknown>; run_id?: string; work_item?: WorkItemDetail }>(response);
+}
+
 export async function runDevTask(id: string, force = false): Promise<{ run_id: string; status: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/run`);

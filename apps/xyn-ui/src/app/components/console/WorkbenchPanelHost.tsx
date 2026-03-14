@@ -17,6 +17,8 @@ import {
   getRuntimeRunCanvasApi,
   getWorkItem,
   getWorkQueue,
+  dispatchNextWorkQueueItem,
+  dispatchWorkItem,
   generateApplicationPlan,
   listGoals,
   listCoordinationThreads,
@@ -1209,27 +1211,33 @@ function ThreadListPanel({
   const [queue, setQueue] = useState<WorkQueueResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionState, setActionState] = useState<{ status: "idle" | "submitting"; message: string | null }>({
+    status: "idle",
+    message: null,
+  });
+
+  async function loadThreadState(active = true) {
+    try {
+      setLoading(true);
+      setError(null);
+      const [threadRows, queueRows] = await Promise.all([
+        listCoordinationThreads(workspaceId),
+        getWorkQueue(workspaceId),
+      ]);
+      if (!active) return;
+      setThreads(threadRows.threads || []);
+      setQueue(queueRows);
+    } catch (err) {
+      if (!active) return;
+      setError(err instanceof Error ? err.message : "Failed to load threads");
+    } finally {
+      if (active) setLoading(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const [threadRows, queueRows] = await Promise.all([
-          listCoordinationThreads(workspaceId),
-          getWorkQueue(workspaceId),
-        ]);
-        if (!active) return;
-        setThreads(threadRows.threads || []);
-        setQueue(queueRows);
-      } catch (err) {
-        if (!active) return;
-        setError(err instanceof Error ? err.message : "Failed to load threads");
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
+    void loadThreadState(active);
     return () => {
       active = false;
     };
@@ -1238,6 +1246,39 @@ function ThreadListPanel({
   useEffect(() => {
     onTitleChange?.("Threads");
   }, [onTitleChange]);
+
+  async function handleDispatchNext() {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await dispatchNextWorkQueueItem(workspaceId);
+      await loadThreadState(true);
+      setActionState({
+        status: "idle",
+        message:
+          response.status === "dispatched"
+            ? `Dispatched ${String(response.queue_item?.work_item_id || response.queue_item?.task_id || "next work item")}.`
+            : response.status === "idle"
+              ? "No approved work items are ready for dispatch."
+              : response.status,
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to dispatch next work item" });
+    }
+  }
+
+  async function handleDispatchSelected(taskId: string) {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await dispatchWorkItem(taskId, workspaceId);
+      await loadThreadState(true);
+      setActionState({
+        status: "idle",
+        message: response.status === "dispatched" ? `Dispatched ${String(response.queue_item?.work_item_id || taskId)}.` : response.status,
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to dispatch selected work item" });
+    }
+  }
 
   if (loading) return <p className="muted">Loading XCO threads…</p>;
   if (error) return <p className="danger-text">{error}</p>;
@@ -1297,7 +1338,11 @@ function ThreadListPanel({
             <h3>Derived Queue</h3>
             <p className="muted">Next eligible work items in deterministic dispatch order.</p>
           </div>
+          <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={handleDispatchNext}>
+            Dispatch Next
+          </button>
         </div>
+        {actionState.message ? <p className="muted" style={{ marginBottom: 12 }}>{actionState.message}</p> : null}
         <div className="canvas-table-wrap">
           <table className="canvas-table">
             <thead>
@@ -1307,6 +1352,7 @@ function ThreadListPanel({
                 <th>Work Item</th>
                 <th>Task ID</th>
                 <th>Status</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1317,11 +1363,21 @@ function ThreadListPanel({
                   <td>{entry.work_item_id}</td>
                   <td>{entry.task_id}</td>
                   <td>{entry.queue_state?.message || "Ready for dispatch"}</td>
+                  <td>
+                    <div className="inline-action-row">
+                      <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleDispatchSelected(entry.task_id)}>
+                        Dispatch
+                      </button>
+                      <button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: entry.task_id })}>
+                        Open
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ))}
               {!queue?.items?.length ? (
                 <tr>
-                  <td colSpan={5} className="muted">
+                  <td colSpan={6} className="muted">
                     No eligible work items are currently queued.
                   </td>
                 </tr>
@@ -1731,6 +1787,21 @@ function WorkItemDetailPanel({
     }
   }
 
+  async function handleDispatchTask() {
+    if (!workspaceId) return;
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await dispatchWorkItem(workItemId, workspaceId);
+      setPayload(response.work_item || (await getWorkItem(workItemId)));
+      setActionState({
+        status: "idle",
+        message: response.status === "dispatched" ? `Dispatched ${String(response.queue_item?.work_item_id || payload?.work_item_id || workItemId)}.` : response.status,
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to dispatch work item" });
+    }
+  }
+
   if (loading) return <p className="muted">Loading work item…</p>;
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Work item not found.</p>;
@@ -1761,6 +1832,13 @@ function WorkItemDetailPanel({
             <div><div className="field-label">In Flight</div><div className="field-value">{queue.dispatched ? "yes" : "no"}</div></div>
           </div>
           <p className="muted" style={{ marginTop: 12 }}>{queue.message}</p>
+          {queue.dispatchable && !queue.dispatched ? (
+            <div className="inline-action-row" style={{ marginTop: 12 }}>
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting" || !workspaceId} onClick={handleDispatchTask}>
+                Dispatch Task
+              </button>
+            </div>
+          ) : null}
         </section>
       ) : null}
       {review?.has_brief ? (

@@ -154,3 +154,24 @@ def select_next_dispatchable_queue_entry(
         if state.dispatchable:
             return entry, task, state
     return None
+
+
+def find_dispatchable_queue_entry(
+    entries: Iterable[QueueEntry],
+    *,
+    task_id: str,
+    task_lookup: Callable[[str], Optional[DevTask]],
+    status_lookup: Callable[[DevTask], str],
+) -> Optional[Tuple[QueueEntry, DevTask, DevTaskQueueState]]:
+    target = _clean_text(task_id)
+    for entry in entries:
+        if _clean_text(entry.task_id) != target:
+            continue
+        task = task_lookup(entry.task_id)
+        if task is None:
+            return None
+        state = evaluate_dev_task_queue_state(task, normalized_status=status_lookup(task))
+        if state.dispatchable:
+            return entry, task, state
+        return None
+    return None
