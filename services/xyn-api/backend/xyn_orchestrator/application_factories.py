@@ -17,7 +17,7 @@ from .goal_planning import (
     infer_goal_type,
     persist_goal_plan,
 )
-from .models import Application, ApplicationPlan, Goal, Workspace
+from .models import Application, ApplicationPlan, Goal, ManagedRepository, Workspace
 
 
 class ApplicationFactoryDefinition(BaseModel):
@@ -506,6 +506,7 @@ def create_or_get_application_plan(
     source_conversation_id: str = "",
     factory_key: str = "",
     application_name: str = "",
+    target_repository: ManagedRepository | None = None,
 ) -> Tuple[ApplicationPlan, ApplicationFactoryDefinition, GeneratedApplicationPlan, bool]:
     definition, generated_plan = generate_application_plan(
         objective=objective,
@@ -524,6 +525,7 @@ def create_or_get_application_plan(
         "source_factory_key": definition.key,
         "source_conversation_id": str(source_conversation_id or "").strip(),
         "requested_by": requested_by,
+        "target_repository": target_repository,
         "request_objective": str(objective or "").strip(),
         "plan_json": generated_plan.model_dump(mode="json"),
         "status": "review",
@@ -540,7 +542,7 @@ def create_or_get_application_plan(
                 setattr(plan, field, value)
                 dirty = True
         if dirty:
-            plan.save(update_fields=["name", "summary", "source_factory_key", "source_conversation_id", "requested_by", "request_objective", "plan_json", "status", "updated_at"])
+            plan.save(update_fields=["name", "summary", "source_factory_key", "source_conversation_id", "requested_by", "target_repository", "request_objective", "plan_json", "status", "updated_at"])
     return plan, definition, generated_plan, created
 
 
@@ -558,6 +560,7 @@ def apply_application_plan(*, application_plan: ApplicationPlan, user) -> Tuple[
             "source_factory_key": application_plan.source_factory_key,
             "source_conversation_id": application_plan.source_conversation_id,
             "requested_by": application_plan.requested_by,
+            "target_repository": application_plan.target_repository,
             "request_objective": application_plan.request_objective,
             "status": "active",
             "metadata_json": {
@@ -591,6 +594,9 @@ def apply_application_plan(*, application_plan: ApplicationPlan, user) -> Tuple[
                 resolution_notes=goal_seed.resolution_notes,
             )
             persist_goal_plan(goal, plan, user=user if isinstance(user, user_model) else None)
+    elif application_plan.target_repository_id and application.target_repository_id != application_plan.target_repository_id:
+        application.target_repository = application_plan.target_repository
+        application.save(update_fields=["target_repository", "updated_at"])
     application_plan.application = application
     application_plan.status = "applied"
     application_plan.save(update_fields=["application", "status", "updated_at"])

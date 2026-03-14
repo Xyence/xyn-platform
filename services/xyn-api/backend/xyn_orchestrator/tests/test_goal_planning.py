@@ -21,6 +21,7 @@ from xyn_orchestrator.models import (
     CoordinationThread,
     DevTask,
     Goal,
+    ManagedRepository,
     UserIdentity,
     Workspace,
     WorkspaceMembership,
@@ -400,6 +401,43 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(second_response.status_code, 200)
         self.assertEqual(second_payload["status"], "already_applied")
         self.assertEqual(Application.objects.filter(id=application.id).count(), 1)
+
+    def test_application_plan_target_repository_propagates_to_application_and_generated_tasks(self):
+        repository = ManagedRepository.objects.create(
+            slug="shine-app",
+            display_name="Shine App",
+            remote_url="https://example.com/shine-app.git",
+            default_branch="main",
+            is_active=True,
+            auth_mode="local",
+        )
+        generate_request = self._request(
+            "/xyn/api/application-plans",
+            method="post",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "objective": "Build an AI real estate deal finder",
+                    "source_conversation_id": "thread-1",
+                    "target_repository_slug": "shine-app",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            generate_response = application_plans_collection(generate_request)
+        self.assertEqual(generate_response.status_code, 201)
+        generated = json.loads(generate_response.content)
+        self.assertEqual(generated["target_repository_slug"], "shine-app")
+
+        plan = ApplicationPlan.objects.get(id=generated["id"])
+        self.assertEqual(plan.target_repository_id, repository.id)
+        apply_request = self._request(f"/xyn/api/application-plans/{plan.id}/apply", method="post", data=json.dumps({}))
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            apply_response = application_plan_apply(apply_request, str(plan.id))
+        self.assertEqual(apply_response.status_code, 200)
+        application = Application.objects.get(id=json.loads(apply_response.content)["application"]["id"])
+        self.assertEqual(application.target_repository_id, repository.id)
+        self.assertTrue(DevTask.objects.filter(goal__application=application, target_repo="shine-app", target_branch="main").exists())
 
     def test_application_detail_groups_goals_and_reuses_portfolio_state(self):
         plan = ApplicationPlan.objects.create(

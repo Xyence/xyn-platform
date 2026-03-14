@@ -14,7 +14,7 @@ from xyn_orchestrator.managed_repositories import (
 )
 from xyn_orchestrator.managed_storage import codegen_task_workspace
 from xyn_orchestrator.models import ManagedRepository
-from xyn_orchestrator.worker_tasks import _ensure_repo_workspace
+from xyn_orchestrator.worker_tasks import _effective_codegen_repo_targets, _ensure_repo_workspace
 
 
 class ManagedRepositoryTests(TestCase):
@@ -157,3 +157,28 @@ class ManagedRepositoryTests(TestCase):
             )
         self.assertEqual(repo_dir, workspace_root / "fallback-repo")
         self.assertTrue((repo_dir / ".git").exists())
+
+    def test_effective_codegen_repo_targets_prefers_explicit_task_target(self):
+        repository = ManagedRepository.objects.create(
+            slug="shine-app",
+            display_name="Shine App",
+            remote_url="https://example.com/shine-app.git",
+            default_branch="main",
+            is_active=True,
+            auth_mode="local",
+        )
+        targets = _effective_codegen_repo_targets(
+            {"target_repo": "shine-app", "target_branch": "main"},
+            {"repo_targets": []},
+        )
+        self.assertEqual(
+            targets,
+            [
+                {
+                    "name": repository.slug,
+                    "url": repository.remote_url,
+                    "ref": "main",
+                    "auth": "local",
+                }
+            ],
+        )

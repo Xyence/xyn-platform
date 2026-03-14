@@ -129,6 +129,7 @@ from .models import (
     ProviderCredential,
     AgentDefinition,
     AgentDefinitionPurpose,
+    ManagedRepository,
     PlatformConfigDocument,
     Report,
     ReportAttachment,
@@ -161,6 +162,7 @@ from .application_factories import (
     get_application_factory,
     list_application_factories,
 )
+from .development_targets import repo_target_payload_for_resolution, resolve_development_target
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -25321,22 +25323,26 @@ def _load_dev_task_runtime_source(task: DevTask) -> Dict[str, Any]:
             break
     if not isinstance(work_item, dict):
         raise ValueError(f"work_item_id not found in source plan: {work_item_id}")
-    repo_targets = work_item.get("repo_targets") if isinstance(work_item.get("repo_targets"), list) else []
-    repo_candidates: List[Tuple[str, str]] = []
-    for target in repo_targets:
-        if not isinstance(target, dict):
-            continue
-        branch = str(target.get("ref") or "").strip() or "develop"
-        for candidate in _runtime_repo_candidates_from_target(target):
-            repo_candidates.append((candidate, branch))
-    unique_candidates = {(repo, branch) for repo, branch in repo_candidates}
-    if not unique_candidates:
-        raise ValueError("unable to resolve a canonical runtime target repo from work item repo_targets")
-    repo_names = {repo for repo, _branch in unique_candidates}
-    if len(repo_names) > 1:
-        raise ValueError(f"multiple runtime target repos found for work item: {sorted(repo_names)}")
-    repo_name = next(iter(repo_names))
-    branch = next(branch for repo, branch in unique_candidates if repo == repo_name)
+    target = resolve_development_target(task=task, work_item=work_item)
+    repo_name = str(target.repository_slug or "").strip()
+    branch = str(target.branch or "").strip()
+    if not repo_name:
+        repo_targets = work_item.get("repo_targets") if isinstance(work_item.get("repo_targets"), list) else []
+        repo_candidates: List[Tuple[str, str]] = []
+        for row in repo_targets:
+            if not isinstance(row, dict):
+                continue
+            row_branch = str(row.get("ref") or "").strip() or "develop"
+            for candidate in _runtime_repo_candidates_from_target(row):
+                repo_candidates.append((candidate, row_branch))
+        unique_candidates = {(repo, row_branch) for repo, row_branch in repo_candidates}
+        if not unique_candidates:
+            raise ValueError("unable to resolve a canonical runtime target repo from work item repo_targets")
+        repo_names = {repo for repo, _branch in unique_candidates}
+        if len(repo_names) > 1:
+            raise ValueError(f"multiple runtime target repos found for work item: {sorted(repo_names)}")
+        repo_name = next(iter(repo_names))
+        branch = next(row_branch for repo, row_branch in unique_candidates if repo == repo_name)
     return {
         "plan_json": plan_json,
         "work_item": work_item,
@@ -25807,6 +25813,8 @@ def _serialize_application_plan_summary(plan: ApplicationPlan) -> Dict[str, Any]
         "source_factory_key": plan.source_factory_key,
         "source_conversation_id": plan.source_conversation_id or None,
         "requested_by": str(plan.requested_by_id) if plan.requested_by_id else None,
+        "target_repository_id": str(plan.target_repository_id) if plan.target_repository_id else None,
+        "target_repository_slug": str(getattr(plan.target_repository, "slug", "") or "") or None,
         "status": plan.status,
         "request_objective": plan.request_objective or "",
         "plan_fingerprint": plan.plan_fingerprint,
@@ -25857,6 +25865,8 @@ def _serialize_application_summary(application: Application) -> Dict[str, Any]:
         "source_factory_key": application.source_factory_key,
         "source_conversation_id": application.source_conversation_id or None,
         "requested_by": str(application.requested_by_id) if application.requested_by_id else None,
+        "target_repository_id": str(application.target_repository_id) if application.target_repository_id else None,
+        "target_repository_slug": str(getattr(application.target_repository, "slug", "") or "") or None,
         "status": application.status,
         "request_objective": application.request_objective or "",
         "goal_count": len(goals),
@@ -27516,6 +27526,9 @@ def _ensure_conversation_dev_task(*, workspace: Workspace, action: Dict[str, Any
             coordination_thread = candidates[0]
     reference = str(target.get("reference") or action_payload.get("reference") or prompt).strip()
     title = str(target.get("label") or reference or prompt).strip() or "Conversation work item"
+    target_resolution = resolve_development_target(goal=coordination_thread.goal if coordination_thread and coordination_thread.goal_id else None)
+    resolved_repo = str(target_resolution.repository_slug or "").strip()
+    resolved_branch = str(target_resolution.branch or "").strip()
     return DevTask.objects.create(
         title=title[:240],
         description=str(prompt or "").strip(),
@@ -27526,8 +27539,8 @@ def _ensure_conversation_dev_task(*, workspace: Workspace, action: Dict[str, Any
         source_entity_id=uuid.uuid4(),
         source_conversation_id=conversation_thread_id,
         intent_type=str(action.get("intent_type") or "").strip(),
-        target_repo=str(action_payload.get("target_repo") or _conversation_default_repo(prompt)).strip(),
-        target_branch=str(action_payload.get("target_branch") or _conversation_default_branch()).strip(),
+        target_repo=str(action_payload.get("target_repo") or resolved_repo or _conversation_default_repo(prompt)).strip(),
+        target_branch=str(action_payload.get("target_branch") or resolved_branch or _conversation_default_branch()).strip(),
         execution_policy=policy or {},
         coordination_thread=coordination_thread,
         work_item_id=_conversation_work_item_id(reference),
@@ -27645,6 +27658,7 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
         coordination_thread = None
         if payload.get("thread_id"):
             coordination_thread = get_object_or_404(CoordinationThread, id=payload["thread_id"])
+        target_resolution = resolve_development_target(goal=coordination_thread.goal if coordination_thread and coordination_thread.goal_id else None)
         dev_task = DevTask.objects.create(
             title=title,
             description=payload.get("description", ""),
@@ -27656,8 +27670,8 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
             source_entity_id=payload.get("source_entity_id") or uuid.uuid4(),
             source_conversation_id=payload.get("source_conversation_id", ""),
             intent_type=payload.get("intent_type", ""),
-            target_repo=payload.get("target_repo", ""),
-            target_branch=payload.get("target_branch", ""),
+            target_repo=payload.get("target_repo") or target_resolution.repository_slug or "",
+            target_branch=payload.get("target_branch") or target_resolution.branch or "",
             execution_policy=payload.get("execution_policy") if isinstance(payload.get("execution_policy"), dict) else None,
             coordination_thread=coordination_thread,
             dependency_work_item_ids=payload.get("dependency_work_item_ids") if isinstance(payload.get("dependency_work_item_ids"), list) else [],
@@ -28199,7 +28213,7 @@ def application_plans_collection(request: HttpRequest) -> JsonResponse:
         workspace, _ = _goal_queryset(identity, workspace_id)
         plans = list(
             ApplicationPlan.objects.filter(workspace=workspace)
-            .select_related("application", "requested_by")
+            .select_related("application", "requested_by", "target_repository")
             .order_by("-updated_at", "-created_at")
         )
         return JsonResponse({"application_plans": [_serialize_application_plan_summary(plan) for plan in plans]})
@@ -28211,6 +28225,12 @@ def application_plans_collection(request: HttpRequest) -> JsonResponse:
     if not workspace_id or not objective:
         return JsonResponse({"error": "workspace_id and objective are required"}, status=400)
     workspace, _ = _goal_queryset(identity, workspace_id)
+    target_repository_slug = str(payload.get("target_repository_slug") or payload.get("target_repo") or "").strip()
+    target_repository = None
+    if target_repository_slug:
+        target_repository = ManagedRepository.objects.filter(slug=slugify(target_repository_slug), is_active=True).first()
+        if target_repository is None:
+            return JsonResponse({"error": "target_repository_slug is not a registered repository"}, status=400)
     plan, factory_definition, generated_plan, created = create_or_get_application_plan(
         workspace=workspace,
         objective=objective,
@@ -28218,6 +28238,7 @@ def application_plans_collection(request: HttpRequest) -> JsonResponse:
         source_conversation_id=str(payload.get("source_conversation_id") or "").strip(),
         factory_key=str(payload.get("factory_key") or "").strip(),
         application_name=str(payload.get("application_name") or "").strip(),
+        target_repository=target_repository,
     )
     response_payload = _serialize_application_plan_detail(plan)
     response_payload["factory"] = _serialize_application_factory_summary(factory_definition)
@@ -28232,7 +28253,7 @@ def application_plan_detail(request: HttpRequest, plan_id: str) -> JsonResponse:
     identity = _require_authenticated(request)
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
-    plan = get_object_or_404(ApplicationPlan.objects.select_related("workspace", "requested_by", "application"), id=plan_id)
+    plan = get_object_or_404(ApplicationPlan.objects.select_related("workspace", "requested_by", "application", "target_repository"), id=plan_id)
     if not _workspace_membership(identity, str(plan.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "GET":
@@ -28248,7 +28269,7 @@ def application_plan_apply(request: HttpRequest, plan_id: str) -> JsonResponse:
         return JsonResponse({"error": "not authenticated"}, status=401)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    plan = get_object_or_404(ApplicationPlan.objects.select_related("workspace", "requested_by", "application"), id=plan_id)
+    plan = get_object_or_404(ApplicationPlan.objects.select_related("workspace", "requested_by", "application", "target_repository"), id=plan_id)
     if not _workspace_membership(identity, str(plan.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     application, created = apply_application_plan(application_plan=plan, user=request.user)
@@ -28276,7 +28297,7 @@ def applications_collection(request: HttpRequest) -> JsonResponse:
     workspace, _ = _goal_queryset(identity, workspace_id)
     applications = list(
         Application.objects.filter(workspace=workspace)
-        .select_related("requested_by")
+        .select_related("requested_by", "target_repository")
         .prefetch_related("goals")
         .order_by("-updated_at", "-created_at")
     )
@@ -28289,7 +28310,7 @@ def application_detail(request: HttpRequest, application_id: str) -> JsonRespons
     identity = _require_authenticated(request)
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
-    application = get_object_or_404(Application.objects.select_related("workspace", "requested_by").prefetch_related("goals__threads__work_items", "goals__work_items"), id=application_id)
+    application = get_object_or_404(Application.objects.select_related("workspace", "requested_by", "target_repository").prefetch_related("goals__threads__work_items", "goals__work_items"), id=application_id)
     if not _workspace_membership(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "GET":

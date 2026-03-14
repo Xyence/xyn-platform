@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from django.contrib.auth import get_user_model
 from django.utils.text import slugify
 
+from .development_targets import resolve_development_target
 from .goal_progress import compute_goal_progress, compute_thread_progress
 from .models import CoordinationThread, DevTask, Goal
 from .xco import THREAD_PRIORITY_ORDER, derive_work_queue
@@ -477,6 +478,9 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
             "work_items": list(goal.work_items.order_by("priority", "created_at", "id")),
         }
     user_model = get_user_model()
+    target = resolve_development_target(goal=goal)
+    target_repo = str(target.repository_slug or "").strip() or "xyn-platform"
+    target_branch = str(target.branch or "").strip() or "develop"
     created_threads: Dict[str, CoordinationThread] = {}
     for thread_def in sorted(plan.threads, key=lambda item: (item.sequence, item.title.lower())):
         thread = CoordinationThread.objects.create(
@@ -509,8 +513,8 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
             source_entity_id=goal.id,
             source_conversation_id=goal.source_conversation_id or "",
             intent_type="goal_planning",
-            target_repo="xyn-platform",
-            target_branch="develop",
+            target_repo=target_repo,
+            target_branch=target_branch,
             execution_policy={},
             goal=goal,
             coordination_thread=thread,

@@ -16,7 +16,8 @@ import boto3
 import requests
 from botocore.exceptions import BotoCoreError, ClientError
 from jsonschema import Draft202012Validator, RefResolver
-from .managed_repositories import ManagedRepositoryError, materialize_repository_workspace
+from .development_targets import DevelopmentTargetResolution, repo_target_payload_for_resolution
+from .managed_repositories import ManagedRepositoryError, materialize_repository_workspace, resolve_managed_repository
 from .managed_storage import codegen_task_workspace, store_local_artifact, resolve_local_artifact_path
 from .video_explainer import render_video, sanitize_payload
 
@@ -226,6 +227,32 @@ def _ensure_repo_workspace(repo: Dict[str, Any], workspace_root: str) -> str:
 
 def _git_cmd(repo_dir: str, cmd: str) -> int:
     return os.system(f"cd {repo_dir} && {cmd}")
+
+
+def _effective_codegen_repo_targets(task: Dict[str, Any], work_item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    explicit_repo = str(task.get("target_repo") or "").strip()
+    explicit_branch = str(task.get("target_branch") or "").strip()
+    if explicit_repo:
+        try:
+            repository = resolve_managed_repository(explicit_repo)
+        except ManagedRepositoryError:
+            repository = None
+        target = repo_target_payload_for_resolution(
+            DevelopmentTargetResolution(
+                repository=repository,
+                repository_slug=explicit_repo,
+                branch=explicit_branch or (repository.default_branch if repository else None),
+                source_kind="task_explicit",
+                application_id=None,
+                application_plan_id=None,
+                goal_id=None,
+            ),
+            branch=explicit_branch,
+        )
+        if target:
+            return [target]
+    repo_targets = work_item.get("repo_targets") if isinstance(work_item.get("repo_targets"), list) else []
+    return [row for row in repo_targets if isinstance(row, dict)]
 
 
 def _stage_all(repo_dir: str) -> int:
@@ -3388,7 +3415,7 @@ def run_dev_task(task_id: str, worker_id: str) -> None:
             blueprint_id = plan_json.get("blueprint_id")
             blueprint_name = plan_json.get("blueprint_name") or plan_json.get("blueprint")
             caps = _work_item_capabilities(work_item, work_item_id)
-            for repo in work_item.get("repo_targets", []):
+            for repo in _effective_codegen_repo_targets(task, work_item):
                 repo_dir = _ensure_repo_workspace(repo, workspace_root)
                 _apply_scaffold_for_work_item(work_item, repo_dir)
                 diff = _collect_git_diff(repo_dir)
@@ -3565,7 +3592,7 @@ def run_dev_task(task_id: str, worker_id: str) -> None:
                     if not images:
                         raise RuntimeError("No images configured for build.")
                     repo_sources: Dict[str, Dict[str, str]] = {}
-                    for repo in (work_item.get("repo_targets") or []):
+                    for repo in _effective_codegen_repo_targets(task, work_item):
                         if not isinstance(repo, dict):
                             continue
                         repo_name = str(repo.get("name") or "").strip()

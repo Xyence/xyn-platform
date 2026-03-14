@@ -5,9 +5,10 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 
-from xyn_orchestrator.models import DevTask, Run, UserIdentity, Workspace, WorkspaceMembership
+from xyn_orchestrator.models import Application, DevTask, Goal, ManagedRepository, Run, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import (
     _conversation_execution_context,
+    _load_dev_task_runtime_source,
     blueprint_dev_tasks,
     dev_task_detail,
     dev_task_retry,
@@ -131,6 +132,61 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertIn("Route development execution through Epic C runtime runs.", runtime_payload["prompt"]["body"])
         self.assertEqual(runtime_payload["policy"]["max_retries"], 2)
         self.assertIn("report", runtime_payload["requested_outputs"])
+
+    def test_load_dev_task_runtime_source_prefers_application_target_repository(self):
+        repository = ManagedRepository.objects.create(
+            slug="shine-app",
+            display_name="Shine App",
+            remote_url="https://example.com/shine-app.git",
+            default_branch="main",
+            is_active=True,
+            auth_mode="local",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Shine App",
+            summary="Targeted app",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            target_repository=repository,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build Shine App",
+        )
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Implement shine app",
+            description="Use repository target",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+        )
+        self.task.goal = goal
+        self.task.target_repo = ""
+        self.task.target_branch = ""
+        self.task.save(update_fields=["goal", "target_repo", "target_branch", "updated_at"])
+        with mock.patch("xyn_orchestrator.xyn_api._download_artifact_json", return_value=self.plan_json):
+            source = _load_dev_task_runtime_source(self.task)
+        self.assertEqual(source["target_repo"], "shine-app")
+        self.assertEqual(source["target_branch"], "main")
+
+    def test_load_dev_task_runtime_source_rejects_ambiguous_repo_targets_without_explicit_target(self):
+        ambiguous_plan = {
+            "work_items": [
+                {
+                    "id": "epic-c-bridge",
+                    "title": "Implement Epic C bridge",
+                    "repo_targets": [
+                        {"name": "xyn-platform", "ref": "develop"},
+                        {"name": "xyn", "ref": "main"},
+                    ],
+                }
+            ]
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._download_artifact_json", return_value=ambiguous_plan):
+            with self.assertRaisesMessage(ValueError, "multiple runtime target repos found"):
+                _load_dev_task_runtime_source(self.task)
 
     def test_work_item_detail_includes_durable_coordination_fields(self):
         self.task.description = "Track durable coordination"

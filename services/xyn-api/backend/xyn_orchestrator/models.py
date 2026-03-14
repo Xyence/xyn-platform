@@ -2770,6 +2770,9 @@ class Application(models.Model):
     requested_by = models.ForeignKey(
         "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="requested_applications"
     )
+    target_repository = models.ForeignKey(
+        "ManagedRepository", null=True, blank=True, on_delete=models.SET_NULL, related_name="applications"
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
     plan_fingerprint = models.CharField(max_length=128, blank=True, default="")
     request_objective = models.TextField(blank=True)
@@ -2809,6 +2812,9 @@ class ApplicationPlan(models.Model):
     source_conversation_id = models.CharField(max_length=120, blank=True)
     requested_by = models.ForeignKey(
         "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="requested_application_plans"
+    )
+    target_repository = models.ForeignKey(
+        "ManagedRepository", null=True, blank=True, on_delete=models.SET_NULL, related_name="application_plans"
     )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="review")
     request_objective = models.TextField(blank=True)
