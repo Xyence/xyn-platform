@@ -183,6 +183,11 @@ from .execution_recovery import (
     record_execution_failure_snapshot,
     serialize_dev_task_recovery_state,
 )
+from .execution_publish import (
+    ExecutionPublishError,
+    publish_dev_task,
+    serialize_dev_task_publish_state,
+)
 from .execution_changes import (
     resolve_dev_task_change_set,
     serialize_dev_task_change_summary,
@@ -25800,6 +25805,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
     queue_state = serialize_dev_task_queue_state(task, normalized_status=status)
     recovery_state = serialize_dev_task_recovery_state(task, execution_summary=execution_payload["execution_summary"])
     change_set = serialize_dev_task_change_summary(task, execution_payload=execution_payload)
+    publish_state = serialize_dev_task_publish_state(task, change_set=change_set)
     return {
         "id": str(task.id),
         "work_item_id": task.work_item_id or str(task.id),
@@ -25823,6 +25829,7 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "execution_run": execution_payload["execution_summary"],
         "execution_recovery": recovery_state,
         "change_set": change_set,
+        "publish_state": publish_state,
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
         "goal_id": str(task.goal_id) if task.goal_id else None,
@@ -29248,6 +29255,27 @@ def dev_task_requeue(request: HttpRequest, task_id: str) -> JsonResponse:
         return JsonResponse({"error": str(exc)}, status=409)
     task.refresh_from_db()
     return JsonResponse({"status": result["status"], "work_item": _serialize_work_item_detail(task)})
+
+
+@csrf_exempt
+@login_required
+def dev_task_publish(request: HttpRequest, task_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    task = get_object_or_404(DevTask, id=task_id)
+    payload = _parse_json(request)
+    push = str(request.GET.get("push") or payload.get("push") or "").strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        result = publish_dev_task(task, user=request.user, push=push)
+    except ExecutionPublishError as exc:
+        return JsonResponse({"error": str(exc), "work_item": _serialize_work_item_detail(task)}, status=409)
+    task.refresh_from_db()
+    return JsonResponse({"status": result.get("status"), "push": push, "work_item": _serialize_work_item_detail(task)})
 
 
 @csrf_exempt

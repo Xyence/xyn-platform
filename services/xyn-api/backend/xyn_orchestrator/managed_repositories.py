@@ -50,6 +50,10 @@ def _repo_clone_url(repository: ManagedRepository) -> str:
     return remote
 
 
+def managed_repository_clone_url(repository: ManagedRepository) -> str:
+    return _repo_clone_url(repository)
+
+
 def repository_cache_root() -> Path:
     root = managed_workspace_path("repositories", "cache")
     root.mkdir(parents=True, exist_ok=True)

@@ -21,6 +21,7 @@ const apiMocks = vi.hoisted(() => ({
   getWorkQueue: vi.fn(),
   dispatchNextWorkQueueItem: vi.fn(),
   dispatchWorkItem: vi.fn(),
+  publishDevTask: vi.fn(),
   retryDevTask: vi.fn(),
   requeueDevTask: vi.fn(),
   listRuntimeRunsCanvasApi: vi.fn(),
@@ -68,6 +69,7 @@ vi.mock("../../../api/xyn", async () => {
     getWorkQueue: apiMocks.getWorkQueue,
     dispatchNextWorkQueueItem: apiMocks.dispatchNextWorkQueueItem,
     dispatchWorkItem: apiMocks.dispatchWorkItem,
+    publishDevTask: apiMocks.publishDevTask,
     retryDevTask: apiMocks.retryDevTask,
     requeueDevTask: apiMocks.requeueDevTask,
     listRuntimeRunsCanvasApi: apiMocks.listRuntimeRunsCanvasApi,
@@ -925,6 +927,15 @@ describe("WorkbenchPanelHost entity refresh", () => {
         message: "2 files changed in the managed workspace.",
         diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
       },
+      publish_state: {
+        status: "idle",
+        repository_slug: "xyn-platform",
+        branch: "xyn/task/task-1",
+        commit: null,
+        push_status: null,
+        message: "No publish action has been recorded yet.",
+        available_actions: ["commit", "commit_and_push"],
+      },
       execution_brief: {
         schema_version: "v1",
         revision: 2,
@@ -1005,6 +1016,15 @@ describe("WorkbenchPanelHost entity refresh", () => {
         patch_available: true,
         message: "2 files changed in the managed workspace.",
         diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
+      },
+      publish_state: {
+        status: "idle",
+        repository_slug: "xyn-platform",
+        branch: "xyn/task/task-1",
+        commit: null,
+        push_status: null,
+        message: "No publish action has been recorded yet.",
+        available_actions: ["commit", "commit_and_push"],
       },
       execution_brief: {
         schema_version: "v1",
@@ -1092,6 +1112,112 @@ describe("WorkbenchPanelHost entity refresh", () => {
           message: "2 files changed in the managed workspace.",
           diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
         },
+        publish_state: {
+          status: "idle",
+          repository_slug: "xyn-platform",
+          branch: "xyn/task/task-1",
+          commit: null,
+          push_status: null,
+          message: "No publish action has been recorded yet.",
+          available_actions: ["commit", "commit_and_push"],
+        },
+        execution_brief: {
+          schema_version: "v1",
+          revision: 2,
+          summary: "Implement scheduler via the bounded handoff",
+          objective: "Keep changes inside the scheduler seam.",
+        },
+        execution_brief_history: [{ revision: 1 }],
+      },
+    });
+    apiMocks.publishDevTask.mockResolvedValue({
+      status: "pushed",
+      push: true,
+      work_item: {
+        id: "task-1",
+        work_item_id: "wi-1",
+        title: "Implement scheduler",
+        description: "Use the stored brief instead of inferring intent.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        runtime_run_id: "run-1",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 0,
+        max_attempts: 2,
+        has_execution_brief: true,
+        execution_brief_revision: 2,
+        execution_brief_history_count: 1,
+        execution_brief_review_state: "approved",
+        execution_brief_review_notes: "Approved for coding",
+        execution_queue: {
+          queue_ready: true,
+          dispatchable: true,
+          dispatched: false,
+          blocked: false,
+          status: "ready",
+          reason: "ready",
+          message: "Task is approved and ready for queue dispatch.",
+        },
+        execution_brief_review: {
+          has_brief: true,
+          review_state: "approved",
+          revision: 2,
+          history_count: 1,
+          summary: "Implement scheduler via the bounded handoff",
+          objective: "Keep changes inside the scheduler seam.",
+          target_repository_slug: "xyn-platform",
+          target_branch: "develop",
+          gated: true,
+          ready: true,
+          blocked: false,
+          blocked_reason: null,
+          blocked_message: "Execution brief is ready for execution.",
+          review_notes: "Approved for coding",
+          available_actions: ["reject", "regenerate"],
+        },
+        execution_run: {
+          has_run: false,
+          run_id: null,
+          source: null,
+          state: "not_run",
+          raw_status: null,
+          validation_status: null,
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "No execution run has been dispatched yet.",
+        },
+        change_set: {
+          available: true,
+          status: "changed",
+          has_changes: true,
+          source: "workspace",
+          repository_slug: "xyn-platform",
+          changed_file_count: 2,
+          files: [
+            { path: "services/scheduler.py", change_type: "modified", patch_available: true },
+            { path: "services/queue.py", change_type: "added", patch_available: true },
+          ],
+          patch_available: true,
+          message: "2 files changed in the managed workspace.",
+          diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
+        },
+        publish_state: {
+          status: "pushed",
+          repository_slug: "xyn-platform",
+          branch: "xyn/task/task-1",
+          commit: "abc1234",
+          push_status: "pushed",
+          published_at: "2026-03-14T10:00:00Z",
+          pushed_at: "2026-03-14T10:05:00Z",
+          message: "Committed changes and pushed the task branch.",
+          available_actions: [],
+        },
         execution_brief: {
           schema_version: "v1",
           revision: 2,
@@ -1118,6 +1244,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Execution Brief Review")).toBeInTheDocument();
     expect(screen.getByText("Execution Run")).toBeInTheDocument();
     expect(screen.getByText("Workspace Changes")).toBeInTheDocument();
+    expect(screen.getByText("Publish")).toBeInTheDocument();
     expect(screen.getByText("Execution Blocked")).toBeInTheDocument();
     expect(screen.getByText("Implement scheduler via the bounded handoff")).toBeInTheDocument();
     expect(screen.getByText("No execution run has been dispatched yet.")).toBeInTheDocument();
@@ -1125,6 +1252,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("2 files changed in the managed workspace.")).toBeInTheDocument();
     expect(screen.getByText(/Modified: services\/scheduler\.py/)).toBeInTheDocument();
     expect(screen.getByText(/diff --git a\/services\/scheduler\.py b\/services\/scheduler\.py/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Commit & Push" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Dispatch Task" })).not.toBeInTheDocument();
 
     await act(async () => {
@@ -1143,6 +1271,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Execution brief is ready for execution.")).toBeInTheDocument();
     expect(screen.getByText("Execution brief Approve.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Dispatch Task" })).toBeEnabled();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Commit & Push" }).click();
+    });
+    await waitFor(() => expect(apiMocks.publishDevTask).toHaveBeenCalledWith("task-1", { push: true }));
+    expect(screen.getByText("Committed changes and pushed the task branch.")).toBeInTheDocument();
+    expect(screen.getByText("abc1234")).toBeInTheDocument();
 
     await act(async () => {
       screen.getByRole("button", { name: "Dispatch Task" }).click();

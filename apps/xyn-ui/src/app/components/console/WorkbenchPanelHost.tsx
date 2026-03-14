@@ -23,6 +23,7 @@ import {
   listGoals,
   listCoordinationThreads,
   listWorkItems,
+  publishDevTask,
   listAppBuilderArtifacts,
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
@@ -33,6 +34,7 @@ import {
   reviewCoordinationThread,
   reviewGoal,
   retryDevTask,
+  publishDevTask,
   updateWorkItem,
 } from "../../../api/xyn";
 import type {
@@ -204,6 +206,18 @@ function ChangeSetSummary({ item }: { item: Pick<WorkItemSummary, "change_set"> 
     <div>
       <div>{fileCount} file{fileCount === 1 ? "" : "s"} changed</div>
       <div className="muted small">{filePreview || changeSet.message}</div>
+    </div>
+  );
+}
+
+function PublishSummary({ item }: { item: Pick<WorkItemSummary, "publish_state"> }) {
+  const publish = item.publish_state;
+  if (!publish?.branch && !publish?.commit) return <span className="muted">Not published</span>;
+  const label = publish.push_status === "pushed" ? "Pushed" : publish.commit ? "Committed" : titleCaseLabel(publish.status || "idle");
+  return (
+    <div>
+      <div>{label}</div>
+      <div className="muted small">{publish.branch || publish.message}</div>
     </div>
   );
 }
@@ -1202,6 +1216,7 @@ function GoalDetailPanel({
                 <th>Repo</th>
                 <th>Execution</th>
                 <th>Changes</th>
+                <th>Publish</th>
                 <th>Brief</th>
                 <th>Actions</th>
               </tr>
@@ -1215,11 +1230,12 @@ function GoalDetailPanel({
                   <td>{item.target_repo || "—"}</td>
                   <td><ExecutionRunSummary item={item} /></td>
                   <td><ChangeSetSummary item={item} /></td>
+                  <td><PublishSummary item={item} /></td>
                   <td><BriefReviewSummary item={item} /></td>
                   <td><button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>Work Item</button></td>
                 </tr>
               ))}
-              {!payload.work_items.length ? <tr><td colSpan={8} className="muted">No work items planned yet.</td></tr> : null}
+              {!payload.work_items.length ? <tr><td colSpan={9} className="muted">No work items planned yet.</td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -1614,6 +1630,7 @@ function ThreadDetailPanel({
                 <th>Repo</th>
                 <th>Execution</th>
                 <th>Changes</th>
+                <th>Publish</th>
                 <th>Brief</th>
                 <th>Actions</th>
               </tr>
@@ -1626,6 +1643,7 @@ function ThreadDetailPanel({
                   <td>{item.target_repo || "—"}</td>
                   <td><ExecutionRunSummary item={item} /></td>
                   <td><ChangeSetSummary item={item} /></td>
+                  <td><PublishSummary item={item} /></td>
                   <td><BriefReviewSummary item={item} /></td>
                   <td>
                     <div className="inline-action-row">
@@ -1643,7 +1661,7 @@ function ThreadDetailPanel({
               ))}
               {!payload.work_items.length ? (
                 <tr>
-                  <td colSpan={7} className="muted">
+                  <td colSpan={8} className="muted">
                     No work items are attached to this thread yet.
                   </td>
                 </tr>
@@ -1890,6 +1908,20 @@ function WorkItemDetailPanel({
     }
   }
 
+  async function handlePublishTask(push = false) {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await publishDevTask(workItemId, { push });
+      setPayload(response.work_item || (await getWorkItem(workItemId)));
+      setActionState({
+        status: "idle",
+        message: push ? "Published branch to the remote repository." : "Committed workspace changes to the task branch.",
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to publish work item" });
+    }
+  }
+
   if (loading) return <p className="muted">Loading work item…</p>;
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Work item not found.</p>;
@@ -1898,6 +1930,7 @@ function WorkItemDetailPanel({
   const execution = payload.execution_run;
   const recovery = payload.execution_recovery;
   const changeSet = payload.change_set;
+  const publish = payload.publish_state;
 
   return (
     <div className="ems-panel-body">
@@ -2069,6 +2102,40 @@ function WorkItemDetailPanel({
             <div style={{ marginTop: 12 }}>
               <div className="field-label">Diff</div>
               <pre className="field-value" style={{ whiteSpace: "pre-wrap", overflowX: "auto", maxHeight: 420 }}>{changeSet.diff_text}</pre>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+      {publish ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Publish</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Publish Status</div><div className="field-value">{titleCaseLabel(publish.status || "idle")}</div></div>
+            <div><div className="field-label">Repository</div><div className="field-value">{publish.repository_slug || payload.target_repo || "—"}</div></div>
+            <div><div className="field-label">Branch</div><div className="field-value">{publish.branch || "—"}</div></div>
+            <div><div className="field-label">Push Status</div><div className="field-value">{publish.push_status ? titleCaseLabel(publish.push_status) : "—"}</div></div>
+            <div><div className="field-label">Commit</div><div className="field-value">{publish.commit || "—"}</div></div>
+            <div><div className="field-label">Published At</div><div className="field-value">{publish.published_at || "—"}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{publish.message}</p>
+          {publish.last_error ? <InlineMessage tone="warn" title="Publish Error" body={publish.last_error} /> : null}
+          {publish.available_actions.length ? (
+            <div className="inline-action-row" style={{ marginTop: 12 }}>
+              {publish.available_actions.includes("commit") ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handlePublishTask(false)}>
+                  Commit Changes
+                </button>
+              ) : null}
+              {publish.available_actions.includes("push") ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handlePublishTask(true)}>
+                  Push Branch
+                </button>
+              ) : null}
+              {publish.available_actions.includes("commit_and_push") ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handlePublishTask(true)}>
+                  Commit & Push
+                </button>
+              ) : null}
             </div>
           ) : null}
         </section>

@@ -4489,6 +4489,24 @@ export async function requeueDevTask(id: string): Promise<{ status: string; work
   return handle<{ status: string; work_item?: WorkItemDetail }>(response);
 }
 
+export async function publishDevTask(
+  id: string,
+  payload: { push?: boolean } = {}
+): Promise<{ status: string; push?: boolean; work_item?: WorkItemDetail }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/publish`);
+  if (payload.push) {
+    url.searchParams.set("push", "1");
+  }
+  const response = await apiFetch(url.toString(), {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<{ status: string; push?: boolean; work_item?: WorkItemDetail }>(response);
+}
+
 export async function cancelDevTask(id: string): Promise<{ status: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/cancel`, {

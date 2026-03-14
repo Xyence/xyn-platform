@@ -2309,6 +2309,18 @@ export type DevTaskSummary = {
     patch_artifact_url?: string | null;
     message: string;
   };
+  publish_state?: {
+    status: string;
+    repository_slug?: string | null;
+    branch?: string | null;
+    commit?: string | null;
+    push_status?: string | null;
+    published_at?: string | null;
+    pushed_at?: string | null;
+    last_error?: string | null;
+    message: string;
+    available_actions: string[];
+  };
   thread_id?: string | null;
   thread_title?: string | null;
   goal_id?: string | null;
