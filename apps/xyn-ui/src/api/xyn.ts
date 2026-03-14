@@ -148,6 +148,7 @@ import type {
   AiModelConfig,
   AiAgent,
   AiBootstrapStatusResponse,
+  SystemReadinessResponse,
   AiInvokeResponse,
   AiModelConfigCompat,
   AccessRegistryResponse,
@@ -4199,6 +4200,14 @@ export async function getWorkItem(id: string): Promise<WorkItemDetail> {
     credentials: "include",
   });
   return handle<WorkItemDetail>(response);
+}
+
+export async function getSystemReadiness(): Promise<SystemReadinessResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/system/readiness`, {
+    credentials: "include",
+  });
+  return handle<SystemReadinessResponse>(response);
 }
 
 export async function updateWorkItem(

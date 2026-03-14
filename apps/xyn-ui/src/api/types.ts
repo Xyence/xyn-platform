@@ -1891,6 +1891,27 @@ export type AiBootstrapStatusResponse = {
   default_agent: AiBootstrapStatus;
 };
 
+export type SystemReadinessCheck = {
+  component: string;
+  status: "ok" | "missing" | "error";
+  message: string;
+  details?: Record<string, unknown>;
+};
+
+export type SystemReadinessResponse = {
+  ready: boolean;
+  summary: string;
+  checks: SystemReadinessCheck[];
+  paths?: {
+    workspace_root?: string;
+    artifact_root?: string;
+  };
+  env?: {
+    workspace_root_env?: string | null;
+    artifact_root_env?: string | null;
+  };
+};
+
 export type LocalProvisionJobResult = {
   status: string;
   job_artifact_id?: string | null;

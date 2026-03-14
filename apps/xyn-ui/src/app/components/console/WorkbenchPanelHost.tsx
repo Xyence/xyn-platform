@@ -15,6 +15,7 @@ import {
   getEmsStatusRollupCanvasTable,
   getRuntimeRunArtifactContent,
   getRuntimeRunCanvasApi,
+  getSystemReadiness,
   getWorkItem,
   getWorkQueue,
   dispatchNextWorkQueueItem,
@@ -23,7 +24,6 @@ import {
   listGoals,
   listCoordinationThreads,
   listWorkItems,
-  publishDevTask,
   listAppBuilderArtifacts,
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
@@ -34,7 +34,6 @@ import {
   reviewCoordinationThread,
   reviewGoal,
   retryDevTask,
-  publishDevTask,
   updateWorkItem,
 } from "../../../api/xyn";
 import type {
@@ -58,6 +57,7 @@ import type {
   RuntimeRunDetail,
   RuntimeRunArtifactContent,
   RuntimeRunSummary,
+  SystemReadinessResponse,
   WorkQueueResponse,
   WorkItemDetail,
   WorkItemSummary,
@@ -219,6 +219,39 @@ function PublishSummary({ item }: { item: Pick<WorkItemSummary, "publish_state">
       <div>{label}</div>
       <div className="muted small">{publish.branch || publish.message}</div>
     </div>
+  );
+}
+
+function readinessTone(readiness: SystemReadinessResponse | null): "ok" | "warning" | "error" {
+  if (!readiness) return "warning";
+  if (readiness.ready) return "ok";
+  return readiness.checks.some((check) => check.status === "error") ? "error" : "warning";
+}
+
+function SystemReadinessBanner({ readiness }: { readiness: SystemReadinessResponse | null }) {
+  if (!readiness) return null;
+  const tone = readinessTone(readiness);
+  const title = readiness.summary || (readiness.ready ? "System ready" : "Configuration required");
+  return (
+    <section className="card" style={{ marginBottom: 12, borderColor: tone === "error" ? "#d14343" : tone === "warning" ? "#c18401" : "#2d7a46" }}>
+      <div className="card-header">
+        <h3>System Readiness</h3>
+      </div>
+      <p style={{ marginTop: 0 }}>{title}</p>
+      <details>
+        <summary>Diagnostic checks</summary>
+        <div className="detail-grid" style={{ marginTop: 12 }}>
+          {readiness.checks.map((check) => (
+            <div key={check.component}>
+              <div className="field-label">{titleCaseToken(check.component)}</div>
+              <div className="field-value">
+                {titleCaseToken(check.status)}: {check.message}
+              </div>
+            </div>
+          ))}
+        </div>
+      </details>
+    </section>
   );
 }
 
@@ -3958,9 +3991,24 @@ export default function WorkbenchPanelHost({
   onContextChange?: ContextEmitter;
 }) {
   const [resolvedTitle, setResolvedTitle] = useState("");
+  const [systemReadiness, setSystemReadiness] = useState<SystemReadinessResponse | null>(null);
   useEffect(() => {
     setResolvedTitle("");
   }, [panel?.panel_id, panel?.key]);
+
+  useEffect(() => {
+    let active = true;
+    getSystemReadiness()
+      .then((next) => {
+        if (active) setSystemReadiness(next);
+      })
+      .catch(() => {
+        if (active) setSystemReadiness(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [workspaceId]);
 
   const content = useMemo(() => {
     if (!panel) return null;
@@ -4350,5 +4398,10 @@ export default function WorkbenchPanelHost({
     return null;
   }
 
-  return <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>;
+  return (
+    <div>
+      <SystemReadinessBanner readiness={systemReadiness} />
+      <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>
+    </div>
+  );
 }

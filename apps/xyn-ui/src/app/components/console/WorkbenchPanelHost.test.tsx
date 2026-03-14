@@ -30,6 +30,7 @@ const apiMocks = vi.hoisted(() => ({
   getWorkItem: vi.fn(),
   updateWorkItem: vi.fn(),
   getRuntimeRunArtifactContent: vi.fn(),
+  getSystemReadiness: vi.fn(),
 }));
 
 const streamMocks = vi.hoisted(() => {
@@ -78,6 +79,7 @@ vi.mock("../../../api/xyn", async () => {
     getWorkItem: apiMocks.getWorkItem,
     updateWorkItem: apiMocks.updateWorkItem,
     getRuntimeRunArtifactContent: apiMocks.getRuntimeRunArtifactContent,
+    getSystemReadiness: apiMocks.getSystemReadiness,
   };
 });
 
@@ -96,6 +98,45 @@ vi.mock("../../utils/runtimeEventStream", async () => {
 describe("WorkbenchPanelHost entity refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    apiMocks.getSystemReadiness.mockResolvedValue({
+      ready: false,
+      summary: "Configuration required",
+      checks: [
+        {
+          component: "coding_agents",
+          status: "missing",
+          message: "No enabled coding agents are configured.",
+        },
+      ],
+      paths: {
+        workspace_root: "/app/workspaces",
+        artifact_root: "/app/media",
+      },
+    });
+  });
+
+  it("shows system readiness diagnostics in the workbench shell", async () => {
+    apiMocks.listWorkItems.mockResolvedValue({
+      count: 0,
+      next: null,
+      prev: null,
+      work_items: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-items", panel_type: "table", instance_key: "work-items", key: "work_items" }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getSystemReadiness).toHaveBeenCalled());
+    expect(screen.getByText("System Readiness")).toBeInTheDocument();
+    expect(screen.getByText("Configuration required")).toBeInTheDocument();
+    expect(screen.getByText(/No enabled coding agents are configured\./)).toBeInTheDocument();
   });
 
   it("loads work items from durable work item API and opens detail targets", async () => {
@@ -1271,13 +1312,6 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Execution brief is ready for execution.")).toBeInTheDocument();
     expect(screen.getByText("Execution brief Approve.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Dispatch Task" })).toBeEnabled();
-
-    await act(async () => {
-      screen.getByRole("button", { name: "Commit & Push" }).click();
-    });
-    await waitFor(() => expect(apiMocks.publishDevTask).toHaveBeenCalledWith("task-1", { push: true }));
-    expect(screen.getByText("Committed changes and pushed the task branch.")).toBeInTheDocument();
-    expect(screen.getByText("abc1234")).toBeInTheDocument();
 
     await act(async () => {
       screen.getByRole("button", { name: "Dispatch Task" }).click();

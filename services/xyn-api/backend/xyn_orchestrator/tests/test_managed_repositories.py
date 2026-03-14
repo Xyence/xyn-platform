@@ -53,23 +53,39 @@ class ManagedRepositoryTests(TestCase):
         subprocess.run(["git", "push", "origin", branch], cwd=source, check=True, capture_output=True, text=True)
 
     def test_register_managed_repository_is_idempotent(self):
-        repository = register_managed_repository(
-            slug="xyn-platform",
-            remote_url="https://example.com/xyn-platform.git",
-            default_branch="develop",
-            auth_mode="https_token",
-            display_name="Xyn Platform",
-        )
-        second = register_managed_repository(
-            slug="xyn-platform",
-            remote_url="https://example.com/xyn-platform.git",
-            default_branch="develop",
-            auth_mode="https_token",
-            display_name="Xyn Platform",
-        )
+        with mock.patch.dict("os.environ", {"XYN_CODEGEN_GIT_TOKEN": "token-test"}, clear=False):
+            repository = register_managed_repository(
+                slug="xyn-platform",
+                remote_url="https://example.com/xyn-platform.git",
+                default_branch="develop",
+                auth_mode="https_token",
+                display_name="Xyn Platform",
+                validate_remote=False,
+            )
+            second = register_managed_repository(
+                slug="xyn-platform",
+                remote_url="https://example.com/xyn-platform.git",
+                default_branch="develop",
+                auth_mode="https_token",
+                display_name="Xyn Platform",
+                validate_remote=False,
+            )
         self.assertEqual(repository.id, second.id)
         self.assertEqual(ManagedRepository.objects.count(), 1)
         self.assertEqual(second.default_branch, "develop")
+
+    def test_register_managed_repository_reports_missing_https_token_configuration(self):
+        with mock.patch.dict("os.environ", {"XYN_CODEGEN_GIT_TOKEN": "", "XYENCE_CODEGEN_GIT_TOKEN": ""}, clear=False):
+            with self.assertRaises(ManagedRepositoryError) as exc:
+                register_managed_repository(
+                    slug="private-repo",
+                    remote_url="https://example.com/private.git",
+                    default_branch="main",
+                    auth_mode="https_token",
+                    display_name="Private Repo",
+                    validate_remote=False,
+                )
+        self.assertIn("https_token auth", str(exc.exception))
 
     def test_repository_materialization_clones_and_refreshes_cache(self):
         source, remote = self._seed_remote_repo()

@@ -192,6 +192,7 @@ from .execution_changes import (
     resolve_dev_task_change_set,
     serialize_dev_task_change_summary,
 )
+from .system_readiness import system_readiness_report
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -15260,6 +15261,16 @@ def ai_bootstrap_status(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "forbidden"}, status=403)
     _ensure_default_agent_purposes()
     return JsonResponse({"default_agent": get_default_agent_bootstrap_status()})
+
+
+@csrf_exempt
+def system_readiness(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(system_readiness_report())
 
 
 @csrf_exempt

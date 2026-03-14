@@ -87,18 +87,75 @@ def _write_repository_marker(path: Path, *, repository: ManagedRepository, kind:
     (path / ".xyn-repository.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def _run_git(args: list[str], *, cwd: Optional[Path] = None) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(
-        args,
-        cwd=str(cwd) if cwd else None,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+def _run_git(args: list[str], *, cwd: Optional[Path] = None, timeout: Optional[int] = None) -> subprocess.CompletedProcess[str]:
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=str(cwd) if cwd else None,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ManagedRepositoryError(f"git command timed out after {timeout or 0}s") from exc
     if proc.returncode != 0:
         detail = proc.stderr or proc.stdout or "git command failed"
         raise ManagedRepositoryError(detail.strip())
     return proc
+
+
+def validate_managed_repository_registration(
+    *,
+    remote_url: str,
+    default_branch: str = "main",
+    auth_mode: str = "",
+    verify_remote: bool = True,
+) -> Dict[str, Any]:
+    remote = str(remote_url or "").strip()
+    branch = str(default_branch or "main").strip() or "main"
+    normalized_auth = str(auth_mode or "").strip()
+    if not remote:
+        raise ManagedRepositoryError("repository remote URL is required")
+    if normalized_auth not in {"", "local", "https_token"}:
+        raise ManagedRepositoryError("repository auth mode must be one of: local, https_token")
+    parsed = urlparse(remote)
+    is_url = bool(parsed.scheme)
+    if is_url and parsed.scheme not in {"https", "ssh", "git", "file"}:
+        raise ManagedRepositoryError("repository URL must use https, ssh, git, or file")
+    if not is_url:
+        candidate = Path(remote).expanduser()
+        if not candidate.exists():
+            raise ManagedRepositoryError("repository path does not exist")
+    if normalized_auth == "https_token":
+        if not remote.startswith("https://"):
+            raise ManagedRepositoryError("https_token auth requires an https repository URL")
+        if not _repo_clone_token():
+            raise ManagedRepositoryError(
+                "repository uses https_token auth but no XYN_CODEGEN_GIT_TOKEN or XYENCE_CODEGEN_GIT_TOKEN is configured"
+            )
+    if not verify_remote:
+        return {
+            "remote_url": remote,
+            "branch": branch,
+            "auth_mode": normalized_auth or "local",
+            "validated": False,
+        }
+    clone_url = remote if not is_url or parsed.scheme != "https" else _repo_clone_url(
+        ManagedRepository(remote_url=remote, auth_mode=normalized_auth)
+    )
+    try:
+        refs = _run_git(["git", "ls-remote", "--heads", clone_url, branch], timeout=8)
+    except ManagedRepositoryError as exc:
+        raise ManagedRepositoryError(f"unable to access repository remote: {exc}") from exc
+    if not refs.stdout.strip():
+        raise ManagedRepositoryError(f"repository branch '{branch}' was not found on the remote")
+    return {
+        "remote_url": remote,
+        "branch": branch,
+        "auth_mode": normalized_auth or "local",
+        "validated": True,
+    }
 
 
 @transaction.atomic
@@ -110,17 +167,24 @@ def register_managed_repository(
     auth_mode: str = "",
     display_name: str = "",
     metadata: Optional[Dict[str, Any]] = None,
+    validate_remote: bool = True,
 ) -> ManagedRepository:
+    validation = validate_managed_repository_registration(
+        remote_url=remote_url,
+        default_branch=default_branch,
+        auth_mode=auth_mode,
+        verify_remote=validate_remote,
+    )
     normalized_slug = _safe_repo_slug(slug or _repo_source_slug_from_url(remote_url))
-    normalized_branch = str(default_branch or "main").strip() or "main"
-    normalized_auth = str(auth_mode or "").strip()
+    normalized_branch = str(validation["branch"] or "main").strip() or "main"
+    normalized_auth = str(validation["auth_mode"] or "").strip()
     defaults = {
         "display_name": str(display_name or slug or normalized_slug).strip(),
-        "remote_url": str(remote_url or "").strip(),
+        "remote_url": str(validation["remote_url"] or "").strip(),
         "default_branch": normalized_branch,
         "is_active": True,
         "auth_mode": normalized_auth,
-        "metadata_json": metadata or None,
+        "metadata_json": {**(metadata or {}), "validation": {"validated": bool(validation.get("validated"))}} or None,
     }
     repository, created = ManagedRepository.objects.get_or_create(slug=normalized_slug, defaults=defaults)
     if created:
