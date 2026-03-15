@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Layout, Model, Actions, type IJsonModel, type TabNode } from "flexlayout-react";
 import { useParams, useSearchParams } from "react-router-dom";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
@@ -121,18 +121,7 @@ export default function WorkbenchPage({
     requestSubmit();
   };
 
-  const renderPanel = (panelState: typeof panels[number]): ConsolePanelSpec => ({
-    panel_id: panelState.panel_id,
-    panel_type: panelState.panel_type,
-    instance_key: panelState.instance_key,
-    title: panelState.title,
-    key: panelState.key as ConsolePanelKey,
-    params: panelState.params || {},
-    active_group_id: panelState.active_group_id,
-    open_in: "current_panel",
-  });
-
-  const factory = (node: TabNode) => {
+  const factory = useCallback((node: TabNode) => {
     const panelId = String(node.getId() || "");
     const panelState = panelById.get(panelId);
     if (!panelState) {
@@ -142,7 +131,16 @@ export default function WorkbenchPage({
         </section>
       );
     }
-    const panel = renderPanel(panelState);
+    const panel: ConsolePanelSpec = {
+      panel_id: panelState.panel_id,
+      panel_type: panelState.panel_type,
+      instance_key: panelState.instance_key,
+      title: panelState.title,
+      key: panelState.key as ConsolePanelKey,
+      params: panelState.params || {},
+      active_group_id: panelState.active_group_id,
+      open_in: "current_panel",
+    };
     return (
       <WorkbenchPanelHost
         panel={panel}
@@ -166,7 +164,7 @@ export default function WorkbenchPage({
         }}
       />
     );
-  };
+  }, [panelById, workspaceId, workspaceName, workspaceColor, openPanel, setCanvasContext, closePanel]);
 
   const handleModelChange = (nextModel: Model) => {
     const nextJson = nextModel.toJson();
