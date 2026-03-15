@@ -2820,7 +2820,8 @@ function RunDetailPanel({
 }
 
 function PlatformSettingsPanel() {
-  return <PlatformSettingsHubPage />;
+  const [section, setSection] = useState<"general" | "security" | "integrations" | "deploy" | "workspaces">("security");
+  return <PlatformSettingsHubPage sectionOverride={section} onSectionChange={setSection} />;
 }
 
 function ArtifactListPanel({

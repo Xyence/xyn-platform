@@ -86,7 +86,13 @@ const SURFACES: SurfaceCard[] = [
   },
 ];
 
-export default function PlatformSettingsHubPage({ sectionOverride }: { sectionOverride?: HubSection }) {
+export default function PlatformSettingsHubPage({
+  sectionOverride,
+  onSectionChange,
+}: {
+  sectionOverride?: HubSection;
+  onSectionChange?: (section: HubSection) => void;
+}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedSection = sectionOverride || String(searchParams.get("section") || "security").trim().toLowerCase();
@@ -108,14 +114,18 @@ export default function PlatformSettingsHubPage({ sectionOverride }: { sectionOv
           value={activeSection}
           options={SECTIONS.map((section) => ({ value: section.value, label: section.label }))}
           onChange={(nextSection) => {
-            const next = new URLSearchParams(searchParams);
-            next.set("section", nextSection);
-            setSearchParams(next, { replace: true });
+            if (onSectionChange) {
+              onSectionChange(nextSection as HubSection);
+            } else {
+              const next = new URLSearchParams(searchParams);
+              next.set("section", nextSection);
+              setSearchParams(next, { replace: true });
+            }
           }}
         />
       </div>
 
-      <section className="card" style={{ marginBottom: 12 }}>
+      <section className="card" style={{ marginBottom: 12, minHeight: "auto" }}>
         <p className="muted">{SECTIONS.find((section) => section.value === activeSection)?.description}</p>
       </section>
 
