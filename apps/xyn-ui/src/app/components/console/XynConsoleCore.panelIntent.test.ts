@@ -59,6 +59,14 @@ describe("resolvePanelCommand", () => {
       panelKey: "drafts_list",
       params: {},
     });
+    expect(resolvePanelCommand("open composer")).toEqual({
+      panelKey: "composer_detail",
+      params: {},
+    });
+    expect(resolvePanelCommand("open workbench")).toEqual({
+      panelKey: "composer_detail",
+      params: {},
+    });
     expect(resolvePanelCommand("open jobs")).toEqual({
       panelKey: "jobs_list",
       params: {},

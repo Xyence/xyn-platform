@@ -39,6 +39,7 @@ type ArtifactStructuredQuery = {
 };
 
 type ResolvedPanelCommand =
+  | { panelKey: "composer_detail"; params: Record<string, never> }
   | { panelKey: "artifact_list"; params: { namespace?: string; query?: ArtifactStructuredQuery; query_error?: string } }
   | { panelKey: "workspaces"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "runs"; params: { query?: Record<string, unknown>; query_error?: string } }
@@ -198,6 +199,13 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
         },
       },
     };
+  }
+  if (
+    /^(open|show|go to|list)\s+composer$/.test(normalized)
+    || /^(open|show|go to)\s+application\s+workbench$/.test(normalized)
+    || /^(open|show|go to)\s+workbench$/.test(normalized)
+  ) {
+    return { panelKey: "composer_detail", params: {} };
   }
   if (/^(show|list|open)\s+drafts$/.test(normalized)) {
     return { panelKey: "drafts_list", params: {} };

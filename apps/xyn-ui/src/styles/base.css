@@ -4619,6 +4619,24 @@ button.sm {
   min-height: 540px;
 }
 
+.system-readiness-banner {
+  margin-top: 12px;
+  margin-bottom: 0;
+  padding-bottom: 14px;
+}
+
+.system-readiness-banner > p {
+  margin-bottom: 0;
+}
+
+.system-readiness-banner details {
+  margin-top: 10px;
+}
+
+.system-readiness-banner details:not([open]) {
+  margin-bottom: 0;
+}
+
 .ems-panel-head {
   display: flex;
   justify-content: space-between;

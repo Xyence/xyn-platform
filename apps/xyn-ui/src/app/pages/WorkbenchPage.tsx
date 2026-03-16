@@ -4,8 +4,6 @@ import { useLocation, useNavigate, useParams, useSearchParams } from "react-rout
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
 import { useXynConsole } from "../state/xynConsoleStore";
 import { useContextualCapabilities } from "../components/console/contextualCapabilities";
-import { useExecutionPlan } from "../components/console/useExecutionPlan";
-import CapabilityPlanSummary from "../components/console/CapabilityPlanSummary";
 import { resolveCapabilityGraphContext } from "../navigation/capabilityContext";
 import { executeCapabilityAction } from "../navigation/executeCapabilityAction";
 import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
@@ -40,6 +38,7 @@ export default function WorkbenchPage({
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = String(params.workspaceId || "").trim();
+  const showLandingShell = !activePanel;
   const landingContext = useMemo(
     () =>
       resolveCapabilityGraphContext({
@@ -50,12 +49,12 @@ export default function WorkbenchPage({
     [location.pathname, location.search],
   );
   const { capabilities: landingCapabilities } = useContextualCapabilities({
-    context: landingContext,
-    workspaceId,
+    enabled: showLandingShell,
+    context: showLandingShell ? landingContext : undefined,
+    workspaceId: showLandingShell ? workspaceId : undefined,
     includeUnavailable: true,
   });
   const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
-  const [selectedCapabilityId, setSelectedCapabilityId] = useState("");
 
   const panelById = useMemo(() => new Map(panels.map((entry) => [entry.panel_id, entry] as const)), [panels]);
 
@@ -244,9 +243,7 @@ export default function WorkbenchPage({
           },
         ]
   ).slice(0, 6);
-  const { loading: planLoading, error: planError, plan: selectedPlanSummary } = useExecutionPlan(selectedCapabilityId || null);
-
-  const handleSuggestion = (capability: ContextualCapability, capabilityId: string, prompt: string) => {
+  const handleSuggestion = (capability: ContextualCapability, prompt: string) => {
     executeCapabilityAction({
       capability,
       navigate,
@@ -332,7 +329,7 @@ export default function WorkbenchPage({
                     key={entry.id}
                     type="button"
                     className="ghost workbench-suggestion-chip"
-                    onClick={() => handleSuggestion(entry.capability, entry.id, entry.prompt)}
+                    onClick={() => handleSuggestion(entry.capability, entry.prompt)}
                   >
                     <strong>{entry.label}</strong>
                     <span className="muted small">{entry.description}</span>
@@ -353,9 +350,6 @@ export default function WorkbenchPage({
                 </div>
               </div>
             ) : null}
-            {planLoading ? <p className="muted small" style={{ marginTop: 12 }}>Loading plan…</p> : null}
-            {!planLoading && planError ? <p className="danger-text" style={{ marginTop: 12 }}>{planError}</p> : null}
-            {!planLoading && selectedPlanSummary ? <CapabilityPlanSummary plan={selectedPlanSummary} /> : null}
           </section>
         </div>
       ) : null}

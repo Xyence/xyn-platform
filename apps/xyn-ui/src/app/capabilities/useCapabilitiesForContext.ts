@@ -4,6 +4,7 @@ import type { CapabilityContextAttributes, ContextualCapability } from "../../ap
 import { capabilityRefreshMatchesRequest, XYN_CAPABILITY_REFRESH_EVENT, type CapabilityRefreshDetail } from "../events/capabilityEvents";
 
 type Params = {
+  enabled?: boolean;
   context?: string;
   entityId?: string | null;
   workspaceId?: string | null;
@@ -48,6 +49,20 @@ export function useCapabilitiesForContext(params: Params): Model {
   }, [params.context, params.entityId, params.workspaceId]);
 
   useEffect(() => {
+    const enabled = params.enabled !== false;
+    const hasRequestTarget = Boolean(
+      String(params.context || "").trim()
+      || String(params.entityId || "").trim()
+      || String(params.workspaceId || "").trim()
+    );
+    if (!enabled || !hasRequestTarget) {
+      setLoading(false);
+      setError(null);
+      setContext(String(params.context || "unknown") || "unknown");
+      setAttributes({});
+      setCapabilities([]);
+      return;
+    }
     let active = true;
     (async () => {
       try {

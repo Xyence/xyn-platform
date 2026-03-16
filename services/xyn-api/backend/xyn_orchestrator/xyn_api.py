@@ -29247,6 +29247,7 @@ def capabilities_graph(request: HttpRequest) -> JsonResponse:
     return JsonResponse(get_capability_graph_introspection())
 
 
+@csrf_exempt
 @login_required
 def capability_events(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)

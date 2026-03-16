@@ -75,8 +75,6 @@ import JobDetailPage from "../../pages/JobDetailPage";
 import JobsListPage from "../../pages/JobsListPage";
 import PlatformSettingsHubPage from "../../pages/PlatformSettingsHubPage";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
-import CapabilityPlanSummary from "./CapabilityPlanSummary";
-import { useExecutionPlan } from "./useExecutionPlan";
 
 export type ConsolePanelKey =
   | "platform_settings"
@@ -236,7 +234,7 @@ function SystemReadinessBanner({ readiness }: { readiness: SystemReadinessRespon
   const tone = readinessTone(readiness);
   const title = readiness.summary || (readiness.ready ? "System ready" : "Configuration required");
   return (
-    <section className="card" style={{ marginBottom: 12, borderColor: tone === "error" ? "#d14343" : tone === "warning" ? "#c18401" : "#2d7a46" }}>
+    <section className="card system-readiness-banner" style={{ borderColor: tone === "error" ? "#d14343" : tone === "warning" ? "#c18401" : "#2d7a46" }}>
       <div className="card-header">
         <h3>System Readiness</h3>
       </div>
@@ -3554,11 +3552,6 @@ function ComposerDetailPanel({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [objective, setObjective] = useState("");
-  const showApplicationPlanSummary =
-    Boolean(factoryKey || applicationPlanId || applicationId) || (!goalId && !threadId);
-  const { loading: planSummaryLoading, error: planSummaryError, plan: applicationPlanSummary } = useExecutionPlan(
-    showApplicationPlanSummary ? "build_application" : null
-  );
 
   useEffect(() => {
     let active = true;
@@ -3683,35 +3676,39 @@ function ComposerDetailPanel({
     selectedGoal && selectedGoal.recommendation && typeof selectedGoal.recommendation === "object"
       ? selectedGoal.recommendation
       : null;
+  const actionableBreadcrumbs = payload.breadcrumbs.filter(
+    (crumb) => !(crumb.kind === "composer" && payload.breadcrumbs.length === 1)
+  );
 
   return (
     <div className="panel-section-stack">
       <section className="card">
         <div className="card-header">
           <div>
-            <div className="field-label">Stage</div>
+            <div className="field-label">Composer Stage</div>
             <div className="field-value">{payload.stage.replace(/_/g, " ")}</div>
           </div>
         </div>
-        <div className="inline-action-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
-          {payload.breadcrumbs.map((crumb, index) => (
-            <button
-              key={`${crumb.kind}:${crumb.id || index}`}
-              type="button"
-              className="ghost sm"
-              onClick={() => {
-                if (crumb.kind === "composer") openComposer();
-                else if (crumb.kind === "factory" && crumb.id) openComposer({ factory_key: crumb.id });
-                else if (crumb.kind === "application_plan" && crumb.id) openComposer({ application_plan_id: crumb.id });
-                else if (crumb.kind === "application" && crumb.id) openComposer({ application_id: crumb.id });
-                else if (crumb.kind === "goal" && crumb.id) openComposer({ goal_id: crumb.id });
-                else if (crumb.kind === "thread" && crumb.id) openComposer({ thread_id: crumb.id });
-              }}
-            >
-              {crumb.label}
-            </button>
-          ))}
-        </div>
+        {actionableBreadcrumbs.length ? (
+          <div className="inline-action-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
+            {actionableBreadcrumbs.map((crumb, index) => (
+              <button
+                key={`${crumb.kind}:${crumb.id || index}`}
+                type="button"
+                className="ghost sm"
+                onClick={() => {
+                  if (crumb.kind === "factory" && crumb.id) openComposer({ factory_key: crumb.id });
+                  else if (crumb.kind === "application_plan" && crumb.id) openComposer({ application_plan_id: crumb.id });
+                  else if (crumb.kind === "application" && crumb.id) openComposer({ application_id: crumb.id });
+                  else if (crumb.kind === "goal" && crumb.id) openComposer({ goal_id: crumb.id });
+                  else if (crumb.kind === "thread" && crumb.id) openComposer({ thread_id: crumb.id });
+                }}
+              >
+                {crumb.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
         {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
       </section>
 
@@ -3780,20 +3777,6 @@ function ComposerDetailPanel({
             </button>
           </div>
         </section>
-      ) : null}
-
-      {showApplicationPlanSummary ? (
-        planSummaryLoading ? (
-          <section className="card">
-            <p className="muted small">Loading plan summary…</p>
-          </section>
-        ) : planSummaryError ? (
-          <section className="card">
-            <p className="danger-text">{planSummaryError}</p>
-          </section>
-        ) : applicationPlanSummary ? (
-          <CapabilityPlanSummary plan={applicationPlanSummary} />
-        ) : null
       ) : null}
 
       {selectedApplication ? (
@@ -4443,7 +4426,6 @@ export default function WorkbenchPanelHost({
   if (panel.key === "platform_settings") {
     return (
       <div>
-        <SystemReadinessBanner readiness={systemReadiness} />
         <div className="card ems-panel-host">
           <PlatformSettingsPanel
             initialSection={String(panel.params?.section || "")}
@@ -4452,14 +4434,15 @@ export default function WorkbenchPanelHost({
             }}
           />
         </div>
+        <SystemReadinessBanner readiness={systemReadiness} />
       </div>
     );
   }
 
   return (
     <div>
-      <SystemReadinessBanner readiness={systemReadiness} />
       <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>
+      <SystemReadinessBanner readiness={systemReadiness} />
     </div>
   );
 }

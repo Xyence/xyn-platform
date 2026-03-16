@@ -670,7 +670,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(screen.getByText(/plan review/i)).toBeInTheDocument());
     expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
-    expect(await screen.findByText("Application Plan")).toBeInTheDocument();
+    expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
     await act(async () => {
       screen.getByRole("button", { name: "Apply Plan" }).click();
     });
@@ -2347,8 +2347,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
         thread_id: undefined,
       })
     );
+    expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
     expect(screen.getByText(/factory discovery/i)).toBeInTheDocument();
     expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Composer" })).not.toBeInTheDocument();
   });
 
   it("loads composer plan review state and applies plans through the existing apply seam", async () => {
