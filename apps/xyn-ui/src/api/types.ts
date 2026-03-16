@@ -2396,6 +2396,12 @@ export type DevTaskSummary = {
     status: string;
     reason?: string | null;
     message: string;
+    selected_for_dispatch?: boolean;
+    next_dispatchable_task_id?: string | null;
+    next_dispatchable_work_item_id?: string | null;
+    next_dispatchable_title?: string | null;
+    next_dispatchable_thread_id?: string | null;
+    next_dispatchable_thread_title?: string | null;
   };
   execution_run?: {
     has_run: boolean;

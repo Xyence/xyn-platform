@@ -1984,6 +1984,7 @@ function WorkItemDetailPanel({
   const recovery = payload.execution_recovery;
   const changeSet = payload.change_set;
   const publish = payload.publish_state;
+  const canDispatchSelectedTask = Boolean(queue?.dispatchable && !queue?.dispatched && (queue?.selected_for_dispatch ?? true));
 
   return (
     <div className="ems-panel-body">
@@ -2009,7 +2010,18 @@ function WorkItemDetailPanel({
             <div><div className="field-label">In Flight</div><div className="field-value">{queue.dispatched ? "yes" : "no"}</div></div>
           </div>
           <p className="muted" style={{ marginTop: 12 }}>{queue.message}</p>
-          {queue.dispatchable && !queue.dispatched ? (
+          {queue.dispatchable && !queue.dispatched && !(queue.selected_for_dispatch ?? true) && queue.next_dispatchable_task_id ? (
+            <div className="inline-action-row" style={{ marginTop: 12 }}>
+              <button
+                type="button"
+                className="ghost sm"
+                onClick={() => onOpenPanel("work_item_detail", { work_item_id: queue.next_dispatchable_task_id })}
+              >
+                Open next ready work item
+              </button>
+            </div>
+          ) : null}
+          {canDispatchSelectedTask ? (
             <div className="inline-action-row" style={{ marginTop: 12 }}>
               <button type="button" className="ghost sm" disabled={actionState.status === "submitting" || !workspaceId} onClick={handleDispatchTask}>
                 Dispatch Task

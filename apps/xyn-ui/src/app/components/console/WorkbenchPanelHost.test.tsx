@@ -2541,6 +2541,110 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Task has been returned to the execution queue after a failed run.")).toBeInTheDocument();
   });
 
+  it("hides dispatch for a ready item when another queued item is next", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getWorkItem.mockResolvedValue({
+      id: "task-3",
+      work_item_id: "wi-3",
+      title: "Validate the first slice with tests and runtime observability",
+      description: "Review the queued validation slice.",
+      status: "queued",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 0,
+      max_attempts: 3,
+      has_execution_brief: true,
+      execution_brief_revision: 1,
+      execution_brief_history_count: 0,
+      execution_brief_review_state: "approved",
+      execution_brief_review_notes: "",
+      execution_queue: {
+        queue_ready: true,
+        dispatchable: true,
+        dispatched: false,
+        blocked: false,
+        status: "queue_ready",
+        message:
+          "Validate the first slice with tests and runtime observability is approved, but Define the first operator workflow state is next in the execution queue for Operator Workflow.",
+        selected_for_dispatch: false,
+        next_dispatchable_task_id: "task-next",
+        next_dispatchable_work_item_id: "wi-next",
+        next_dispatchable_title: "Define the first operator workflow state",
+        next_dispatchable_thread_id: "thread-next",
+        next_dispatchable_thread_title: "Operator Workflow",
+      },
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "approved",
+        revision: 1,
+        history_count: 0,
+        summary: "Validate the first slice with tests and runtime observability",
+        objective: "Confirm the slice works end-to-end.",
+        gated: true,
+        ready: true,
+        blocked: false,
+        blocked_reason: null,
+        blocked_message: "Execution brief is ready for execution.",
+        review_notes: "",
+        available_actions: ["reject", "regenerate"],
+      },
+      execution_run: {
+        has_run: false,
+        state: "not_run",
+        artifact_count: 0,
+        artifact_labels: [],
+        message: "No execution run has been dispatched yet.",
+      },
+      execution_recovery: {
+        available: true,
+        retryable: false,
+        requeueable: false,
+        status: "idle",
+        message: "Task has not failed recently.",
+      },
+      change_set: {
+        available: false,
+        has_changes: false,
+        changed_file_count: 0,
+        files: [],
+        message: "No workspace changes recorded.",
+      },
+      publish_state: {
+        available: false,
+        status: "idle",
+        message: "Nothing to publish yet.",
+        available_actions: [],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail", panel_type: "detail", instance_key: "work-item:task-3", key: "work_item_detail", params: { work_item_id: "task-3" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getWorkItem).toHaveBeenCalledWith("task-3"));
+    expect(screen.getByText(/Define the first operator workflow state is next in the execution queue/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Dispatch Task" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Open next ready work item" }).click();
+    });
+
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "work_item_detail",
+        params: { work_item_id: "task-next" },
+      }),
+    );
+  });
+
   it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {
     apiMocks.getRuntimeRunArtifactContent.mockResolvedValue({
       artifact_id: "artifact-1",

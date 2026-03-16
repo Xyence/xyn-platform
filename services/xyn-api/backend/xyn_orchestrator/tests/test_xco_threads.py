@@ -12,6 +12,7 @@ from xyn_orchestrator.goal_progress import compute_thread_execution_metrics, com
 from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xco import derive_work_queue
 from xyn_orchestrator.xyn_api import (
+    _coordination_task_lookup_factory,
     _dispatch_next_queue_item,
     _dispatch_selected_queue_item,
     _update_thread_status_from_tasks,
@@ -89,6 +90,9 @@ class XcoThreadTests(TestCase):
             "created_by": self.user,
             "updated_by": self.user,
             "coordination_thread": thread,
+            "target_repo": "xyn-platform",
+            "target_branch": "develop",
+            "runtime_workspace_id": thread.workspace_id,
         }
         defaults.update(overrides)
         return DevTask.objects.create(**defaults)
@@ -249,6 +253,8 @@ class XcoThreadTests(TestCase):
             execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
             execution_brief_review_state="approved",
             execution_policy={"require_brief_approval": True},
+            target_repo="xyn-platform",
+            target_branch="develop",
         )
 
         with mock.patch(
@@ -268,7 +274,7 @@ class XcoThreadTests(TestCase):
         self.assertEqual(str(task.coordination_thread_id), str(thread.id))
 
     def test_dispatch_selected_queue_item_dispatches_requested_ready_task(self):
-        thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
+        thread = self._create_thread(status="active", priority="high", execution_policy={"auto_resume": True})
         task = self._create_task(
             thread,
             work_item_id="wi-dispatch",
@@ -284,6 +290,35 @@ class XcoThreadTests(TestCase):
         self.assertEqual(result["run_id"], "run-selected")
         thread.refresh_from_db()
         self.assertEqual(thread.status, "active")
+        task.refresh_from_db()
+        self.assertEqual(str(task.coordination_thread_id), str(thread.id))
+
+    def test_dispatch_selected_queue_item_tolerates_non_uuid_dependency_references(self):
+        dependency_thread = self._create_thread(title="Dependency Thread", status="completed", priority="normal")
+        dependency = self._create_task(
+            dependency_thread,
+            work_item_id="goal-nonuuid-dependency",
+            execution_brief={"schema_version": "v1", "summary": "Dependency handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        thread = self._create_thread(status="active", priority="high", execution_policy={"auto_resume": True})
+        task = self._create_task(
+            thread,
+            work_item_id="wi-dispatch",
+            dependency_work_item_ids=["goal-nonuuid-dependency"],
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        dependency.status = "completed"
+        dependency.save(update_fields=["status", "updated_at"])
+        queue = derive_work_queue(
+            threads=CoordinationThread.objects.filter(id=thread.id).prefetch_related("work_items"),
+            status_lookup=lambda row: row.status,
+            task_lookup=_coordination_task_lookup_factory(str(self.workspace.id)),
+        )
+        self.assertEqual([entry.work_item_id for entry in queue], ["wi-dispatch"])
 
     def test_dev_task_dispatch_rejects_non_ready_selected_task(self):
         thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
@@ -303,7 +338,40 @@ class XcoThreadTests(TestCase):
             response = dev_task_dispatch(request, str(task.id))
         self.assertEqual(response.status_code, 409)
         payload = json.loads(response.content)
-        self.assertIn("not ready for queue dispatch", payload["error"])
+        self.assertIn("Execution brief review is required", payload["error"])
+
+    def test_dev_task_dispatch_explains_when_another_queue_item_is_next(self):
+        thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
+        first = self._create_task(
+            thread,
+            title="First ready task",
+            work_item_id="wi-first",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        second = self._create_task(
+            thread,
+            title="Second ready task",
+            work_item_id="wi-second",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request(
+            f"/xyn/api/dev-tasks/{second.id}/dispatch",
+            method="post",
+            data=json.dumps({"workspace_id": str(self.workspace.id)}),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = dev_task_dispatch(request, str(second.id))
+        self.assertIn(response.status_code, {409, 502})
+        payload = json.loads(response.content)
+        self.assertIn("First ready task is next in the execution queue", payload["error"])
+        queue_state = payload["work_item"]["execution_queue"]
+        self.assertFalse(queue_state["selected_for_dispatch"])
+        self.assertEqual(queue_state["next_dispatchable_task_id"], str(first.id))
+        self.assertEqual(queue_state["next_dispatchable_work_item_id"], "wi-first")
 
     def test_dev_task_dispatch_endpoint_dispatches_selected_task(self):
         thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})

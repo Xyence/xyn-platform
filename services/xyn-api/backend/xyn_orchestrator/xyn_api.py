@@ -25,6 +25,7 @@ from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db import models, transaction
+from django.db.models import Q
 from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -26263,6 +26264,55 @@ def _serialize_dev_task_summary(task: DevTask, *, runtime_detail: Optional[Dict[
     return _serialize_work_item_summary(task, runtime_detail=runtime_detail)
 
 
+def _serialize_selected_work_item_queue_state(task: DevTask, *, normalized_status: str) -> Dict[str, Any]:
+    queue_state = serialize_dev_task_queue_state(task, normalized_status=normalized_status)
+    enriched_state: Dict[str, Any] = {
+        **queue_state,
+        "selected_for_dispatch": queue_state.get("dispatchable", False),
+        "next_dispatchable_task_id": None,
+        "next_dispatchable_work_item_id": None,
+        "next_dispatchable_title": None,
+        "next_dispatchable_thread_id": None,
+        "next_dispatchable_thread_title": None,
+    }
+    if not task.coordination_thread_id:
+        return enriched_state
+
+    workspace_id = str(task.coordination_thread.workspace_id)
+    threads = CoordinationThread.objects.filter(workspace_id=workspace_id).select_related("workspace", "owner", "goal").prefetch_related("work_items")
+    task_lookup = _coordination_task_lookup_factory(workspace_id)
+    queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
+    for thread in threads:
+        _update_thread_status_from_tasks(thread)
+    queue = derive_work_queue(threads=threads, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
+    selected = find_dispatchable_queue_entry(
+        queue,
+        task_id=str(task.id),
+        task_lookup=queue_task_lookup,
+        status_lookup=_xco_status_lookup,
+    )
+    if selected:
+        return enriched_state
+
+    next_selected = select_next_dispatchable_queue_entry(queue, task_lookup=queue_task_lookup, status_lookup=_xco_status_lookup)
+    if not next_selected:
+        return enriched_state
+
+    next_entry, next_task, _ = next_selected
+    enriched_state["selected_for_dispatch"] = False
+    enriched_state["next_dispatchable_task_id"] = str(next_task.id)
+    enriched_state["next_dispatchable_work_item_id"] = str(next_task.work_item_id or next_task.id)
+    enriched_state["next_dispatchable_title"] = next_task.title
+    enriched_state["next_dispatchable_thread_id"] = next_entry.thread_id
+    enriched_state["next_dispatchable_thread_title"] = next_entry.thread_title
+    if queue_state.get("dispatchable"):
+        enriched_state["message"] = (
+            f"{task.title} is approved, but {next_task.title} is next in the execution queue "
+            f"for {next_entry.thread_title}."
+        )
+    return enriched_state
+
+
 def _serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
     return serialize_goal_summary(goal)
 
@@ -26954,8 +27004,10 @@ def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
     artifacts_payload = execution_payload["artifacts_payload"]
     commands_payload = execution_payload["commands_payload"]
     change_set = resolve_dev_task_change_set(task, execution_payload=execution_payload, include_diff=True)
+    normalized_status = _canonical_work_item_status(str((runtime_detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
     return {
         **_serialize_work_item_summary(task, runtime_detail=runtime_detail),
+        "execution_queue": _serialize_selected_work_item_queue_state(task, normalized_status=normalized_status),
         "input_artifact_key": task.input_artifact_key,
         "last_error": str((runtime_detail or {}).get("failure_reason") or (runtime_detail or {}).get("escalation_reason") or task.last_error or ""),
         "context_packs": [
@@ -28675,11 +28727,16 @@ def _coordination_task_lookup_factory(workspace_id: str):
         if not key:
             return None
         if key not in cache:
-            cache[key] = (
-                DevTask.objects.filter(runtime_workspace_id=workspace_id).filter(
-                    Q(id=key) | Q(work_item_id=key)
-                ).order_by("-updated_at", "-created_at").first()
-            )
+            try:
+                key_uuid = uuid.UUID(key)
+            except (TypeError, ValueError, AttributeError):
+                key_uuid = None
+            query = DevTask.objects.filter(runtime_workspace_id=workspace_id)
+            if key_uuid is not None:
+                query = query.filter(Q(id=key_uuid) | Q(work_item_id=key))
+            else:
+                query = query.filter(work_item_id=key)
+            cache[key] = query.order_by("-updated_at", "-created_at").first()
         return cache[key]
 
     return _lookup
@@ -29917,9 +29974,13 @@ def dev_task_dispatch(request: HttpRequest, task_id: str) -> JsonResponse:
         result = _dispatch_selected_queue_item(workspace=workspace, task=task, user=request.user, identity=identity)
     except RuntimeError as exc:
         task.refresh_from_db()
+        detail_payload = _serialize_work_item_detail(task)
         error_text = str(exc) or "runtime submission failed"
+        if error_text == "selected work item is not ready for queue dispatch":
+            queue_state = detail_payload.get("execution_queue") if isinstance(detail_payload.get("execution_queue"), dict) else {}
+            error_text = str(queue_state.get("message") or error_text)
         status_code = 502 if "runtime" in error_text.lower() or "xyn-core" in error_text.lower() else 409
-        return JsonResponse({"error": error_text, "work_item": _serialize_work_item_detail(task)}, status=status_code)
+        return JsonResponse({"error": error_text, "work_item": detail_payload}, status=status_code)
     task.refresh_from_db()
     return JsonResponse(
         {

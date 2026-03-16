@@ -64,6 +64,8 @@ class ExecutionQueueTests(TestCase):
 
     def test_queue_state_requires_brief_approval_when_gated(self):
         task = self._task(
+            target_repo="xyn-platform",
+            target_branch="develop",
             execution_brief={"schema_version": "v1", "summary": "Implement queue dispatch"},
             execution_brief_review_state="draft",
             execution_policy={"require_brief_approval": True},
@@ -164,6 +166,8 @@ class ExecutionQueueTests(TestCase):
         )
         approved = self._task(
             work_item_id="wi-approved",
+            target_repo="xyn-platform",
+            target_branch="develop",
             execution_brief={"schema_version": "v1", "summary": "Approved brief"},
             execution_brief_review_state="approved",
             execution_policy={"require_brief_approval": True},
