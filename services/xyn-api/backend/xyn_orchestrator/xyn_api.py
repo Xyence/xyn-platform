@@ -25705,9 +25705,43 @@ def _runtime_repo_candidates_from_target(target: Dict[str, Any]) -> List[str]:
     return candidates
 
 
+def _fallback_dev_task_runtime_source(task: DevTask) -> Dict[str, Any]:
+    work_item_id = str(task.work_item_id or "").strip()
+    if not work_item_id:
+        raise ValueError("dev task is missing work_item_id")
+    handoff = resolve_execution_brief(task)
+    brief = handoff.brief if isinstance(handoff.brief, dict) else {}
+    target = handoff.target
+    target_repo = str(target.repository_slug or task.target_repo or "").strip()
+    target_branch = str(target.branch or task.target_branch or "").strip()
+    if not target_repo:
+        raise ValueError("dev task is missing runtime target context required for runtime submission")
+    validation = brief.get("validation") if isinstance(brief.get("validation"), dict) else {}
+    acceptance = validation.get("acceptance_criteria") if isinstance(validation.get("acceptance_criteria"), list) else []
+    commands = validation.get("commands") if isinstance(validation.get("commands"), list) else []
+    work_item: Dict[str, Any] = {
+        "id": work_item_id,
+        "title": str(brief.get("summary") or task.title or work_item_id).strip() or work_item_id,
+        "summary": str(brief.get("summary") or task.title or work_item_id).strip() or work_item_id,
+        "description": str(brief.get("implementation_intent") or brief.get("objective") or task.description or "").strip(),
+        "execution_brief": brief,
+        "acceptance_criteria": [str(item).strip() for item in acceptance if str(item).strip()],
+        "verify": [{"command": str(command).strip()} for command in commands if str(command).strip()],
+    }
+    repo_target = repo_target_payload_for_resolution(target, branch=target_branch)
+    if repo_target:
+        work_item["repo_targets"] = [repo_target]
+    return {
+        "plan_json": {"work_items": [work_item], "source": "execution_brief_fallback"},
+        "work_item": work_item,
+        "target_repo": target_repo,
+        "target_branch": target_branch,
+    }
+
+
 def _load_dev_task_runtime_source(task: DevTask) -> Dict[str, Any]:
     if not task.source_run_id or not task.input_artifact_key:
-        raise ValueError("dev task is missing source run context required for runtime submission")
+        return _fallback_dev_task_runtime_source(task)
     plan_json = _download_artifact_json(str(task.source_run_id), task.input_artifact_key)
     if not plan_json:
         raise ValueError(f"{task.input_artifact_key} not found for dev task source run")

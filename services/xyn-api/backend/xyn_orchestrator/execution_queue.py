@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
+from .development_targets import resolve_development_target
 from .execution_briefs import execution_brief_readiness
 from .models import DevTask
 from .xco import QueueEntry
@@ -29,12 +30,17 @@ def _clean_text(value: Any) -> str:
 
 
 def _runtime_submission_context_missing_reason(task: DevTask) -> Optional[str]:
+    if not _clean_text(task.work_item_id):
+        return "Task is missing the durable work item reference required for runtime submission."
+    if _clean_text(task.source_run_id) and _clean_text(task.input_artifact_key):
+        return None
+    target = resolve_development_target(task=task)
+    if _clean_text(target.repository_slug or ""):
+        return None
     if not _clean_text(task.source_run_id):
         return "Task is missing the source run context required for runtime submission."
     if not _clean_text(task.input_artifact_key):
         return "Task is missing the planning artifact reference required for runtime submission."
-    if not _clean_text(task.work_item_id):
-        return "Task is missing the durable work item reference required for runtime submission."
     return None
 
 

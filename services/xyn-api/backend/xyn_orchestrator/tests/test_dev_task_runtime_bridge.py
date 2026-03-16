@@ -317,6 +317,41 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(payload["context"]["metadata"]["execution_brief_source"], "task_execution_brief")
         self.assertEqual(payload["context"]["metadata"]["execution_brief"]["summary"], "Implement Epic C runtime bridge")
 
+    def test_load_dev_task_runtime_source_falls_back_to_execution_brief_context(self):
+        self.task.source_run = None
+        self.task.input_artifact_key = ""
+        self.task.target_repo = "xyn-platform"
+        self.task.target_branch = "develop"
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Implement first durable slice",
+            "objective": "Ship the smallest viable coding slice.",
+            "implementation_intent": "Use the stored brief as the runtime handoff when no plan artifact exists.",
+            "target": {"repository_slug": "xyn-platform", "branch": "develop"},
+            "validation": {
+                "acceptance_criteria": ["Wire the slice through the runtime bridge"],
+                "commands": ["pytest services/xyn-api/backend/xyn_orchestrator/tests/test_dev_task_runtime_bridge.py"],
+            },
+        }
+        self.task.save(
+            update_fields=[
+                "source_run",
+                "input_artifact_key",
+                "target_repo",
+                "target_branch",
+                "execution_brief",
+                "updated_at",
+            ]
+        )
+
+        source = _load_dev_task_runtime_source(self.task)
+
+        self.assertEqual(source["target_repo"], "xyn-platform")
+        self.assertEqual(source["target_branch"], "develop")
+        self.assertEqual(source["work_item"]["id"], self.task.work_item_id)
+        self.assertEqual(source["work_item"]["execution_brief"]["summary"], "Implement first durable slice")
+        self.assertEqual(source["work_item"]["verify"][0]["command"], "pytest services/xyn-api/backend/xyn_orchestrator/tests/test_dev_task_runtime_bridge.py")
+
     def test_load_dev_task_runtime_source_prefers_application_target_repository(self):
         repository = ManagedRepository.objects.create(
             slug="shine-app",

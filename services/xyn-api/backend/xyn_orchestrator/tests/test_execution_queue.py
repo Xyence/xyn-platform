@@ -107,6 +107,26 @@ class ExecutionQueueTests(TestCase):
         self.assertEqual(state.reason, "runtime_submission_context_missing")
         self.assertIn("runtime submission", state.message.lower())
 
+    def test_queue_state_allows_goal_task_with_brief_and_target_without_source_run(self):
+        task = self._task(
+            source_entity_type="goal",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_brief={
+                "schema_version": "v1",
+                "summary": "Implement queue dispatch",
+                "target": {"repository_slug": "xyn-platform", "branch": "develop"},
+            },
+            execution_brief_review_state="approved",
+            source_run=None,
+            input_artifact_key="",
+            execution_policy={"require_brief_approval": True},
+        )
+        state = evaluate_dev_task_queue_state(task, normalized_status="queued")
+        self.assertTrue(state.dispatchable)
+        self.assertTrue(state.queue_ready)
+        self.assertEqual(state.status, "queue_ready")
+
     def test_queue_state_marks_runtime_queued_task_as_dispatched(self):
         task = self._task(runtime_run_id=uuid.uuid4())
         state = evaluate_dev_task_queue_state(task, normalized_status="queued")
