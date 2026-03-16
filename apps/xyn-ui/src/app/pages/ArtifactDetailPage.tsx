@@ -55,6 +55,7 @@ import CompactPaneTabs, { type CompactPaneTab } from "../components/ui/CompactPa
 import Popover from "../components/ui/Popover";
 import EditorCentricLayout from "../layouts/EditorCentricLayout";
 import ArtifactCredibilityLayer from "../components/artifacts/ArtifactCredibilityLayer";
+import CapabilitySuggestionPanel from "../components/capabilities/CapabilitySuggestionPanel";
 import { resolveArtifactWorkflowActions, type WorkflowAction, type WorkflowActionId } from "../workflows/artifactWorkflow";
 import { computeLineDiff } from "../utils/textDiff";
 import { useNotifications } from "../state/notificationsStore";
@@ -388,6 +389,8 @@ export default function ArtifactDetailPage({
     session: consoleSession,
     setContext: setConsoleContext,
     clearContext: clearConsoleContext,
+    setInputText,
+    setOpen,
     registerEditorBridge,
     unregisterEditorBridge,
   } = useXynConsole();
@@ -2738,6 +2741,17 @@ export default function ArtifactDetailPage({
           </div>
         </div>
       </section>
+      <CapabilitySuggestionPanel
+        context="artifact_detail"
+        workspaceId={workspaceId}
+        artifactId={artifactId}
+        title="Suggested Next Step"
+        className="artifact-capability-suggestion-panel"
+        onInsertSuggestion={(text) => {
+          setInputText(text);
+          setOpen(true);
+        }}
+      />
     </div>
   );
 

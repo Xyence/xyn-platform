@@ -4336,6 +4336,23 @@ button.sm {
   opacity: 0.72;
 }
 
+.capability-suggestion-panel {
+  margin-top: 12px;
+}
+
+.capability-suggestion-action {
+  width: 100%;
+  align-items: flex-start;
+  text-align: left;
+}
+
+.capability-suggestion-unavailable {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .capability-plan-card {
   gap: 0;
 }

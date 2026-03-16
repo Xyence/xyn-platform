@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import InlineMessage from "../../components/InlineMessage";
 import Tabs from "../components/ui/Tabs";
+import CapabilitySuggestionPanel from "../components/capabilities/CapabilitySuggestionPanel";
 import { getAppJob } from "../../api/xyn";
 import type { AppJob } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
+import { useXynConsole } from "../state/xynConsoleStore";
 
 type JobDetailTab = "logs" | "output" | "input";
 
@@ -39,11 +41,14 @@ export default function JobDetailPage({
   const [tab, setTab] = useState<JobDetailTab>("logs");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { setInputText, setOpen } = useXynConsole();
 
   const shouldPoll = useMemo(() => {
     const token = String(job?.status || "").toLowerCase();
     return token === "queued" || token === "running";
   }, [job?.status]);
+  const draftId = useMemo(() => String((job?.input_json as Record<string, unknown> | undefined)?.draft_id || "").trim() || null, [job?.input_json]);
+  const capabilityContext = draftId ? "app_intent_draft" : "application_workspace";
 
   const load = useCallback(async () => {
     if (!workspaceId || !jobId) return;
@@ -87,6 +92,16 @@ export default function JobDetailPage({
         </div>
       </div>
       {error && <InlineMessage tone="error" title="Request failed" body={error} />}
+      <CapabilitySuggestionPanel
+        context={capabilityContext}
+        workspaceId={workspaceId}
+        draftId={draftId}
+        title="Suggested Actions"
+        onInsertSuggestion={(text) => {
+          setInputText(text);
+          setOpen(true);
+        }}
+      />
       <section className="card">
         <div className="card-header">
           <h3>{job?.type || "Job"}</h3>

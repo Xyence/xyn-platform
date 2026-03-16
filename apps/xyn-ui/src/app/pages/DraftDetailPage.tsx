@@ -5,6 +5,7 @@ import Tabs from "../components/ui/Tabs";
 import { getAppIntentDraft, getDraftWorkflow, listAppExecutionNotes, listAppJobs, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
 import type { AppExecutionNote, AppIntentDraft, AppJob, DraftWorkflow } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
+import CapabilitySuggestionPanel from "../components/capabilities/CapabilitySuggestionPanel";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { useNotifications } from "../state/notificationsStore";
 import { useXynConsole } from "../state/xynConsoleStore";
@@ -651,6 +652,16 @@ export default function DraftDetailPage({
         tone="info"
         title="Application workspace"
         body={`This draft is routed through the ${draftDescriptor.editorKey.replace(/_/g, " ")} shell. Use Continue in Workbench to continue application design with the composer and related workbench tools.`}
+      />
+      <CapabilitySuggestionPanel
+        context="app_intent_draft"
+        workspaceId={workspaceId}
+        draftId={draftId}
+        title="Suggested Actions"
+        onInsertSuggestion={(text) => {
+          setInputText(text);
+          setOpen(true);
+        }}
       />
 
       <section className="card">
