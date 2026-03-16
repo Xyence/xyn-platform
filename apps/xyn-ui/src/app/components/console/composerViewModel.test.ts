@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { ComposerState } from "../../../api/types";
-import { deriveComposerStageSummary, deriveComposerViewModel } from "./composerViewModel";
+import {
+  deriveComposerStageSummary,
+  deriveComposerViewModel,
+  formatComposerGoalProgressStatus,
+  formatComposerPlanningStatus,
+  formatComposerThreadStatus,
+} from "./composerViewModel";
 
 describe("deriveComposerViewModel", () => {
   it("groups goals and threads under their application and isolates orphaned work", () => {
@@ -216,6 +222,14 @@ describe("deriveComposerViewModel", () => {
     expect(viewModel.containers.find((container) => container.title === "Lunch Poll")?.threads[0]?.title).toBe("Smoke test");
     expect(viewModel.unlinkedGoals.map((goal) => goal.title)).toEqual(["Legacy cleanup"]);
     expect(viewModel.unlinkedThreads.map((thread) => thread.title)).toEqual(["Cleanup slice"]);
+  });
+});
+
+describe("composer display labels", () => {
+  it("maps internal workflow statuses to user-facing labels", () => {
+    expect(formatComposerPlanningStatus("decomposed")).toBe("Broken into work steps");
+    expect(formatComposerGoalProgressStatus("in_progress")).toBe("In progress");
+    expect(formatComposerThreadStatus("queued")).toBe("Ready to run");
   });
 });
 

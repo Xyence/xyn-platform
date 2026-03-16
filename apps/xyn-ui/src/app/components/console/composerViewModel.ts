@@ -63,6 +63,62 @@ export type ComposerStageSummary = {
   nextStep: string;
 };
 
+function humanizeFallback(value?: string | null): string {
+  const normalized = String(value || "").trim();
+  if (!normalized) return "Unknown";
+  return normalized
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+const GOAL_PLANNING_STATUS_LABELS: Record<string, string> = {
+  draft: "Drafting the goal",
+  planned: "Planned",
+  decomposed: "Broken into work steps",
+  ready: "Ready to start",
+  completed: "Planned work complete",
+};
+
+const GOAL_PROGRESS_STATUS_LABELS: Record<string, string> = {
+  active: "In progress",
+  in_progress: "In progress",
+  blocked: "Blocked",
+  queued: "Ready to run",
+  completed: "Completed",
+  failed: "Needs attention",
+  paused: "Waiting",
+};
+
+const THREAD_STATUS_LABELS: Record<string, string> = {
+  queued: "Ready to run",
+  active: "In progress",
+  in_progress: "In progress",
+  paused: "Waiting",
+  blocked: "Blocked",
+  failed: "Needs attention",
+  completed: "Completed",
+};
+
+export function formatComposerPlanningStatus(value?: string | null): string {
+  const normalized = String(value || "").trim().toLowerCase();
+  return GOAL_PLANNING_STATUS_LABELS[normalized] || humanizeFallback(value);
+}
+
+export function formatComposerGoalProgressStatus(value?: string | null): string {
+  const normalized = String(value || "").trim().toLowerCase();
+  return GOAL_PROGRESS_STATUS_LABELS[normalized] || humanizeFallback(value);
+}
+
+export function formatComposerThreadStatus(value?: string | null): string {
+  const normalized = String(value || "").trim().toLowerCase();
+  return THREAD_STATUS_LABELS[normalized] || humanizeFallback(value);
+}
+
+export function formatComposerCountLabel(count: number, singular: string, plural?: string): string {
+  const nextPlural = plural || `${singular}s`;
+  return `${count} ${count === 1 ? singular : nextPlural}`;
+}
+
 function parseTimestamp(value?: string | null): number {
   const parsed = Date.parse(String(value || ""));
   return Number.isFinite(parsed) ? parsed : 0;
@@ -96,22 +152,22 @@ function latestResultForApplication(application: ApplicationSummary, goals: Goal
   const reviewBlockedCount = threads.reduce((sum, thread) => sum + Number(thread.awaiting_review_work_items || 0), 0);
   const failedThreadCount = threads.filter((thread) => ["failed", "blocked"].includes(String(thread.status || "").toLowerCase())).length;
   if (reviewBlockedCount > 0) {
-    return `${reviewBlockedCount} work item${reviewBlockedCount === 1 ? "" : "s"} waiting for review before coding can continue.`;
+    return `${formatComposerCountLabel(reviewBlockedCount, "review item")} must be cleared before coding can continue.`;
   }
   if (failedThreadCount > 0) {
-    return `${failedThreadCount} thread${failedThreadCount === 1 ? "" : "s"} blocked or failed.`;
+    return `${formatComposerCountLabel(failedThreadCount, "execution thread")} need attention.`;
   }
   const recommendedGoal = application.portfolio_state?.recommended_goal?.title;
   if (recommendedGoal) {
-    return `Recommended goal: ${recommendedGoal}.`;
+    return `Recommended work goal: ${recommendedGoal}.`;
   }
   if (threads.some((thread) => thread.running_work_items > 0)) {
-    return "Coding work is currently running.";
+    return "Implementation work is currently running.";
   }
   if (goals.length > 0) {
-    return `${goals.length} goal${goals.length === 1 ? "" : "s"} available for review or dispatch.`;
+    return `${formatComposerCountLabel(goals.length, "work goal")} are available for review or dispatch.`;
   }
-  return "No goal activity has started yet.";
+  return "No work goals have started yet.";
 }
 
 function statusLabelForPlan(plan: ApplicationPlanSummary): string {
@@ -146,7 +202,8 @@ function latestResultForPlan(plan: ApplicationPlanSummary, detail?: ApplicationP
     return "Plan has already been applied to a durable application.";
   }
   if (goalCount > 0) {
-    return `${goalCount} planned goal${goalCount === 1 ? "" : "s"} ready to apply.`;
+    const goalsLabel = formatComposerCountLabel(goalCount, "planned work goal");
+    return `${goalsLabel} ${goalCount === 1 ? "is" : "are"} ready for review.`;
   }
   return "Plan is ready for review.";
 }
@@ -200,11 +257,11 @@ export function deriveComposerStageSummary(payload: ComposerState, currentContex
   );
 
   if (stage === "factory_discovery" && !selectedFactory && !hasActiveEffort) {
-    return {
-      label: "No active build in progress",
-      explanation: "Composer is waiting for you to choose a starting template or describe a new application.",
-      nextStep: "Start a new application plan.",
-    };
+      return {
+        label: "No active build in progress",
+        explanation: "Choose a starting template or describe a new application to begin planning.",
+        nextStep: "Start a new application plan.",
+      };
   }
 
   switch (stage) {
@@ -212,7 +269,7 @@ export function deriveComposerStageSummary(payload: ComposerState, currentContex
       return {
         label: "Choosing a starting template",
         explanation: selectedFactory
-          ? `${selectedFactory.name} is selected as the starting point for the next application effort.`
+          ? `${selectedFactory.name} is selected as the starting template for the next application effort.`
           : "Composer is showing the available starting templates for a new application.",
         nextStep: "Choose the best template, then generate a plan.",
       };
@@ -234,8 +291,8 @@ export function deriveComposerStageSummary(payload: ComposerState, currentContex
       return {
         label: "Reviewing a goal",
         explanation: selectedGoal
-          ? `${selectedGoal.title} is the current goal under ${currentContainer?.title || "this application effort"}.`
-          : "Composer is focused on a specific goal so you can decide what to do next.",
+          ? `${selectedGoal.title} is the current work goal under ${currentContainer?.title || "this application effort"}.`
+          : "Composer is focused on a specific work goal so you can decide what to do next.",
         nextStep: "Review the recommendation, then approve the next slice if it looks correct.",
       };
     case "thread_focus":
@@ -244,8 +301,8 @@ export function deriveComposerStageSummary(payload: ComposerState, currentContex
         explanation: reviewBlocked
           ? "The current thread is paused until a blocking review item is handled."
           : selectedThread
-            ? `${selectedThread.title} is the active thread for this application effort.`
-            : "Composer is focused on a specific thread.",
+            ? `${selectedThread.title} is the active execution thread for this application effort.`
+            : "Composer is focused on a specific execution thread.",
         nextStep: reviewBlocked ? "Review the blocking work item before queueing more work." : "Review the current thread and decide whether to continue dispatching work.",
       };
     case "application_overview":
@@ -253,7 +310,7 @@ export function deriveComposerStageSummary(payload: ComposerState, currentContex
         label: currentContainer ? "Reviewing current application work" : "Choose an application effort",
         explanation: currentContainer
           ? `${currentContainer.title} is the active application effort in Composer.`
-          : "Composer needs a selected application effort before it can show focused goals, threads, and follow-up actions.",
+          : "Composer needs a selected application effort before it can show focused work goals, execution threads, and follow-up actions.",
         nextStep: currentContainer ? "Choose the goal or thread you want to continue." : "Pick the application or plan you want to continue.",
       };
     default:
@@ -426,7 +483,7 @@ export function deriveComposerViewModel(payload: ComposerState): ComposerViewMod
     || currentContainer?.title
     || "Choose an application effort";
   const currentStatusLabel = selectedThread?.status
-    || selectedGoal?.goal_progress?.goal_progress_status
+    || (selectedGoal?.goal_progress?.goal_progress_status ? formatComposerGoalProgressStatus(selectedGoal.goal_progress.goal_progress_status) : null)
     || currentContainer?.statusLabel
     || "Awaiting selection";
   const currentLatestResult = selectedThread?.thread_diagnostic?.provenance?.summary

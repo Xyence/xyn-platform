@@ -629,12 +629,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalledWith({ workspace_id: "ws-1" }));
-    expect(screen.getByText("Application Efforts")).toBeInTheDocument();
-    expect(screen.getByText("Workflow status")).toBeInTheDocument();
+    expect(screen.getByText("Application efforts")).toBeInTheDocument();
+    expect(screen.getByText("Current workflow step")).toBeInTheDocument();
     expect(screen.getByText("No active build in progress")).toBeInTheDocument();
     expect(screen.getByText("Start a new application plan.")).toBeInTheDocument();
     expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Generate Plan" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Build plan" })).toBeInTheDocument();
   });
 
   it("groups composer work under application efforts and isolates unlinked coordination items", async () => {
@@ -783,15 +783,15 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
-    expect(screen.getByText("Current Work Context")).toBeInTheDocument();
-    expect(screen.getByText("Application Efforts")).toBeInTheDocument();
+    expect(screen.getByText("Current application effort")).toBeInTheDocument();
+    expect(screen.getByText("Application efforts")).toBeInTheDocument();
     expect(screen.getAllByText("Knowledgebase").length).toBeGreaterThan(0);
     expect(screen.queryByText("Lunch Poll")).not.toBeInTheDocument();
     await act(async () => {
       screen.getByRole("button", { name: "Failed (1)" }).click();
     });
     expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
-    expect(screen.getByText("Unlinked Work")).toBeInTheDocument();
+    expect(screen.getByText("Unlinked work")).toBeInTheDocument();
     expect(screen.getAllByText("Legacy cleanup").length).toBeGreaterThan(0);
   });
 
@@ -1055,12 +1055,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0));
-    expect(screen.getByText("Selected Application Plan")).toBeInTheDocument();
+    expect(screen.getByText("Selected application plan")).toBeInTheDocument();
     expect(screen.getByText("Reviewing the implementation plan")).toBeInTheDocument();
     expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
     expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
     await act(async () => {
-      screen.getAllByRole("button", { name: "Apply Plan" })[0].click();
+      screen.getAllByRole("button", { name: "Apply plan" })[0].click();
     });
     await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
     await waitFor(() =>
@@ -1192,15 +1192,15 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument());
     expect(screen.getByText("Waiting on a fix or input")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Current Goal" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Current Thread" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Resume Thread" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Queue Next Slice" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Current goal" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Current thread" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resume thread" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Queue next slice" })).toBeDisabled();
     expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument();
     expect(screen.getAllByText(/review the blocking execution brief/i).length).toBeGreaterThan(0);
 
     await act(async () => {
-      screen.getAllByRole("button", { name: "Review Work Items" })[0].click();
+      screen.getAllByRole("button", { name: "Review work items" })[0].click();
     });
 
     expect(onOpenPanel).toHaveBeenCalledWith(
@@ -2706,7 +2706,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(apiMocks.getApplicationPlan).toHaveBeenCalledWith("plan-1"));
     await waitFor(() => expect(screen.getByText("Reviewable application plan")).toBeInTheDocument());
     await act(async () => {
-      screen.getByRole("button", { name: "Apply Plan" }).click();
+      screen.getAllByRole("button", { name: "Apply Plan" })[0].click();
     });
     await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
     await waitFor(() =>
@@ -2876,7 +2876,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
       })
     );
     expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
-    expect(screen.getByText("Application Efforts")).toBeInTheDocument();
+    expect(screen.getByText("Application efforts")).toBeInTheDocument();
     expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Composer" })).not.toBeInTheDocument();
   });
@@ -3002,7 +3002,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
     expect(screen.getAllByText("Choose an application effort").length).toBeGreaterThan(0);
     expect(screen.getByText("Awaiting Selection")).toBeInTheDocument();
-    expect(screen.getByText("Composer is not focused on a single effort yet. Choose one from the effort list below.")).toBeInTheDocument();
+    expect(screen.getByText("Composer is not focused on a single effort yet. Choose one from the list below to see its work goals, execution threads, and next steps.")).toBeInTheDocument();
     expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
     expect(screen.getByText("Knowledgebase Plan")).toBeInTheDocument();
   });
@@ -3170,7 +3170,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0));
-    expect(screen.getByText("Selected Application Plan")).toBeInTheDocument();
+    expect(screen.getByText("Selected application plan")).toBeInTheDocument();
     expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
     await act(async () => {
       screen.getAllByRole("button", { name: /apply plan/i })[0].click();

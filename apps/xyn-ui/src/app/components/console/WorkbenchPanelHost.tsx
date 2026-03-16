@@ -71,7 +71,14 @@ import InlineMessage from "../../../components/InlineMessage";
 import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityRegistry";
 import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail } from "../../utils/entityChangeEvents";
 import { applyRuntimeEventToRunDetail, applyRuntimeEventToRuns, refreshRuntimeRunDetail, refreshRuntimeRunSummary, subscribeRuntimeEventStream } from "../../utils/runtimeEventStream";
-import { deriveComposerStageSummary, deriveComposerViewModel } from "./composerViewModel";
+import {
+  deriveComposerStageSummary,
+  deriveComposerViewModel,
+  formatComposerCountLabel,
+  formatComposerGoalProgressStatus,
+  formatComposerPlanningStatus,
+  formatComposerThreadStatus,
+} from "./composerViewModel";
 import type { ComposerContainerFilter, ComposerWorkContainer } from "./composerViewModel";
 import { clearComposerStoredSelection, readComposerStoredSelection, resolveComposerInitialSelection, writeComposerStoredSelection } from "./composerSelection";
 import DraftDetailPage from "../../pages/DraftDetailPage";
@@ -3927,13 +3934,13 @@ function ComposerDetailPanel({
       <section className="card">
         <div className="card-header">
           <div>
-            <div className="field-label">Current Work Context</div>
+            <div className="field-label">Current application effort</div>
             <div className="field-value">{currentWork.title}</div>
           </div>
         </div>
         <div className="composer-stage-strip" role="status" aria-live="polite">
           <div className="composer-stage-strip__header">
-            <span className="field-label">Workflow status</span>
+            <span className="field-label">Current workflow step</span>
             <span className="pill ghost">{stageSummary.label}</span>
           </div>
           <p className="composer-stage-strip__explanation">{stageSummary.explanation}</p>
@@ -3943,7 +3950,7 @@ function ComposerDetailPanel({
         </div>
         <div className="detail-grid">
           <div><div className="field-label">Overall state</div><div className="field-value">{titleCaseLabel(currentWork.statusLabel)}</div></div>
-          <div><div className="field-label">Container</div><div className="field-value">{currentContainer ? `${currentContainer.kind === "application" ? "Application" : "Application Plan"} · ${currentContainer.title}` : "No application effort selected"}</div></div>
+          <div><div className="field-label">Selected item</div><div className="field-value">{currentContainer ? `${currentContainer.kind === "application" ? "Application" : "Application plan"} · ${currentContainer.title}` : "No application effort selected"}</div></div>
           <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(currentWork.latestActivityAt)}</div></div>
         </div>
         <p className="muted" style={{ marginTop: 12 }}>{currentWork.latestResult}</p>
@@ -3992,7 +3999,7 @@ function ComposerDetailPanel({
         <p className="muted small" style={{ marginTop: 8 }}>{latestQuickActionReason}</p>
         {!currentContainer ? (
           <p className="muted small" style={{ marginTop: 8 }}>
-            Composer is not focused on a single effort yet. Choose one from the effort list below.
+            Composer is not focused on a single effort yet. Choose one from the list below to see its work goals, execution threads, and next steps.
           </p>
         ) : null}
         {currentContainer ? renderLifecycleActions(currentContainer, { compact: true }) : null}
@@ -4002,12 +4009,12 @@ function ComposerDetailPanel({
       <section className="card">
         <div className="card-header">
           <div>
-            <div className="field-label">Application Efforts</div>
-            <div className="field-value">Choose the application or plan you want to work on</div>
+            <div className="field-label">Application efforts</div>
+            <div className="field-value">Choose the application or plan you want to continue</div>
           </div>
         </div>
         <p className="muted" style={{ marginBottom: 12 }}>
-          Composer now groups goals and threads under their parent application effort. Older efforts stay visible, but they are clearly separated from the current one.
+          Composer groups work by application effort first so each work goal and execution thread is shown under the application or plan it belongs to.
         </p>
         <div className="inline-action-row" style={{ marginBottom: 12, flexWrap: "wrap" }}>
           {(["active", "failed", "archived", "all"] as ComposerContainerFilter[]).map((filter) => (
@@ -4030,7 +4037,7 @@ function ComposerDetailPanel({
             >
               <div className="composer-effort-header">
                 <div>
-                  <div className="field-label">{container.kind === "application" ? "Application" : "Application Plan"}</div>
+                  <div className="field-label">{container.kind === "application" ? "Application" : "Application plan"}</div>
                   <h3>{container.title}</h3>
                 </div>
                 <div className="composer-effort-badges">
@@ -4043,26 +4050,26 @@ function ComposerDetailPanel({
               <p className="composer-effort-summary">{container.promptSummary}</p>
               <div className="composer-effort-meta">
                 <span><strong>Updated</strong> {formatPanelTimestamp(container.latestActivityAt)}</span>
-                <span><strong>Goals</strong> {container.goalCount}</span>
-                <span><strong>Threads</strong> {container.threadCount}</span>
+                <span><strong>Work goals</strong> {container.goalCount}</span>
+                <span><strong>Execution threads</strong> {container.threadCount}</span>
               </div>
               <p className="muted small">{container.latestResult}</p>
               {container.kind === "application" ? (
                 <div className="composer-effort-children">
-                  <div className="field-label">Related goals</div>
+                  <div className="field-label">Work goals for this application</div>
                   {container.goals.length ? (
                     <ul className="detail-list">
                       {container.goals.slice(0, 4).map((goal) => (
                         <li key={goal.id}>
-                          <strong>{goal.title}</strong> · {goal.goal_progress_status || goal.planning_status || "planned"} · {goal.threads.length} thread{goal.threads.length === 1 ? "" : "s"}
+                          <strong>{goal.title}</strong> · {formatComposerGoalProgressStatus(goal.goal_progress_status || goal.planning_status || "planned")} · {formatComposerCountLabel(goal.threads.length, "execution thread")}
                         </li>
                       ))}
                     </ul>
                   ) : (
                     <p className="muted small">
                       {container.goalCount > 0
-                        ? "This application has goals, but only counts are available until you open the effort."
-                        : "No goals are attached yet."}
+                        ? "This application already has work goals, but you need to open the effort to inspect them in detail."
+                        : "No work goals are attached yet."}
                     </p>
                   )}
                 </div>
@@ -4075,7 +4082,7 @@ function ComposerDetailPanel({
                   title={container.isCurrent ? "This application effort is already selected." : undefined}
                   onClick={() => openComposer(container.selectionParams)}
                 >
-                  {container.isCurrent ? "Current Effort" : "Open Effort"}
+                  {container.isCurrent ? "Current effort" : "Open effort"}
                 </button>
               </div>
               {renderLifecycleActions(container)}
@@ -4084,9 +4091,9 @@ function ComposerDetailPanel({
           {!filteredContainers.length ? (
             <p className="muted">
               {effortFilter === "active"
-                ? "No active application efforts are visible. Switch filters to inspect archived or failed work."
+                ? "No current application efforts are visible. Switch filters to inspect archived or older blocked work."
                 : effortFilter === "failed"
-                  ? "No failed efforts are currently visible."
+                  ? "No blocked or failed efforts are currently visible."
                   : effortFilter === "archived"
                     ? "No archived efforts are currently visible."
                     : "No application efforts have been created in this workspace yet."}
@@ -4099,16 +4106,16 @@ function ComposerDetailPanel({
         <section className="card">
           <div className="card-header">
             <div>
-              <div className="field-label">Unlinked Work</div>
-              <div className="field-value">Legacy or orphaned coordination items</div>
+              <div className="field-label">Unlinked work</div>
+              <div className="field-value">Older coordination items that are not attached to a current application effort</div>
             </div>
           </div>
           <p className="muted" style={{ marginBottom: 12 }}>
-            These items could not be attached to a durable application effort from the current payload, so Composer keeps them separate instead of implying they belong to the selected app.
+            These items could not be attached to a durable application effort from the current payload, so Composer keeps them separate instead of implying they belong to the selected application.
           </p>
           {composerView.unlinkedGoals.length ? (
             <>
-              <div className="field-label">Goals</div>
+              <div className="field-label">Work goals</div>
               <div className="canvas-table-wrap">
                 <table className="canvas-table">
                   <thead>
@@ -4123,9 +4130,9 @@ function ComposerDetailPanel({
                     {composerView.unlinkedGoals.map((goal) => (
                       <tr key={goal.id}>
                         <td>{goal.title}</td>
-                        <td>{goal.goal_progress_status || goal.planning_status}</td>
+                        <td>{formatComposerGoalProgressStatus(goal.goal_progress_status || goal.planning_status)}</td>
                         <td>{formatPanelTimestamp(goal.updated_at)}</td>
-                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: goal.id })}>Open Goal</button></td>
+                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: goal.id })}>Open goal</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -4135,7 +4142,7 @@ function ComposerDetailPanel({
           ) : null}
           {composerView.unlinkedThreads.length ? (
             <>
-              <div className="field-label" style={{ marginTop: 12 }}>Threads</div>
+              <div className="field-label" style={{ marginTop: 12 }}>Execution threads</div>
               <div className="canvas-table-wrap">
                 <table className="canvas-table">
                   <thead>
@@ -4150,9 +4157,9 @@ function ComposerDetailPanel({
                     {composerView.unlinkedThreads.map((thread) => (
                       <tr key={thread.id}>
                         <td>{thread.title}</td>
-                        <td>{thread.status}</td>
+                        <td>{formatComposerThreadStatus(thread.status)}</td>
                         <td>{thread.goal_title || "—"}</td>
-                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: thread.goal_id || undefined, thread_id: thread.id })}>Open Thread</button></td>
+                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: thread.goal_id || undefined, thread_id: thread.id })}>Open thread</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -4165,7 +4172,10 @@ function ComposerDetailPanel({
 
       {showPlanningTools && (
         <section className="card">
-          <div className="field-label">Plan a New Application</div>
+          <div className="field-label">Start a new application plan</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            Describe what you want to build. Composer will turn that request into a reviewable implementation plan.
+          </p>
           <textarea
             className="input"
             value={objective}
@@ -4175,7 +4185,7 @@ function ComposerDetailPanel({
           />
           <div className="inline-action-row" style={{ marginTop: 12 }}>
             <button type="button" className="ghost sm" onClick={() => handleGeneratePlan(selectedFactory?.key)}>
-              Generate Plan
+              Build plan
             </button>
           </div>
         </section>
@@ -4183,14 +4193,17 @@ function ComposerDetailPanel({
 
       {showPlanningTools && (
         <section className="card">
-          <div className="field-label">Application Factories</div>
+          <div className="field-label">Starting templates</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            Starting templates help Composer choose the right structure for a new application before detailed planning begins.
+          </p>
           <div className="canvas-table-wrap">
             <table className="canvas-table">
               <thead>
                 <tr>
-                  <th>Factory</th>
+                  <th>Template</th>
                   <th>Description</th>
-                  <th>Use Case</th>
+                  <th>Best For</th>
                   <th />
                 </tr>
               </thead>
@@ -4202,7 +4215,7 @@ function ComposerDetailPanel({
                     <td>{factory.intended_use_case || "—"}</td>
                     <td>
                       <button type="button" className="ghost sm" onClick={() => openComposer({ factory_key: factory.key })}>
-                        Select
+                        Use template
                       </button>
                     </td>
                   </tr>
@@ -4215,17 +4228,20 @@ function ComposerDetailPanel({
 
       {selectedPlan ? (
         <section className="card">
-          <div className="card-header"><div><div className="field-label">Selected Application Plan</div></div></div>
+          <div className="card-header"><div><div className="field-label">Selected application plan</div></div></div>
+          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
+            This is the reviewable plan for the selected application effort. Review it, then apply it when you are ready to create durable work.
+          </p>
           <div className="detail-grid">
             <div><div className="field-label">Plan</div><div className="field-value">{selectedPlan.name}</div></div>
-            <div><div className="field-label">Factory</div><div className="field-value">{selectedPlan.factory?.name || selectedPlan.source_factory_key}</div></div>
-            <div><div className="field-label">Status</div><div className="field-value">{selectedPlan.status}</div></div>
-            <div><div className="field-label">Goals</div><div className="field-value">{selectedPlanGoals.length}</div></div>
+            <div><div className="field-label">Starting template</div><div className="field-value">{selectedPlan.factory?.name || selectedPlan.source_factory_key}</div></div>
+            <div><div className="field-label">Status</div><div className="field-value">{formatComposerPlanningStatus(selectedPlan.status)}</div></div>
+            <div><div className="field-label">Planned work goals</div><div className="field-value">{selectedPlanGoals.length}</div></div>
           </div>
           <p className="muted" style={{ marginTop: 12 }}>{selectedPlan.summary}</p>
           <div className="inline-action-row" style={{ marginTop: 12 }}>
             <button type="button" className="ghost sm" disabled={selectedPlan.status === "applied"} onClick={() => handleApplyPlan(selectedPlan.id)}>
-              Apply Plan
+              Apply plan
             </button>
           </div>
           {currentContainer?.kind === "application_plan" ? renderLifecycleActions(currentContainer) : null}
@@ -4234,17 +4250,20 @@ function ComposerDetailPanel({
 
       {selectedApplication ? (
         <section className="card">
-          <div className="card-header"><div><div className="field-label">Selected Application</div></div></div>
+          <div className="card-header"><div><div className="field-label">Selected application overview</div></div></div>
+          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
+            This is the currently selected application effort and its overall coordination state.
+          </p>
           <div className="detail-grid">
             <div><div className="field-label">Application</div><div className="field-value">{selectedApplication.name}</div></div>
-            <div><div className="field-label">Factory</div><div className="field-value">{selectedApplication.source_factory_key}</div></div>
-            <div><div className="field-label">Status</div><div className="field-value">{selectedApplication.status}</div></div>
-            <div><div className="field-label">Goals</div><div className="field-value">{selectedApplication.goals.length}</div></div>
+            <div><div className="field-label">Starting template</div><div className="field-value">{selectedApplication.source_factory_key}</div></div>
+            <div><div className="field-label">Status</div><div className="field-value">{titleCaseLabel(currentContainer?.statusLabel || selectedApplication.status)}</div></div>
+            <div><div className="field-label">Work goals</div><div className="field-value">{selectedApplication.goals.length}</div></div>
           </div>
           {selectedApplication.portfolio_state?.recommended_goal ? (
             <InlineMessage
               tone="info"
-              title={`Recommended Goal: ${selectedApplication.portfolio_state.recommended_goal.title}`}
+              title={`Recommended work goal: ${selectedApplication.portfolio_state.recommended_goal.title}`}
               body={selectedApplication.portfolio_state.recommended_goal.summary}
             />
           ) : null}
@@ -4254,13 +4273,16 @@ function ComposerDetailPanel({
 
       {selectedContainerGoals.length ? (
         <section className="card">
-          <div className="field-label">Goals in This Application</div>
+          <div className="field-label">Work goals for this application</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            Work goals break the application effort into meaningful outcomes. Open one to review recommendations and next steps.
+          </p>
           <div className="canvas-table-wrap">
             <table className="canvas-table">
               <thead>
                 <tr>
-                  <th>Goal</th>
-                  <th>Status</th>
+                  <th>Work goal</th>
+                  <th>Planning</th>
                   <th>Progress</th>
                   <th>Threads</th>
                   <th />
@@ -4270,8 +4292,8 @@ function ComposerDetailPanel({
                 {selectedContainerGoals.map((goal) => (
                   <tr key={goal.id}>
                     <td>{goal.title}</td>
-                    <td>{goal.planning_status}</td>
-                    <td>{goal.goal_progress_status || "—"}</td>
+                    <td>{formatComposerPlanningStatus(goal.planning_status)}</td>
+                    <td>{goal.goal_progress_status ? formatComposerGoalProgressStatus(goal.goal_progress_status) : "Not started"}</td>
                     <td>{goal.threads.length || goal.thread_count}</td>
                     <td>
                       <button
@@ -4281,7 +4303,7 @@ function ComposerDetailPanel({
                         title={currentGoalId === goal.id ? "This goal is already focused." : undefined}
                         onClick={() => openComposer({ application_id: selectedApplication?.id, goal_id: goal.id })}
                       >
-                        {currentGoalId === goal.id ? "Current Goal" : "Focus Goal"}
+                        {currentGoalId === goal.id ? "Current goal" : "Open goal"}
                       </button>
                     </td>
                   </tr>
@@ -4294,17 +4316,20 @@ function ComposerDetailPanel({
 
       {selectedGoal ? (
         <section className="card">
-          <div className="card-header"><div><div className="field-label">Current Goal</div></div></div>
+          <div className="card-header"><div><div className="field-label">Selected work goal</div></div></div>
+          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
+            This section explains the current goal, how far it has progressed, and the next slice of work Composer recommends.
+          </p>
           <div className="detail-grid">
-            <div><div className="field-label">Goal</div><div className="field-value">{selectedGoal.title}</div></div>
-            <div><div className="field-label">Planning Status</div><div className="field-value">{selectedGoal.planning_status}</div></div>
-            <div><div className="field-label">Progress</div><div className="field-value">{selectedGoal.goal_progress?.goal_progress_status || "—"}</div></div>
-            <div><div className="field-label">Threads</div><div className="field-value">{selectedGoal.threads.length}</div></div>
+            <div><div className="field-label">Work goal</div><div className="field-value">{selectedGoal.title}</div></div>
+            <div><div className="field-label">Planning status</div><div className="field-value">{formatComposerPlanningStatus(selectedGoal.planning_status)}</div></div>
+            <div><div className="field-label">Progress</div><div className="field-value">{selectedGoal.goal_progress?.goal_progress_status ? formatComposerGoalProgressStatus(selectedGoal.goal_progress.goal_progress_status) : "Not started"}</div></div>
+            <div><div className="field-label">Execution threads</div><div className="field-value">{selectedGoal.threads.length}</div></div>
           </div>
           {recommendation ? (
             <InlineMessage
               tone="info"
-              title={`Recommended Next Slice${recommendation.thread_title ? `: ${recommendation.thread_title}` : ""}`}
+              title={`Recommended next slice${recommendation.thread_title ? `: ${recommendation.thread_title}` : ""}`}
               body={recommendation.reasoning_summary || recommendation.summary || ""}
             />
           ) : null}
@@ -4315,7 +4340,7 @@ function ComposerDetailPanel({
               disabled={!recommendation}
               onClick={() => recommendation && handleApproveNextSlice(selectedGoal, String(recommendation.recommendation_id || ""))}
             >
-              Approve Next Slice
+              Approve next slice
             </button>
           </div>
         </section>
@@ -4323,12 +4348,15 @@ function ComposerDetailPanel({
 
       {selectedContainerThreads.length ? (
         <section className="card">
-          <div className="field-label">Threads in This Application</div>
+          <div className="field-label">Execution threads for this application</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            Execution threads organize the ongoing implementation work for this application. Open one to inspect work items and dispatch status.
+          </p>
           <div className="canvas-table-wrap">
             <table className="canvas-table">
               <thead>
                 <tr>
-                  <th>Thread</th>
+                  <th>Execution thread</th>
                   <th>Status</th>
                   <th>Ready</th>
                   <th>Blocked</th>
@@ -4339,7 +4367,7 @@ function ComposerDetailPanel({
                 {selectedContainerThreads.map((thread) => (
                   <tr key={thread.id}>
                     <td>{thread.title}</td>
-                    <td>{thread.status}</td>
+                    <td>{formatComposerThreadStatus(thread.status)}</td>
                     <td>{thread.queued_work_items}</td>
                     <td>{thread.awaiting_review_work_items + thread.failed_work_items}</td>
                     <td>
@@ -4356,7 +4384,7 @@ function ComposerDetailPanel({
                           })
                         }
                       >
-                        {currentThreadId === thread.id ? "Current Thread" : "Focus Thread"}
+                        {currentThreadId === thread.id ? "Current thread" : "Open thread"}
                       </button>
                     </td>
                   </tr>
@@ -4369,14 +4397,17 @@ function ComposerDetailPanel({
 
       {selectedGoalThreads.length ? (
         <section className="card">
-          <div className="field-label">Threads in Current Goal</div>
+          <div className="field-label">Execution threads for this work goal</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            These are the execution threads contributing to the selected work goal.
+          </p>
           <div className="canvas-table-wrap">
             <table className="canvas-table">
               <thead>
                 <tr>
-                  <th>Thread</th>
+                  <th>Execution thread</th>
                   <th>Status</th>
-                  <th>Queued</th>
+                  <th>Ready</th>
                   <th>Blocked</th>
                 </tr>
               </thead>
@@ -4384,7 +4415,7 @@ function ComposerDetailPanel({
                 {selectedGoalThreads.map((thread) => (
                   <tr key={thread.id}>
                     <td>{thread.title}</td>
-                    <td>{thread.status}</td>
+                    <td>{formatComposerThreadStatus(thread.status)}</td>
                     <td>{thread.queued_work_items}</td>
                     <td>{thread.awaiting_review_work_items + thread.failed_work_items}</td>
                   </tr>
@@ -4397,15 +4428,18 @@ function ComposerDetailPanel({
 
       {selectedThread ? (
         <section className="card">
-          <div className="card-header"><div><div className="field-label">Current Thread</div></div></div>
+          <div className="card-header"><div><div className="field-label">Selected execution thread</div></div></div>
+          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
+            This thread shows the current line of implementation work, whether it is moving, and what you can do next.
+          </p>
           <div className="detail-grid">
-            <div><div className="field-label">Thread</div><div className="field-value">{selectedThread.title}</div></div>
-            <div><div className="field-label">Status</div><div className="field-value">{selectedThread.status}</div></div>
+            <div><div className="field-label">Execution thread</div><div className="field-value">{selectedThread.title}</div></div>
+            <div><div className="field-label">Status</div><div className="field-value">{formatComposerThreadStatus(selectedThread.status)}</div></div>
             <div><div className="field-label">Completed</div><div className="field-value">{selectedThread.work_items_completed}</div></div>
             <div><div className="field-label">Blocked</div><div className="field-value">{selectedThread.work_items_blocked}</div></div>
           </div>
           {threadDiagnosticSummary ? (
-            <InlineMessage tone="info" title="Thread Diagnostic" body={threadDiagnosticSummary} />
+            <InlineMessage tone="info" title="Execution thread summary" body={threadDiagnosticSummary} />
           ) : null}
           {threadActionGuidance ? (
             <InlineMessage tone="warn" title="Review Required Before Resuming" body={threadActionGuidance} />
@@ -4418,7 +4452,7 @@ function ComposerDetailPanel({
               title={selectedThread.status === "active" ? "This thread is already active." : undefined}
               onClick={() => handleThreadReview(selectedThread, "resume_thread")}
             >
-              Resume Thread
+              Resume thread
             </button>
             <button
               type="button"
@@ -4433,7 +4467,7 @@ function ComposerDetailPanel({
               }
               onClick={() => handleThreadReview(selectedThread, "queue_next_slice")}
             >
-              Queue Next Slice
+              Queue next slice
             </button>
             <button
               type="button"
@@ -4442,10 +4476,10 @@ function ComposerDetailPanel({
               title={selectedThread.status === "completed" ? "This thread is already completed." : undefined}
               onClick={() => handleThreadReview(selectedThread, "mark_thread_completed")}
             >
-              Mark Thread Completed
+              Mark thread completed
             </button>
             <button type="button" className="ghost sm" onClick={() => onOpenPanel("thread_detail", { thread_id: selectedThread.id })}>
-              Review Work Items
+              Review work items
             </button>
           </div>
         </section>
@@ -4453,11 +4487,14 @@ function ComposerDetailPanel({
 
       {payload.portfolio_context ? (
         <section className="card">
-          <div className="field-label">Portfolio Context</div>
+          <div className="field-label">Other related work</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            This section shows nearby work that may affect the selected application effort, without implying it is the current focus.
+          </p>
           <div className="detail-grid">
-            <div><div className="field-label">Goals</div><div className="field-value">{payload.portfolio_context.goals.length}</div></div>
+            <div><div className="field-label">Work goals</div><div className="field-value">{payload.portfolio_context.goals.length}</div></div>
             <div><div className="field-label">Insights</div><div className="field-value">{portfolioInsights.length}</div></div>
-            <div><div className="field-label">Recommended Goal</div><div className="field-value">{payload.portfolio_context.recommended_goal?.title || "—"}</div></div>
+            <div><div className="field-label">Recommended work goal</div><div className="field-value">{payload.portfolio_context.recommended_goal?.title || "—"}</div></div>
           </div>
         </section>
       ) : null}
