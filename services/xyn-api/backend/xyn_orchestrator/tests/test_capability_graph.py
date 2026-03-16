@@ -54,6 +54,46 @@ class CapabilityGraphTests(TestCase):
         )
         self.assertEqual([entry["id"] for entry in payload["capabilities"]], ["open_application_workspace", "view_execution_status"])
 
+    def test_graph_service_can_include_unavailable_capabilities_with_explanations(self):
+        payload = get_capabilities_for_context(
+            context="app_intent_draft",
+            entity_id="draft-1",
+            workspace_id="ws-1",
+            entity_state={"draft_state": "completed", "execution_state": None, "application_exists": False},
+            include_unavailable=True,
+        )
+        self.assertEqual(
+            [
+                (
+                    entry["id"],
+                    entry["available"],
+                    entry["failure_code"],
+                    entry["failure_message"],
+                )
+                for entry in payload["capabilities"]
+            ],
+            [
+                (
+                    "continue_application_draft",
+                    False,
+                    "draft_not_editable",
+                    "This draft is no longer in an editable state.",
+                ),
+                (
+                    "open_application_workspace",
+                    False,
+                    "application_missing",
+                    "The application has not been generated yet.",
+                ),
+                (
+                    "view_execution_status",
+                    False,
+                    "execution_missing",
+                    "No execution is available for this item yet.",
+                ),
+            ],
+        )
+
     def test_graph_service_normalizes_legacy_artifact_draft_context(self):
         payload = get_capabilities_for_context(context="artifact_draft")
         self.assertEqual(payload["context"], "artifact_detail")
@@ -191,6 +231,31 @@ class CapabilityGraphTests(TestCase):
         self.assertEqual(
             [entry["id"] for entry in payload["capabilities"]],
             ["view_artifact_details", "open_application_workspace", "view_execution_status", "explore_artifacts"],
+        )
+
+    def test_endpoint_includes_unavailable_capabilities_only_when_requested(self):
+        response = self.client.get(
+            "/xyn/api/capabilities/context",
+            {
+                "context": "artifact_detail",
+                "entityId": "artifact-2",
+                "workspaceId": "ws-1",
+                "include_unavailable": "true",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            [
+                (entry["id"], entry["available"], entry.get("failure_code"))
+                for entry in payload["capabilities"]
+            ],
+            [
+                ("view_artifact_details", True, None),
+                ("open_application_workspace", False, "application_missing"),
+                ("view_execution_status", False, "execution_missing"),
+                ("explore_artifacts", True, None),
+            ],
         )
 
     def test_path_service_returns_build_application_path(self):

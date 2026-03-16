@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from ..capability_models import Capability
+from ..capability_models import Capability, CapabilityPrecondition
 
 
 def _token(value: Any) -> str:
@@ -57,6 +57,54 @@ def evaluate_capability_guard(capability: Capability, entity_state: Dict[str, An
         return bool(key and raw_value) and _attribute_value(state, key) in _tokens(raw_value)
 
     return False
+
+
+def evaluate_precondition(
+    precondition: CapabilityPrecondition,
+    entity_state: Dict[str, Any] | None = None,
+) -> bool:
+    shadow_capability = Capability(
+        id="__precondition__",
+        name="",
+        description="",
+        contexts=[],
+        prompt_template=None,
+        visibility="secondary",
+        priority=0,
+        guard_type=precondition.guard_type,
+        guard_target=precondition.guard_target,
+    )
+    return evaluate_capability_guard(shadow_capability, entity_state)
+
+
+def evaluate_capability_availability(
+    capability: Capability,
+    entity_state: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    state = entity_state if isinstance(entity_state, dict) else {}
+    preconditions = list(capability.preconditions or [])
+    if not preconditions:
+        available = evaluate_capability_guard(capability, state)
+        return {
+            "available": available,
+            "failure_code": None,
+            "failure_message": None,
+        }
+
+    for precondition in preconditions:
+        if evaluate_precondition(precondition, state):
+            continue
+        return {
+            "available": False,
+            "failure_code": precondition.failure_code,
+            "failure_message": precondition.failure_message,
+        }
+
+    return {
+        "available": True,
+        "failure_code": None,
+        "failure_message": None,
+    }
 
 
 def evaluate_path_condition(condition: str | None, entity_state: Dict[str, Any] | None = None) -> bool:

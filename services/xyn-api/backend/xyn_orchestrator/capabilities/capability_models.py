@@ -1,5 +1,13 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+
+@dataclass(frozen=True)
+class CapabilityPrecondition:
+    guard_type: str
+    guard_target: Optional[str] = None
+    failure_code: Optional[str] = None
+    failure_message: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -19,3 +27,4 @@ class Capability:
     action_target: Optional[str] = None
     guard_type: Optional[str] = None
     guard_target: Optional[str] = None
+    preconditions: List[CapabilityPrecondition] = field(default_factory=list)

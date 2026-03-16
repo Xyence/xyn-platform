@@ -6,6 +6,7 @@ type Params = {
   context?: string;
   entityId?: string | null;
   workspaceId?: string | null;
+  includeUnavailable?: boolean;
 };
 
 type Model = {
@@ -28,8 +29,9 @@ export function useContextualCapabilities(params: Params): Model {
       String(params.context || "").trim().toLowerCase(),
       String(params.entityId || "").trim(),
       String(params.workspaceId || "").trim(),
+      params.includeUnavailable ? "with-unavailable" : "available-only",
     ].join("::"),
-    [params.context, params.entityId, params.workspaceId]
+    [params.context, params.entityId, params.workspaceId, params.includeUnavailable]
   );
 
   useEffect(() => {
@@ -42,6 +44,7 @@ export function useContextualCapabilities(params: Params): Model {
           context: params.context || undefined,
           entityId: params.entityId || undefined,
           workspaceId: params.workspaceId || undefined,
+          includeUnavailable: params.includeUnavailable,
         });
         if (!active) return;
         setContext(String(payload.context || "unknown"));
@@ -60,7 +63,7 @@ export function useContextualCapabilities(params: Params): Model {
     return () => {
       active = false;
     };
-  }, [params.context, params.entityId, params.workspaceId, requestKey]);
+  }, [params.context, params.entityId, params.workspaceId, params.includeUnavailable, requestKey]);
 
   return { loading, error, context, attributes, capabilities };
 }

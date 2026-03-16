@@ -3598,6 +3598,30 @@ button.sm {
   max-width: 220px;
 }
 
+.workbench-unavailable-capabilities {
+  margin-top: 18px;
+  width: min(760px, 100%);
+  text-align: left;
+}
+
+.workbench-unavailable-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.workbench-unavailable-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-soft) 82%, transparent);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  opacity: 0.72;
+}
+
 .workbench-canvas {
   display: flex;
   flex: 1 1 auto;
@@ -4299,6 +4323,17 @@ button.sm {
   align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.xyn-console-option-disabled {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-soft) 84%, transparent);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  opacity: 0.72;
 }
 
 .capability-plan-card {

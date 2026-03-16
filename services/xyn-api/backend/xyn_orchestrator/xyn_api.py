@@ -29216,6 +29216,7 @@ def capabilities_context(request: HttpRequest) -> JsonResponse:
     context = str(request.GET.get("context") or "").strip() or None
     entity_id = str(request.GET.get("entityId") or "").strip() or None
     workspace_id = str(request.GET.get("workspaceId") or "").strip() or None
+    include_unavailable = str(request.GET.get("include_unavailable") or "").strip().lower() in {"1", "true", "yes"}
     return JsonResponse(
         get_capability_graph_context(
             context=context,
@@ -29227,6 +29228,7 @@ def capabilities_context(request: HttpRequest) -> JsonResponse:
                 entity_id=entity_id,
                 workspace_id=workspace_id,
             ),
+            include_unavailable=include_unavailable,
         )
     )
 

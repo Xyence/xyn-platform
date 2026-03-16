@@ -1922,6 +1922,8 @@ export type ContextualCapability = {
   action_type?: "prompt" | "open_descriptor" | "route" | string;
   action_target?: string | null;
   available?: boolean;
+  failure_code?: string | null;
+  failure_message?: string | null;
 };
 
 export type CapabilityContextAttributes = {

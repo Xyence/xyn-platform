@@ -4227,6 +4227,7 @@ export async function getContextualCapabilities(params?: {
   application_id?: string;
   entityId?: string;
   workspaceId?: string;
+  includeUnavailable?: boolean;
 }): Promise<ContextualCapabilityResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/capabilities/context`);
@@ -4234,6 +4235,7 @@ export async function getContextualCapabilities(params?: {
   const entityId = params?.entityId || params?.artifact_id || params?.application_id;
   if (entityId) url.searchParams.set("entityId", entityId);
   if (params?.workspaceId) url.searchParams.set("workspaceId", params.workspaceId);
+  if (params?.includeUnavailable) url.searchParams.set("include_unavailable", "true");
   const response = await apiFetch(url.toString(), {
     credentials: "include",
   });

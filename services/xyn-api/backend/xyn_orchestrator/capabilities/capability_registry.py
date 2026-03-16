@@ -1,4 +1,4 @@
-from .capability_models import Capability
+from .capability_models import Capability, CapabilityPrecondition
 
 
 CAPABILITIES = [
@@ -136,6 +136,14 @@ CAPABILITIES = [
         action_type="prompt",
         guard_type="draft_state",
         guard_target="draft,plan_ready",
+        preconditions=[
+            CapabilityPrecondition(
+                guard_type="draft_state",
+                guard_target="draft,plan_ready",
+                failure_code="draft_not_editable",
+                failure_message="This draft is no longer in an editable state.",
+            )
+        ],
     ),
     Capability(
         id="open_application_workspace",
@@ -152,6 +160,14 @@ CAPABILITIES = [
         action_target="fromApplicationWorkspace",
         guard_type="application_exists",
         guard_target="application",
+        preconditions=[
+            CapabilityPrecondition(
+                guard_type="application_exists",
+                guard_target="application",
+                failure_code="application_missing",
+                failure_message="The application has not been generated yet.",
+            )
+        ],
     ),
     Capability(
         id="view_execution_status",
@@ -168,6 +184,14 @@ CAPABILITIES = [
         action_target="workspace_jobs",
         guard_type="attribute_in",
         guard_target="execution_state:submitted,queued,executing,completed,failed",
+        preconditions=[
+            CapabilityPrecondition(
+                guard_type="attribute_in",
+                guard_target="execution_state:submitted,queued,executing,completed,failed",
+                failure_code="execution_missing",
+                failure_message="No execution is available for this item yet.",
+            )
+        ],
     ),
     Capability(
         id="inspect_application_goals",

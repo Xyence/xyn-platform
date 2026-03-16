@@ -36,12 +36,25 @@ export default function ConsoleGuidancePanel({
 }: Props) {
   const navigate = useNavigate();
   const resolvedEntityId = entityId || artifactId || applicationId || null;
-  const { capabilities } = useContextualCapabilities({ context, entityId: resolvedEntityId, workspaceId });
+  const { capabilities } = useContextualCapabilities({
+    context,
+    entityId: resolvedEntityId,
+    workspaceId,
+    includeUnavailable: true,
+  });
   const { paths, selectedPath, selectedPathId, setSelectedPath } = useCapabilityPaths({ context, entityId: resolvedEntityId, workspaceId });
   const [selectedCapabilityId, setSelectedCapabilityId] = useState<string>("");
-  const prompts = useMemo(
-    () => ((capabilities.length ? capabilities : FALLBACK_PROMPTS) as ContextualCapability[]).slice(0, 4),
+  const availableCapabilities = useMemo(
+    () => capabilities.filter((entry) => entry.available !== false),
     [capabilities]
+  );
+  const unavailableCapabilities = useMemo(
+    () => capabilities.filter((entry) => entry.available === false),
+    [capabilities]
+  );
+  const prompts = useMemo(
+    () => ((capabilities.length ? availableCapabilities : FALLBACK_PROMPTS) as ContextualCapability[]).slice(0, 4),
+    [availableCapabilities, capabilities.length]
   );
   const { loading, error, plan } = useExecutionPlan(selectedCapabilityId || null);
 
@@ -76,6 +89,19 @@ export default function ConsoleGuidancePanel({
           ))}
         </div>
       </div>
+      {unavailableCapabilities.length ? (
+        <div className="xyn-console-guidance-card">
+          <h4>Unavailable Right Now</h4>
+          <div className="xyn-console-options-list">
+            {unavailableCapabilities.map((entry) => (
+              <div key={entry.id} className="xyn-console-option-disabled" aria-disabled="true">
+                <strong>{entry.name}</strong>
+                {entry.failure_message ? <span className="muted small">{entry.failure_message}</span> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {loading ? <div className="xyn-console-guidance-card"><p className="muted small">Loading plan…</p></div> : null}
       {!loading && error ? <div className="xyn-console-guidance-card"><p className="danger-text">{error}</p></div> : null}
       {!loading && plan ? <CapabilityPlanSummary plan={plan} /> : null}

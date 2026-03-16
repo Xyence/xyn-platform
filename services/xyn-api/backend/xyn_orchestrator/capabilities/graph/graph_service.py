@@ -2,7 +2,7 @@ from typing import Any, Dict
 
 from ..capability_registry import get_capability_by_id
 from .capability_context import build_context_attributes
-from .guards import evaluate_capability_guard
+from .guards import evaluate_capability_availability
 from .capability_graph import get_capability_ids_for_context
 from .context_nodes import normalize_context_id
 
@@ -12,6 +12,7 @@ def get_capabilities_for_context(
     entity_id: str | None = None,
     workspace_id: str | None = None,
     entity_state: Dict[str, Any] | None = None,
+    include_unavailable: bool = False,
 ):
     resolved_context = normalize_context_id(context)
     capabilities = []
@@ -20,7 +21,8 @@ def get_capabilities_for_context(
         capability = get_capability_by_id(capability_id)
         if capability is None:
             continue
-        if not evaluate_capability_guard(capability, resolved_state):
+        availability = evaluate_capability_availability(capability, resolved_state)
+        if not availability["available"] and not include_unavailable:
             continue
         capabilities.append(
             {
@@ -32,7 +34,9 @@ def get_capabilities_for_context(
                 "priority": capability.priority,
                 "action_type": capability.action_type or "prompt",
                 "action_target": capability.action_target,
-                "available": True,
+                "available": availability["available"],
+                "failure_code": availability["failure_code"],
+                "failure_message": availability["failure_message"],
             }
         )
     return {

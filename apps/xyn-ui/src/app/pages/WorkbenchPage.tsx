@@ -48,7 +48,11 @@ export default function WorkbenchPage({
       }),
     [location.pathname, location.search],
   );
-  const { capabilities: landingCapabilities } = useContextualCapabilities({ context: landingContext, workspaceId });
+  const { capabilities: landingCapabilities } = useContextualCapabilities({
+    context: landingContext,
+    workspaceId,
+    includeUnavailable: true,
+  });
   const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
   const [selectedCapabilityId, setSelectedCapabilityId] = useState("");
 
@@ -154,9 +158,18 @@ export default function WorkbenchPage({
     setSearchParams(next, { replace: true });
   }, [searchParams, setContext, setInputText, setLastArtifactHint, setOpen, setSearchParams, workspaceId]);
 
+  const availableLandingCapabilities = useMemo(
+    () => landingCapabilities.filter((entry) => entry.available !== false),
+    [landingCapabilities]
+  );
+  const unavailableLandingCapabilities = useMemo(
+    () => landingCapabilities.filter((entry) => entry.available === false).slice(0, 3),
+    [landingCapabilities]
+  );
+
   const suggestions = (
     landingCapabilities.length
-      ? landingCapabilities.slice(0, 6).map((entry) => ({
+      ? availableLandingCapabilities.slice(0, 6).map((entry) => ({
           id: entry.id,
           label: entry.name,
           description: entry.description,
@@ -317,6 +330,19 @@ export default function WorkbenchPage({
                     <span className="muted small">{entry.description}</span>
                   </button>
                 ))}
+              </div>
+            ) : null}
+            {unavailableLandingCapabilities.length ? (
+              <div className="workbench-unavailable-capabilities">
+                <h3>Unavailable Right Now</h3>
+                <div className="workbench-unavailable-list">
+                  {unavailableLandingCapabilities.map((entry) => (
+                    <div key={entry.id} className="workbench-unavailable-item" aria-disabled="true">
+                      <strong>{entry.name}</strong>
+                      {entry.failure_message ? <span className="muted small">{entry.failure_message}</span> : null}
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : null}
             {planLoading ? <p className="muted small" style={{ marginTop: 12 }}>Loading plan…</p> : null}
