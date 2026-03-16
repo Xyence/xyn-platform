@@ -3952,7 +3952,7 @@ button.sm {
 
 .xyn-console-anchor {
   position: fixed;
-  top: calc(var(--xyn-header-top-offset) + var(--xyn-header-height) + var(--xyn-console-safe-top) + 4px);
+  top: calc(var(--xyn-header-top-offset) + var(--xyn-header-height) + var(--xyn-console-safe-top) - 10px);
   right: var(--xyn-console-safe-right);
   z-index: var(--xyn-z-console);
   pointer-events: auto;
@@ -3969,7 +3969,7 @@ button.sm {
   align-items: center;
   gap: 8px;
   border-radius: 999px;
-  border: 1px solid var(--border);
+  border: 2px solid var(--border);
   background: var(--card-elevated);
   color: var(--ink);
   padding: 5px 11px;
