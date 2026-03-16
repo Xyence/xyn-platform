@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { fromApplicationWorkspace, fromRecentArtifactItem, fromWorkspaceInstalledArtifact } from "./viewDescriptorBuilders";
+import { fromApplicationWorkspace, fromArtifactDetail, fromRecentArtifactItem, fromWorkspaceInstalledArtifact } from "./viewDescriptorBuilders";
 
 describe("viewDescriptorBuilders", () => {
   it("builds a workspace installed artifact descriptor from the manage surface when present", () => {
@@ -52,6 +52,22 @@ describe("viewDescriptorBuilders", () => {
       entityId: "artifact-22",
       route: "/w/ws-1/build/artifacts/artifact-22",
       title: "Launch Notes",
+      panelKey: "artifact_detail",
+    });
+  });
+
+  it("builds a direct artifact detail descriptor from an artifact id and workspace", () => {
+    const descriptor = fromArtifactDetail({
+      artifactId: "artifact-99",
+      workspaceId: "ws-7",
+      title: "Output Artifact",
+    });
+
+    expect(descriptor).toMatchObject({
+      kind: "artifact_detail",
+      entityId: "artifact-99",
+      route: "/w/ws-7/build/artifacts/artifact-99",
+      title: "Output Artifact",
       panelKey: "artifact_detail",
     });
   });

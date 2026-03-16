@@ -73,6 +73,25 @@ export function fromRecentArtifactItem(item: RecentArtifactItem, workspaceId?: s
   };
 }
 
+export function fromArtifactDetail(options: {
+  artifactId: string;
+  workspaceId?: string;
+  title?: string;
+  subtitle?: string;
+}): ArtifactDetailViewDescriptor {
+  const artifactId = String(options.artifactId || "").trim();
+  const workspaceId = String(options.workspaceId || "").trim();
+  return {
+    kind: "artifact_detail",
+    entityId: artifactId,
+    route: workspaceId && artifactId ? toWorkspacePath(workspaceId, `build/artifacts/${encodeURIComponent(artifactId)}`) : "/",
+    title: normalizeTitle(options.title, artifactId || "Artifact"),
+    subtitle: String(options.subtitle || "").trim() || undefined,
+    shell: "workspace",
+    panelKey: "artifact_detail",
+  };
+}
+
 export function fromApplicationWorkspace(options: {
   workspaceId: string;
   applicationId?: string | null;

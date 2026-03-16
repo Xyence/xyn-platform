@@ -13,7 +13,7 @@ import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import { emitEntityChange, inferEntityChangeFromPrompt } from "../../utils/entityChangeEvents";
-import { fromRecentArtifactItem } from "../../navigation/viewDescriptorBuilders";
+import { fromArtifactDetail, fromRecentArtifactItem } from "../../navigation/viewDescriptorBuilders";
 import type { ConsolePanelKey } from "./WorkbenchPanelHost";
 import RecentArtifactsMiniTable from "./RecentArtifactsMiniTable";
 import ConsolePromptCard from "./ConsolePromptCard";
@@ -1056,6 +1056,13 @@ function ResolutionCard({
   const panelLinks = (resolution.next_actions || []).filter(
     (item) => item.action === "OpenPanel" && typeof item.panel_key === "string" && item.panel_key.length > 0
   );
+  const artifactDescriptor = canOpen
+    ? fromArtifactDetail({
+        artifactId: String(resolution.artifact_id || ""),
+        workspaceId,
+        title: resolution.artifact_type || undefined,
+      })
+    : null;
   const createActionLabel =
     (resolution.next_actions || []).find((item) => item.action === "CreateDraft" && String(item.label || "").trim())?.label ||
     "Create draft";
@@ -1084,11 +1091,9 @@ function ResolutionCard({
           <button
             type="button"
             className="ghost sm"
-            onClick={() =>
-              navigate(workspaceId ? toWorkspacePath(workspaceId, `build/artifacts/${resolution.artifact_id}`) : "/")
-            }
+            onClick={() => artifactDescriptor && openViewDescriptor(artifactDescriptor, navigate)}
           >
-            Open in editor
+            View Details
           </button>
         ) : null}
         {showRevise ? (
