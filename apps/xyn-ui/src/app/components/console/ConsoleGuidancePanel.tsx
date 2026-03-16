@@ -69,7 +69,6 @@ export default function ConsoleGuidancePanel({
                 type="button"
                 className="ghost sm"
                 onClick={() => {
-                  setSelectedCapabilityId(entry.id);
                   executeCapabilityAction({
                     capability: entry,
                     navigate,

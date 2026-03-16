@@ -132,4 +132,16 @@ describe("emitCapabilityEvent", () => {
     expect(apiMocks.getContextualCapabilities).toHaveBeenCalledTimes(2);
     expect(apiMocks.getCapabilityPaths).toHaveBeenCalledTimes(2);
   });
+
+  it("swallows refresh endpoint failures without throwing", async () => {
+    apiMocks.emitCapabilityRefreshEvent.mockRejectedValueOnce(new Error("Not authenticated. Please sign in."));
+
+    await expect(
+      emitCapabilityEvent({
+        eventType: "execution_completed",
+        entityId: "draft-1",
+        workspaceId: "ws-1",
+      })
+    ).resolves.toBeUndefined();
+  });
 });

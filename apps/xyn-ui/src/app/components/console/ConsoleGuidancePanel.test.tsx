@@ -1,5 +1,5 @@
 import { MemoryRouter } from "react-router-dom";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -28,6 +28,21 @@ vi.mock("../../navigation/executeCapabilityAction", () => ({
 
 describe("ConsoleGuidancePanel", () => {
   it("renders unavailable capabilities with explanations and does not make them clickable", async () => {
+    mockUseExecutionPlan.mockImplementation((capabilityId) => ({
+      loading: false,
+      error: null,
+      plan: capabilityId
+        ? {
+            capability_id: String(capabilityId),
+            architecture: {},
+            defaults: {},
+            dependencies: [],
+            components: [],
+            generated_commands: [],
+            artifacts: [],
+          }
+        : null,
+    }));
     mockUseContextualCapabilities.mockReturnValue({
       capabilities: [
         {
@@ -58,13 +73,9 @@ describe("ConsoleGuidancePanel", () => {
       selectedPathId: "",
       setSelectedPath: vi.fn(),
     });
-    mockUseExecutionPlan.mockReturnValue({
-      loading: false,
-      error: null,
-      plan: null,
-    });
 
     const onInsertSuggestion = vi.fn();
+    const user = userEvent.setup();
     render(
       <MemoryRouter>
         <ConsoleGuidancePanel onInsertSuggestion={onInsertSuggestion} context="app_intent_draft" workspaceId="ws-1" entityId="draft-1" />
@@ -77,8 +88,14 @@ describe("ConsoleGuidancePanel", () => {
     expect(screen.getByText("The application has not been generated yet.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Open application workspace/i })).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /Build an application/i }));
+    await user.click(screen.getByRole("button", { name: /Build an application/i }));
     expect(mockExecuteCapabilityAction).toHaveBeenCalledTimes(1);
     expect(onInsertSuggestion).not.toHaveBeenCalled();
+    expect(mockUseExecutionPlan).not.toHaveBeenCalledWith("build_application");
+
+    await act(async () => {
+      await user.click(screen.getByRole("button", { name: /View plan/i }));
+    });
+    expect(mockUseExecutionPlan).toHaveBeenCalledWith("build_application");
   });
 });

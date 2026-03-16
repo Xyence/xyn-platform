@@ -247,7 +247,6 @@ export default function WorkbenchPage({
   const { loading: planLoading, error: planError, plan: selectedPlanSummary } = useExecutionPlan(selectedCapabilityId || null);
 
   const handleSuggestion = (capability: ContextualCapability, capabilityId: string, prompt: string) => {
-    setSelectedCapabilityId(capabilityId);
     executeCapabilityAction({
       capability,
       navigate,

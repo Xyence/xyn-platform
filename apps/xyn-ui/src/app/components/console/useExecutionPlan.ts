@@ -31,7 +31,13 @@ export function useExecutionPlan(capabilityId?: string | null): Model {
         setPlan(payload);
       } catch (err) {
         if (!active) return;
-        setError(err instanceof Error ? err.message : "Failed to load plan summary");
+        const message = err instanceof Error ? err.message : "Failed to load plan summary";
+        if (message.includes("Unknown capability") || message.includes("Request failed (404)")) {
+          setError(null);
+          setPlan(null);
+          return;
+        }
+        setError(message);
         setPlan(null);
       } finally {
         if (active) setLoading(false);

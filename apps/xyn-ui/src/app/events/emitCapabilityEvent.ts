@@ -23,18 +23,22 @@ export async function emitCapabilityEvent(payload: CapabilityEventPayload): Prom
   recentEventSignature = signature;
   recentEventAt = now;
 
-  const response = await emitCapabilityRefreshEvent({
-    event_type: eventType,
-    entity_id: String(payload.entityId || "").trim() || undefined,
-    workspace_id: String(payload.workspaceId || "").trim() || undefined,
-  });
+  try {
+    const response = await emitCapabilityRefreshEvent({
+      event_type: eventType,
+      entity_id: String(payload.entityId || "").trim() || undefined,
+      workspace_id: String(payload.workspaceId || "").trim() || undefined,
+    });
 
-  const detail: CapabilityRefreshDetail = {
-    eventType: response.event_type,
-    entityId: response.entityId || null,
-    workspaceId: response.workspaceId || null,
-    contexts: Array.isArray(response.contexts) ? response.contexts : [],
-  };
+    const detail: CapabilityRefreshDetail = {
+      eventType: response.event_type,
+      entityId: response.entityId || null,
+      workspaceId: response.workspaceId || null,
+      contexts: Array.isArray(response.contexts) ? response.contexts : [],
+    };
 
-  window.dispatchEvent(new CustomEvent<CapabilityRefreshDetail>(XYN_CAPABILITY_REFRESH_EVENT, { detail }));
+    window.dispatchEvent(new CustomEvent<CapabilityRefreshDetail>(XYN_CAPABILITY_REFRESH_EVENT, { detail }));
+  } catch {
+    // Capability refresh is opportunistic; failed refreshes should not break the active surface.
+  }
 }
