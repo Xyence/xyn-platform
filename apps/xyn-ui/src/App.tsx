@@ -1,9 +1,9 @@
 import { Suspense, lazy, useEffect } from "react";
 import { Route, Routes, useParams } from "react-router-dom";
-const AppShell = lazy(() => import("./app/AppShell"));
-const LegacyAppRedirect = lazy(() => import("./app/routing/LegacyAppRedirect"));
+import AppShell from "./app/AppShell";
+import LegacyAppRedirect from "./app/routing/LegacyAppRedirect";
 import RootRedirect from "./app/routing/RootRedirect";
-const PublicShell = lazy(() => import("./public/PublicShell"));
+import PublicShell from "./public/PublicShell";
 const PageRoute = lazy(() => import("./public/pages/PageRoute"));
 const ArticlesIndex = lazy(() => import("./public/pages/ArticlesIndex"));
 const ArticleDetail = lazy(() => import("./public/pages/ArticleDetail"));
