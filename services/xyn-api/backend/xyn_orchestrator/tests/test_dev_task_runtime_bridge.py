@@ -898,6 +898,84 @@ class DevTaskRuntimeBridgeTests(TestCase):
         payload = json.loads(response.content)
         self.assertIn("already in progress", payload["error"])
 
+    def test_retry_allows_awaiting_review_task_after_unsafe_repository_state(self):
+        runtime_run_id = uuid.uuid4()
+        new_runtime_run_id = str(uuid.uuid4())
+        self.task.runtime_run_id = runtime_run_id
+        self.task.runtime_workspace_id = self.workspace.id
+        self.task.status = "awaiting_review"
+        self.task.execution_brief_review_state = "approved"
+        self.task.execution_policy = {
+            "require_brief_approval": True,
+            "recovery": {
+                "last_failure": {
+                    "run_id": str(runtime_run_id),
+                    "source": "runtime",
+                    "state": "awaiting_review",
+                    "summary": "Repository is dirty",
+                    "error": "unsafe_repository_state",
+                }
+            },
+        }
+        self.task.save(
+            update_fields=[
+                "runtime_run_id",
+                "runtime_workspace_id",
+                "status",
+                "execution_brief_review_state",
+                "execution_policy",
+                "updated_at",
+            ]
+        )
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}/retry")
+
+        def _seed_api_request(*, method, path, workspace_id="", workspace_slug="", payload=None, timeout=20):
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}":
+                return _FakeResponse(
+                    body={
+                        "id": str(runtime_run_id),
+                        "run_id": str(runtime_run_id),
+                        "status": "blocked",
+                        "summary": "Repository is dirty",
+                        "failure_reason": "unsafe_repository_state",
+                        "escalation_reason": "unsafe_repository_state",
+                        "prompt_payload": {"target": {"workspace_id": str(self.workspace.id), "repo": "xyn-platform", "branch": "develop"}},
+                    }
+                )
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/steps":
+                return _FakeResponse(body=[])
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/artifacts":
+                return _FakeResponse(body=[])
+            if method == "POST" and path == "/api/v1/runtime/runs":
+                return _FakeResponse(body={"id": new_runtime_run_id, "status": "queued"})
+            if method == "GET" and path == f"/api/v1/runs/{new_runtime_run_id}":
+                return _FakeResponse(
+                    body={
+                        "id": new_runtime_run_id,
+                        "run_id": new_runtime_run_id,
+                        "status": "queued",
+                        "summary": None,
+                        "failure_reason": None,
+                        "escalation_reason": None,
+                        "prompt_payload": {"target": {"workspace_id": str(self.workspace.id), "repo": "xyn-platform", "branch": "develop"}},
+                    }
+                )
+            if method == "GET" and path == f"/api/v1/runs/{new_runtime_run_id}/steps":
+                return _FakeResponse(body=[])
+            if method == "GET" and path == f"/api/v1/runs/{new_runtime_run_id}/artifacts":
+                return _FakeResponse(body=[])
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request", side_effect=_seed_api_request
+        ), mock.patch("xyn_orchestrator.xyn_api._download_artifact_json", return_value=self.plan_json):
+            response = dev_task_retry(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["status"], "queued")
+        self.assertEqual(payload["run_id"], new_runtime_run_id)
+
     def test_requeue_clears_failed_runtime_run_and_returns_task_to_queue(self):
         runtime_run_id = uuid.uuid4()
         self.task.runtime_run_id = runtime_run_id

@@ -128,3 +128,25 @@ class ExecutionRecoveryTests(TestCase):
         self.assertFalse(state.failed)
         self.assertTrue(state.blocked)
         self.assertEqual(state.status, "review_blocked")
+
+    def test_awaiting_review_unsafe_repository_state_is_retryable_once_brief_is_ready(self):
+        task = self._task(
+            status="awaiting_review",
+            execution_brief={"schema_version": "v1", "summary": "Recover scheduler"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        state = evaluate_dev_task_recovery_state(
+            task,
+            execution_summary={
+                "state": "awaiting_review",
+                "run_id": "run-1",
+                "summary": "Repository is dirty",
+                "error": "unsafe_repository_state",
+            },
+        )
+        self.assertTrue(state.retryable)
+        self.assertTrue(state.requeueable)
+        self.assertTrue(state.failed)
+        self.assertFalse(state.blocked)
+        self.assertEqual(state.status, "retryable_after_review")

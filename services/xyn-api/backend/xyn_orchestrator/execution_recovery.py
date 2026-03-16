@@ -10,6 +10,7 @@ from .models import DevTask
 RECOVERY_SUPPORTED_TASK_TYPES = {"codegen"}
 RECOVERY_ACTIVE_STATES = {"queued", "running"}
 RECOVERY_FAILURE_STATES = {"failed"}
+RECOVERY_REVIEW_RETRYABLE_ERRORS = {"unsafe_repository_state"}
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,21 @@ def evaluate_dev_task_recovery_state(
             last_failure=last_failure,
         )
     if state == "awaiting_review":
+        readiness = execution_brief_readiness(task)
+        failure_error = _clean_text((last_failure or {}).get("error")).lower()
+        if failure_error in RECOVERY_REVIEW_RETRYABLE_ERRORS and readiness.executable:
+            return DevTaskRecoveryState(
+                retryable=True,
+                requeueable=True,
+                in_flight=False,
+                failed=True,
+                blocked=False,
+                status="retryable_after_review",
+                reason=failure_error,
+                message="Execution paused for review after an environment issue and can be retried now.",
+                available_actions=("retry_now", "requeue"),
+                last_failure=last_failure,
+            )
         return DevTaskRecoveryState(
             retryable=False,
             requeueable=False,
