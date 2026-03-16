@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ComposerState } from "../../../api/types";
-import { deriveComposerViewModel } from "./composerViewModel";
+import { deriveComposerStageSummary, deriveComposerViewModel } from "./composerViewModel";
 
 describe("deriveComposerViewModel", () => {
   it("groups goals and threads under their application and isolates orphaned work", () => {
@@ -216,5 +216,114 @@ describe("deriveComposerViewModel", () => {
     expect(viewModel.containers.find((container) => container.title === "Lunch Poll")?.threads[0]?.title).toBe("Smoke test");
     expect(viewModel.unlinkedGoals.map((goal) => goal.title)).toEqual(["Legacy cleanup"]);
     expect(viewModel.unlinkedThreads.map((thread) => thread.title)).toEqual(["Cleanup slice"]);
+  });
+});
+
+describe("deriveComposerStageSummary", () => {
+  it("maps representative composer stages to human-readable workflow copy", () => {
+    const base: ComposerState = {
+      workspace_id: "ws-1",
+      stage: "factory_discovery",
+      context: {
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+        application_plan_id: null,
+        factory_key: null,
+      },
+      factory_catalog: [],
+      selected_factory: null,
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    };
+
+    const neutral = deriveComposerStageSummary(base, {
+      title: "No application effort selected",
+      statusLabel: "Idle",
+      latestResult: "Start by selecting an application effort or generating a new plan.",
+      latestActivityAt: null,
+      container: null,
+    });
+    expect(neutral.label).toBe("No active build in progress");
+    expect(neutral.nextStep).toBe("Start a new application plan.");
+
+    const planReview = deriveComposerStageSummary(
+      {
+        ...base,
+        stage: "plan_review",
+        application_plan: {
+          id: "plan-1",
+          name: "Deal Finder",
+          summary: "Reviewable plan",
+          status: "review",
+          source_factory_key: "generic_application_mvp",
+          generated_goals: [{ title: "Goal 1" }, { title: "Goal 2" }],
+        },
+      } as unknown as ComposerState,
+      {
+        title: "Deal Finder",
+        statusLabel: "Ready for review",
+        latestResult: "2 planned goals ready to apply.",
+        latestActivityAt: null,
+        container: null,
+      },
+    );
+    expect(planReview.label).toBe("Reviewing the implementation plan");
+    expect(planReview.explanation).toMatch(/2 planned goals/i);
+
+    const threadFocus = deriveComposerStageSummary(
+      {
+        ...base,
+        stage: "thread_focus",
+        thread: {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          title: "Verification and Smoke Test",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: { max_concurrent_runs: 1 },
+          source_conversation_id: "conv-1",
+          queued_work_items: 0,
+          running_work_items: 0,
+          awaiting_review_work_items: 1,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-16T16:00:00Z",
+          updated_at: "2026-03-16T16:01:00Z",
+          thread_diagnostic: {
+            status: "blocked",
+            observations: ["Execution brief review is still blocking coding dispatch for this thread."],
+            likely_causes: [],
+            evidence: [],
+            provenance: { summary: "Execution brief review is required before coding execution can proceed." },
+            suggested_human_review_action: "Review the blocking work item.",
+          },
+        },
+      } as unknown as ComposerState,
+      {
+        title: "Verification and Smoke Test",
+        statusLabel: "Active",
+        latestResult: "Execution brief review is required before coding execution can proceed.",
+        latestActivityAt: null,
+        container: null,
+      },
+    );
+    expect(threadFocus.label).toBe("Waiting on a fix or input");
+    expect(threadFocus.nextStep).toMatch(/review the blocking work item/i);
   });
 });

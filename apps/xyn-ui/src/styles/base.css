@@ -5178,6 +5178,38 @@ button.sm {
   gap: 16px;
 }
 
+.composer-stage-strip {
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, white 22%);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 84%, white 16%);
+}
+
+.composer-stage-strip__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.composer-stage-strip__explanation,
+.composer-stage-strip__next-step {
+  margin: 0;
+  font-size: 0.94rem;
+  line-height: 1.45;
+}
+
+.composer-stage-strip__explanation {
+  color: var(--text);
+}
+
+.composer-stage-strip__next-step {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
 .composer-effort-card {
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -5230,6 +5262,11 @@ button.sm {
 @media (max-width: 768px) {
   .app-draft-layout {
     grid-template-columns: 1fr;
+  }
+
+  .composer-stage-strip__header {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .workbench-topbar {

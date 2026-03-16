@@ -69,7 +69,7 @@ import InlineMessage from "../../../components/InlineMessage";
 import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityRegistry";
 import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail } from "../../utils/entityChangeEvents";
 import { applyRuntimeEventToRunDetail, applyRuntimeEventToRuns, refreshRuntimeRunDetail, refreshRuntimeRunSummary, subscribeRuntimeEventStream } from "../../utils/runtimeEventStream";
-import { deriveComposerViewModel } from "./composerViewModel";
+import { deriveComposerStageSummary, deriveComposerViewModel } from "./composerViewModel";
 import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
 import JobDetailPage from "../../pages/JobDetailPage";
@@ -3702,6 +3702,7 @@ function ComposerDetailPanel({
   const composerView = deriveComposerViewModel(payload);
   const currentWork = composerView.currentContext;
   const currentContainer = currentWork.container;
+  const stageSummary = deriveComposerStageSummary(payload, currentWork);
   const selectedContainerGoals = currentContainer?.kind === "application" ? currentContainer.goals : [];
   const selectedContainerGoalIds = new Set(selectedContainerGoals.map((goal) => goal.id));
   const selectedContainerThreads = currentContainer?.kind === "application"
@@ -3726,11 +3727,20 @@ function ComposerDetailPanel({
             <div className="field-value">{currentWork.title}</div>
           </div>
         </div>
+        <div className="composer-stage-strip" role="status" aria-live="polite">
+          <div className="composer-stage-strip__header">
+            <span className="field-label">Workflow status</span>
+            <span className="pill ghost">{stageSummary.label}</span>
+          </div>
+          <p className="composer-stage-strip__explanation">{stageSummary.explanation}</p>
+          <p className="composer-stage-strip__next-step">
+            <strong>Next:</strong> {stageSummary.nextStep}
+          </p>
+        </div>
         <div className="detail-grid">
           <div><div className="field-label">Overall state</div><div className="field-value">{titleCaseLabel(currentWork.statusLabel)}</div></div>
           <div><div className="field-label">Container</div><div className="field-value">{currentContainer ? `${currentContainer.kind === "application" ? "Application" : "Application Plan"} · ${currentContainer.title}` : "No application effort selected"}</div></div>
           <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(currentWork.latestActivityAt)}</div></div>
-          <div><div className="field-label">Stage</div><div className="field-value">{titleCaseLabel(payload.stage)}</div></div>
         </div>
         <p className="muted" style={{ marginTop: 12 }}>{currentWork.latestResult}</p>
         {actionableBreadcrumbs.length ? (

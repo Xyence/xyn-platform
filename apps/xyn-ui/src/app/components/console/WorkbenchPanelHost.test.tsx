@@ -625,6 +625,9 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalledWith({ workspace_id: "ws-1" }));
     expect(screen.getByText("Application Efforts")).toBeInTheDocument();
+    expect(screen.getByText("Workflow status")).toBeInTheDocument();
+    expect(screen.getByText("No active build in progress")).toBeInTheDocument();
+    expect(screen.getByText("Start a new application plan.")).toBeInTheDocument();
     expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Generate Plan" })).toBeInTheDocument();
   });
@@ -825,6 +828,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0));
     expect(screen.getByText("Selected Application Plan")).toBeInTheDocument();
+    expect(screen.getByText("Reviewing the implementation plan")).toBeInTheDocument();
     expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
     expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
     await act(async () => {
@@ -959,6 +963,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument());
+    expect(screen.getByText("Waiting on a fix or input")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Current Goal" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Current Thread" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Resume Thread" })).toBeDisabled();

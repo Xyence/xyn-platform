@@ -1,4 +1,5 @@
 import type {
+  ComposerStage,
   ApplicationPlanDetail,
   ApplicationPlanSummary,
   ApplicationSummary,
@@ -45,6 +46,12 @@ export type ComposerViewModel = {
   currentContext: ComposerCurrentContext;
   unlinkedGoals: GoalSummary[];
   unlinkedThreads: CoordinationThreadSummary[];
+};
+
+export type ComposerStageSummary = {
+  label: string;
+  explanation: string;
+  nextStep: string;
 };
 
 function parseTimestamp(value?: string | null): number {
@@ -141,6 +148,87 @@ function mergeGoals(primary: GoalSummary[], secondary: GoalSummary[]): GoalSumma
     map.set(goal.id, goal);
   }
   return Array.from(map.values());
+}
+
+export function deriveComposerStageSummary(payload: ComposerState, currentContext: ComposerCurrentContext): ComposerStageSummary {
+  const stage = String(payload.stage || "").toLowerCase() as ComposerStage | "";
+  const selectedFactory = payload.selected_factory;
+  const selectedPlan = payload.application_plan;
+  const selectedGoal = payload.goal;
+  const selectedThread = payload.thread;
+  const currentContainer = currentContext.container;
+  const hasActiveEffort = Boolean(currentContainer || payload.applications?.length || payload.application_plans?.length);
+  const goalCount = selectedPlan?.generated_goals?.length ?? selectedPlan?.generated_plan?.generated_goals?.length ?? 0;
+  const reviewBlocked = Boolean(
+    selectedThread?.awaiting_review_work_items
+    || selectedThread?.thread_diagnostic?.suggested_human_review_action
+    || selectedThread?.thread_diagnostic?.observations?.some((entry) => /review/i.test(String(entry || "")))
+  );
+
+  if (stage === "factory_discovery" && !selectedFactory && !hasActiveEffort) {
+    return {
+      label: "No active build in progress",
+      explanation: "Composer is waiting for you to choose a starting template or describe a new application.",
+      nextStep: "Start a new application plan.",
+    };
+  }
+
+  switch (stage) {
+    case "factory_discovery":
+      return {
+        label: "Choosing a starting template",
+        explanation: selectedFactory
+          ? `${selectedFactory.name} is selected as the starting point for the next application effort.`
+          : "Composer is showing the available starting templates for a new application.",
+        nextStep: "Choose the best template, then generate a plan.",
+      };
+    case "plan_review":
+      return {
+        label: "Reviewing the implementation plan",
+        explanation: goalCount > 0
+          ? `${goalCount} planned goal${goalCount === 1 ? "" : "s"} are ready to inspect before you apply the plan.`
+          : "The plan is ready to inspect before it becomes a durable application effort.",
+        nextStep: selectedPlan?.status === "applied" ? "Open the application effort." : "Apply the plan when it looks right.",
+      };
+    case "plan_applied":
+      return {
+        label: "Turning the plan into application work",
+        explanation: "The reviewed plan has been attached to a durable application effort and is ready for follow-up work.",
+        nextStep: "Open the application effort and review its goals.",
+      };
+    case "goal_focus":
+      return {
+        label: "Reviewing a goal",
+        explanation: selectedGoal
+          ? `${selectedGoal.title} is the current goal under ${currentContainer?.title || "this application effort"}.`
+          : "Composer is focused on a specific goal so you can decide what to do next.",
+        nextStep: "Review the recommendation, then approve the next slice if it looks correct.",
+      };
+    case "thread_focus":
+      return {
+        label: reviewBlocked ? "Waiting on a fix or input" : "Running work",
+        explanation: reviewBlocked
+          ? "The current thread is paused until a blocking review item is handled."
+          : selectedThread
+            ? `${selectedThread.title} is the active thread for this application effort.`
+            : "Composer is focused on a specific thread.",
+        nextStep: reviewBlocked ? "Review the blocking work item before queueing more work." : "Review the current thread and decide whether to continue dispatching work.",
+      };
+    case "application_overview":
+      return {
+        label: "Reviewing current application work",
+        explanation: currentContainer
+          ? `${currentContainer.title} is the active application effort in Composer.`
+          : "Composer is summarizing the current application effort and its related work.",
+        nextStep: "Choose the goal or thread you want to continue.",
+      };
+    default:
+      return {
+        label: "No active build in progress",
+        explanation: "Composer is ready to organize application work when you select or start an effort.",
+        nextStep: "Start a new application plan.",
+      };
+  }
 }
 
 export function deriveComposerViewModel(payload: ComposerState): ComposerViewModel {
