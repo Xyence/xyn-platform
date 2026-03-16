@@ -514,6 +514,57 @@ class GoalPlanningTests(TestCase):
         self.assertIn("portfolio_state", payload)
         self.assertEqual(len(payload["portfolio_state"]["goals"]), 1)
 
+    def test_application_detail_patch_updates_application_status(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}",
+            method="patch",
+            data=json.dumps({"status": "archived"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_detail(request, str(application.id))
+        payload = json.loads(response.content)
+        application.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(application.status, "archived")
+        self.assertEqual(payload["status"], "archived")
+
+    def test_application_plan_detail_patch_updates_plan_status(self):
+        plan = ApplicationPlan.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Reviewable plan",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="review",
+            request_objective="Build an AI real estate deal finder",
+            plan_fingerprint=f"plan-{uuid.uuid4().hex}",
+            plan_json={"application_name": "Deal Finder"},
+        )
+        request = self._request(
+            f"/xyn/api/application-plans/{plan.id}",
+            method="patch",
+            data=json.dumps({"status": "canceled"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_plan_detail(request, str(plan.id))
+        payload = json.loads(response.content)
+        plan.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(plan.status, "canceled")
+        self.assertEqual(payload["status"], "canceled")
+
     def test_composer_state_defaults_to_factory_discovery(self):
         request = self._request("/xyn/api/composer/state", data={"workspace_id": str(self.workspace.id)})
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):

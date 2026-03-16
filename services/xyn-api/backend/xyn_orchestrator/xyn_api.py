@@ -28952,6 +28952,16 @@ def application_plan_detail(request: HttpRequest, plan_id: str) -> JsonResponse:
     plan = get_object_or_404(ApplicationPlan.objects.select_related("workspace", "requested_by", "application", "target_repository"), id=plan_id)
     if not _workspace_membership(identity, str(plan.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "PATCH":
+        payload = _parse_json(request)
+        status_value = str(payload.get("status") or "").strip().lower()
+        allowed_statuses = {choice for choice, _label in ApplicationPlan.STATUS_CHOICES}
+        if status_value not in allowed_statuses:
+            return JsonResponse({"error": "status must be one of review, applied, or canceled"}, status=400)
+        plan.status = status_value
+        plan.save(update_fields=["status", "updated_at"])
+        plan.refresh_from_db()
+        return JsonResponse(_serialize_application_plan_detail(plan))
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     return JsonResponse(_serialize_application_plan_detail(plan))
@@ -29009,6 +29019,16 @@ def application_detail(request: HttpRequest, application_id: str) -> JsonRespons
     application = get_object_or_404(Application.objects.select_related("workspace", "requested_by", "target_repository").prefetch_related("goals__threads__work_items", "goals__work_items"), id=application_id)
     if not _workspace_membership(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "PATCH":
+        payload = _parse_json(request)
+        status_value = str(payload.get("status") or "").strip().lower()
+        allowed_statuses = {choice for choice, _label in Application.STATUS_CHOICES}
+        if status_value not in allowed_statuses:
+            return JsonResponse({"error": "status must be one of active, completed, or archived"}, status=400)
+        application.status = status_value
+        application.save(update_fields=["status", "updated_at"])
+        application.refresh_from_db()
+        return JsonResponse(_serialize_application_detail(application))
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     return JsonResponse(_serialize_application_detail(application))

@@ -35,6 +35,8 @@ import {
   reviewCoordinationThread,
   reviewGoal,
   retryDevTask,
+  updateApplication,
+  updateApplicationPlan,
   updateWorkItem,
 } from "../../../api/xyn";
 import type {
@@ -70,6 +72,7 @@ import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityR
 import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail } from "../../utils/entityChangeEvents";
 import { applyRuntimeEventToRunDetail, applyRuntimeEventToRuns, refreshRuntimeRunDetail, refreshRuntimeRunSummary, subscribeRuntimeEventStream } from "../../utils/runtimeEventStream";
 import { deriveComposerStageSummary, deriveComposerViewModel } from "./composerViewModel";
+import type { ComposerContainerFilter, ComposerWorkContainer } from "./composerViewModel";
 import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
 import JobDetailPage from "../../pages/JobDetailPage";
@@ -3559,6 +3562,34 @@ function ComposerDetailPanel({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [objective, setObjective] = useState("");
+  const [effortFilter, setEffortFilter] = useState<ComposerContainerFilter>("active");
+  const [hiddenEffortIds, setHiddenEffortIds] = useState<Record<string, true>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const raw = window.localStorage.getItem(`xyn:composer:hidden-efforts:${workspaceId}`);
+      return raw ? JSON.parse(raw) as Record<string, true> : {};
+    } catch {
+      return {};
+    }
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(`xyn:composer:hidden-efforts:${workspaceId}`, JSON.stringify(hiddenEffortIds));
+  }, [hiddenEffortIds, workspaceId]);
+
+  async function reloadComposerState() {
+    const next = await getComposerState({
+      workspace_id: workspaceId,
+      factory_key: factoryKey,
+      application_plan_id: applicationPlanId,
+      application_id: applicationId,
+      goal_id: goalId,
+      thread_id: threadId,
+    });
+    setPayload(next);
+    return next;
+  }
 
   useEffect(() => {
     let active = true;
@@ -3638,6 +3669,55 @@ function ComposerDetailPanel({
     }
   }
 
+  async function handleArchiveApplication(application: ComposerWorkContainer | ApplicationDetail) {
+    try {
+      const result = await updateApplication(application.id, { status: "archived" });
+      setMessage(`Archived ${result.name}. It is now hidden from the default active view.`);
+      await reloadComposerState();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to archive the application effort");
+    }
+  }
+
+  async function handleCancelPlan(plan: ComposerWorkContainer | ApplicationPlanDetail) {
+    try {
+      const result = await updateApplicationPlan(plan.id, { status: "canceled" });
+      setMessage(`Canceled ${result.name}. It is now treated as historical plan work.`);
+      await reloadComposerState();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to archive the application plan");
+    }
+  }
+
+  async function handleRestartEffort(container: ComposerWorkContainer) {
+    const objectiveText = String(container.requestObjective || "").trim();
+    if (!objectiveText) {
+      setMessage("This effort does not have a reusable objective, so Xyn cannot restart it automatically.");
+      return;
+    }
+    try {
+      const response = await generateApplicationPlan({
+        workspace_id: workspaceId,
+        objective: objectiveText,
+        factory_key: container.sourceFactoryKey || undefined,
+        application_name: container.title,
+      });
+      if (container.kind === "application") {
+        await updateApplication(container.id, { status: "archived" });
+      } else {
+        await updateApplicationPlan(container.id, { status: "canceled" });
+      }
+      setMessage(`Started a new plan for ${container.title} and retired the older effort from the default active view.`);
+      setEffortFilter("active");
+      openComposer({
+        application_plan_id: response.id,
+        factory_key: response.source_factory_key || container.sourceFactoryKey || undefined,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to start over from this application effort");
+    }
+  }
+
   async function handleApproveNextSlice(goal: GoalDetail, recommendationId?: string | null) {
     try {
       const response = await reviewGoal(goal.id, "approve_and_queue", recommendationId);
@@ -3703,6 +3783,31 @@ function ComposerDetailPanel({
   const currentWork = composerView.currentContext;
   const currentContainer = currentWork.container;
   const stageSummary = deriveComposerStageSummary(payload, currentWork);
+  const effortVisibilityKey = (container: ComposerWorkContainer) => `${container.kind}:${container.id}`;
+  const isEffortHidden = (container: ComposerWorkContainer) => Boolean(hiddenEffortIds[effortVisibilityKey(container)]);
+  const visibleEffortCount = (filter: ComposerContainerFilter) =>
+    composerView.containers.filter((container) => {
+      const isHidden = isEffortHidden(container);
+      if (filter === "all") return true;
+      if (filter === "archived") return container.lifecycleState === "archived";
+      if (filter === "failed") return !isHidden && container.lifecycleState === "failed";
+      if (isHidden || container.lifecycleState === "archived") return false;
+      if (container.lifecycleState === "failed" && !container.isCurrent && !container.isMostRecent) return false;
+      if (container.isSuperseded && !container.isCurrent && !container.isMostRecent) return false;
+      return true;
+    }).length;
+  // Active view stays focused on current/recent work and hides locally hidden or stale failed
+  // efforts by default. Older failed/archived efforts remain available through the other tabs.
+  const filteredContainers = composerView.containers.filter((container) => {
+    const isHidden = isEffortHidden(container);
+    if (effortFilter === "all") return true;
+    if (effortFilter === "archived") return container.lifecycleState === "archived";
+    if (effortFilter === "failed") return !isHidden && container.lifecycleState === "failed";
+    if (isHidden || container.lifecycleState === "archived") return false;
+    if (container.lifecycleState === "failed" && !container.isCurrent && !container.isMostRecent) return false;
+    if (container.isSuperseded && !container.isCurrent && !container.isMostRecent) return false;
+    return true;
+  });
   const selectedContainerGoals = currentContainer?.kind === "application" ? currentContainer.goals : [];
   const selectedContainerGoalIds = new Set(selectedContainerGoals.map((goal) => goal.id));
   const selectedContainerThreads = currentContainer?.kind === "application"
@@ -3717,6 +3822,49 @@ function ComposerDetailPanel({
       ? recommendation.summary
       : currentWork.latestResult;
   const showPlanningTools = payload.stage === "factory_discovery" || payload.stage === "plan_review";
+
+  function renderLifecycleActions(container: ComposerWorkContainer, options?: { compact?: boolean }) {
+    const isHidden = isEffortHidden(container);
+    const canArchive = container.kind === "application" && container.rawStatus !== "archived";
+    const canCancel = container.kind === "application_plan" && container.rawStatus !== "canceled";
+    const canRestart = Boolean(String(container.requestObjective || "").trim());
+    return (
+      <div className="inline-action-row" style={{ marginTop: options?.compact ? 8 : 12, flexWrap: "wrap" }}>
+        {canRestart ? (
+          <button type="button" className="ghost sm" onClick={() => void handleRestartEffort(container)}>
+            Start Over
+          </button>
+        ) : null}
+        {canArchive ? (
+          <button type="button" className="ghost sm" onClick={() => void handleArchiveApplication(container)}>
+            Archive
+          </button>
+        ) : null}
+        {canCancel ? (
+          <button type="button" className="ghost sm" onClick={() => void handleCancelPlan(container)}>
+            Mark Obsolete
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="ghost sm"
+          disabled={container.isCurrent && !isHidden}
+          title={container.isCurrent && !isHidden ? "Select another effort before hiding this one from the default active view." : undefined}
+          onClick={() => {
+            setHiddenEffortIds((current) => {
+              const next = { ...current };
+              const key = effortVisibilityKey(container);
+              if (next[key]) delete next[key];
+              else next[key] = true;
+              return next;
+            });
+          }}
+        >
+          {isHidden ? "Show in Active View" : "Hide from Active View"}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="panel-section-stack">
@@ -3786,6 +3934,7 @@ function ComposerDetailPanel({
           ) : null}
         </div>
         <p className="muted small" style={{ marginTop: 8 }}>{latestQuickActionReason}</p>
+        {currentContainer ? renderLifecycleActions(currentContainer, { compact: true }) : null}
         {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
       </section>
 
@@ -3799,8 +3948,21 @@ function ComposerDetailPanel({
         <p className="muted" style={{ marginBottom: 12 }}>
           Composer now groups goals and threads under their parent application effort. Older efforts stay visible, but they are clearly separated from the current one.
         </p>
+        <div className="inline-action-row" style={{ marginBottom: 12, flexWrap: "wrap" }}>
+          {(["active", "failed", "archived", "all"] as ComposerContainerFilter[]).map((filter) => (
+            <button
+              key={filter}
+              type="button"
+              className={effortFilter === filter ? "primary sm" : "ghost sm"}
+              aria-pressed={effortFilter === filter}
+              onClick={() => setEffortFilter(filter)}
+            >
+              {filter === "active" ? "Active" : filter === "failed" ? "Failed" : filter === "archived" ? "Archived" : "All"} ({visibleEffortCount(filter)})
+            </button>
+          ))}
+        </div>
         <div className="composer-effort-grid">
-          {composerView.containers.map((container) => (
+          {filteredContainers.map((container) => (
             <article
               key={`${container.kind}:${container.id}`}
               className={`composer-effort-card${container.isCurrent ? " is-current" : ""}`}
@@ -3813,6 +3975,8 @@ function ComposerDetailPanel({
                 <div className="composer-effort-badges">
                   <span className="pill">{container.statusLabel}</span>
                   <span className="pill ghost">{container.recencyLabel}</span>
+                  {container.isSuperseded ? <span className="pill ghost">Superseded</span> : null}
+                  {isEffortHidden(container) ? <span className="pill ghost">Hidden</span> : null}
                 </div>
               </div>
               <p className="composer-effort-summary">{container.promptSummary}</p>
@@ -3853,10 +4017,19 @@ function ComposerDetailPanel({
                   {container.isCurrent ? "Current Effort" : "Open Effort"}
                 </button>
               </div>
+              {renderLifecycleActions(container)}
             </article>
           ))}
-          {!composerView.containers.length ? (
-            <p className="muted">No application efforts have been created in this workspace yet.</p>
+          {!filteredContainers.length ? (
+            <p className="muted">
+              {effortFilter === "active"
+                ? "No active application efforts are visible. Switch filters to inspect archived or failed work."
+                : effortFilter === "failed"
+                  ? "No failed efforts are currently visible."
+                  : effortFilter === "archived"
+                    ? "No archived efforts are currently visible."
+                    : "No application efforts have been created in this workspace yet."}
+            </p>
           ) : null}
         </div>
       </section>
@@ -3994,6 +4167,7 @@ function ComposerDetailPanel({
               Apply Plan
             </button>
           </div>
+          {currentContainer?.kind === "application_plan" ? renderLifecycleActions(currentContainer) : null}
         </section>
       ) : null}
 
@@ -4013,6 +4187,7 @@ function ComposerDetailPanel({
               body={selectedApplication.portfolio_state.recommended_goal.summary}
             />
           ) : null}
+          {currentContainer?.kind === "application" ? renderLifecycleActions(currentContainer) : null}
         </section>
       ) : null}
 

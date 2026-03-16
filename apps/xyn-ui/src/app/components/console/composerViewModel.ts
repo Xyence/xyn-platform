@@ -14,6 +14,10 @@ export type ComposerContainerGoal = GoalSummary & {
   threads: CoordinationThreadSummary[];
 };
 
+export type ComposerContainerLifecycleState = "active" | "failed" | "archived" | "completed";
+
+export type ComposerContainerFilter = "active" | "failed" | "archived" | "all";
+
 export type ComposerWorkContainer = {
   kind: ComposerContainerKind;
   id: string;
@@ -21,9 +25,14 @@ export type ComposerWorkContainer = {
   summary: string;
   promptSummary: string;
   statusLabel: string;
+  rawStatus: string;
+  sourceFactoryKey: string;
+  requestObjective: string;
   recencyLabel: string;
   latestActivityAt: string | null;
   latestResult: string;
+  lifecycleState: ComposerContainerLifecycleState;
+  isSuperseded: boolean;
   isCurrent: boolean;
   isMostRecent: boolean;
   goals: ComposerContainerGoal[];
@@ -113,6 +122,24 @@ function statusLabelForPlan(plan: ApplicationPlanSummary): string {
   return status ? status.replace(/[_-]+/g, " ") : "Draft";
 }
 
+function lifecycleStateForApplication(application: ApplicationSummary, goals: GoalSummary[], threads: CoordinationThreadSummary[]): ComposerContainerLifecycleState {
+  const status = String(application.status || "").toLowerCase();
+  if (status === "archived") return "archived";
+  if (status === "completed") return "completed";
+  const blockedThreadCount = threads.filter((thread) => ["blocked", "failed"].includes(String(thread.status || "").toLowerCase())).length;
+  const reviewBlockedCount = threads.reduce((sum, thread) => sum + Number(thread.awaiting_review_work_items || 0), 0);
+  if (blockedThreadCount > 0 || reviewBlockedCount > 0) return "failed";
+  if (goals.length > 0 || status === "active") return "active";
+  return "active";
+}
+
+function lifecycleStateForPlan(plan: ApplicationPlanSummary): ComposerContainerLifecycleState {
+  const status = String(plan.status || "").toLowerCase();
+  if (status === "canceled") return "archived";
+  if (status === "applied") return "completed";
+  return "active";
+}
+
 function latestResultForPlan(plan: ApplicationPlanSummary, detail?: ApplicationPlanDetail | null): string {
   const goalCount = detail?.generated_goals?.length ?? detail?.generated_plan?.generated_goals?.length ?? 0;
   if (String(plan.status || "").toLowerCase() === "applied") {
@@ -148,6 +175,13 @@ function mergeGoals(primary: GoalSummary[], secondary: GoalSummary[]): GoalSumma
     map.set(goal.id, goal);
   }
   return Array.from(map.values());
+}
+
+function normalizeEffortKey(value: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 export function deriveComposerStageSummary(payload: ComposerState, currentContext: ComposerCurrentContext): ComposerStageSummary {
@@ -283,9 +317,14 @@ export function deriveComposerViewModel(payload: ComposerState): ComposerViewMod
       summary: application.summary || "",
       promptSummary: application.request_objective || application.summary || application.name,
       statusLabel: statusLabelForApplication(application, goals, threads),
+      rawStatus: String(application.status || ""),
+      sourceFactoryKey: String(application.source_factory_key || ""),
+      requestObjective: application.request_objective || application.summary || application.name,
       recencyLabel: "Older",
       latestActivityAt,
       latestResult: latestResultForApplication(application, goals, threads),
+      lifecycleState: lifecycleStateForApplication(application, goals, threads),
+      isSuperseded: false,
       isCurrent,
       isMostRecent: false,
       goals: goals.map((goal) => ({ ...goal, threads: threadsByGoal.get(goal.id) || [] })),
@@ -314,9 +353,14 @@ export function deriveComposerViewModel(payload: ComposerState): ComposerViewMod
         summary: plan.summary || "",
         promptSummary: plan.request_objective || plan.summary || plan.name,
         statusLabel: statusLabelForPlan(plan),
+        rawStatus: String(plan.status || ""),
+        sourceFactoryKey: String(plan.source_factory_key || ""),
+        requestObjective: plan.request_objective || plan.summary || plan.name,
         recencyLabel: "Older",
         latestActivityAt,
         latestResult: latestResultForPlan(plan, detail),
+        lifecycleState: lifecycleStateForPlan(plan),
+        isSuperseded: false,
         isCurrent,
         isMostRecent: false,
         goals: [],
@@ -339,6 +383,26 @@ export function deriveComposerViewModel(payload: ComposerState): ComposerViewMod
     for (const container of containers) {
       container.isMostRecent = container.id === mostRecentId && container.kind === mostRecentKind;
       container.recencyLabel = recencyLabel(container.isCurrent, container.isMostRecent);
+    }
+  }
+
+  const effortGroups = new Map<string, ComposerWorkContainer[]>();
+  for (const container of containers) {
+    const key = `${normalizeEffortKey(container.sourceFactoryKey)}::${normalizeEffortKey(container.requestObjective)}`;
+    const current = effortGroups.get(key) || [];
+    current.push(container);
+    effortGroups.set(key, current);
+  }
+  for (const group of effortGroups.values()) {
+    if (group.length < 2) continue;
+    const ordered = [...group].sort((left, right) => parseTimestamp(right.latestActivityAt) - parseTimestamp(left.latestActivityAt));
+    const newest = ordered[0];
+    for (const container of ordered.slice(1)) {
+      if (container.lifecycleState === "archived") {
+        container.isSuperseded = true;
+      } else if (!container.isCurrent && newest.id !== container.id) {
+        container.isSuperseded = true;
+      }
     }
   }
 

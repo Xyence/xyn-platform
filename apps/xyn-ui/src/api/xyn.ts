@@ -4438,6 +4438,17 @@ export async function getApplicationPlan(id: string): Promise<ApplicationPlanDet
   return handle<ApplicationPlanDetail>(response);
 }
 
+export async function updateApplicationPlan(id: string, payload: { status: "review" | "applied" | "canceled" | string }): Promise<ApplicationPlanDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-plans/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<ApplicationPlanDetail>(response);
+}
+
 export async function applyApplicationPlan(id: string): Promise<{ status: string; application: ApplicationDetail; application_plan: ApplicationPlanDetail }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-plans/${id}/apply`, {
@@ -4460,6 +4471,17 @@ export async function getApplication(id: string): Promise<ApplicationDetail> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${id}`, {
     credentials: "include",
+  });
+  return handle<ApplicationDetail>(response);
+}
+
+export async function updateApplication(id: string, payload: { status: "active" | "completed" | "archived" | string }): Promise<ApplicationDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
   });
   return handle<ApplicationDetail>(response);
 }
