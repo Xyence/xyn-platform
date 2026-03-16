@@ -9,6 +9,7 @@ import { executeAppPalettePrompt } from "../../../api/xyn";
 import type { PromptInterpretationClarificationOption, RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
 import { openViewDescriptor } from "../../navigation/openViewDescriptor";
+import { resolveCapabilityGraphContext } from "../../navigation/capabilityContext";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
 import { useXynConsole } from "../../state/xynConsoleStore";
@@ -1180,19 +1181,29 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
   const hasContextArtifact = Boolean(context.artifact_id && context.artifact_type);
   const isGlobalContext = !hasContextArtifact;
   const contextualApplicationId = String(activePanel?.params?.application_id || "").trim() || null;
-  const contextualCapabilityContext = hasContextArtifact
-    ? "artifact_draft"
-    : String(activePanel?.key || "") === "composer_detail" && String(activePanel?.params?.application_plan_id || "").trim()
-      ? "plan_review"
-      : contextualApplicationId
-        ? "application_workspace"
-        : isWorkbenchPath
-          ? "landing"
-          : "unknown";
   const workspaceIdFromPath = useMemo(() => {
     const match = String(location.pathname || "").match(/^\/w\/([^/]+)(?:\/|$)/);
     return match?.[1] ? decodeURIComponent(match[1]) : "";
   }, [location.pathname]);
+  const contextualEntityId = useMemo(() => {
+    const draftId = String(activePanel?.params?.draft_id || "").trim();
+    if (draftId) return draftId;
+    if (context.artifact_id) return String(context.artifact_id);
+    if (contextualApplicationId) return contextualApplicationId;
+    return null;
+  }, [activePanel?.params?.draft_id, context.artifact_id, contextualApplicationId]);
+  const contextualCapabilityContext = useMemo(
+    () =>
+      resolveCapabilityGraphContext({
+        pathname: location.pathname,
+        search: location.search,
+        panelKey: String(activePanel?.key || ""),
+        artifactId: context.artifact_id || null,
+        applicationId: contextualApplicationId,
+        applicationPlanId: String(activePanel?.params?.application_plan_id || ""),
+      }),
+    [activePanel?.key, activePanel?.params?.application_plan_id, context.artifact_id, contextualApplicationId, location.pathname, location.search],
+  );
   const ensureWorkbench = () => {
     if (!isOnWorkbench && workspaceIdFromPath) {
       navigate(`/w/${encodeURIComponent(workspaceIdFromPath)}/workbench`);
@@ -1850,8 +1861,8 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
             onInsertSuggestion={injectSuggestion}
             dimmed={Boolean(inputText.trim())}
             context={contextualCapabilityContext}
-            artifactId={context.artifact_id || null}
-            applicationId={contextualApplicationId}
+            entityId={contextualEntityId}
+            workspaceId={workspaceIdFromPath || null}
           />
         </div>
         {recentSection}

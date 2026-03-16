@@ -4,8 +4,8 @@ import type { ContextualCapability } from "../../../api/types";
 
 type Params = {
   context?: string;
-  artifactId?: string | null;
-  applicationId?: string | null;
+  entityId?: string | null;
+  workspaceId?: string | null;
 };
 
 type Model = {
@@ -24,10 +24,10 @@ export function useContextualCapabilities(params: Params): Model {
   const requestKey = useMemo(
     () => [
       String(params.context || "").trim().toLowerCase(),
-      String(params.artifactId || "").trim(),
-      String(params.applicationId || "").trim(),
+      String(params.entityId || "").trim(),
+      String(params.workspaceId || "").trim(),
     ].join("::"),
-    [params.applicationId, params.artifactId, params.context]
+    [params.context, params.entityId, params.workspaceId]
   );
 
   useEffect(() => {
@@ -38,8 +38,8 @@ export function useContextualCapabilities(params: Params): Model {
         setError(null);
         const payload = await getContextualCapabilities({
           context: params.context || undefined,
-          artifact_id: params.artifactId || undefined,
-          application_id: params.applicationId || undefined,
+          entityId: params.entityId || undefined,
+          workspaceId: params.workspaceId || undefined,
         });
         if (!active) return;
         setContext(String(payload.context || "unknown"));
@@ -56,7 +56,7 @@ export function useContextualCapabilities(params: Params): Model {
     return () => {
       active = false;
     };
-  }, [params.applicationId, params.artifactId, params.context, requestKey]);
+  }, [params.context, params.entityId, params.workspaceId, requestKey]);
 
   return { loading, error, context, capabilities };
 }

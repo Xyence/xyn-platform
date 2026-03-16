@@ -7,6 +7,8 @@ type Props = {
   onInsertSuggestion: (text: string) => void;
   dimmed?: boolean;
   context?: string;
+  entityId?: string | null;
+  workspaceId?: string | null;
   artifactId?: string | null;
   applicationId?: string | null;
 };
@@ -18,8 +20,17 @@ const FALLBACK_PROMPTS = [
   { id: "fallback-artifacts", name: "Explore artifacts", description: "View existing artifacts in the workspace.", prompt_template: "Show my artifacts" },
 ];
 
-export default function ConsoleGuidancePanel({ onInsertSuggestion, dimmed = false, context, artifactId, applicationId }: Props) {
-  const { capabilities } = useContextualCapabilities({ context, artifactId, applicationId });
+export default function ConsoleGuidancePanel({
+  onInsertSuggestion,
+  dimmed = false,
+  context,
+  entityId,
+  workspaceId,
+  artifactId,
+  applicationId,
+}: Props) {
+  const resolvedEntityId = entityId || artifactId || applicationId || null;
+  const { capabilities } = useContextualCapabilities({ context, entityId: resolvedEntityId, workspaceId });
   const [selectedCapabilityId, setSelectedCapabilityId] = useState<string>("");
   const prompts = useMemo(
     () => (capabilities.length ? capabilities : FALLBACK_PROMPTS).slice(0, 4),

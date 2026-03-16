@@ -194,6 +194,7 @@ from .execution_changes import (
 )
 from .system_readiness import system_readiness_report
 from .capabilities.capability_service import get_capabilities as get_contextual_capabilities
+from .capabilities.graph.graph_service import get_capabilities_for_context as get_capability_graph_context
 from .planning.plan_service import get_plan_for_capability
 from .workflows.workflow_service import get_draft_workflow
 from .goal_progress import (
@@ -29032,6 +29033,22 @@ def contextual_capabilities(request: HttpRequest) -> JsonResponse:
             context=str(request.GET.get("context") or "").strip() or None,
             artifact_id=str(request.GET.get("artifact_id") or "").strip() or None,
             application_id=str(request.GET.get("application_id") or "").strip() or None,
+        )
+    )
+
+
+@login_required
+def capabilities_context(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(
+        get_capability_graph_context(
+            context=str(request.GET.get("context") or "").strip() or None,
+            entity_id=str(request.GET.get("entityId") or "").strip() or None,
+            workspace_id=str(request.GET.get("workspaceId") or "").strip() or None,
         )
     )
 

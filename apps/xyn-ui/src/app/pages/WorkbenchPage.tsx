@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layout, Model, Actions, type IJsonModel, type TabNode } from "flexlayout-react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useLocation, useParams, useSearchParams } from "react-router-dom";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
 import { useXynConsole } from "../state/xynConsoleStore";
 import { useContextualCapabilities } from "../components/console/contextualCapabilities";
 import { useExecutionPlan } from "../components/console/useExecutionPlan";
 import CapabilityPlanSummary from "../components/console/CapabilityPlanSummary";
+import { resolveCapabilityGraphContext } from "../navigation/capabilityContext";
 import { buildWorkspaceLayout, derivePanelGroupAssignments, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
 export default function WorkbenchPage({
@@ -32,9 +33,19 @@ export default function WorkbenchPage({
   } =
     useXynConsole();
   const params = useParams();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = String(params.workspaceId || "").trim();
-  const { capabilities: landingCapabilities } = useContextualCapabilities({ context: "landing" });
+  const landingContext = useMemo(
+    () =>
+      resolveCapabilityGraphContext({
+        pathname: location.pathname,
+        search: location.search,
+        explicitContext: "landing",
+      }),
+    [location.pathname, location.search],
+  );
+  const { capabilities: landingCapabilities } = useContextualCapabilities({ context: landingContext, workspaceId });
   const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
   const [selectedCapabilityId, setSelectedCapabilityId] = useState("");
 

@@ -55,13 +55,25 @@ CAPABILITIES = [
         id="explore_artifacts",
         name="Explore artifacts",
         description="View existing artifacts in the workspace.",
-        contexts=["landing", "application_workspace"],
+        contexts=["landing", "application_workspace", "artifact_registry", "console"],
         prompt_template="Show my artifacts",
         visibility="secondary",
         priority=7,
         default_assumptions={"surface": "Artifact registry"},
         default_components=["artifact_registry", "artifact_search"],
         generated_artifacts=["artifact_list"],
+    ),
+    Capability(
+        id="view_artifact_details",
+        name="View artifact details",
+        description="Inspect the current artifact and its available surfaces.",
+        contexts=["artifact_detail", "artifact_registry"],
+        prompt_template="Show details for this artifact.",
+        visibility="primary",
+        priority=9,
+        default_assumptions={"surface": "Artifact detail"},
+        default_components=["artifact_detail", "available_surfaces"],
+        generated_artifacts=["artifact_detail"],
     ),
     Capability(
         id="revise_draft",
@@ -105,6 +117,42 @@ CAPABILITIES = [
         generated_artifacts=["application_progress"],
     ),
     Capability(
+        id="continue_application_draft",
+        name="Continue application design",
+        description="Continue shaping the current application draft in the workbench.",
+        contexts=["app_intent_draft"],
+        prompt_template="Continue application design for this draft.",
+        visibility="primary",
+        priority=10,
+        default_assumptions={"surface": "Application draft workspace"},
+        default_components=["application_draft", "workbench_handoff"],
+        generated_artifacts=["application_draft_progress"],
+    ),
+    Capability(
+        id="open_application_workspace",
+        name="Open application workspace",
+        description="Open the application workbench for this application context.",
+        contexts=["app_intent_draft", "application_workspace", "console"],
+        prompt_template="Open application workspace.",
+        visibility="secondary",
+        priority=8,
+        default_assumptions={"shell": "workbench"},
+        default_components=["composer", "application_panels"],
+        generated_artifacts=["application_workspace"],
+    ),
+    Capability(
+        id="view_execution_status",
+        name="View execution status",
+        description="Inspect the latest execution state for this application draft.",
+        contexts=["app_intent_draft"],
+        prompt_template="Show the execution status for this draft.",
+        visibility="secondary",
+        priority=7,
+        default_assumptions={"surface": "Draft execution timeline"},
+        default_components=["workflow_status", "job_summary"],
+        generated_artifacts=["execution_status"],
+    ),
+    Capability(
         id="inspect_application_goals",
         name="Inspect application goals",
         description="Review the current goals and execution slices for this application.",
@@ -139,3 +187,13 @@ CAPABILITIES = [
 def get_capabilities_for_context(context: str):
     caps = [capability for capability in CAPABILITIES if context in capability.contexts]
     return sorted(caps, key=lambda capability: capability.priority, reverse=True)
+
+
+def get_capability_by_id(capability_id: str):
+    target = str(capability_id or "").strip()
+    if not target:
+        return None
+    for capability in CAPABILITIES:
+        if capability.id == target:
+            return capability
+    return None

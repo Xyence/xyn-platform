@@ -4224,12 +4224,15 @@ export async function getContextualCapabilities(params?: {
   context?: string;
   artifact_id?: string;
   application_id?: string;
+  entityId?: string;
+  workspaceId?: string;
 }): Promise<ContextualCapabilityResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const url = new URL(`${apiBaseUrl}/xyn/api/contextual-capabilities`);
+  const url = new URL(`${apiBaseUrl}/xyn/api/capabilities/context`);
   if (params?.context) url.searchParams.set("context", params.context);
-  if (params?.artifact_id) url.searchParams.set("artifact_id", params.artifact_id);
-  if (params?.application_id) url.searchParams.set("application_id", params.application_id);
+  const entityId = params?.entityId || params?.artifact_id || params?.application_id;
+  if (entityId) url.searchParams.set("entityId", entityId);
+  if (params?.workspaceId) url.searchParams.set("workspaceId", params.workspaceId);
   const response = await apiFetch(url.toString(), {
     credentials: "include",
   });
