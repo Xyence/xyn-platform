@@ -8,6 +8,7 @@ import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { useNotifications } from "../state/notificationsStore";
 import { useXynConsole } from "../state/xynConsoleStore";
+import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
 
 type DraftDetailTab = "editor" | "meta";
 type DraftStatusValue = "draft" | "ready" | "submitted" | "archived";
@@ -278,6 +279,10 @@ export default function DraftDetailPage({
   const [executionTraceExpanded, setExecutionTraceExpanded] = useState(false);
   const { push } = useNotifications();
   const { setInputText, setOpen, setLastArtifactHint, clearContext } = useXynConsole();
+  const draftDescriptor = useMemo(
+    () => getAppDraftViewDescriptor({ id: draftId, title: draft?.title || title }, workspaceId),
+    [draft?.title, draftId, title, workspaceId]
+  );
   const rawPrompt = useMemo(() => {
     if (!draft?.content_json || typeof draft.content_json !== "object") return "";
     return String((draft.content_json as Record<string, unknown>).raw_prompt || "");
@@ -476,6 +481,46 @@ export default function DraftDetailPage({
     workspaceId,
   ]);
 
+  const continueInWorkbench = useCallback(() => {
+    clearContext();
+    if (siblingInstalledArtifact?.artifactSlug || applicationDefinition?.artifactSlug) {
+      const artifactSlug = siblingInstalledArtifact?.artifactSlug || applicationDefinition?.artifactSlug || "";
+      const artifactTitle = applicationDefinition?.title || installedCapability?.title || draft?.title || title || "Generated application";
+      setLastArtifactHint(
+        artifactSlug
+          ? {
+              artifact_id: siblingInstalledArtifact?.artifactId || artifactSlug,
+              artifact_type: "GeneratedApplication",
+              artifact_state: "installed",
+              title: artifactTitle,
+              route: toWorkspacePath(workspaceId, "workbench"),
+            }
+          : null,
+      );
+      setInputText("Add ");
+    } else {
+      setLastArtifactHint(null);
+      setInputText(rawPrompt || `Continue application design for ${draft?.title || title || "this draft"}`);
+    }
+    setOpen(true);
+    navigate(toWorkspacePath(workspaceId, "workbench"));
+  }, [
+    applicationDefinition?.artifactSlug,
+    applicationDefinition?.title,
+    clearContext,
+    draft?.title,
+    installedCapability?.title,
+    navigate,
+    rawPrompt,
+    setInputText,
+    setLastArtifactHint,
+    setOpen,
+    siblingInstalledArtifact?.artifactId,
+    siblingInstalledArtifact?.artifactSlug,
+    title,
+    workspaceId,
+  ]);
+
   useEffect(() => {
     if (!relatedJobs.length) return;
     if (buildStatus !== "succeeded" && buildStatus !== "failed") return;
@@ -553,16 +598,19 @@ export default function DraftDetailPage({
       <WorkspaceContextBar workspaceName={workspaceName} workspaceColor={workspaceColor} variant={workspaceBarVariant} />
       <div className="page-header">
         <div>
-          <h2>Draft Detail</h2>
-          <p className="muted">Review, edit, and submit the app intent draft.</p>
+          <h2>Application Draft</h2>
+          <p className="muted">Review the application intent, track progress, and continue designing the application in the workbench.</p>
         </div>
         <div className="inline-actions">
           <button className="ghost" onClick={() => (onBack ? onBack() : navigate(toWorkspacePath(workspaceId, "drafts")))}>
             {onBack ? "Back" : "Back to Drafts"}
           </button>
+          <button className="ghost" type="button" onClick={continueInWorkbench} disabled={!workspaceId}>
+            Continue in Workbench
+          </button>
           {latestJobId ? (
             <button className="ghost" onClick={() => (onOpenJob ? onOpenJob(latestJobId) : navigate(toWorkspacePath(workspaceId, `jobs/${latestJobId}`)))}>
-              View Pipeline Job
+              View Execution Status
             </button>
           ) : null}
           <button className="ghost" onClick={() => setMessage("Regenerate is not implemented yet.")}>
@@ -578,15 +626,20 @@ export default function DraftDetailPage({
       </div>
       {message && <InlineMessage tone="info" title="Draft" body={message} />}
       {error && <InlineMessage tone="error" title="Request failed" body={error} />}
+      <InlineMessage
+        tone="info"
+        title="Application workspace"
+        body={`This draft is routed through the ${draftDescriptor.editorKey.replace(/_/g, " ")} shell. Use Continue in Workbench to continue application design with the composer and related workbench tools.`}
+      />
 
       <section className="card">
         <div className="card-header">
-          <h3>{draft?.title || "Draft"}</h3>
+          <h3>{draftDescriptor.title || "Application Draft"}</h3>
           <span className="chip">{draft?.status || status || "draft"}</span>
         </div>
         <div className="detail-grid" style={{ marginTop: 12, marginBottom: 12 }}>
           <div>
-            <strong>Draft lifecycle</strong>
+            <strong>Application stage</strong>
             <p className="muted small">{workflowLoading ? "Loading..." : draftWorkflowStateLabel(workflow?.state)}</p>
           </div>
           <div>
@@ -598,11 +651,11 @@ export default function DraftDetailPage({
             <p className="muted small">{workflow?.active_run_id || "Not started yet"}</p>
           </div>
           <div>
-            <strong>Last run status</strong>
+            <strong>Execution status</strong>
             <p className="muted small">{workflow?.last_run_status || "—"}</p>
           </div>
           <div>
-            <strong>Build status</strong>
+            <strong>Build readiness</strong>
             <p className="muted small">{buildStatus}</p>
           </div>
           <div>
@@ -610,7 +663,7 @@ export default function DraftDetailPage({
             <p className="muted small">{relatedJobs.length || 0}</p>
           </div>
           <div>
-            <strong>Plan summary</strong>
+            <strong>Plan state</strong>
             <p className="muted small">{workflow?.plan_available ? "Available" : "Not available yet"}</p>
           </div>
           <div>
@@ -649,7 +702,7 @@ export default function DraftDetailPage({
         {installedCapability || siblingInstalledArtifact ? (
           <InlineMessage
             tone="info"
-            title="Build state"
+            title="Application state"
             body={
               siblingInstalledArtifact
                 ? `${installedCapability?.title || siblingInstalledArtifact.artifactSlug} has a local runtime deployed from the generated AppSpec, and the sibling Xyn instance has the generated artifact ${siblingInstalledArtifact.artifactSlug} installed for capability visibility and workbench access.`
@@ -660,7 +713,7 @@ export default function DraftDetailPage({
         {applicationDefinition ? (
           <div className="card capability-card" style={{ marginBottom: 12 }}>
             <div className="card-header">
-              <h3>Application Definition</h3>
+              <h3>Application Design</h3>
               <span className="chip">definition-driven</span>
             </div>
             <div className="detail-grid" style={{ marginTop: 12 }}>
@@ -669,11 +722,11 @@ export default function DraftDetailPage({
                 <p className="muted small">{rawPrompt || "Prompt unavailable."}</p>
               </div>
               <div>
-                <strong>Generated artifact</strong>
+                <strong>Application artifact</strong>
                 <p className="muted small">{applicationDefinition.artifactSlug}</p>
               </div>
               <div>
-                <strong>Capability summary</strong>
+                <strong>Application shape</strong>
                 <p className="muted small">{applicationDefinition.entities.join(", ") || "No entities recorded"}</p>
               </div>
               <div>
@@ -696,20 +749,23 @@ export default function DraftDetailPage({
             <div className="inline-actions" style={{ marginTop: 12 }}>
               {revisionUrl ? (
                 <a className="primary button-link" href={revisionUrl}>
-                  Revise application
+                  Open Application Workbench
                 </a>
               ) : (
                 <button className="primary" type="button" onClick={openRevisionPrompt}>
-                  Revise application
+                  Open Application Workbench
                 </button>
               )}
+              <button className="ghost" type="button" onClick={continueInWorkbench}>
+                Continue Application Design
+              </button>
             </div>
           </div>
         ) : null}
         {installedCapability ? (
           <div className="card capability-card" style={{ marginBottom: 12 }}>
             <div className="card-header">
-              <h3>Generated Application State</h3>
+              <h3>Application Runtime</h3>
               <span className="chip">runtime deployed</span>
             </div>
             <div className="detail-grid" style={{ marginTop: 12 }}>
@@ -753,7 +809,7 @@ export default function DraftDetailPage({
             {onOpenArtifacts ? (
               <div className="inline-actions" style={{ marginTop: 12 }}>
                 <button className="ghost" type="button" onClick={() => onOpenArtifacts("app_spec")}>
-                  View generated artifacts
+                  View Application Artifacts
                 </button>
               </div>
             ) : null}
@@ -762,7 +818,7 @@ export default function DraftDetailPage({
         {relatedJobs.length > 0 ? (
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="card-header">
-              <h3>Build Pipeline</h3>
+              <h3>Execution Timeline</h3>
             </div>
             <div className="canvas-table-wrap">
               <table className="canvas-table">
@@ -793,7 +849,7 @@ export default function DraftDetailPage({
         {(String(draft?.status || status).toLowerCase() === "submitted" || relatedJobs.length > 0) ? (
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="card-header">
-              <h3>Execution Trace</h3>
+              <h3>Execution Findings</h3>
               {executionNote ? <span className="chip">{executionNote.status}</span> : null}
             </div>
             {executionNotesLoading ? <p className="muted small">Loading execution trace…</p> : null}
