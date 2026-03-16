@@ -1,5 +1,5 @@
 from .draft_lifecycle import COMPLETED, DRAFT, EXECUTING, FAILED, PLAN_READY, QUEUED, SUBMITTED, DraftLifecycle
-from .workflow_service import get_draft_workflow
+from .workflow_service import find_related_draft_jobs, get_draft_workflow
 
 __all__ = [
     "COMPLETED",
@@ -7,6 +7,7 @@ __all__ = [
     "DraftLifecycle",
     "EXECUTING",
     "FAILED",
+    "find_related_draft_jobs",
     "PLAN_READY",
     "QUEUED",
     "SUBMITTED",

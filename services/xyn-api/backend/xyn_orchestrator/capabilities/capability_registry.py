@@ -134,6 +134,8 @@ CAPABILITIES = [
         default_components=["application_draft", "workbench_handoff"],
         generated_artifacts=["application_draft_progress"],
         action_type="prompt",
+        guard_type="draft_state",
+        guard_target="draft,plan_ready",
     ),
     Capability(
         id="open_application_workspace",
@@ -148,6 +150,8 @@ CAPABILITIES = [
         generated_artifacts=["application_workspace"],
         action_type="open_descriptor",
         action_target="fromApplicationWorkspace",
+        guard_type="application_exists",
+        guard_target="application",
     ),
     Capability(
         id="view_execution_status",
@@ -162,6 +166,8 @@ CAPABILITIES = [
         generated_artifacts=["execution_status"],
         action_type="route",
         action_target="workspace_jobs",
+        guard_type="execution_state",
+        guard_target="submitted,queued,executing,completed,failed",
     ),
     Capability(
         id="inspect_application_goals",

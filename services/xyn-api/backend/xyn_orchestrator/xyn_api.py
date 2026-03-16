@@ -195,9 +195,10 @@ from .execution_changes import (
 from .system_readiness import system_readiness_report
 from .capabilities.capability_service import get_capabilities as get_contextual_capabilities
 from .capabilities.graph.graph_service import get_capabilities_for_context as get_capability_graph_context
+from .capabilities.graph.context_nodes import normalize_context_id
 from .capabilities.graph.path_service import get_capability_paths_for_context
 from .planning.plan_service import get_plan_for_capability
-from .workflows.workflow_service import get_draft_workflow
+from .workflows.workflow_service import find_related_draft_jobs, get_draft_workflow
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -29038,6 +29039,104 @@ def contextual_capabilities(request: HttpRequest) -> JsonResponse:
     )
 
 
+def _capability_state_has_application(related_jobs: Iterable[Dict[str, Any]]) -> bool:
+    for job in related_jobs:
+        if not isinstance(job, dict):
+            continue
+        for payload in (job.get("output_json"), job.get("input_json")):
+            if not isinstance(payload, dict):
+                continue
+            app_spec = payload.get("app_spec")
+            if isinstance(app_spec, dict) and str(app_spec.get("app_slug") or "").strip():
+                return True
+            generated_artifact = payload.get("generated_artifact")
+            if isinstance(generated_artifact, dict) and (
+                str(generated_artifact.get("artifact_slug") or "").strip() or str(generated_artifact.get("artifact_id") or "").strip()
+            ):
+                return True
+            sibling = payload.get("sibling_xyn")
+            installed_artifact = sibling.get("installed_artifact") if isinstance(sibling, dict) else None
+            if not isinstance(installed_artifact, dict):
+                installed_artifact = payload.get("installed_artifact")
+            if isinstance(installed_artifact, dict) and (
+                str(installed_artifact.get("artifact_slug") or "").strip() or str(installed_artifact.get("artifact_id") or "").strip()
+            ):
+                return True
+    return False
+
+
+def _normalize_capability_execution_state(workflow_state: Any) -> Optional[str]:
+    token = str(workflow_state or "").strip().lower()
+    if token in {"submitted", "queued", "executing", "completed", "failed"}:
+        return token
+    return None
+
+
+def _resolve_capability_entity_state(
+    *,
+    identity: UserIdentity,
+    context: str | None = None,
+    entity_id: str | None = None,
+    workspace_id: str | None = None,
+) -> Dict[str, Any]:
+    resolved_context = normalize_context_id(context)
+    normalized_entity_id = str(entity_id or "").strip() or None
+    normalized_workspace_id = str(workspace_id or "").strip() or None
+    state: Dict[str, Any] = {
+        "draft_state": None,
+        "execution_state": None,
+        "application_exists": False,
+        "workspace_available": False,
+    }
+
+    if resolved_context == "application_workspace":
+        state["application_exists"] = bool(normalized_entity_id)
+        state["workspace_available"] = bool(normalized_entity_id or normalized_workspace_id)
+        return state
+
+    workspace = _resolve_workspace_for_identity(identity, normalized_workspace_id or "")
+    if workspace is None:
+        return state
+    state["workspace_available"] = True
+
+    if resolved_context != "app_intent_draft" or not normalized_entity_id:
+        return state
+
+    try:
+        draft_response = _seed_api_request(
+            method="GET",
+            path=f"/api/v1/drafts/{normalized_entity_id}",
+            workspace_slug=str(workspace.slug or ""),
+            timeout=20,
+        )
+        jobs_response = _seed_api_request(
+            method="GET",
+            path="/api/v1/jobs",
+            workspace_slug=str(workspace.slug or ""),
+            timeout=20,
+        )
+    except requests.RequestException:
+        return state
+
+    if draft_response.status_code >= 300 or jobs_response.status_code >= 300:
+        return state
+
+    draft_payload = draft_response.json() if draft_response.content else {}
+    jobs_payload = jobs_response.json() if jobs_response.content else []
+    if not isinstance(draft_payload, dict):
+        return state
+    if not isinstance(jobs_payload, list):
+        jobs_payload = []
+
+    workflow = get_draft_workflow(workspace=workspace, draft=draft_payload, jobs=jobs_payload)
+    related_jobs = find_related_draft_jobs(normalized_entity_id, jobs_payload)
+    workflow_state = str(workflow.get("state") or "").strip().lower() or None
+    state["draft_state"] = workflow_state
+    state["execution_state"] = _normalize_capability_execution_state(workflow_state)
+    state["application_exists"] = _capability_state_has_application(related_jobs)
+    return state
+
+
 @login_required
 def capabilities_context(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
@@ -29045,11 +29144,20 @@ def capabilities_context(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "not authenticated"}, status=401)
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
+    context = str(request.GET.get("context") or "").strip() or None
+    entity_id = str(request.GET.get("entityId") or "").strip() or None
+    workspace_id = str(request.GET.get("workspaceId") or "").strip() or None
     return JsonResponse(
         get_capability_graph_context(
-            context=str(request.GET.get("context") or "").strip() or None,
-            entity_id=str(request.GET.get("entityId") or "").strip() or None,
-            workspace_id=str(request.GET.get("workspaceId") or "").strip() or None,
+            context=context,
+            entity_id=entity_id,
+            workspace_id=workspace_id,
+            entity_state=_resolve_capability_entity_state(
+                identity=identity,
+                context=context,
+                entity_id=entity_id,
+                workspace_id=workspace_id,
+            ),
         )
     )
 
@@ -29061,11 +29169,21 @@ def capability_paths_context(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "not authenticated"}, status=401)
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
+    context = str(request.GET.get("context") or "").strip() or None
+    entity_id = str(request.GET.get("entityId") or "").strip() or None
+    workspace_id = str(request.GET.get("workspaceId") or "").strip() or None
+    entity_state = _resolve_capability_entity_state(
+        identity=identity,
+        context=context,
+        entity_id=entity_id,
+        workspace_id=workspace_id,
+    )
     return JsonResponse(
         get_capability_paths_for_context(
-            context=str(request.GET.get("context") or "").strip() or None,
-            entity_id=str(request.GET.get("entityId") or "").strip() or None,
-            workspace_id=str(request.GET.get("workspaceId") or "").strip() or None,
+            context=context,
+            entity_id=entity_id,
+            workspace_id=workspace_id,
+            entity_state=entity_state,
         )
     )
 

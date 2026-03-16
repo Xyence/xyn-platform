@@ -1921,6 +1921,7 @@ export type ContextualCapability = {
   priority?: number;
   action_type?: "prompt" | "open_descriptor" | "route" | string;
   action_target?: string | null;
+  available?: boolean;
 };
 
 export type ContextualCapabilityResponse = {
@@ -1937,6 +1938,7 @@ export type CapabilityPathStep = {
   priority?: number;
   action_type?: "prompt" | "open_descriptor" | "route" | string;
   action_target?: string | null;
+  available?: boolean;
 };
 
 export type CapabilityPath = {

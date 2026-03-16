@@ -38,7 +38,7 @@ def _normalize_job_status(status: Any) -> str:
     return token
 
 
-def _find_related_jobs(draft_id: str, jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def find_related_draft_jobs(draft_id: str, jobs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     related_ids: set[str] = set()
     normalized_draft_id = _text(draft_id)
     job_rows = [job for job in jobs if isinstance(job, dict)]
@@ -136,7 +136,7 @@ def _resolve_thread_from_jobs(workspace: Workspace, related_jobs: List[Dict[str,
 
 def get_draft_workflow(*, workspace: Workspace, draft: Dict[str, Any], jobs: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     draft_id = _text(draft.get("id"))
-    related_jobs = _find_related_jobs(draft_id, jobs)
+    related_jobs = find_related_draft_jobs(draft_id, jobs)
     _thread, _run, thread_id, run_id, run_status = _resolve_thread_from_jobs(workspace, related_jobs)
     if not run_status and related_jobs:
         run_status = _normalize_job_status(related_jobs[-1].get("status")) or None

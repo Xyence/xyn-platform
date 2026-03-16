@@ -17,3 +17,5 @@ class Capability:
     generated_artifacts: Optional[List[str]] = None
     action_type: Optional[str] = None
     action_target: Optional[str] = None
+    guard_type: Optional[str] = None
+    guard_target: Optional[str] = None

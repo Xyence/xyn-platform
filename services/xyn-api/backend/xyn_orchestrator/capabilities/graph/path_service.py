@@ -1,16 +1,27 @@
+from typing import Any, Dict
+
 from ..capability_registry import get_capability_by_id
+from .guards import evaluate_capability_guard
 from .capability_paths import get_paths_for_context
 from .context_nodes import normalize_context_id
 
 
-def get_capability_paths_for_context(context: str | None = None, entity_id: str | None = None, workspace_id: str | None = None):
+def get_capability_paths_for_context(
+    context: str | None = None,
+    entity_id: str | None = None,
+    workspace_id: str | None = None,
+    entity_state: Dict[str, Any] | None = None,
+):
     resolved_context = normalize_context_id(context)
     paths = []
+    resolved_state = entity_state if isinstance(entity_state, dict) else {}
     for path in get_paths_for_context(resolved_context):
         steps = []
         for step in path.steps:
             capability = get_capability_by_id(step.capability_id)
             if capability is None:
+                continue
+            if not evaluate_capability_guard(capability, resolved_state):
                 continue
             steps.append(
                 {
@@ -22,8 +33,11 @@ def get_capability_paths_for_context(context: str | None = None, entity_id: str 
                     "priority": capability.priority,
                     "action_type": capability.action_type or "prompt",
                     "action_target": capability.action_target,
+                    "available": True,
                 }
             )
+        if not steps:
+            continue
         paths.append(
             {
                 "id": path.id,
