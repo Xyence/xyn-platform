@@ -4129,10 +4129,21 @@ function ComposerDetailPanel({
                 <div className="composer-effort-children">
                   <div className="field-label">Work goals for this application</div>
                   {container.goals.length ? (
-                    <ul className="detail-list">
+                    <ul className="detail-list composer-effort-goal-list">
                       {container.goals.slice(0, 4).map((goal) => (
                         <li key={goal.id}>
-                          <strong>{goal.title}</strong> · {formatComposerGoalProgressStatus(goal.goal_progress_status || goal.planning_status || "planned")} · {formatComposerCountLabel(goal.threads.length, "execution thread")}
+                          <div className="composer-effort-goal-copy">
+                            <strong>{goal.title}</strong> · {formatComposerGoalProgressStatus(goal.goal_progress_status || goal.planning_status || "planned")} · {formatComposerCountLabel(goal.threads.length, "execution thread")}
+                          </div>
+                          <div className="inline-action-row composer-effort-goal-actions">
+                            <button
+                              type="button"
+                              className="ghost sm"
+                              onClick={() => openComposer({ application_id: container.id, goal_id: goal.id })}
+                            >
+                              Open goal
+                            </button>
+                          </div>
                         </li>
                       ))}
                     </ul>
@@ -4337,6 +4348,21 @@ function ComposerDetailPanel({
               title={`Recommended work goal: ${currentApplication.portfolio_state.recommended_goal.title}`}
               body={currentApplication.portfolio_state.recommended_goal.summary}
             />
+          ) : null}
+          {currentApplication.portfolio_state?.recommended_goal?.goal_id ? (
+            <div className="inline-action-row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="ghost sm"
+                onClick={() =>
+                  openComposer({
+                    application_id: currentApplication.id,
+                    goal_id: currentApplication.portfolio_state?.recommended_goal?.goal_id,
+                  })}
+              >
+                Open recommended goal
+              </button>
+            </div>
           ) : null}
           {currentContainer?.kind === "application" ? renderLifecycleActions(currentContainer) : null}
         </section>

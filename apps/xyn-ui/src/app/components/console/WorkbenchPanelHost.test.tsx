@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -848,6 +848,19 @@ describe("WorkbenchPanelHost entity refresh", () => {
       },
       related_goals: [
         {
+          id: "goal-kb-1",
+          application_id: "app-2",
+          title: "Knowledge Capture",
+          planning_status: "decomposed",
+          goal_progress_status: "active",
+          thread_count: 1,
+          work_item_count: 1,
+          planning_summary: "Define the first durable knowledge workflow.",
+          resolution_notes: [],
+          created_at: "2026-03-16T16:05:00Z",
+          updated_at: "2026-03-16T16:05:00Z",
+        },
+        {
           id: "goal-1",
           application_id: "app-1",
           title: "Workflow and Stabilization",
@@ -875,6 +888,29 @@ describe("WorkbenchPanelHost entity refresh", () => {
         },
       ],
       related_threads: [
+        {
+          id: "thread-kb-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-kb-1",
+          goal_title: "Knowledge Capture",
+          title: "Capture workflow",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "queued",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-2",
+          queued_work_items: 1,
+          running_work_items: 0,
+          awaiting_review_work_items: 0,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-16T16:06:00Z",
+          updated_at: "2026-03-16T16:06:00Z",
+        },
         {
           id: "thread-1",
           workspace_id: "ws-1",
@@ -941,6 +977,25 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Application efforts")).toBeInTheDocument();
     expect(screen.getAllByText("Knowledgebase").length).toBeGreaterThan(0);
     expect(screen.queryByText("Lunch Poll")).not.toBeInTheDocument();
+    const effortSection = screen.getByText("Application efforts").closest("section");
+    expect(effortSection).not.toBeNull();
+    const knowledgebaseCard = within(effortSection as HTMLElement).getByRole("heading", { name: "Knowledgebase" }).closest(".composer-effort-card");
+    expect(knowledgebaseCard).not.toBeNull();
+    const applicationGoalsSection = within(knowledgebaseCard as HTMLElement).getByText("Work goals for this application").closest(".composer-effort-children");
+    expect(applicationGoalsSection).not.toBeNull();
+    await act(async () => {
+      within(applicationGoalsSection as HTMLElement).getByRole("button", { name: "Open goal" }).click();
+    });
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "composer_detail",
+        params: expect.objectContaining({
+          workspace_id: "ws-1",
+          application_id: "app-2",
+          goal_id: "goal-kb-1",
+        }),
+      })
+    );
     await act(async () => {
       screen.getByRole("button", { name: "Failed (1)" }).click();
     });
