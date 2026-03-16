@@ -34,11 +34,14 @@ class CapabilityGraphTests(TestCase):
         self.assertEqual(payload["entityId"], "draft-1")
         self.assertEqual(payload["workspaceId"], "ws-1")
         self.assertEqual(payload["capabilities"][0]["id"], "continue_application_draft")
+        self.assertEqual(payload["capabilities"][0]["action_type"], "prompt")
 
     def test_graph_service_normalizes_legacy_artifact_draft_context(self):
         payload = get_capabilities_for_context(context="artifact_draft")
         self.assertEqual(payload["context"], "artifact_detail")
         self.assertEqual(payload["capabilities"][0]["id"], "view_artifact_details")
+        self.assertEqual(payload["capabilities"][0]["action_type"], "open_descriptor")
+        self.assertEqual(payload["capabilities"][0]["action_target"], "fromArtifactDetail")
 
     def test_endpoint_returns_context_capabilities(self):
         response = self.client.get(
@@ -51,3 +54,4 @@ class CapabilityGraphTests(TestCase):
         self.assertEqual(payload["workspaceId"], "ws-1")
         self.assertGreaterEqual(len(payload["capabilities"]), 1)
         self.assertEqual(payload["capabilities"][0]["id"], "explore_artifacts")
+        self.assertEqual(payload["capabilities"][0]["action_type"], "prompt")

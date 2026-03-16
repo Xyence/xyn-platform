@@ -15,3 +15,5 @@ class Capability:
     default_dependencies: Optional[List[str]] = None
     default_components: Optional[List[str]] = None
     generated_artifacts: Optional[List[str]] = None
+    action_type: Optional[str] = None
+    action_target: Optional[str] = None

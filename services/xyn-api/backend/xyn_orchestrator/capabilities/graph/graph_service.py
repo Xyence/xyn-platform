@@ -18,6 +18,8 @@ def get_capabilities_for_context(context: str | None = None, entity_id: str | No
                 "prompt_template": capability.prompt_template,
                 "visibility": capability.visibility,
                 "priority": capability.priority,
+                "action_type": capability.action_type or "prompt",
+                "action_target": capability.action_target,
             }
         )
     return {

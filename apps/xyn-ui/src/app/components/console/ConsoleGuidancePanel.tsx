@@ -1,7 +1,10 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useContextualCapabilities } from "./contextualCapabilities";
 import { useExecutionPlan } from "./useExecutionPlan";
 import CapabilityPlanSummary from "./CapabilityPlanSummary";
+import { executeCapabilityAction } from "../../navigation/executeCapabilityAction";
+import type { ContextualCapability } from "../../../api/types";
 
 type Props = {
   onInsertSuggestion: (text: string) => void;
@@ -14,10 +17,10 @@ type Props = {
 };
 
 const FALLBACK_PROMPTS = [
-  { id: "fallback-build", name: "Build an application", description: "Create a new software application.", prompt_template: "Build an application that..." },
-  { id: "fallback-article", name: "Write an article", description: "Create a written article artifact.", prompt_template: "Write an article about..." },
-  { id: "fallback-video", name: "Create an explainer video", description: "Create a narrated explainer video artifact.", prompt_template: "Create an explainer video explaining..." },
-  { id: "fallback-artifacts", name: "Explore artifacts", description: "View existing artifacts in the workspace.", prompt_template: "Show my artifacts" },
+  { id: "fallback-build", name: "Build an application", description: "Create a new software application.", prompt_template: "Build an application that...", visibility: "primary", action_type: "prompt" },
+  { id: "fallback-article", name: "Write an article", description: "Create a written article artifact.", prompt_template: "Write an article about...", visibility: "primary", action_type: "prompt" },
+  { id: "fallback-video", name: "Create an explainer video", description: "Create a narrated explainer video artifact.", prompt_template: "Create an explainer video explaining...", visibility: "primary", action_type: "prompt" },
+  { id: "fallback-artifacts", name: "Explore artifacts", description: "View existing artifacts in the workspace.", prompt_template: "Show my artifacts", visibility: "secondary", action_type: "prompt" },
 ];
 
 export default function ConsoleGuidancePanel({
@@ -29,11 +32,12 @@ export default function ConsoleGuidancePanel({
   artifactId,
   applicationId,
 }: Props) {
+  const navigate = useNavigate();
   const resolvedEntityId = entityId || artifactId || applicationId || null;
   const { capabilities } = useContextualCapabilities({ context, entityId: resolvedEntityId, workspaceId });
   const [selectedCapabilityId, setSelectedCapabilityId] = useState<string>("");
   const prompts = useMemo(
-    () => (capabilities.length ? capabilities : FALLBACK_PROMPTS).slice(0, 4),
+    () => ((capabilities.length ? capabilities : FALLBACK_PROMPTS) as ContextualCapability[]).slice(0, 4),
     [capabilities]
   );
   const { loading, error, plan } = useExecutionPlan(selectedCapabilityId || null);
@@ -50,7 +54,13 @@ export default function ConsoleGuidancePanel({
                 className="ghost sm"
                 onClick={() => {
                   setSelectedCapabilityId(entry.id);
-                  onInsertSuggestion(String(entry.prompt_template || entry.name || "").trim());
+                  executeCapabilityAction({
+                    capability: entry,
+                    navigate,
+                    workspaceId,
+                    entityId: resolvedEntityId,
+                    insertPrompt: onInsertSuggestion,
+                  });
                 }}
               >
                 <span>{entry.name}</span>

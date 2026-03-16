@@ -62,6 +62,7 @@ CAPABILITIES = [
         default_assumptions={"surface": "Artifact registry"},
         default_components=["artifact_registry", "artifact_search"],
         generated_artifacts=["artifact_list"],
+        action_type="prompt",
     ),
     Capability(
         id="view_artifact_details",
@@ -74,6 +75,8 @@ CAPABILITIES = [
         default_assumptions={"surface": "Artifact detail"},
         default_components=["artifact_detail", "available_surfaces"],
         generated_artifacts=["artifact_detail"],
+        action_type="open_descriptor",
+        action_target="fromArtifactDetail",
     ),
     Capability(
         id="revise_draft",
@@ -87,6 +90,7 @@ CAPABILITIES = [
         default_dependencies=["Draft session context", "Validation checks"],
         default_components=["draft_editor", "revision_summary"],
         generated_artifacts=["draft_revision"],
+        action_type="prompt",
     ),
     Capability(
         id="summarize_draft",
@@ -99,6 +103,7 @@ CAPABILITIES = [
         default_assumptions={"workflow": "draft analysis"},
         default_components=["draft_summary", "change_recommendations"],
         generated_artifacts=["draft_summary"],
+        action_type="prompt",
     ),
     Capability(
         id="continue_application",
@@ -115,6 +120,7 @@ CAPABILITIES = [
         default_dependencies=["Planning assistant", "Coding assistant"],
         default_components=["goal_portfolio", "coordination_threads", "dev_tasks"],
         generated_artifacts=["application_progress"],
+        action_type="prompt",
     ),
     Capability(
         id="continue_application_draft",
@@ -127,6 +133,7 @@ CAPABILITIES = [
         default_assumptions={"surface": "Application draft workspace"},
         default_components=["application_draft", "workbench_handoff"],
         generated_artifacts=["application_draft_progress"],
+        action_type="prompt",
     ),
     Capability(
         id="open_application_workspace",
@@ -139,6 +146,8 @@ CAPABILITIES = [
         default_assumptions={"shell": "workbench"},
         default_components=["composer", "application_panels"],
         generated_artifacts=["application_workspace"],
+        action_type="open_descriptor",
+        action_target="fromApplicationWorkspace",
     ),
     Capability(
         id="view_execution_status",
@@ -151,6 +160,8 @@ CAPABILITIES = [
         default_assumptions={"surface": "Draft execution timeline"},
         default_components=["workflow_status", "job_summary"],
         generated_artifacts=["execution_status"],
+        action_type="route",
+        action_target="workspace_jobs",
     ),
     Capability(
         id="inspect_application_goals",
@@ -163,6 +174,7 @@ CAPABILITIES = [
         default_assumptions={"surface": "Composer workspace review"},
         default_components=["goals", "threads", "execution_summaries"],
         generated_artifacts=["goal_review"],
+        action_type="prompt",
     ),
     Capability(
         id="review_plan",
@@ -180,6 +192,7 @@ CAPABILITIES = [
         default_dependencies=["FastAPI", "SQLAlchemy"],
         default_components=["application_service", "data_models", "api_endpoints"],
         generated_artifacts=["application_plan"],
+        action_type="prompt",
     ),
 ]
 

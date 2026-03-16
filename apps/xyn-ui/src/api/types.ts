@@ -1919,6 +1919,8 @@ export type ContextualCapability = {
   prompt_template?: string;
   visibility: string;
   priority?: number;
+  action_type?: "prompt" | "open_descriptor" | "route" | string;
+  action_target?: string | null;
 };
 
 export type ContextualCapabilityResponse = {

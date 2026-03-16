@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layout, Model, Actions, type IJsonModel, type TabNode } from "flexlayout-react";
-import { useLocation, useParams, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
 import { useXynConsole } from "../state/xynConsoleStore";
 import { useContextualCapabilities } from "../components/console/contextualCapabilities";
 import { useExecutionPlan } from "../components/console/useExecutionPlan";
 import CapabilityPlanSummary from "../components/console/CapabilityPlanSummary";
 import { resolveCapabilityGraphContext } from "../navigation/capabilityContext";
+import { executeCapabilityAction } from "../navigation/executeCapabilityAction";
+import type { ContextualCapability } from "../../api/types";
 import { buildWorkspaceLayout, derivePanelGroupAssignments, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
 export default function WorkbenchPage({
@@ -33,6 +35,7 @@ export default function WorkbenchPage({
   } =
     useXynConsole();
   const params = useParams();
+  const navigate = useNavigate();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = String(params.workspaceId || "").trim();
@@ -158,20 +161,80 @@ export default function WorkbenchPage({
           label: entry.name,
           description: entry.description,
           prompt: String(entry.prompt_template || "").trim() || entry.name,
+          capability: entry,
         }))
       : [
-          { id: "build_application", label: "Build an application", description: "Create a new software application.", prompt: "Build an application that..." },
-          { id: "write_article", label: "Write an article", description: "Create a written article artifact.", prompt: "Write an article about..." },
-          { id: "create_explainer_video", label: "Create an explainer video", description: "Create a narrated explainer video artifact.", prompt: "Create an explainer video explaining..." },
-          { id: "explore_artifacts", label: "Explore artifacts", description: "View existing artifacts in the workspace.", prompt: "Show my artifacts" },
+          {
+            id: "build_application",
+            label: "Build an application",
+            description: "Create a new software application.",
+            prompt: "Build an application that...",
+            capability: {
+              id: "build_application",
+              name: "Build an application",
+              description: "Create a new software application.",
+              prompt_template: "Build an application that...",
+              visibility: "primary",
+              action_type: "prompt",
+            } satisfies ContextualCapability,
+          },
+          {
+            id: "write_article",
+            label: "Write an article",
+            description: "Create a written article artifact.",
+            prompt: "Write an article about...",
+            capability: {
+              id: "write_article",
+              name: "Write an article",
+              description: "Create a written article artifact.",
+              prompt_template: "Write an article about...",
+              visibility: "primary",
+              action_type: "prompt",
+            } satisfies ContextualCapability,
+          },
+          {
+            id: "create_explainer_video",
+            label: "Create an explainer video",
+            description: "Create a narrated explainer video artifact.",
+            prompt: "Create an explainer video explaining...",
+            capability: {
+              id: "create_explainer_video",
+              name: "Create an explainer video",
+              description: "Create a narrated explainer video artifact.",
+              prompt_template: "Create an explainer video explaining...",
+              visibility: "primary",
+              action_type: "prompt",
+            } satisfies ContextualCapability,
+          },
+          {
+            id: "explore_artifacts",
+            label: "Explore artifacts",
+            description: "View existing artifacts in the workspace.",
+            prompt: "Show my artifacts",
+            capability: {
+              id: "explore_artifacts",
+              name: "Explore artifacts",
+              description: "View existing artifacts in the workspace.",
+              prompt_template: "Show my artifacts",
+              visibility: "secondary",
+              action_type: "prompt",
+            } satisfies ContextualCapability,
+          },
         ]
   ).slice(0, 6);
   const { loading: planLoading, error: planError, plan: selectedPlanSummary } = useExecutionPlan(selectedCapabilityId || null);
 
-  const handleSuggestion = (capabilityId: string, prompt: string) => {
+  const handleSuggestion = (capability: ContextualCapability, capabilityId: string, prompt: string) => {
     setSelectedCapabilityId(capabilityId);
-    setInputText(prompt);
-    setOpen(true);
+    executeCapabilityAction({
+      capability,
+      navigate,
+      workspaceId,
+      insertPrompt: (text) => {
+        setInputText(text || prompt);
+        setOpen(true);
+      },
+    });
   };
 
   const factory = useCallback((node: TabNode) => {
@@ -244,7 +307,12 @@ export default function WorkbenchPage({
             {suggestions.length ? (
               <div className="workbench-suggestion-grid">
                 {suggestions.map((entry) => (
-                  <button key={entry.id} type="button" className="ghost workbench-suggestion-chip" onClick={() => handleSuggestion(entry.id, entry.prompt)}>
+                  <button
+                    key={entry.id}
+                    type="button"
+                    className="ghost workbench-suggestion-chip"
+                    onClick={() => handleSuggestion(entry.capability, entry.id, entry.prompt)}
+                  >
                     <strong>{entry.label}</strong>
                     <span className="muted small">{entry.description}</span>
                   </button>
