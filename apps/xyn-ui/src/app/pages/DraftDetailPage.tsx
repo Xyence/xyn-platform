@@ -1,6 +1,8 @@
+import { AlertTriangle, ExternalLink, FilePenLine, History, RefreshCw, Save, Send, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import InlineMessage from "../../components/InlineMessage";
+import ActionRowCard from "../components/ui/ActionRowCard";
 import { getAppIntentDraft, getDraftWorkflow, listAppExecutionNotes, listAppJobs, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
 import type { AppExecutionNote, AppIntentDraft, AppJob, DraftWorkflow } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
@@ -325,6 +327,29 @@ function overallStateTone(value: DraftPageOverallState): "success" | "warn" | "d
 function actionTone(value: DraftActionCard["emphasis"], available: boolean): string {
   if (!available) return "muted";
   return value === "primary" ? "success" : "info";
+}
+
+function actionIcon(actionId: DraftActionId) {
+  switch (actionId) {
+    case "review_failure":
+      return <AlertTriangle size={18} />;
+    case "retry_validation":
+      return <RefreshCw size={18} />;
+    case "view_build_jobs":
+      return <History size={18} />;
+    case "edit_definition":
+      return <FilePenLine size={18} />;
+    case "open_generated_environment":
+      return <ExternalLink size={18} />;
+    case "open_application_workspace":
+      return <Waypoints size={18} />;
+    case "save_draft":
+      return <Save size={18} />;
+    case "submit_draft":
+      return <Send size={18} />;
+    default:
+      return <History size={18} />;
+  }
 }
 
 function matchesJobType(job: AppJob, tokens: string[]): boolean {
@@ -1068,32 +1093,20 @@ export default function DraftDetailPage({
         <div className="app-draft-main-column">
           <section className="card">
             <div className="card-header">
-              <h3>Primary actions</h3>
+              <h3>Suggested Actions</h3>
             </div>
-            <div className="app-draft-action-grid">
+            <div className="app-draft-action-list">
               {viewModel.recommendedActions.map((action) => (
-                <div key={action.id} className="app-draft-action-card">
-                  <div className="app-draft-action-heading">
-                    <div>
-                      <strong>{action.title}</strong>
-                      <p className="muted small">{action.description}</p>
-                    </div>
-                    <span className={`chip ${actionTone(action.emphasis, action.available)}`}>{action.badge}</span>
-                  </div>
-                  {action.available ? (
-                    <button
-                      type="button"
-                      className={action.emphasis === "primary" ? "primary" : "ghost"}
-                      onClick={() => handleAction(action.id)}
-                    >
-                      {action.title}
-                    </button>
-                  ) : (
-                    <div className="app-draft-disabled-action" aria-disabled="true">
-                      <span className="muted small">{action.disabledReason}</span>
-                    </div>
-                  )}
-                </div>
+                <ActionRowCard
+                  key={action.id}
+                  title={action.title}
+                  description={action.description}
+                  badge={<span className={`chip ${actionTone(action.emphasis, action.available)}`}>{action.badge}</span>}
+                  icon={actionIcon(action.id)}
+                  disabled={!action.available}
+                  disabledReason={action.disabledReason}
+                  onClick={action.available ? () => handleAction(action.id) : undefined}
+                />
               ))}
             </div>
           </section>

@@ -4999,33 +4999,101 @@ button.sm {
   margin: 6px 0 0 18px;
 }
 
-.app-draft-action-grid {
+.app-draft-action-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
 }
 
-.app-draft-action-card {
+.action-row-card {
+  width: 100%;
   display: grid;
-  gap: 10px;
-  padding: 14px;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  align-items: flex-start;
+  padding: 14px 16px;
   border-radius: 16px;
   border: 1px solid var(--border);
   background: var(--surface-soft);
+  color: inherit;
+  appearance: none;
+  font: inherit;
+  text-align: left;
 }
 
-.app-draft-action-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+.action-row-card.is-interactive {
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease, transform 0.16s ease;
+}
+
+.action-row-card.is-interactive:hover,
+.action-row-card.is-interactive:focus-visible {
+  border-color: var(--border-strong);
+  background: var(--surface);
+  transform: translateY(-1px);
+}
+
+.action-row-card.is-disabled {
+  opacity: 0.72;
+}
+
+.action-row-card__icon {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.action-row-card__body {
+  min-width: 0;
+  display: grid;
   gap: 10px;
 }
 
-.app-draft-disabled-action {
-  min-height: 38px;
+.action-row-card__header {
   display: flex;
-  align-items: center;
-  padding: 0 2px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.action-row-card__copy {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.action-row-card__title {
+  display: block;
+  line-height: 1.3;
+}
+
+.action-row-card__description,
+.action-row-card__reason {
+  margin: 0;
+  line-height: 1.45;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.action-row-card__reason {
+  font-size: 0.92rem;
+}
+
+.action-row-card__badge {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 1040px) {
+  .action-row-card__header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 .app-draft-timeline {
