@@ -14,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
   getXynIntentOptions: vi.fn(),
   getRecentArtifacts: vi.fn(),
   executeAppPalettePrompt: vi.fn(),
+  getContextualCapabilities: vi.fn(),
 }));
 
 vi.mock("../../../api/xyn", () => ({
@@ -23,6 +24,7 @@ vi.mock("../../../api/xyn", () => ({
   getXynIntentOptions: apiMocks.getXynIntentOptions,
   getRecentArtifacts: apiMocks.getRecentArtifacts,
   executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
+  getContextualCapabilities: apiMocks.getContextualCapabilities,
 }));
 
 function renderConsole() {
@@ -56,6 +58,16 @@ function renderConsoleCoreAt(path: string, onOpenPanel = vi.fn()) {
       </MemoryRouter>
     ),
   };
+}
+
+function renderConsolePageAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <XynConsoleProvider>
+        <XynConsoleCore mode="page" />
+      </XynConsoleProvider>
+    </MemoryRouter>
+  );
 }
 
 function ConsoleBridgeHarness({
@@ -151,6 +163,18 @@ describe("XynConsole", () => {
       rows: [],
       text: "",
     });
+    apiMocks.getContextualCapabilities.mockResolvedValue({
+      context: "landing",
+      capabilities: [
+        {
+          id: "build_application",
+          name: "Build an application",
+          description: "Create a new software application.",
+          prompt_template: "Build an application that...",
+          visibility: "primary",
+        },
+      ],
+    });
     apiMocks.previewXynIntent.mockResolvedValue({
       status: "UnsupportedIntent",
       action_type: "ValidateDraft",
@@ -174,6 +198,14 @@ describe("XynConsole", () => {
     const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
     await waitFor(() => expect(input).toHaveFocus());
     expect(screen.getByRole("dialog", { name: "Xyn Console" })).toBeInTheDocument();
+  });
+
+  it("renders contextual guidance prompts in page mode and inserts the template", async () => {
+    renderConsolePageAt("/w/ws-1/workbench");
+    const capability = await screen.findByRole("button", { name: /Build an application/i });
+    await userEvent.click(capability);
+    expect(await screen.findByDisplayValue("Build an application that...")).toBeInTheDocument();
+    expect(apiMocks.getContextualCapabilities).toHaveBeenCalled();
   });
 
   it("stays open when launched from a platform settings subpage", async () => {

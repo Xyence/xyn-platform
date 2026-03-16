@@ -1,24 +1,37 @@
+import { useMemo } from "react";
+import { useContextualCapabilities } from "./contextualCapabilities";
+
 type Props = {
   onInsertSuggestion: (text: string) => void;
   dimmed?: boolean;
+  context?: string;
+  artifactId?: string | null;
+  applicationId?: string | null;
 };
 
-const QUICK_PROMPTS = [
-  "Create an explainer video about Xyn governance ledger for telecom engineers.",
-  "Create a guide about RBAC visualization",
-  "Open my latest draft",
-  "Add tags governance, ledger, access-control",
+const FALLBACK_PROMPTS = [
+  { id: "fallback-build", name: "Build an application", description: "Create a new software application.", prompt_template: "Build an application that..." },
+  { id: "fallback-article", name: "Write an article", description: "Create a written article artifact.", prompt_template: "Write an article about..." },
+  { id: "fallback-video", name: "Create an explainer video", description: "Create a narrated explainer video artifact.", prompt_template: "Create an explainer video explaining..." },
+  { id: "fallback-artifacts", name: "Explore artifacts", description: "View existing artifacts in the workspace.", prompt_template: "Show my artifacts" },
 ];
 
-export default function ConsoleGuidancePanel({ onInsertSuggestion, dimmed = false }: Props) {
+export default function ConsoleGuidancePanel({ onInsertSuggestion, dimmed = false, context, artifactId, applicationId }: Props) {
+  const { capabilities } = useContextualCapabilities({ context, artifactId, applicationId });
+  const prompts = useMemo(
+    () => (capabilities.length ? capabilities : FALLBACK_PROMPTS).slice(0, 4),
+    [capabilities]
+  );
+
   return (
-    <aside className={`xyn-console-guidance ${dimmed ? "is-dimmed" : ""}`} aria-label="Try this">
+    <aside className={`xyn-console-guidance ${dimmed ? "is-dimmed" : ""}`} aria-label="Suggested actions">
       <div className="xyn-console-guidance-card">
-        <h4>Try this</h4>
+        <h4>Suggested Actions</h4>
         <div className="xyn-console-options-list">
-          {QUICK_PROMPTS.map((prompt) => (
-            <button key={prompt} type="button" className="ghost sm" onClick={() => onInsertSuggestion(prompt)}>
-              {prompt}
+          {prompts.map((entry) => (
+            <button key={entry.id} type="button" className="ghost sm" onClick={() => onInsertSuggestion(String(entry.prompt_template || entry.name || "").trim())}>
+              <span>{entry.name}</span>
+              {entry.description ? <span className="muted small">{entry.description}</span> : null}
             </button>
           ))}
         </div>
@@ -26,9 +39,9 @@ export default function ConsoleGuidancePanel({ onInsertSuggestion, dimmed = fals
       <div className="xyn-console-guidance-card">
         <h4>Quick start</h4>
         <ol className="xyn-console-steps">
-          <li>Describe what you want.</li>
-          <li>Create draft from the structured response.</li>
-          <li>Refine in editor with Xyn.</li>
+          <li>Pick a suggested action or describe what you want.</li>
+          <li>Review any draft or proposal Xyn produces.</li>
+          <li>Refine or execute from the structured result.</li>
         </ol>
       </div>
     </aside>

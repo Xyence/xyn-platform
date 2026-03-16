@@ -193,6 +193,7 @@ from .execution_changes import (
     serialize_dev_task_change_summary,
 )
 from .system_readiness import system_readiness_report
+from .capabilities.capability_service import get_capabilities as get_contextual_capabilities
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -29013,6 +29014,22 @@ def composer_state(request: HttpRequest) -> JsonResponse:
             application=application,
             goal=goal,
             thread=thread,
+        )
+    )
+
+
+@login_required
+def contextual_capabilities(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(
+        get_contextual_capabilities(
+            context=str(request.GET.get("context") or "").strip() or None,
+            artifact_id=str(request.GET.get("artifact_id") or "").strip() or None,
+            application_id=str(request.GET.get("application_id") or "").strip() or None,
         )
     )
 

@@ -1147,6 +1147,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     openPanel,
     updateActivePanelParams,
     activePanelId,
+    activePanel,
     setActivePanelId,
     closePanel,
     navigateBack,
@@ -1171,6 +1172,16 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     isOnWorkbench || /^\/app\/platform(?:\/|$)/.test(location.pathname);
   const hasContextArtifact = Boolean(context.artifact_id && context.artifact_type);
   const isGlobalContext = !hasContextArtifact;
+  const contextualApplicationId = String(activePanel?.params?.application_id || "").trim() || null;
+  const contextualCapabilityContext = hasContextArtifact
+    ? "artifact_draft"
+    : String(activePanel?.key || "") === "composer_detail" && String(activePanel?.params?.application_plan_id || "").trim()
+      ? "plan_review"
+      : contextualApplicationId
+        ? "application_workspace"
+        : isWorkbenchPath
+          ? "landing"
+          : "unknown";
   const workspaceIdFromPath = useMemo(() => {
     const match = String(location.pathname || "").match(/^\/w\/([^/]+)(?:\/|$)/);
     return match?.[1] ? decodeURIComponent(match[1]) : "";
@@ -1827,7 +1838,13 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
             {promptCard}
             {hasResolutionContent ? <ConsoleResultPanel>{resolutionStack}</ConsoleResultPanel> : null}
           </div>
-          <ConsoleGuidancePanel onInsertSuggestion={injectSuggestion} dimmed={Boolean(inputText.trim())} />
+          <ConsoleGuidancePanel
+            onInsertSuggestion={injectSuggestion}
+            dimmed={Boolean(inputText.trim())}
+            context={contextualCapabilityContext}
+            artifactId={context.artifact_id || null}
+            applicationId={contextualApplicationId}
+          />
         </div>
         {recentSection}
       </div>

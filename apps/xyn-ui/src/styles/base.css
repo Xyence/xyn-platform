@@ -3587,9 +3587,15 @@ button.sm {
 }
 
 .workbench-suggestion-chip {
-  white-space: nowrap;
+  white-space: normal;
   opacity: 0.86;
   font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  text-align: left;
+  max-width: 220px;
 }
 
 .workbench-canvas {
@@ -4279,8 +4285,13 @@ button.sm {
 
 .xyn-console-options-list {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
+}
+
+.xyn-console-options-list button {
+  align-items: flex-start;
+  text-align: left;
 }
 
 .xyn-console-recent {

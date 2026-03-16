@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layout, Model, Actions, type IJsonModel, type TabNode } from "flexlayout-react";
 import { useParams, useSearchParams } from "react-router-dom";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
-import { useCapabilitySuggestions } from "../components/console/capabilitySuggestions";
 import { useXynConsole } from "../state/xynConsoleStore";
+import { useContextualCapabilities } from "../components/console/contextualCapabilities";
 import { buildWorkspaceLayout, derivePanelGroupAssignments, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
 export default function WorkbenchPage({
@@ -23,7 +23,6 @@ export default function WorkbenchPage({
     openPanel,
     setActivePanelId,
     setCanvasContext,
-    requestSubmit,
     setLastArtifactHint,
     panels,
     restorePanels,
@@ -33,7 +32,7 @@ export default function WorkbenchPage({
   const params = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = String(params.workspaceId || "").trim();
-  const { landingSuggestions } = useCapabilitySuggestions(workspaceId);
+  const { capabilities: landingCapabilities } = useContextualCapabilities({ context: "landing" });
   const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
 
   const panelById = useMemo(() => new Map(panels.map((entry) => [entry.panel_id, entry] as const)), [panels]);
@@ -139,20 +138,24 @@ export default function WorkbenchPage({
   }, [searchParams, setContext, setInputText, setLastArtifactHint, setOpen, setSearchParams, workspaceId]);
 
   const suggestions = (
-    landingSuggestions.length
-      ? landingSuggestions.slice(0, 6).map((entry) => entry.prompt)
+    landingCapabilities.length
+      ? landingCapabilities.slice(0, 6).map((entry) => ({
+          id: entry.id,
+          label: entry.name,
+          description: entry.description,
+          prompt: String(entry.prompt_template || "").trim() || entry.name,
+        }))
       : [
-          "List artifacts",
-          "Show runs",
-          "Open platform settings",
-          "Provision Xyn instance (remote)",
+          { id: "build_application", label: "Build an application", description: "Create a new software application.", prompt: "Build an application that..." },
+          { id: "write_article", label: "Write an article", description: "Create a written article artifact.", prompt: "Write an article about..." },
+          { id: "create_explainer_video", label: "Create an explainer video", description: "Create a narrated explainer video artifact.", prompt: "Create an explainer video explaining..." },
+          { id: "explore_artifacts", label: "Explore artifacts", description: "View existing artifacts in the workspace.", prompt: "Show my artifacts" },
         ]
   ).slice(0, 6);
 
   const handleSuggestion = (prompt: string) => {
     setInputText(prompt);
     setOpen(true);
-    requestSubmit();
   };
 
   const factory = useCallback((node: TabNode) => {
@@ -225,8 +228,9 @@ export default function WorkbenchPage({
             {suggestions.length ? (
               <div className="workbench-suggestion-grid">
                 {suggestions.map((entry) => (
-                  <button key={entry} type="button" className="ghost workbench-suggestion-chip" onClick={() => handleSuggestion(entry)}>
-                    {entry}
+                  <button key={entry.id} type="button" className="ghost workbench-suggestion-chip" onClick={() => handleSuggestion(entry.prompt)}>
+                    <strong>{entry.label}</strong>
+                    <span className="muted small">{entry.description}</span>
                   </button>
                 ))}
               </div>

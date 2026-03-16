@@ -1912,6 +1912,20 @@ export type SystemReadinessResponse = {
   };
 };
 
+export type ContextualCapability = {
+  id: string;
+  name: string;
+  description: string;
+  prompt_template?: string;
+  visibility: string;
+  priority?: number;
+};
+
+export type ContextualCapabilityResponse = {
+  context: string;
+  capabilities: ContextualCapability[];
+};
+
 export type LocalProvisionJobResult = {
   status: string;
   job_artifact_id?: string | null;

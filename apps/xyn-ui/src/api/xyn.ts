@@ -149,6 +149,7 @@ import type {
   AiAgent,
   AiBootstrapStatusResponse,
   SystemReadinessResponse,
+  ContextualCapabilityResponse,
   AiInvokeResponse,
   AiModelConfigCompat,
   AccessRegistryResponse,
@@ -4208,6 +4209,22 @@ export async function getSystemReadiness(): Promise<SystemReadinessResponse> {
     credentials: "include",
   });
   return handle<SystemReadinessResponse>(response);
+}
+
+export async function getContextualCapabilities(params?: {
+  context?: string;
+  artifact_id?: string;
+  application_id?: string;
+}): Promise<ContextualCapabilityResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/contextual-capabilities`);
+  if (params?.context) url.searchParams.set("context", params.context);
+  if (params?.artifact_id) url.searchParams.set("artifact_id", params.artifact_id);
+  if (params?.application_id) url.searchParams.set("application_id", params.application_id);
+  const response = await apiFetch(url.toString(), {
+    credentials: "include",
+  });
+  return handle<ContextualCapabilityResponse>(response);
 }
 
 export async function updateWorkItem(
