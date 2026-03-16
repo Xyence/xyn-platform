@@ -521,6 +521,27 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("repository_slug"), "shine-app")
         self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("branch"), "main")
 
+    def test_apply_application_plan_without_target_repository_leaves_generated_tasks_unresolved(self):
+        objective = (
+            "Build a simple internal web app called Team Lunch Poll. "
+            "Core entities: 1. Poll - title - poll_date - status 2. Lunch Option - poll - name 3. Vote - poll - lunch option - voter_name."
+        )
+        plan, _definition, _generated, _created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            application_name="Team Lunch Poll",
+        )
+
+        application, created = apply_application_plan(application_plan=plan, user=self.user)
+
+        self.assertTrue(created)
+        task = DevTask.objects.filter(goal__application=application).order_by("created_at").first()
+        self.assertIsNotNone(task)
+        self.assertEqual(task.target_repo, "")
+        self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("repository_slug"), None)
+        self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("source_kind"), "unresolved")
+
     def test_application_detail_groups_goals_and_reuses_portfolio_state(self):
         plan = ApplicationPlan.objects.create(
             workspace=self.workspace,

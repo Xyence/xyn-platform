@@ -480,7 +480,7 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
         }
     user_model = get_user_model()
     target = resolve_development_target(goal=goal)
-    target_repo = str(target.repository_slug or "").strip() or "xyn-platform"
+    target_repo = str(target.repository_slug or "").strip()
     target_branch = str(target.branch or "").strip() or "develop"
     created_threads: Dict[str, CoordinationThread] = {}
     for thread_def in sorted(plan.threads, key=lambda item: (item.sequence, item.title.lower())):

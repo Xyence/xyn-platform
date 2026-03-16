@@ -16532,9 +16532,10 @@ def app_palette_execute(request: HttpRequest) -> JsonResponse:
     prompt = str(payload.get("prompt") or "").strip()
     prompt_key = _normalize_palette_prompt(prompt)
     request_id = str(uuid.uuid4())
-    runtime_target_record = _workspace_runtime_target(workspace, "net-inventory")
-    generated_artifact_issue = _workspace_generated_artifact_issue(workspace, "net-inventory")
-    capability_manifest = _workspace_installed_capability_manifest(workspace, "net-inventory")
+    generated_app_slug = _resolve_generated_app_slug(workspace) or "net-inventory"
+    runtime_target_record = _workspace_runtime_target(workspace, generated_app_slug)
+    generated_artifact_issue = _workspace_generated_artifact_issue(workspace, generated_app_slug)
+    capability_manifest = _workspace_installed_capability_manifest(workspace, generated_app_slug)
     if (
         runtime_target_record
         and generated_artifact_issue
@@ -17216,6 +17217,29 @@ def _installed_generated_app_contexts(workspace: Workspace) -> List[Dict[str, An
             }
         )
     return contexts
+
+
+def _resolve_generated_app_slug(workspace: Workspace, *, preferred_app_slug: str = "") -> Optional[str]:
+    preferred = str(preferred_app_slug or "").strip()
+    if preferred:
+        artifact_slug = f"app.{preferred}"
+        if _workspace_has_installed_artifact_slug(workspace, artifact_slug) or _workspace_runtime_target(workspace, preferred):
+            return preferred
+    contexts = _installed_generated_app_contexts(workspace)
+    if not contexts:
+        return None
+    if len(contexts) == 1:
+        return str(contexts[0].get("app_slug") or "").strip() or None
+    active_contexts = [row for row in contexts if str(row.get("runtime_instance_id") or "").strip()]
+    if len(active_contexts) == 1:
+        return str(active_contexts[0].get("app_slug") or "").strip() or None
+    legacy_default = next(
+        (str(row.get("app_slug") or "").strip() for row in contexts if str(row.get("app_slug") or "").strip() == "net-inventory"),
+        "",
+    )
+    if legacy_default:
+        return legacy_default
+    return str(contexts[0].get("app_slug") or "").strip() or None
 
 
 def _looks_like_generated_app_evolution_request(message: str) -> bool:
