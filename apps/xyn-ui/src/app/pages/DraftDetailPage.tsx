@@ -1,21 +1,61 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import InlineMessage from "../../components/InlineMessage";
-import Tabs from "../components/ui/Tabs";
 import { getAppIntentDraft, getDraftWorkflow, listAppExecutionNotes, listAppJobs, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
 import type { AppExecutionNote, AppIntentDraft, AppJob, DraftWorkflow } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
-import CapabilitySuggestionPanel from "../components/capabilities/CapabilitySuggestionPanel";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { useNotifications } from "../state/notificationsStore";
-import { useXynConsole } from "../state/xynConsoleStore";
 import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
-import { fromApplicationWorkspace } from "../navigation/viewDescriptorBuilders";
-import { openViewDescriptor } from "../navigation/openViewDescriptor";
 import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
 
-type DraftDetailTab = "editor" | "meta";
 type DraftStatusValue = "draft" | "ready" | "submitted" | "archived";
+type DraftPageOverallState = "draft" | "building" | "build_blocked" | "ready" | "needs_revision" | "unavailable";
+type TimelineStepStatus = "complete" | "current" | "pending" | "failed";
+type DraftActionId =
+  | "review_failure"
+  | "retry_validation"
+  | "view_build_jobs"
+  | "edit_definition"
+  | "open_generated_environment"
+  | "open_application_workspace"
+  | "save_draft"
+  | "submit_draft";
+
+type DraftActionCard = {
+  id: DraftActionId;
+  title: string;
+  description: string;
+  badge: string;
+  available: boolean;
+  disabledReason?: string;
+  emphasis?: "primary" | "secondary";
+};
+
+type DraftTimelineStep = {
+  key: string;
+  label: string;
+  detail: string;
+  status: TimelineStepStatus;
+};
+
+type DraftPageViewModel = {
+  overallState: DraftPageOverallState;
+  overallLabel: string;
+  currentStep: string;
+  plainLanguageStatus: string;
+  lastUpdated: string | null;
+  succeeded: string[];
+  failed: string[];
+  appArtifactLabel: string;
+  runtimeLabel: string;
+  workspaceRoutingLabel: string;
+  primaryNextStep: string;
+  failureSummaryTitle: string;
+  failureSummaryBody: string;
+  buildTimeline: DraftTimelineStep[];
+  recommendedActions: DraftActionCard[];
+};
 
 function prettyJson(value: unknown): string {
   try {
@@ -240,6 +280,339 @@ function draftWorkflowStateLabel(state?: string | null): string {
   }
 }
 
+function statusBadgeLabel(value: TimelineStepStatus): string {
+  if (value === "complete") return "Done";
+  if (value === "current") return "Current";
+  if (value === "failed") return "Failed";
+  return "Pending";
+}
+
+function overallStateLabel(value: DraftPageOverallState): string {
+  switch (value) {
+    case "building":
+      return "Building";
+    case "build_blocked":
+      return "Build blocked";
+    case "ready":
+      return "Ready";
+    case "needs_revision":
+      return "Needs revision";
+    case "unavailable":
+      return "Unavailable";
+    case "draft":
+    default:
+      return "Draft";
+  }
+}
+
+function overallStateTone(value: DraftPageOverallState): "success" | "warn" | "danger" | "info" | "muted" {
+  switch (value) {
+    case "ready":
+      return "success";
+    case "build_blocked":
+    case "needs_revision":
+      return "danger";
+    case "building":
+      return "warn";
+    case "unavailable":
+      return "muted";
+    case "draft":
+    default:
+      return "info";
+  }
+}
+
+function actionTone(value: DraftActionCard["emphasis"], available: boolean): string {
+  if (!available) return "muted";
+  return value === "primary" ? "success" : "info";
+}
+
+function matchesJobType(job: AppJob, tokens: string[]): boolean {
+  const normalized = String(job.type || "").trim().toLowerCase();
+  return tokens.some((token) => normalized.includes(token));
+}
+
+function latestMatchingJob(jobs: AppJob[], predicate: (job: AppJob) => boolean): AppJob | null {
+  const matches = jobs.filter(predicate);
+  return matches.length ? matches[matches.length - 1] : null;
+}
+
+function deriveDraftPageViewModel(args: {
+  draft: AppIntentDraft | null;
+  draftStatus: DraftStatusValue;
+  workflow: DraftWorkflow | null;
+  relatedJobs: AppJob[];
+  executionNote: AppExecutionNote | null;
+  applicationDefinition: {
+    appSlug: string;
+    title: string;
+    artifactSlug: string;
+    entities: string[];
+    reports: string[];
+  } | null;
+  installedCapability: {
+    appSlug: string;
+    title: string;
+    reports: string[];
+  } | null;
+  siblingInstalledArtifact: {
+    artifactId: string;
+    artifactSlug: string;
+    workspaceId: string;
+    workspaceSlug: string;
+  } | null;
+  deploymentUrls: {
+    appUrl: string;
+    siblingUiUrl: string;
+    siblingApiUrl: string;
+  };
+  workspaceId: string;
+  saving: boolean;
+  submitting: boolean;
+}): DraftPageViewModel {
+  const {
+    draft,
+    draftStatus,
+    workflow,
+    relatedJobs,
+    executionNote,
+    applicationDefinition,
+    installedCapability,
+    siblingInstalledArtifact,
+    deploymentUrls,
+    workspaceId,
+    saving,
+    submitting,
+  } = args;
+
+  const latestFailedJob = latestMatchingJob(relatedJobs, (job) => normalizeJobStatus(job.status) === "failed");
+  const runningJob = latestMatchingJob(relatedJobs, (job) => {
+    const status = normalizeJobStatus(job.status);
+    return status === "queued" || status === "running";
+  });
+  const smokeJob = latestMatchingJob(relatedJobs, (job) => matchesJobType(job, ["smoke", "verify", "validation"]));
+  const smokeFailed = Boolean(smokeJob && normalizeJobStatus(smokeJob.status) === "failed");
+  const smokeSucceeded = Boolean(smokeJob && normalizeJobStatus(smokeJob.status) === "succeeded");
+  const appArtifactCreated = Boolean(applicationDefinition || installedCapability);
+  const runtimeDeployed = Boolean(installedCapability || deploymentUrls.appUrl || deploymentUrls.siblingUiUrl);
+  const generatedEnvironmentProvisioned = Boolean(siblingInstalledArtifact || deploymentUrls.siblingUiUrl);
+  const workspaceRoutingConfirmed = Boolean(
+    deploymentUrls.siblingUiUrl &&
+      siblingInstalledArtifact?.workspaceId &&
+      siblingInstalledArtifact.workspaceId !== workspaceId,
+  );
+  const workflowState = String(workflow?.state || "").trim().toLowerCase();
+  const hasExecution = Boolean(workflow?.active_run_id || workflow?.last_run_status || relatedJobs.length);
+
+  let overallState: DraftPageOverallState = "draft";
+  if (!draft) {
+    overallState = "unavailable";
+  } else if (smokeFailed && runtimeDeployed) {
+    overallState = "build_blocked";
+  } else if (latestFailedJob) {
+    overallState = appArtifactCreated || runtimeDeployed ? "build_blocked" : "needs_revision";
+  } else if (
+    runningJob ||
+    ["submitted", "queued", "executing"].includes(workflowState) ||
+    String(draft.status || draftStatus).trim().toLowerCase() === "submitted"
+  ) {
+    overallState = "building";
+  } else if (smokeSucceeded || (workflowState === "completed" && appArtifactCreated && runtimeDeployed)) {
+    overallState = "ready";
+  }
+
+  const failedStepLabel = smokeFailed
+    ? "Smoke test failed after deploy"
+    : latestFailedJob
+      ? `${String(latestFailedJob.type || "Build step").replace(/_/g, " ")} failed`
+      : overallState === "ready"
+        ? "Verification completed"
+        : overallState === "building"
+          ? String(runningJob?.type || draftWorkflowStateLabel(workflowState)).replace(/_/g, " ")
+          : "Draft not yet submitted";
+
+  const succeeded: string[] = [];
+  if (appArtifactCreated) succeeded.push("App spec generated");
+  if (runtimeDeployed) succeeded.push("Local deploy succeeded");
+  if (generatedEnvironmentProvisioned) succeeded.push("Sibling Xyn provisioned");
+
+  const failed: string[] = [];
+  if (smokeFailed) {
+    failed.push("Smoke test failed");
+  } else if (latestFailedJob) {
+    failed.push(`${String(latestFailedJob.type || "Build step").replace(/_/g, " ")} failed`);
+  }
+
+  const failureSummaryBody =
+    overallState === "build_blocked"
+      ? "The application definition was generated and deployed, but verification failed afterward. Review the failure details and retry validation after addressing the issue."
+      : overallState === "needs_revision"
+        ? "The build could not complete successfully. Review the failure details and revise the app definition before retrying."
+        : overallState === "ready"
+          ? "The generated application passed its current build and verification steps."
+          : overallState === "building"
+            ? "The build is still running. Watch the active jobs until validation completes."
+            : overallState === "draft"
+              ? "This draft is editable and has not started a full build yet."
+              : "This draft is not currently available for build or revision actions.";
+
+  const buildTimeline: DraftTimelineStep[] = [
+    {
+      key: "definition",
+      label: "App definition",
+      detail: draft ? "Draft captured" : "No draft loaded",
+      status: draft ? "complete" : "pending",
+    },
+    {
+      key: "artifact",
+      label: "App spec generated",
+      detail: appArtifactCreated ? "Generated app artifact created" : "Waiting for generated app artifact",
+      status: appArtifactCreated ? "complete" : overallState === "building" ? "current" : "pending",
+    },
+    {
+      key: "deploy",
+      label: "Runtime deployed",
+      detail: runtimeDeployed ? "Local deploy succeeded" : "Runtime not deployed yet",
+      status: runtimeDeployed ? "complete" : appArtifactCreated && overallState === "building" ? "current" : "pending",
+    },
+    {
+      key: "environment",
+      label: "Generated app environment",
+      detail: generatedEnvironmentProvisioned ? "Sibling Xyn provisioned" : "Generated app environment not confirmed",
+      status: generatedEnvironmentProvisioned ? "complete" : runtimeDeployed && overallState === "building" ? "current" : "pending",
+    },
+    {
+      key: "verification",
+      label: "Smoke test",
+      detail: smokeFailed
+        ? "Smoke test failed after deploy"
+        : smokeSucceeded
+          ? "Smoke test passed"
+          : hasExecution
+            ? "Verification pending"
+            : "Verification not started",
+      status: smokeFailed ? "failed" : smokeSucceeded ? "complete" : overallState === "building" ? "current" : "pending",
+    },
+  ];
+
+  // Centralize which actions make sense so the page never shows contradictory
+  // "continue/open" affordances without explaining why they are blocked.
+  const recommendedActions: DraftActionCard[] = [
+    {
+      id: "review_failure",
+      title: "Review failure summary",
+      description: "Inspect the verification failure and the build notes for the blocked step.",
+      badge: overallState === "build_blocked" ? "Recommended" : "Available",
+      available: overallState === "build_blocked" || overallState === "needs_revision",
+      disabledReason: "No build failure summary is available yet.",
+      emphasis: "primary",
+    },
+    {
+      id: "retry_validation",
+      title: "Retry validation",
+      description: "Queue another build attempt after reviewing the failure and making any needed changes.",
+      badge: submitting ? "Submitting" : overallState === "build_blocked" ? "Next step" : "Available",
+      available: Boolean(draft) && !submitting && overallState !== "building" && overallState !== "unavailable",
+      disabledReason: overallState === "building" ? "A build is already in progress." : "This draft cannot be submitted right now.",
+      emphasis: "primary",
+    },
+    {
+      id: "view_build_jobs",
+      title: "View build jobs",
+      description: "Open the recorded build jobs for this draft and inspect step-by-step execution.",
+      badge: relatedJobs.length ? "Available" : "Unavailable",
+      available: relatedJobs.length > 0,
+      disabledReason: "No build jobs have been recorded yet.",
+      emphasis: "secondary",
+    },
+    {
+      id: "edit_definition",
+      title: "Edit app definition",
+      description: "Review the prompt, title, and raw draft JSON for this application draft.",
+      badge: saving ? "Saving" : "Available",
+      available: Boolean(draft),
+      disabledReason: "Draft details are not loaded yet.",
+      emphasis: "secondary",
+    },
+    {
+      id: "open_generated_environment",
+      title: "Open generated app environment",
+      description: "Open the deployed runtime environment that was provisioned for this generated application.",
+      badge: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl ? "Available" : "Unavailable",
+      available: Boolean(deploymentUrls.siblingUiUrl || deploymentUrls.appUrl),
+      disabledReason: "A generated app environment has not been provisioned yet.",
+      emphasis: "secondary",
+    },
+    {
+      id: "open_application_workspace",
+      title: "Open application workspace",
+      description: "Open the generated application workspace once a confirmed route is available.",
+      badge: workspaceRoutingConfirmed ? "Available" : "Not confirmed",
+      available: workspaceRoutingConfirmed,
+      disabledReason: "Workspace routing for the generated application is not confirmed yet.",
+      emphasis: "secondary",
+    },
+  ];
+
+  if (overallState === "draft") {
+    recommendedActions.push({
+      id: "submit_draft",
+      title: "Submit draft",
+      description: "Start the application build workflow for this draft.",
+      badge: submitting ? "Submitting" : "Primary",
+      available: Boolean(draft) && !submitting,
+      disabledReason: "Draft details are not loaded yet.",
+      emphasis: "primary",
+    });
+  }
+
+  if (overallState === "draft" || overallState === "needs_revision") {
+    recommendedActions.push({
+      id: "save_draft",
+      title: "Save draft",
+      description: "Persist the current title and raw draft JSON without starting a build.",
+      badge: saving ? "Saving" : "Available",
+      available: Boolean(draft) && !saving,
+      disabledReason: "Draft details are not loaded yet.",
+      emphasis: "secondary",
+    });
+  }
+
+  return {
+    overallState,
+    overallLabel: overallStateLabel(overallState),
+    currentStep: failedStepLabel,
+    plainLanguageStatus: failureSummaryBody,
+    lastUpdated: draft?.updated_at || workflow?.last_run_status || null,
+    succeeded,
+    failed,
+    appArtifactLabel: appArtifactCreated ? "Created" : "Not created",
+    runtimeLabel: runtimeDeployed ? "Deployed" : "Not deployed",
+    workspaceRoutingLabel: workspaceRoutingConfirmed ? "Confirmed" : "Not confirmed",
+    primaryNextStep:
+      overallState === "build_blocked"
+        ? "Review failure and retry validation"
+        : overallState === "building"
+          ? "Monitor the active build jobs"
+          : overallState === "ready"
+            ? "Open the generated app environment"
+            : overallState === "draft"
+              ? "Review the draft and submit the build"
+              : overallState === "needs_revision"
+                ? "Edit the app definition and submit again"
+                : "Reload the draft details",
+    failureSummaryTitle:
+      overallState === "build_blocked"
+        ? "Build failure summary"
+        : overallState === "needs_revision"
+          ? "Revision summary"
+          : "Build summary",
+    failureSummaryBody,
+    buildTimeline,
+    recommendedActions,
+  };
+}
+
 export default function DraftDetailPage({
   workspaceId,
   workspaceName,
@@ -270,7 +643,8 @@ export default function DraftDetailPage({
   const [jsonText, setJsonText] = useState("{}");
   const [saving, setSaving] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [activeTab, setActiveTab] = useState<DraftDetailTab>("editor");
+  const [editorExpanded, setEditorExpanded] = useState(false);
+  const [metadataExpanded, setMetadataExpanded] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [latestJobId, setLatestJobId] = useState<string>(String(linkedJobId || "").trim());
@@ -280,21 +654,12 @@ export default function DraftDetailPage({
   const [executionNotes, setExecutionNotes] = useState<AppExecutionNote[]>([]);
   const [executionNotesLoading, setExecutionNotesLoading] = useState(false);
   const [executionNotesError, setExecutionNotesError] = useState<string | null>(null);
-  const [executionTraceExpanded, setExecutionTraceExpanded] = useState(false);
   const { push } = useNotifications();
-  const { setInputText, setOpen, setLastArtifactHint, clearContext } = useXynConsole();
+  const failureSummaryRef = useRef<HTMLElement | null>(null);
+  const editorRef = useRef<HTMLDetailsElement | null>(null);
   const draftDescriptor = useMemo(
     () => getAppDraftViewDescriptor({ id: draftId, title: draft?.title || title }, workspaceId),
     [draft?.title, draftId, title, workspaceId]
-  );
-  const workbenchDescriptor = useMemo(
-    () =>
-      fromApplicationWorkspace({
-        workspaceId,
-        title: draft?.title || title || "Application Workbench",
-        subtitle: "Continue application design and execution",
-      }),
-    [draft?.title, title, workspaceId],
   );
   const rawPrompt = useMemo(() => {
     if (!draft?.content_json || typeof draft.content_json !== "object") return "";
@@ -411,19 +776,6 @@ export default function DraftDetailPage({
 
   const executionNote = useMemo(() => (executionNotes.length ? executionNotes[0] : null), [executionNotes]);
 
-  const buildStatus = useMemo(() => {
-    if (relatedJobs.some((job) => normalizeJobStatus(job.status) === "failed")) return "failed";
-    if (relatedJobs.some((job) => job.type === "smoke_test" && normalizeJobStatus(job.status) === "succeeded")) return "succeeded";
-    if (relatedJobs.some((job) => {
-      const status = normalizeJobStatus(job.status);
-      return status === "queued" || status === "running";
-    })) {
-      return "running";
-    }
-    if (String(draft?.status || status).toLowerCase() === "submitted") return "running";
-    return "draft";
-  }, [draft?.status, relatedJobs, status]);
-
   const deploymentUrls = useMemo(() => {
     let appUrl = "";
     let siblingUiUrl = "";
@@ -442,134 +794,139 @@ export default function DraftDetailPage({
   const installedCapability = useMemo(() => extractInstalledCapability(relatedJobs), [relatedJobs]);
   const siblingInstalledArtifact = useMemo(() => extractSiblingInstalledArtifact(relatedJobs), [relatedJobs]);
   const applicationDefinition = useMemo(() => extractApplicationDefinition(relatedJobs), [relatedJobs]);
-  const revisionUrl = useMemo(() => {
-    const artifactSlug = siblingInstalledArtifact?.artifactSlug || applicationDefinition?.artifactSlug || "";
-    const artifactTitle = applicationDefinition?.title || installedCapability?.title || draft?.title || "Generated application";
-    const siblingWorkspaceId = String(siblingInstalledArtifact?.workspaceId || "").trim();
-    if (!deploymentUrls.siblingUiUrl || !siblingWorkspaceId) return "";
-    const workbenchPath = new URL(`/w/${encodeURIComponent(siblingWorkspaceId)}/workbench`, deploymentUrls.siblingUiUrl);
-    workbenchPath.searchParams.set("revise", "1");
-    workbenchPath.searchParams.set("prompt", "Add ");
-    if (artifactSlug) workbenchPath.searchParams.set("artifact_slug", artifactSlug);
-    if (artifactTitle) workbenchPath.searchParams.set("artifact_title", artifactTitle);
-    const authLogin = new URL("/auth/login", deploymentUrls.siblingUiUrl);
-    authLogin.searchParams.set("appId", "xyn-ui");
-    authLogin.searchParams.set("returnTo", `${workbenchPath.pathname}${workbenchPath.search}`);
-    return authLogin.toString();
-  }, [
-    applicationDefinition?.artifactSlug,
-    applicationDefinition?.title,
-    deploymentUrls.siblingUiUrl,
-    draft?.title,
-    installedCapability?.title,
-    siblingInstalledArtifact?.artifactSlug,
-    siblingInstalledArtifact?.workspaceId,
-  ]);
+  const viewModel = useMemo(
+    () =>
+      deriveDraftPageViewModel({
+        draft,
+        draftStatus: status,
+        workflow,
+        relatedJobs,
+        executionNote,
+        applicationDefinition,
+        installedCapability,
+        siblingInstalledArtifact,
+        deploymentUrls,
+        workspaceId,
+        saving,
+        submitting,
+      }),
+    [
+      applicationDefinition,
+      deploymentUrls,
+      draft,
+      executionNote,
+      installedCapability,
+      relatedJobs,
+      saving,
+      siblingInstalledArtifact,
+      status,
+      submitting,
+      workflow,
+      workspaceId,
+    ],
+  );
 
-  const openRevisionPrompt = useCallback(() => {
-    const artifactSlug = siblingInstalledArtifact?.artifactSlug || applicationDefinition?.artifactSlug || "";
-    const artifactTitle = applicationDefinition?.title || installedCapability?.title || draft?.title || "Generated application";
-    if (revisionUrl) {
-      window.location.assign(revisionUrl);
-      return;
-    }
-    clearContext();
-    setLastArtifactHint(
-      artifactSlug
-        ? {
-            artifact_id: siblingInstalledArtifact?.artifactId || artifactSlug,
-            artifact_type: "GeneratedApplication",
-            artifact_state: "installed",
-            title: artifactTitle,
-            route: workbenchDescriptor.route,
-          }
-        : null,
-    );
-    setInputText("Add ");
-    setOpen(true);
-    setMessage(`Revision prompt scoped to ${artifactTitle}${artifactSlug ? ` (${artifactSlug})` : ""}.`);
-  }, [
-    applicationDefinition?.artifactSlug,
-    applicationDefinition?.title,
-    clearContext,
-    draft?.title,
-    installedCapability?.title,
-    revisionUrl,
-    setInputText,
-    setLastArtifactHint,
-    setOpen,
-    siblingInstalledArtifact?.artifactId,
-    siblingInstalledArtifact?.artifactSlug,
-    workbenchDescriptor.route,
-  ]);
+  const latestFailedJob = useMemo(
+    () => latestMatchingJob(relatedJobs, (job) => normalizeJobStatus(job.status) === "failed"),
+    [relatedJobs],
+  );
+  const latestJob = relatedJobs.length ? relatedJobs[relatedJobs.length - 1] : null;
 
-  const continueInWorkbench = useCallback(() => {
-    clearContext();
-    if (siblingInstalledArtifact?.artifactSlug || applicationDefinition?.artifactSlug) {
-      const artifactSlug = siblingInstalledArtifact?.artifactSlug || applicationDefinition?.artifactSlug || "";
-      const artifactTitle = applicationDefinition?.title || installedCapability?.title || draft?.title || title || "Generated application";
-      setLastArtifactHint(
-        artifactSlug
-          ? {
-              artifact_id: siblingInstalledArtifact?.artifactId || artifactSlug,
-              artifact_type: "GeneratedApplication",
-              artifact_state: "installed",
-              title: artifactTitle,
-              route: workbenchDescriptor.route,
-            }
-          : null,
-      );
-      setInputText("Add ");
-    } else {
-      setLastArtifactHint(null);
-      setInputText(rawPrompt || `Continue application design for ${draft?.title || title || "this draft"}`);
-    }
-    setOpen(true);
-    openViewDescriptor(workbenchDescriptor, navigate);
-  }, [
-    applicationDefinition?.artifactSlug,
-    applicationDefinition?.title,
-    clearContext,
-    draft?.title,
-    installedCapability?.title,
-    navigate,
-    rawPrompt,
-    setInputText,
-    setLastArtifactHint,
-    setOpen,
-    siblingInstalledArtifact?.artifactId,
-    siblingInstalledArtifact?.artifactSlug,
-    title,
-    workbenchDescriptor,
-  ]);
+  const openGeneratedEnvironment = useCallback(() => {
+    const target = deploymentUrls.siblingUiUrl || deploymentUrls.appUrl;
+    if (!target) return;
+    window.open(target, "_blank", "noopener,noreferrer");
+  }, [deploymentUrls.appUrl, deploymentUrls.siblingUiUrl]);
+
+  const reviewFailureSummary = useCallback(() => {
+    setMessage(null);
+    failureSummaryRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  const openEditor = useCallback(() => {
+    setEditorExpanded(true);
+    requestAnimationFrame(() => {
+      editorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, []);
+
+  const handleAction = useCallback(
+    (actionId: DraftActionId) => {
+      if (actionId === "review_failure") {
+        reviewFailureSummary();
+        return;
+      }
+      if (actionId === "retry_validation") {
+        void submit();
+        return;
+      }
+      if (actionId === "view_build_jobs") {
+        if (!latestJobId) return;
+        if (onOpenJob) onOpenJob(latestJobId);
+        else navigate(toWorkspacePath(workspaceId, `jobs/${latestJobId}`));
+        return;
+      }
+      if (actionId === "edit_definition") {
+        openEditor();
+        return;
+      }
+      if (actionId === "open_generated_environment") {
+        openGeneratedEnvironment();
+        return;
+      }
+      if (actionId === "open_application_workspace") {
+        setMessage("Generated application workspace routing is not confirmed yet for this build.");
+        return;
+      }
+      if (actionId === "save_draft") {
+        void save();
+        return;
+      }
+      if (actionId === "submit_draft") {
+        void submit();
+      }
+    },
+    [latestJobId, navigate, onOpenJob, openEditor, openGeneratedEnvironment, reviewFailureSummary, workspaceId],
+  );
 
   useEffect(() => {
     if (!relatedJobs.length) return;
-    if (buildStatus !== "succeeded" && buildStatus !== "failed") return;
+    if (viewModel.overallState !== "ready" && viewModel.overallState !== "build_blocked" && viewModel.overallState !== "needs_revision") return;
     push({
-      level: buildStatus === "succeeded" ? "success" : "error",
-      title: buildStatus === "succeeded" ? "App build completed" : "App build failed",
+      level: viewModel.overallState === "ready" ? "success" : "error",
+      title: viewModel.overallState === "ready" ? "App build completed" : "App build blocked",
       message:
-        buildStatus === "succeeded"
+        viewModel.overallState === "ready"
           ? draft?.title || "Draft build succeeded."
-          : (relatedJobs.find((job) => normalizeJobStatus(job.status) === "failed")?.logs_text || "Review build pipeline logs."),
+          : (latestFailedJob?.logs_text || viewModel.failureSummaryBody),
       entityType: "run",
       entityId: latestJobId || draftId,
-      status: buildStatus,
+      status: viewModel.overallState === "ready" ? "succeeded" : "failed",
       href: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl || undefined,
       ctaLabel: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl ? "Open" : undefined,
-      dedupeKey: `app-build:${draftId}:${buildStatus}`,
+      dedupeKey: `app-build:${draftId}:${viewModel.overallState}`,
     });
-  }, [buildStatus, deploymentUrls.appUrl, deploymentUrls.siblingUiUrl, draft?.title, draftId, latestJobId, push, relatedJobs]);
+  }, [
+    deploymentUrls.appUrl,
+    deploymentUrls.siblingUiUrl,
+    draft?.title,
+    draftId,
+    latestFailedJob?.logs_text,
+    latestJobId,
+    push,
+    relatedJobs.length,
+    viewModel.failureSummaryBody,
+    viewModel.overallState,
+  ]);
 
   useEffect(() => {
-    if (buildStatus !== "running") return;
+    if (viewModel.overallState !== "building") return;
     const interval = window.setInterval(() => {
       void loadJobs();
       void loadWorkflow();
     }, 4000);
     return () => window.clearInterval(interval);
-  }, [buildStatus, loadJobs, loadWorkflow]);
+  }, [loadJobs, loadWorkflow, viewModel.overallState]);
 
   const save = async () => {
     if (!workspaceId || !draftId) return;
@@ -621,384 +978,370 @@ export default function DraftDetailPage({
       <div className="page-header">
         <div>
           <h2>Application Draft</h2>
-          <p className="muted">Review the application intent, track progress, and continue designing the application in the workbench.</p>
+          <p className="muted">Review the current build state, understand what succeeded, and take the next meaningful action.</p>
         </div>
         <div className="inline-actions">
           <button className="ghost" onClick={() => (onBack ? onBack() : navigate(toWorkspacePath(workspaceId, "drafts")))}>
             {onBack ? "Back" : "Back to Drafts"}
           </button>
-          <button className="ghost" type="button" onClick={continueInWorkbench} disabled={!workspaceId}>
-            Continue in Workbench
+          <button className="ghost" type="button" onClick={openEditor} disabled={!draft}>
+            Edit app definition
           </button>
           {latestJobId ? (
-            <button className="ghost" onClick={() => (onOpenJob ? onOpenJob(latestJobId) : navigate(toWorkspacePath(workspaceId, `jobs/${latestJobId}`)))}>
-              View Execution Status
+            <button className="ghost" onClick={() => handleAction("view_build_jobs")}>
+              View build jobs
             </button>
           ) : null}
-          <button className="ghost" onClick={() => setMessage("Regenerate is not implemented yet.")}>
-            Regenerate
-          </button>
-          <button className="ghost" onClick={() => void save()} disabled={saving || !workspaceId}>
-            {saving ? "Saving..." : "Save"}
-          </button>
-          <button className="primary" onClick={() => void submit()} disabled={submitting || !workspaceId}>
-            {submitting ? "Submitting..." : "Submit"}
+          {(deploymentUrls.siblingUiUrl || deploymentUrls.appUrl) ? (
+            <button className="ghost" type="button" onClick={openGeneratedEnvironment}>
+              Open generated app environment
+            </button>
+          ) : null}
+          <button className="primary" onClick={() => handleAction(viewModel.overallState === "draft" ? "submit_draft" : "retry_validation")} disabled={submitting || !workspaceId}>
+            {submitting ? "Submitting..." : viewModel.overallState === "draft" ? "Submit draft" : "Retry validation"}
           </button>
         </div>
       </div>
       {message && <InlineMessage tone="info" title="Draft" body={message} />}
       {error && <InlineMessage tone="error" title="Request failed" body={error} />}
-      <InlineMessage
-        tone="info"
-        title="Application workspace"
-        body={`This draft is routed through the ${draftDescriptor.editorKey.replace(/_/g, " ")} shell. Use Continue in Workbench to continue application design with the composer and related workbench tools.`}
-      />
-      <CapabilitySuggestionPanel
-        context="app_intent_draft"
-        workspaceId={workspaceId}
-        draftId={draftId}
-        title="Suggested Actions"
-        onInsertSuggestion={(text) => {
-          setInputText(text);
-          setOpen(true);
-        }}
-      />
-
-      <section className="card">
+      <section className="card app-draft-hero-card">
         <div className="card-header">
-          <h3>{draftDescriptor.title || "Application Draft"}</h3>
-          <span className="chip">{draft?.status || status || "draft"}</span>
+          <div>
+            <h3>{draftDescriptor.title || draft?.title || "Application Draft"}</h3>
+            <p className="muted small">{viewModel.currentStep}</p>
+          </div>
+          <span className={`chip app-draft-state-chip ${overallStateTone(viewModel.overallState)}`}>{viewModel.overallLabel}</span>
         </div>
-        <div className="detail-grid" style={{ marginTop: 12, marginBottom: 12 }}>
+        <div className="detail-grid" style={{ marginTop: 12 }}>
           <div>
-            <strong>Application stage</strong>
-            <p className="muted small">{workflowLoading ? "Loading..." : draftWorkflowStateLabel(workflow?.state)}</p>
+            <strong>Current step</strong>
+            <p className="muted small">{viewModel.currentStep}</p>
           </div>
           <div>
-            <strong>Coordination thread</strong>
-            <p className="muted small">{workflow?.thread_id || "Not linked yet"}</p>
+            <strong>Last updated</strong>
+            <p className="muted small">{formatTimestamp(draft?.updated_at || latestJob?.updated_at || latestJob?.created_at)}</p>
           </div>
           <div>
-            <strong>Execution run</strong>
-            <p className="muted small">{workflow?.active_run_id || "Not started yet"}</p>
+            <strong>App artifact</strong>
+            <p className="muted small">{viewModel.appArtifactLabel}</p>
           </div>
           <div>
-            <strong>Execution status</strong>
-            <p className="muted small">{workflow?.last_run_status || "—"}</p>
+            <strong>Runtime</strong>
+            <p className="muted small">{viewModel.runtimeLabel}</p>
           </div>
           <div>
-            <strong>Build readiness</strong>
-            <p className="muted small">{buildStatus}</p>
+            <strong>Workspace routing</strong>
+            <p className="muted small">{viewModel.workspaceRoutingLabel}</p>
           </div>
           <div>
-            <strong>Tracked jobs</strong>
-            <p className="muted small">{relatedJobs.length || 0}</p>
+            <strong>Primary next step</strong>
+            <p className="muted small">{viewModel.primaryNextStep}</p>
+          </div>
+          <div className="span-full">
+            <strong>Status explanation</strong>
+            <p className="muted small">{viewModel.plainLanguageStatus}</p>
           </div>
           <div>
-            <strong>Plan state</strong>
-            <p className="muted small">{workflow?.plan_available ? "Available" : "Not available yet"}</p>
-          </div>
-          <div>
-            <strong>Generated capability</strong>
-            {installedCapability ? (
-              <>
-                <p className="muted small">{installedCapability.title}</p>
-                <p className="muted small">{installedCapability.appSlug}</p>
-              </>
+            <strong>What succeeded</strong>
+            {viewModel.succeeded.length ? (
+              <ul className="muted small app-draft-summary-list">
+                {viewModel.succeeded.map((item) => <li key={item}>{item}</li>)}
+              </ul>
             ) : (
-              <p className="muted small">AppSpec not available yet</p>
+              <p className="muted small">No completed build steps yet.</p>
             )}
           </div>
           <div>
-            <strong>Open sibling Xyn</strong>
-            {deploymentUrls.siblingUiUrl ? (
-              <>
-                <p className="muted small">
-                  <a
-                    className="button-link"
-                    href={deploymentUrls.siblingUiUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-label="Open sibling Xyn"
-                  >
-                    Open sibling Xyn
-                  </a>
-                </p>
-                <p className="muted small">{deploymentUrls.siblingUiUrl}</p>
-              </>
+            <strong>What failed</strong>
+            {viewModel.failed.length ? (
+              <ul className="muted small app-draft-summary-list">
+                {viewModel.failed.map((item) => <li key={item}>{item}</li>)}
+              </ul>
             ) : (
-              <p className="muted small">Not provisioned yet</p>
+              <p className="muted small">No failed build steps recorded.</p>
             )}
           </div>
         </div>
-        {installedCapability || siblingInstalledArtifact ? (
-          <InlineMessage
-            tone="info"
-            title="Application state"
-            body={
-              siblingInstalledArtifact
-                ? `${installedCapability?.title || siblingInstalledArtifact.artifactSlug} has a local runtime deployed from the generated AppSpec, and the sibling Xyn instance has the generated artifact ${siblingInstalledArtifact.artifactSlug} installed for capability visibility and workbench access.`
-                : `${installedCapability?.title || "This app"} currently has a local runtime deployed from the generated AppSpec. No sibling artifact installation has been recorded yet.`
-            }
-          />
-        ) : null}
-        {applicationDefinition ? (
-          <div className="card capability-card" style={{ marginBottom: 12 }}>
+      </section>
+
+      <div className="app-draft-layout">
+        <div className="app-draft-main-column">
+          <section className="card">
             <div className="card-header">
-              <h3>Application Design</h3>
-              <span className="chip">definition-driven</span>
+              <h3>Primary actions</h3>
+            </div>
+            <div className="app-draft-action-grid">
+              {viewModel.recommendedActions.map((action) => (
+                <div key={action.id} className="app-draft-action-card">
+                  <div className="app-draft-action-heading">
+                    <div>
+                      <strong>{action.title}</strong>
+                      <p className="muted small">{action.description}</p>
+                    </div>
+                    <span className={`chip ${actionTone(action.emphasis, action.available)}`}>{action.badge}</span>
+                  </div>
+                  {action.available ? (
+                    <button
+                      type="button"
+                      className={action.emphasis === "primary" ? "primary" : "ghost"}
+                      onClick={() => handleAction(action.id)}
+                    >
+                      {action.title}
+                    </button>
+                  ) : (
+                    <div className="app-draft-disabled-action" aria-disabled="true">
+                      <span className="muted small">{action.disabledReason}</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="card-header">
+              <h3>Build progress</h3>
+            </div>
+            <div className="app-draft-timeline">
+              {viewModel.buildTimeline.map((step) => (
+                <div key={step.key} className={`app-draft-timeline-step ${step.status}`}>
+                  <div className="app-draft-timeline-marker" />
+                  <div>
+                    <div className="app-draft-timeline-heading">
+                      <strong>{step.label}</strong>
+                      <span className={`chip ${actionTone(step.status === "current" ? "primary" : "secondary", step.status !== "pending")}`}>
+                        {statusBadgeLabel(step.status)}
+                      </span>
+                    </div>
+                    <p className="muted small">{step.detail}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="card" ref={failureSummaryRef}>
+            <div className="card-header">
+              <h3>{viewModel.failureSummaryTitle}</h3>
+              <span className={`chip ${overallStateTone(viewModel.overallState)}`}>{viewModel.currentStep}</span>
+            </div>
+            {executionNotesLoading || workflowLoading ? <p className="muted small">Loading build summary…</p> : null}
+            {executionNotesError ? <InlineMessage tone="error" title="Diagnostics unavailable" body={executionNotesError} /> : null}
+            <p className="muted small">{viewModel.failureSummaryBody}</p>
+            <div className="detail-grid" style={{ marginTop: 12 }}>
+              <div>
+                <strong>Failure stage</strong>
+                <p className="muted small">{viewModel.currentStep}</p>
+              </div>
+              <div>
+                <strong>Latest failed step</strong>
+                <p className="muted small">{latestFailedJob ? String(latestFailedJob.type || "").replace(/_/g, " ") : "—"}</p>
+              </div>
+              <div>
+                <strong>Recorded note</strong>
+                <p className="muted small">{executionNote?.status || "No execution note linked"}</p>
+              </div>
+              <div className="span-full">
+                <strong>Plain-language explanation</strong>
+                <p className="muted small">{viewModel.plainLanguageStatus}</p>
+              </div>
+              {executionNote?.findings?.length ? (
+                <div>
+                  <strong>Observed issues</strong>
+                  <ul className="muted small app-draft-summary-list">
+                    {executionNote.findings.slice(0, 4).map((item, index) => <li key={`finding-${index}`}>{item}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+              {executionNote?.validation_summary?.length ? (
+                <div>
+                  <strong>Validation summary</strong>
+                  <ul className="muted small app-draft-summary-list">
+                    {executionNote.validation_summary.slice(0, 4).map((item, index) => <li key={`validation-${index}`}>{item}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+              {executionNote?.proposed_fix ? (
+                <div className="span-full">
+                  <strong>Suggested next correction</strong>
+                  <p className="muted small">{executionNote.proposed_fix}</p>
+                </div>
+              ) : null}
+            </div>
+          </section>
+        </div>
+
+        <div className="app-draft-side-column">
+          <section className="card">
+            <div className="card-header">
+              <h3>Current state</h3>
             </div>
             <div className="detail-grid" style={{ marginTop: 12 }}>
               <div>
+                <strong>Draft stage</strong>
+                <p className="muted small">{workflowLoading ? "Loading..." : draftWorkflowStateLabel(workflow?.state)}</p>
+              </div>
+              <div>
+                <strong>Execution run</strong>
+                <p className="muted small">{workflow?.active_run_id || "Not started yet"}</p>
+              </div>
+              <div>
+                <strong>Build jobs</strong>
+                <p className="muted small">{relatedJobs.length || 0}</p>
+              </div>
+              <div>
+                <strong>Plan state</strong>
+                <p className="muted small">{workflow?.plan_available ? "Available" : "Not available yet"}</p>
+              </div>
+              <div>
+                <strong>Generated app</strong>
+                <p className="muted small">{installedCapability?.title || applicationDefinition?.title || "Not created yet"}</p>
+              </div>
+              <div>
+                <strong>Generated artifact</strong>
+                <p className="muted small">{applicationDefinition?.artifactSlug || siblingInstalledArtifact?.artifactSlug || "Not recorded"}</p>
+              </div>
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="card-header">
+              <h3>Technical details</h3>
+            </div>
+            <div className="detail-grid" style={{ marginTop: 12 }}>
+              <div>
+                <strong>Coordination thread</strong>
+                <p className="muted small">{workflow?.thread_id || "Not linked yet"}</p>
+              </div>
+              <div>
+                <strong>Execution status</strong>
+                <p className="muted small">{workflow?.last_run_status || "—"}</p>
+              </div>
+              <div>
+                <strong>Generated reports</strong>
+                <p className="muted small">{installedCapability?.reports.join(", ") || applicationDefinition?.reports.join(", ") || "None recorded"}</p>
+              </div>
+              <div>
+                <strong>Sibling workspace</strong>
+                <p className="muted small">{siblingInstalledArtifact?.workspaceSlug || siblingInstalledArtifact?.workspaceId || "Not recorded"}</p>
+              </div>
+              <div className="span-full">
                 <strong>Originating prompt</strong>
                 <p className="muted small">{rawPrompt || "Prompt unavailable."}</p>
               </div>
-              <div>
-                <strong>Application artifact</strong>
-                <p className="muted small">{applicationDefinition.artifactSlug}</p>
-              </div>
-              <div>
+              <div className="span-full">
                 <strong>Application shape</strong>
-                <p className="muted small">{applicationDefinition.entities.join(", ") || "No entities recorded"}</p>
+                <p className="muted small">{applicationDefinition?.entities.join(", ") || "No entities recorded"}</p>
               </div>
-              <div>
-                <strong>Reports</strong>
-                <p className="muted small">{applicationDefinition.reports.join(", ") || "No reports recorded"}</p>
-              </div>
-              <div className="span-full">
-                <strong>Revision model</strong>
-                <p className="muted small">
-                  The generated artifact is the canonical installed identity. Follow-up prompts revise this application in place rather than creating a separate app.
-                </p>
-              </div>
-              <div className="span-full">
-                <strong>Revision entry point</strong>
-                <p className="muted small">
-                  Revise the installed capability from the sibling workbench so the prompt runs in the application workspace and targets the current generated artifact.
-                </p>
-              </div>
-            </div>
-            <div className="inline-actions" style={{ marginTop: 12 }}>
-              {revisionUrl ? (
-                <a className="primary button-link" href={revisionUrl}>
-                  Open Application Workbench
-                </a>
-              ) : (
-                <button className="primary" type="button" onClick={openRevisionPrompt}>
-                  Open Application Workbench
-                </button>
-              )}
-              <button className="ghost" type="button" onClick={continueInWorkbench}>
-                Continue Application Design
-              </button>
-            </div>
-          </div>
-        ) : null}
-        {installedCapability ? (
-          <div className="card capability-card" style={{ marginBottom: 12 }}>
-            <div className="card-header">
-              <h3>Application Runtime</h3>
-              <span className="chip">runtime deployed</span>
-            </div>
-            <div className="detail-grid" style={{ marginTop: 12 }}>
-              <div>
-                <strong>Generated AppSpec</strong>
-                <p className="muted small">{installedCapability.title}</p>
-              </div>
-              <div>
-                <strong>Root instance state</strong>
-                <p className="muted small">Local runtime deployed</p>
-              </div>
-              <div>
-                <strong>Sibling instance state</strong>
-                <p className="muted small">
-                  {siblingInstalledArtifact
-                    ? `Generated artifact installed (${siblingInstalledArtifact.artifactSlug})`
-                    : "No sibling artifact install recorded"}
-                </p>
-              </div>
-              <div className="span-full">
-                <strong>Operate with palette</strong>
-                <ul className="muted small" style={{ margin: "6px 0 0 18px" }}>
-                  <li><code>show devices</code></li>
-                  <li><code>show devices by status</code></li>
-                  <li><code>show artifacts of kind app_spec</code></li>
-                </ul>
-              </div>
-              <div className="span-full">
-                <strong>Semantics</strong>
-                <p className="muted small">
-                  The root instance currently deploys the generated app as local runtime containers. The sibling instance installs the generated artifact and executes against its own sibling-owned runtime target.
-                </p>
-              </div>
-              {installedCapability.reports.length > 0 ? (
-                <div className="span-full">
-                  <strong>Generated reports</strong>
-                  <p className="muted small">{installedCapability.reports.join(", ")}</p>
-                </div>
-              ) : null}
             </div>
             {onOpenArtifacts ? (
               <div className="inline-actions" style={{ marginTop: 12 }}>
                 <button className="ghost" type="button" onClick={() => onOpenArtifacts("app_spec")}>
-                  View Application Artifacts
+                  View application artifacts
                 </button>
               </div>
             ) : null}
-          </div>
-        ) : null}
-        {relatedJobs.length > 0 ? (
-          <div className="card" style={{ marginBottom: 12 }}>
-            <div className="card-header">
-              <h3>Execution Timeline</h3>
+          </section>
+
+          <details className="card" open={editorExpanded} ref={editorRef} onToggle={(event) => setEditorExpanded((event.currentTarget as HTMLDetailsElement).open)}>
+            <summary><strong>Edit app definition</strong></summary>
+            <div className="form-grid" style={{ marginTop: 12 }}>
+              <label>
+                Title
+                <input className="input" value={title} onChange={(event) => setTitle(event.target.value)} />
+              </label>
+              <label>
+                Status
+                <select className="input" value={status} onChange={(event) => setStatus(event.target.value as DraftStatusValue)}>
+                  <option value="draft">draft</option>
+                  <option value="ready">ready</option>
+                  <option value="submitted">submitted</option>
+                  <option value="archived">archived</option>
+                </select>
+              </label>
+              <label className="span-full">
+                Raw Prompt
+                <textarea className="input" rows={4} value={rawPrompt} readOnly />
+              </label>
+              <label className="span-full">
+                Draft JSON
+                <textarea className="input" rows={18} value={jsonText} onChange={(event) => setJsonText(event.target.value)} />
+              </label>
             </div>
-            <div className="canvas-table-wrap">
-              <table className="canvas-table">
-                <thead>
-                  <tr>
-                    <th>Step</th>
-                    <th>Status</th>
-                    <th>Updated</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {relatedJobs.map((job) => (
-                    <tr key={job.id}>
-                      <td>
-                        <button className="ghost small" type="button" onClick={() => (onOpenJob ? onOpenJob(job.id) : navigate(toWorkspacePath(workspaceId, `jobs/${job.id}`)))}>
-                          {job.type}
-                        </button>
-                      </td>
-                      <td><span className="chip">{job.status}</span></td>
-                      <td>{job.updated_at || job.created_at || "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="inline-actions" style={{ marginTop: 12 }}>
+              <button className="ghost" onClick={() => void save()} disabled={saving || !workspaceId}>
+                {saving ? "Saving..." : "Save draft"}
+              </button>
+              <button className="primary" onClick={() => void submit()} disabled={submitting || !workspaceId}>
+                {submitting ? "Submitting..." : "Submit draft"}
+              </button>
             </div>
-          </div>
-        ) : null}
-        {(String(draft?.status || status).toLowerCase() === "submitted" || relatedJobs.length > 0) ? (
-          <div className="card" style={{ marginBottom: 12 }}>
-            <div className="card-header">
-              <h3>Execution Findings</h3>
-              {executionNote ? <span className="chip">{executionNote.status}</span> : null}
+          </details>
+
+          <details className="card" open={metadataExpanded} onToggle={(event) => setMetadataExpanded((event.currentTarget as HTMLDetailsElement).open)}>
+            <summary><strong>Technical metadata</strong></summary>
+            <div className="detail-grid" style={{ marginTop: 12 }}>
+              <div>
+                <strong>Draft ID</strong>
+                <p className="muted small">{draft?.id || draftId}</p>
+              </div>
+              <div>
+                <strong>Workspace ID</strong>
+                <p className="muted small">{draft?.workspace_id || workspaceId}</p>
+              </div>
+              <div>
+                <strong>Created By</strong>
+                <p className="muted small">{draft?.created_by || "user"}</p>
+              </div>
+              <div>
+                <strong>Updated</strong>
+                <p className="muted small">{draft?.updated_at || "—"}</p>
+              </div>
             </div>
-            {executionNotesLoading ? <p className="muted small">Loading execution trace…</p> : null}
-            {executionNotesError ? <InlineMessage tone="error" title="Trace unavailable" body={executionNotesError} /> : null}
-            {!executionNotesLoading && !executionNotesError && !executionNote ? (
-              <p className="muted small">Execution trace not yet linked to this build.</p>
-            ) : null}
+          </details>
+
+          <details className="card">
+            <summary><strong>Diagnostics and raw logs</strong></summary>
             {executionNote ? (
               <>
-                <div className="detail-grid" style={{ marginTop: 12, marginBottom: 12 }}>
+                <div className="detail-grid" style={{ marginTop: 12 }}>
                   <div>
                     <strong>Recorded</strong>
                     <p className="muted small">{formatTimestamp(executionNote.updated_at || executionNote.timestamp)}</p>
                   </div>
                   <div>
-                    <strong>Match</strong>
+                    <strong>Match reason</strong>
                     <p className="muted small">{executionNote.match_reason.replace(/_/g, " ")}</p>
                   </div>
                   <div className="span-full">
                     <strong>Request</strong>
                     <p className="muted small">{executionNote.prompt_or_request || "—"}</p>
                   </div>
-                  <div>
-                    <strong>Findings</strong>
-                    <ul className="muted small" style={{ margin: "6px 0 0 18px" }}>
-                      {(executionNote.findings || []).slice(0, 3).map((item, index) => <li key={`finding-${index}`}>{item}</li>)}
-                    </ul>
-                  </div>
-                  <div>
-                    <strong>Proposed Fix</strong>
-                    <p className="muted small">{executionNote.proposed_fix || "—"}</p>
-                  </div>
-                  <div>
-                    <strong>Validation</strong>
-                    <ul className="muted small" style={{ margin: "6px 0 0 18px" }}>
-                      {(executionNote.validation_summary || []).slice(0, 4).map((item, index) => <li key={`validation-${index}`}>{item}</li>)}
-                    </ul>
-                  </div>
-                  <div>
-                    <strong>Debt / Warnings</strong>
-                    {executionNote.debt_recorded && executionNote.debt_recorded.length > 0 ? (
-                      <ul className="muted small" style={{ margin: "6px 0 0 18px" }}>
-                        {executionNote.debt_recorded.slice(0, 3).map((item, index) => <li key={`debt-${index}`}>{item}</li>)}
-                      </ul>
-                    ) : (
-                      <p className="muted small">None recorded.</p>
-                    )}
-                  </div>
                 </div>
-                {executionNotes.length > 1 ? (
-                  <p className="muted small">Showing latest of {executionNotes.length} explicitly linked execution traces.</p>
+                {executionNote.debt_recorded?.length ? (
+                  <>
+                    <strong>Recorded debt</strong>
+                    <ul className="muted small app-draft-summary-list">
+                      {executionNote.debt_recorded.map((item, index) => <li key={`debt-${index}`}>{item}</li>)}
+                    </ul>
+                  </>
                 ) : null}
-                <button className="ghost small" type="button" onClick={() => setExecutionTraceExpanded((value) => !value)}>
-                  {executionTraceExpanded ? "Hide full execution note" : "View full execution note"}
-                </button>
-                {executionTraceExpanded ? (
-                  <pre className="code-block" style={{ marginTop: 12 }}>{prettyJson(executionNote)}</pre>
-                ) : null}
+                <pre className="code-block" style={{ marginTop: 12 }}>{prettyJson(executionNote)}</pre>
+              </>
+            ) : (
+              <p className="muted small" style={{ marginTop: 12 }}>No linked execution note is available for this draft yet.</p>
+            )}
+            {latestFailedJob?.logs_text ? (
+              <>
+                <strong>Latest failed job logs</strong>
+                <pre className="code-block" style={{ marginTop: 12 }}>{latestFailedJob.logs_text}</pre>
               </>
             ) : null}
-          </div>
-        ) : null}
-        <Tabs
-          value={activeTab}
-          onChange={(next) => setActiveTab(next)}
-          options={[
-            { value: "editor", label: "Editor" },
-            { value: "meta", label: "Meta" },
-          ]}
-          ariaLabel="Draft detail tabs"
-        />
-        {activeTab === "editor" && (
-          <div className="form-grid" style={{ marginTop: 12 }}>
-            <label>
-              Title
-              <input className="input" value={title} onChange={(event) => setTitle(event.target.value)} />
-            </label>
-            <label>
-              Status
-              <select className="input" value={status} onChange={(event) => setStatus(event.target.value as DraftStatusValue)}>
-                <option value="draft">draft</option>
-                <option value="ready">ready</option>
-                <option value="submitted">submitted</option>
-                <option value="archived">archived</option>
-              </select>
-            </label>
-            <label className="span-full">
-              Raw Prompt
-              <textarea className="input" rows={4} value={rawPrompt} readOnly />
-            </label>
-            <label className="span-full">
-              Draft JSON
-              <textarea className="input" rows={18} value={jsonText} onChange={(event) => setJsonText(event.target.value)} />
-            </label>
-          </div>
-        )}
-        {activeTab === "meta" && (
-          <div className="detail-grid" style={{ marginTop: 12 }}>
-            <div>
-              <strong>Draft ID</strong>
-              <p className="muted small">{draft?.id || draftId}</p>
-            </div>
-            <div>
-              <strong>Workspace ID</strong>
-              <p className="muted small">{draft?.workspace_id || workspaceId}</p>
-            </div>
-            <div>
-              <strong>Created By</strong>
-              <p className="muted small">{draft?.created_by || "user"}</p>
-            </div>
-            <div>
-              <strong>Updated</strong>
-              <p className="muted small">{draft?.updated_at || "—"}</p>
-            </div>
-          </div>
-        )}
-      </section>
+            <strong>Raw draft JSON</strong>
+            <pre className="code-block" style={{ marginTop: 12 }}>{jsonText}</pre>
+          </details>
+        </div>
+      </div>
     </>
   );
 }

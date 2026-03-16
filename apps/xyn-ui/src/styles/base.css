@@ -4948,7 +4948,138 @@ button.sm {
   background: linear-gradient(90deg, rgba(34, 197, 94, 0.82), rgba(56, 189, 248, 0.82));
 }
 
+.app-draft-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(320px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.app-draft-main-column,
+.app-draft-side-column {
+  display: grid;
+  gap: 16px;
+}
+
+.app-draft-hero-card .card-header {
+  align-items: flex-start;
+}
+
+.app-draft-state-chip.success,
+.chip.success {
+  background: rgba(34, 197, 94, 0.18);
+  border: 1px solid rgba(34, 197, 94, 0.32);
+}
+
+.app-draft-state-chip.warn,
+.chip.warn {
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px solid rgba(245, 158, 11, 0.32);
+}
+
+.app-draft-state-chip.danger,
+.chip.danger {
+  background: rgba(239, 68, 68, 0.16);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.app-draft-state-chip.info,
+.chip.info {
+  background: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.28);
+}
+
+.app-draft-state-chip.muted,
+.chip.muted {
+  background: rgba(148, 163, 184, 0.18);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.app-draft-summary-list {
+  margin: 6px 0 0 18px;
+}
+
+.app-draft-action-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.app-draft-action-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--surface-soft);
+}
+
+.app-draft-action-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.app-draft-disabled-action {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  padding: 0 2px;
+}
+
+.app-draft-timeline {
+  display: grid;
+  gap: 12px;
+}
+
+.app-draft-timeline-step {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.app-draft-timeline-marker {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  margin-top: 4px;
+  border: 2px solid var(--border-strong);
+  background: var(--card);
+}
+
+.app-draft-timeline-step.complete .app-draft-timeline-marker {
+  background: rgba(34, 197, 94, 0.78);
+  border-color: rgba(34, 197, 94, 0.92);
+}
+
+.app-draft-timeline-step.current .app-draft-timeline-marker {
+  background: rgba(245, 158, 11, 0.8);
+  border-color: rgba(245, 158, 11, 0.95);
+}
+
+.app-draft-timeline-step.failed .app-draft-timeline-marker {
+  background: rgba(239, 68, 68, 0.8);
+  border-color: rgba(239, 68, 68, 0.95);
+}
+
+.app-draft-timeline-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.app-draft-side-column details summary {
+  cursor: pointer;
+}
+
 @media (max-width: 768px) {
+  .app-draft-layout {
+    grid-template-columns: 1fr;
+  }
+
   .workbench-topbar {
     justify-content: center;
   }
