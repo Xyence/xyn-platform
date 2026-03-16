@@ -7,7 +7,7 @@ from xyn_orchestrator.execution_queue import (
     evaluate_dev_task_queue_state,
     select_next_dispatchable_queue_entry,
 )
-from xyn_orchestrator.models import CoordinationThread, DevTask, UserIdentity, Workspace, WorkspaceMembership
+from xyn_orchestrator.models import CoordinationThread, DevTask, Run, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xco import derive_work_queue
 
 
@@ -74,15 +74,38 @@ class ExecutionQueueTests(TestCase):
         self.assertEqual(state.reason, "brief_not_ready")
 
     def test_queue_state_allows_approved_structured_brief(self):
+        source_run = Run.objects.create(
+            entity_type="blueprint",
+            entity_id=uuid.uuid4(),
+            status="succeeded",
+            summary="Implementation plan source",
+            created_by=self.user,
+        )
         task = self._task(
             execution_brief={"schema_version": "v1", "summary": "Implement queue dispatch"},
             execution_brief_review_state="approved",
+            source_run=source_run,
+            input_artifact_key="implementation_plan.json",
             execution_policy={"require_brief_approval": True},
         )
         state = evaluate_dev_task_queue_state(task, normalized_status="queued")
         self.assertTrue(state.dispatchable)
         self.assertTrue(state.queue_ready)
         self.assertEqual(state.status, "queue_ready")
+
+    def test_queue_state_requires_runtime_submission_context(self):
+        task = self._task(
+            execution_brief={"schema_version": "v1", "summary": "Implement queue dispatch"},
+            execution_brief_review_state="approved",
+            source_run=None,
+            input_artifact_key="",
+            execution_policy={"require_brief_approval": True},
+        )
+        state = evaluate_dev_task_queue_state(task, normalized_status="queued")
+        self.assertFalse(state.dispatchable)
+        self.assertTrue(state.blocked)
+        self.assertEqual(state.reason, "runtime_submission_context_missing")
+        self.assertIn("runtime submission", state.message.lower())
 
     def test_queue_state_marks_runtime_queued_task_as_dispatched(self):
         task = self._task(runtime_run_id=uuid.uuid4())

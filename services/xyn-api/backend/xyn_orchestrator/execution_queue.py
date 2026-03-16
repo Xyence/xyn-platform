@@ -28,6 +28,16 @@ def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _runtime_submission_context_missing_reason(task: DevTask) -> Optional[str]:
+    if not _clean_text(task.source_run_id):
+        return "Task is missing the source run context required for runtime submission."
+    if not _clean_text(task.input_artifact_key):
+        return "Task is missing the planning artifact reference required for runtime submission."
+    if not _clean_text(task.work_item_id):
+        return "Task is missing the durable work item reference required for runtime submission."
+    return None
+
+
 def evaluate_dev_task_queue_state(
     task: DevTask,
     *,
@@ -85,6 +95,17 @@ def evaluate_dev_task_queue_state(
             status="terminal",
             reason=f"status_{status}",
             message=f"Task is {status} and is no longer dispatchable.",
+        )
+    runtime_submission_context_error = _runtime_submission_context_missing_reason(task)
+    if runtime_submission_context_error:
+        return DevTaskQueueState(
+            queue_ready=False,
+            dispatchable=False,
+            dispatched=False,
+            blocked=True,
+            status="blocked",
+            reason="runtime_submission_context_missing",
+            message=runtime_submission_context_error,
         )
     readiness = execution_brief_readiness(task, work_item=work_item)
     if not readiness.executable:
