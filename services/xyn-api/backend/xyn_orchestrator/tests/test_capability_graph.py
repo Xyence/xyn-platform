@@ -126,7 +126,15 @@ class CapabilityGraphTests(TestCase):
         payload = get_capability_paths_for_context(context="landing", workspace_id="ws-1")
         self.assertEqual(payload["context"], "landing")
         self.assertEqual(payload["paths"][0]["id"], "build_application")
-        self.assertEqual([step["capability_id"] for step in payload["paths"][0]["steps"]], ["build_application"])
+        self.assertEqual(
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [
+                ("build_application", "current"),
+                ("continue_application_draft", "pending"),
+                ("view_execution_status", "pending"),
+                ("open_application_workspace", "pending"),
+            ],
+        )
 
     def test_path_service_adapts_completed_app_draft_to_workspace_open(self):
         payload = get_capability_paths_for_context(
@@ -137,8 +145,8 @@ class CapabilityGraphTests(TestCase):
         )
         self.assertEqual(payload["paths"][0]["id"], "build_application")
         self.assertEqual(
-            [step["capability_id"] for step in payload["paths"][0]["steps"]],
-            ["build_application", "open_application_workspace"],
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [("build_application", "completed"), ("open_application_workspace", "current")],
         )
 
     def test_path_service_keeps_execution_status_while_app_draft_is_running(self):
@@ -149,8 +157,13 @@ class CapabilityGraphTests(TestCase):
             entity_state={"draft_state": "submitted", "execution_state": "executing", "application_exists": True},
         )
         self.assertEqual(
-            [step["capability_id"] for step in payload["paths"][0]["steps"]],
-            ["build_application", "view_execution_status", "open_application_workspace"],
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [
+                ("build_application", "completed"),
+                ("continue_application_draft", "completed"),
+                ("view_execution_status", "current"),
+                ("open_application_workspace", "pending"),
+            ],
         )
 
     def test_path_endpoint_returns_artifact_review_path(self):
@@ -166,18 +179,30 @@ class CapabilityGraphTests(TestCase):
 
     def test_path_service_filters_invalid_app_draft_steps(self):
         payload = get_capability_paths_for_context(
-            context="landing",
+            context="app_intent_draft",
+            entity_id="draft-1",
             workspace_id="ws-1",
-            entity_state={"draft_state": None, "execution_state": None, "application_exists": False},
+            entity_state={"draft_state": "draft", "execution_state": None, "application_exists": False},
         )
-        self.assertEqual([step["capability_id"] for step in payload["paths"][0]["steps"]], ["build_application"])
+        self.assertEqual(
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [
+                ("build_application", "completed"),
+                ("continue_application_draft", "current"),
+                ("view_execution_status", "pending"),
+                ("open_application_workspace", "pending"),
+            ],
+        )
 
     def test_workspace_exploration_path_truncates_when_workspace_is_initialized(self):
         payload = get_capability_paths_for_context(
             context="application_workspace",
             entity_id="app-1",
             workspace_id="ws-1",
-            entity_state={"application_exists": True, "workspace_available": True},
+            entity_state={"application_exists": True, "workspace_available": True, "workspace_initialized": True},
         )
         self.assertEqual(payload["paths"][0]["id"], "workspace_exploration")
-        self.assertEqual([step["capability_id"] for step in payload["paths"][0]["steps"]], ["open_application_workspace"])
+        self.assertEqual(
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [("open_application_workspace", "completed")],
+        )

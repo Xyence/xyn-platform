@@ -2,6 +2,17 @@ import { useNavigate } from "react-router-dom";
 import type { CapabilityPath } from "../../../api/types";
 import { executeCapabilityAction } from "../../navigation/executeCapabilityAction";
 
+function statusMarker(status?: string): string {
+  switch (String(status || "").trim().toLowerCase()) {
+    case "completed":
+      return "✔";
+    case "current":
+      return "→";
+    default:
+      return "";
+  }
+}
+
 export default function CapabilityPathPanel({
   path,
   workspaceId,
@@ -45,7 +56,10 @@ export default function CapabilityPathPanel({
                 })
               }
             >
-              <span>{step.name}</span>
+              <span>
+                {statusMarker(step.status) ? `${statusMarker(step.status)} ` : ""}
+                {step.name}
+              </span>
               <span className="muted small">{step.description}</span>
             </button>
           </li>

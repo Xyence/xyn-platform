@@ -1939,6 +1939,7 @@ export type CapabilityPathStep = {
   action_type?: "prompt" | "open_descriptor" | "route" | string;
   action_target?: string | null;
   available?: boolean;
+  status?: "completed" | "current" | "pending";
 };
 
 export type CapabilityPath = {

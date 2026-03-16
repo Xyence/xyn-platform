@@ -29087,11 +29087,13 @@ def _resolve_capability_entity_state(
         "execution_state": None,
         "application_exists": False,
         "workspace_available": False,
+        "workspace_initialized": False,
     }
 
     if resolved_context == "application_workspace":
         state["application_exists"] = bool(normalized_entity_id)
         state["workspace_available"] = bool(normalized_entity_id or normalized_workspace_id)
+        state["workspace_initialized"] = bool(normalized_entity_id or normalized_workspace_id)
         return state
 
     workspace = _resolve_workspace_for_identity(identity, normalized_workspace_id or "")

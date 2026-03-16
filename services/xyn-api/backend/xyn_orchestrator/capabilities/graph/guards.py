@@ -66,6 +66,6 @@ def evaluate_path_condition(condition: str | None, entity_state: Dict[str, Any] 
         return bool(state.get("application_exists") or state.get("artifact_exists"))
 
     if token == "workspace_initialized":
-        return bool(state.get("workspace_available") or state.get("application_exists"))
+        return bool(state.get("workspace_initialized"))
 
     return False
