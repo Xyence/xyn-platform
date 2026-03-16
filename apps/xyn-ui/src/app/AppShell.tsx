@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Bot } from "lucide-react";
 import { getAuthMode, getMe, getMyProfile, getTenantBranding, listArtifactNavSurfaces, listWorkspaces } from "../api/xyn";
@@ -7,43 +7,43 @@ import type { ArtifactSurface } from "../api/types";
 import { CREATE_ACTIONS, NAV_GROUPS, NAV_MOVE_TOAST_STORAGE_KEY, NavGroup, NavItem, NavUserContext } from "./nav/nav.config";
 import { getBreadcrumbs, visibleNav } from "./nav/nav.utils";
 import Sidebar from "./components/nav/Sidebar";
-import BlueprintsPage from "./pages/BlueprintsPage";
-import InstancesPage from "./pages/InstancesPage";
-import SecretConfigurationPage from "./pages/SecretConfigurationPage";
-import AIConfigPage from "./pages/AIConfigPage";
-import IdentityConfigurationPage from "./pages/IdentityConfigurationPage";
-import AccessControlPage from "./pages/AccessControlPage";
-import RunsPage from "./pages/RunsPage";
-import JobsListPage from "./pages/JobsListPage";
-import JobDetailPage from "./pages/JobDetailPage";
-import ActivityPage from "./pages/ActivityPage";
-import DevTasksPage from "./pages/DevTasksPage";
-import PlatformBrandingPage from "./pages/PlatformBrandingPage";
-import ControlPlanePage from "./pages/ControlPlanePage";
-import GuidesPage from "./pages/GuidesPage";
-import ToursPage from "./pages/ToursPage";
-import TourDetailPage from "./pages/TourDetailPage";
-import XynMapPage from "./pages/XynMapPage";
-import CapabilityExplorerPage from "./pages/CapabilityExplorerPage";
-import PlatformSettingsPage from "./pages/PlatformSettingsPage";
-import PlatformSettingsHubPage from "./pages/PlatformSettingsHubPage";
-import PlatformDeploySettingsPage from "./pages/PlatformDeploySettingsPage";
-import PlatformRenderingSettingsPage from "./pages/PlatformRenderingSettingsPage";
-import VideoAdapterConfigPage from "./pages/VideoAdapterConfigPage";
-import SeedPacksPage from "./pages/SeedPacksPage";
-import ArtifactsRegistryPage from "./pages/ArtifactsRegistryPage";
-import ArtifactsLibraryPage from "./pages/ArtifactsLibraryPage";
-import ArtifactDetailPage from "./pages/ArtifactDetailPage";
-import ArtifactSurfaceRoutePage from "./pages/ArtifactSurfaceRoutePage";
-import ArticleSurfaceEditorRedirectPage from "./pages/ArticleSurfaceEditorRedirectPage";
-import ArticleSurfaceDocsPage from "./pages/ArticleSurfaceDocsPage";
-import WorkbenchPage from "./pages/WorkbenchPage";
-import WorkspaceSettingsPage from "./pages/WorkspaceSettingsPage";
-import DraftsListPage from "./pages/DraftsListPage";
-import DraftCreatePage from "./pages/DraftCreatePage";
-import DraftDetailPage from "./pages/DraftDetailPage";
-import WorkspacesPage from "./pages/WorkspacesPage";
-import PlatformInitializationPage from "./pages/PlatformInitializationPage";
+const BlueprintsPage = lazy(() => import("./pages/BlueprintsPage"));
+const InstancesPage = lazy(() => import("./pages/InstancesPage"));
+const SecretConfigurationPage = lazy(() => import("./pages/SecretConfigurationPage"));
+const AIConfigPage = lazy(() => import("./pages/AIConfigPage"));
+const IdentityConfigurationPage = lazy(() => import("./pages/IdentityConfigurationPage"));
+const AccessControlPage = lazy(() => import("./pages/AccessControlPage"));
+const RunsPage = lazy(() => import("./pages/RunsPage"));
+const JobsListPage = lazy(() => import("./pages/JobsListPage"));
+const JobDetailPage = lazy(() => import("./pages/JobDetailPage"));
+const ActivityPage = lazy(() => import("./pages/ActivityPage"));
+const DevTasksPage = lazy(() => import("./pages/DevTasksPage"));
+const PlatformBrandingPage = lazy(() => import("./pages/PlatformBrandingPage"));
+const ControlPlanePage = lazy(() => import("./pages/ControlPlanePage"));
+const GuidesPage = lazy(() => import("./pages/GuidesPage"));
+const ToursPage = lazy(() => import("./pages/ToursPage"));
+const TourDetailPage = lazy(() => import("./pages/TourDetailPage"));
+const XynMapPage = lazy(() => import("./pages/XynMapPage"));
+const CapabilityExplorerPage = lazy(() => import("./pages/CapabilityExplorerPage"));
+const PlatformSettingsPage = lazy(() => import("./pages/PlatformSettingsPage"));
+const PlatformSettingsHubPage = lazy(() => import("./pages/PlatformSettingsHubPage"));
+const PlatformDeploySettingsPage = lazy(() => import("./pages/PlatformDeploySettingsPage"));
+const PlatformRenderingSettingsPage = lazy(() => import("./pages/PlatformRenderingSettingsPage"));
+const VideoAdapterConfigPage = lazy(() => import("./pages/VideoAdapterConfigPage"));
+const SeedPacksPage = lazy(() => import("./pages/SeedPacksPage"));
+const ArtifactsRegistryPage = lazy(() => import("./pages/ArtifactsRegistryPage"));
+const ArtifactsLibraryPage = lazy(() => import("./pages/ArtifactsLibraryPage"));
+const ArtifactDetailPage = lazy(() => import("./pages/ArtifactDetailPage"));
+const ArtifactSurfaceRoutePage = lazy(() => import("./pages/ArtifactSurfaceRoutePage"));
+const ArticleSurfaceEditorRedirectPage = lazy(() => import("./pages/ArticleSurfaceEditorRedirectPage"));
+const ArticleSurfaceDocsPage = lazy(() => import("./pages/ArticleSurfaceDocsPage"));
+const WorkbenchPage = lazy(() => import("./pages/WorkbenchPage"));
+const WorkspaceSettingsPage = lazy(() => import("./pages/WorkspaceSettingsPage"));
+const DraftsListPage = lazy(() => import("./pages/DraftsListPage"));
+const DraftCreatePage = lazy(() => import("./pages/DraftCreatePage"));
+const DraftDetailPage = lazy(() => import("./pages/DraftDetailPage"));
+const WorkspacesPage = lazy(() => import("./pages/WorkspacesPage"));
+const PlatformInitializationPage = lazy(() => import("./pages/PlatformInitializationPage"));
 import { useGlobalHotkeys } from "./hooks/useGlobalHotkeys";
 import ReportOverlay from "./components/ReportOverlay";
 import UserMenu from "./components/common/UserMenu";
@@ -229,6 +229,14 @@ function PlatformSettingsLegacyRoute({ workspaceId }: { workspaceId: string }) {
     return <PlatformSettingsPage />;
   }
   return <Navigate to={nextTarget} replace />;
+}
+
+function RouteLoadingFallback() {
+  return (
+    <section className="card">
+      <p className="muted">Loading view…</p>
+    </section>
+  );
 }
 
 export default function AppShell() {
@@ -828,6 +836,7 @@ export default function AppShell() {
               actionTo="/app/platform/hub"
             />
           ) : (
+          <Suspense fallback={<RouteLoadingFallback />}>
           <Routes>
             <Route path="/" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "/"} replace />} />
             <Route path="workbench" element={<WorkbenchPage workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />} />
@@ -1124,6 +1133,7 @@ export default function AppShell() {
             <Route path="settings" element={<WorkspaceSettingsPage workspaceName={activeWorkspace?.name || "Workspace"} />} />
             <Route path="*" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "workspaces"} replace />} />
           </Routes>
+          </Suspense>
           )}
         </main>
       </div>
