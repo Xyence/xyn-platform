@@ -29798,6 +29798,12 @@ def _dispatch_selected_queue_item(*, workspace: Workspace, task: DevTask, user, 
         selected_task.updated_by = user
         selected_task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
         raise RuntimeError(str(exc))
+    except RuntimeError as exc:
+        selected_task.status = "failed"
+        selected_task.last_error = str(exc)
+        selected_task.updated_by = user
+        selected_task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+        raise
     selected_task.refresh_from_db()
     if thread:
         record_thread_event(
@@ -29856,7 +29862,10 @@ def dev_task_dispatch(request: HttpRequest, task_id: str) -> JsonResponse:
     try:
         result = _dispatch_selected_queue_item(workspace=workspace, task=task, user=request.user, identity=identity)
     except RuntimeError as exc:
-        return JsonResponse({"error": str(exc)}, status=409)
+        task.refresh_from_db()
+        error_text = str(exc) or "runtime submission failed"
+        status_code = 502 if "runtime" in error_text.lower() or "xyn-core" in error_text.lower() else 409
+        return JsonResponse({"error": error_text, "work_item": _serialize_work_item_detail(task)}, status=status_code)
     task.refresh_from_db()
     return JsonResponse(
         {

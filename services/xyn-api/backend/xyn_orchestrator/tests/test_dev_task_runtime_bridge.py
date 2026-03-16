@@ -6,13 +6,14 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import Client, RequestFactory, TestCase
 
-from xyn_orchestrator.models import Application, DevTask, Goal, ManagedRepository, Run, RunArtifact, UserIdentity, Workspace, WorkspaceMembership
+from xyn_orchestrator.models import Application, CoordinationThread, DevTask, Goal, ManagedRepository, Run, RunArtifact, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import (
     _build_dev_task_runtime_payload,
     _conversation_execution_context,
     _load_dev_task_runtime_source,
     blueprint_dev_tasks,
     dev_task_detail,
+    dev_task_dispatch,
     dev_task_requeue,
     dev_task_retry,
     dev_task_run,
@@ -194,6 +195,63 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
         self.assertEqual(payload["run_id"], runtime_run_id)
+
+    def test_dev_task_dispatch_returns_structured_runtime_submission_error(self):
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Implement Epic C bridge",
+            "objective": "Route development execution through the runtime bridge.",
+        }
+        self.task.execution_brief_review_state = "approved"
+        self.task.execution_policy = {"require_brief_approval": True}
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Runtime Dispatch Goal",
+            description="",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Runtime Dispatch Thread",
+            status="active",
+            owner=self.identity,
+        )
+        self.task.goal = goal
+        self.task.coordination_thread = thread
+        self.task.status = "queued"
+        self.task.save(
+            update_fields=[
+                "execution_brief",
+                "execution_brief_review_state",
+                "execution_policy",
+                "goal",
+                "coordination_thread",
+                "status",
+                "updated_at",
+            ]
+        )
+
+        request = self._request(
+            f"/xyn/api/dev-tasks/{self.task.id}/dispatch",
+            data=json.dumps({"workspace_id": str(self.workspace.id)}),
+            method="post",
+        )
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
+            side_effect=RuntimeError("runtime submission failed"),
+        ):
+            response = dev_task_dispatch(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 502)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["error"], "runtime submission failed")
+        self.assertEqual(payload["work_item"]["status"], "awaiting_review")
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.status, "awaiting_review")
+        self.assertEqual(self.task.last_error, "runtime submission failed")
 
     def test_dev_task_run_uses_current_active_brief_after_revision(self):
         runtime_run_id = str(uuid.uuid4())
