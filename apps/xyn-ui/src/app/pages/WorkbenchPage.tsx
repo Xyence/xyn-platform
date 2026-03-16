@@ -217,7 +217,7 @@ export default function WorkbenchPage({
   };
 
   return (
-    <>
+    <div className="workbench-page">
       {!activePanel ? (
         <div className="workbench-start-shell">
           <section className="card workbench-start-card">
@@ -235,8 +235,8 @@ export default function WorkbenchPage({
         </div>
       ) : null}
 
-      <section className="workbench-canvas">
-        {panels.length ? (
+      {panels.length ? (
+        <section className="workbench-canvas">
           <Layout
             model={model}
             factory={factory}
@@ -253,8 +253,8 @@ export default function WorkbenchPage({
               return action;
             }}
           />
-        ) : null}
-      </section>
-    </>
+        </section>
+      ) : null}
+    </div>
   );
 }

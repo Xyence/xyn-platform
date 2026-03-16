@@ -356,6 +356,8 @@ input {
 
 .app-content.app-content-workbench {
   gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .page-header {
@@ -3422,6 +3424,13 @@ button.sm {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.workbench-page {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .workbench-start-card {
   min-height: 160px;
   justify-content: center;
@@ -3432,7 +3441,8 @@ button.sm {
 
 .workbench-start-shell {
   display: flex;
-  min-height: calc(100vh - 260px);
+  flex: 1 1 auto;
+  min-height: 0;
   align-items: center;
   justify-content: center;
 }
@@ -3584,11 +3594,12 @@ button.sm {
 
 .workbench-canvas {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 10px;
   position: relative;
   margin-top: 4px;
-  min-height: calc(100vh - 192px);
+  min-height: 0;
 }
 
 .workbench-canvas .flexlayout__layout {
