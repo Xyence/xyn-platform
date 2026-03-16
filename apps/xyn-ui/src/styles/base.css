@@ -386,6 +386,19 @@ input {
   gap: 12px;
 }
 
+.panel-section-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.inline-action-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  row-gap: 10px;
+}
+
 .instance-list {
   display: flex;
   flex-direction: column;
