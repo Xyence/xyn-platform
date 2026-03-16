@@ -413,8 +413,10 @@ function shortArtifactId(id: string): string {
 function getImmediateNavigationAction(
   resolution: XynIntentResolutionResult | null | undefined,
 ): { kind: "panel"; panelKey: string; params: Record<string, unknown> } | { kind: "path"; path: string } | null {
-  if (!resolution || resolution.status !== "IntentResolved") return null;
+  if (!resolution) return null;
+  if (resolution.draft_payload) return null;
   const nextActions = Array.isArray(resolution.next_actions) ? resolution.next_actions : [];
+  if (nextActions.some((item) => item.action === "CreateDraft")) return null;
   const panelAction = nextActions.find(
     (item) => item.action === "OpenPanel" && typeof item.panel_key === "string" && item.panel_key.trim().length > 0,
   );

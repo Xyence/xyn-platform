@@ -1221,10 +1221,44 @@ class EpicDIntentResolveRouteTests(unittest.TestCase):
             response = intent_api.xyn_intent_resolve(request)
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(payload["action_type"], "ValidateDraft")
         self.assertEqual((payload.get("intent") or {}).get("intent_type"), IntentType.LIST_THREADS.value)
         self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "list_threads")
         self.assertEqual(((payload.get("conversation_action") or {}).get("thread_id")), "thread-1")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "thread_list")
+
+    def test_resolve_route_returns_direct_panel_intent_for_open_composer(self):
+        envelope = IntentEnvelope(
+            intent_family=IntentFamily.GOAL_PLANNING.value,
+            intent_type=IntentType.OPEN_COMPOSER.value,
+            target_context={"workspace_id": "ws-1"},
+            resolved_subject={},
+            action_payload={},
+            policy={},
+            confidence=0.95,
+            needs_clarification=False,
+            clarification_reason=None,
+            clarification_options=[],
+            resolution_notes=["composer navigation requested"],
+        )
+        request = self.factory.post(
+            "/xyn/api/xyn/intent/resolve",
+            data='{"message":"open composer","context":{"workspace_id":"ws-1","thread_id":"thread-1"}}',
+            content_type="application/json",
+        )
+        with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
+            patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
+            patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_intent_engine", return_value=SimpleNamespace(resolve_intent=lambda **kwargs: envelope)), \
+            patch.object(intent_api, "_audit_intent_event"), \
+            patch.object(intent_api, "_log_prompt_activity"):
+            response = intent_api.xyn_intent_resolve(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(payload["action_type"], "ValidateDraft")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "composer_detail")
 
     def test_resolve_route_returns_goal_intent_and_prompt_interpretation(self):
         envelope = IntentEnvelope(
@@ -2384,8 +2418,37 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         )
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(payload["action_type"], "ValidateDraft")
         self.assertGreaterEqual(len((payload.get("result") or {}).get("factories") or []), 1)
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "composer_detail")
+
+    def test_execute_conversation_action_show_goal_opens_composer_context_immediately(self):
+        goal = SimpleNamespace(id="goal-1", title="AI Real Estate Deal Finder")
+        detail = {"id": "goal-1", "title": "AI Real Estate Deal Finder"}
+        with patch.object(intent_api.Goal.objects, "filter", return_value=SimpleNamespace(first=lambda: goal)), patch.object(
+            intent_api, "_serialize_goal_detail", return_value=detail
+        ):
+            response = intent_api._execute_conversation_action(
+                identity=SimpleNamespace(id="user-1"),
+                user=SimpleNamespace(id="user-1"),
+                workspace=SimpleNamespace(id="ws-1"),
+                action={
+                    "action_type": "show_goal",
+                    "thread_id": "thread-1",
+                    "payload": {"action_payload": {}},
+                    "target_object": {"kind": "goal", "id": "goal-1", "workspace_id": "ws-1"},
+                },
+                prompt="show this goal",
+                request_id="req-1",
+                intent_payload={"intent_type": "show_goal"},
+                prompt_interpretation={"intent_type": "show_goal"},
+            )
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "composer_detail")
+        self.assertEqual(((payload.get("next_actions") or [])[0].get("params") or {}).get("goal_id"), "goal-1")
 
     def test_execute_conversation_action_generate_application_plan_returns_plan_panel_action(self):
         plan = SimpleNamespace(id="plan-1", name="Deal Finder", source_factory_key="ai_real_estate_deal_finder")
@@ -2499,7 +2562,8 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         )
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(payload["status"], "DraftReady")
+        self.assertEqual(payload["status"], "IntentResolved")
+        self.assertEqual(payload["action_type"], "ValidateDraft")
         self.assertEqual((payload.get("next_actions") or [])[0]["panel_key"], "composer_detail")
 
     def test_resolve_route_preserves_legacy_app_builder_flow_without_epic_d_intent(self):

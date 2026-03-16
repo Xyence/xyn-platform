@@ -16965,29 +16965,67 @@ def _direct_panel_intent_response(
     panel_key: str,
     params: Optional[Dict[str, Any]] = None,
     prompt_interpretation: Optional[Dict[str, Any]] = None,
+    extra_payload: Optional[Dict[str, Any]] = None,
 ) -> JsonResponse:
-    return JsonResponse(
-        {
-            "status": "IntentResolved",
-            "action_type": "ValidateDraft",
-            "artifact_type": "Workspace",
-            "artifact_id": None,
-            "summary": summary,
-            "prompt_interpretation": prompt_interpretation or {},
-            "next_actions": [
-                {
-                    "label": "Open panel",
-                    "action": "OpenPanel",
-                    "panel_key": panel_key,
-                    "params": params or {},
-                }
-            ],
-            "audit": {
-                "request_id": request_id,
-                "timestamp": timezone.now().isoformat(),
-            },
-        }
-    )
+    payload: Dict[str, Any] = {
+        "status": "IntentResolved",
+        "action_type": "ValidateDraft",
+        "artifact_type": "Workspace",
+        "artifact_id": None,
+        "summary": summary,
+        "prompt_interpretation": prompt_interpretation or {},
+        "next_actions": [
+            {
+                "label": "Open panel",
+                "action": "OpenPanel",
+                "panel_key": panel_key,
+                "params": params or {},
+            }
+        ],
+        "audit": {
+            "request_id": request_id,
+            "timestamp": timezone.now().isoformat(),
+        },
+    }
+    if isinstance(extra_payload, dict):
+        payload.update(extra_payload)
+    return JsonResponse(payload)
+
+
+def _direct_panel_target_for_conversation_action(
+    *,
+    action_type: str,
+    workspace_id: str,
+    action_payload: Optional[Dict[str, Any]] = None,
+    target: Optional[Dict[str, Any]] = None,
+) -> Optional[Tuple[str, Dict[str, Any]]]:
+    payload = action_payload if isinstance(action_payload, dict) else {}
+    target_object = target if isinstance(target, dict) else {}
+    summary_mode = str(payload.get("summary_mode") or "").strip()
+    target_id = str(target_object.get("id") or "").strip()
+
+    if action_type == ConversationActionType.LIST_APPLICATION_FACTORIES.value:
+        return "composer_detail", {"workspace_id": workspace_id}
+    if action_type == ConversationActionType.OPEN_COMPOSER.value:
+        params: Dict[str, Any] = {"workspace_id": workspace_id}
+        for key in ("factory_key", "application_plan_id", "application_id", "goal_id", "thread_id"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                params[key] = value
+        return "composer_detail", params
+    if action_type == ConversationActionType.LIST_THREADS.value:
+        return "thread_list", {"workspace_id": workspace_id}
+    if action_type == ConversationActionType.SHOW_THREAD_REVIEW.value and target_id:
+        return "composer_detail", {"workspace_id": workspace_id, "thread_id": target_id}
+    if action_type == ConversationActionType.SHOW_THREAD.value and target_id and not summary_mode:
+        return "composer_detail", {"workspace_id": workspace_id, "thread_id": target_id}
+    if action_type == ConversationActionType.LIST_GOALS.value and not summary_mode:
+        return "composer_detail", {"workspace_id": workspace_id}
+    if action_type == ConversationActionType.SHOW_GOAL.value and target_id and not summary_mode:
+        return "composer_detail", {"workspace_id": workspace_id, "goal_id": target_id}
+    if action_type == ConversationActionType.SHOW_APPLICATION.value and target_id:
+        return "composer_detail", {"workspace_id": workspace_id, "application_id": target_id}
+    return None
 
 
 def _direct_panel_prompt_interpretation(
@@ -20596,6 +20634,50 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             )
         )
         if conversation_action and not reuse_existing_work_item:
+            direct_panel_target = _direct_panel_target_for_conversation_action(
+                action_type=str(conversation_action.get("action_type") or "").strip(),
+                workspace_id=str(operator_workspace.id) if operator_workspace else context_workspace_id,
+                action_payload=((conversation_action.get("payload") or {}) if isinstance(conversation_action.get("payload"), dict) else {}).get("action_payload"),
+                target=(conversation_action.get("target_object") if isinstance(conversation_action.get("target_object"), dict) else {}),
+            )
+            if direct_panel_target:
+                panel_key, params = direct_panel_target
+                response_payload = {
+                    "status": "IntentResolved",
+                    "action_type": "ValidateDraft",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": str((epic_d_intent.resolution_notes or ["Intent resolved."])[0] or "Intent resolved."),
+                    "intent": epic_d_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": conversation_action,
+                    "next_actions": [{"label": "Open panel", "action": "OpenPanel", "panel_key": panel_key, "params": params}],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+                if not preview_mode:
+                    _audit_intent_event(
+                        message="intent.resolve",
+                        identity=identity,
+                        request_id=request_id,
+                        artifact_id=None,
+                        proposal={"epic_d_intent": epic_d_payload, "prompt": message},
+                        resolution=response_payload,
+                    )
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="completed",
+                        prompt=message,
+                        request_type="intent.resolve",
+                        workspace_id=str(operator_workspace.id) if operator_workspace else context_workspace_id,
+                        summary=response_payload["summary"],
+                        trace=epic_d_trace,
+                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                        prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
+                        thread_id=context_thread_id,
+                    )
+                return JsonResponse(response_payload)
             response_payload = {
                 "status": "DraftReady",
                 "action_type": "CreateDraft",
@@ -27040,22 +27122,18 @@ def _execute_conversation_action(
             )
         if action_type == ConversationActionType.LIST_THREADS.value:
             rows = [_coordination_thread_summary(item) for item in CoordinationThread.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100]]
-            return JsonResponse(
-                {
-                    "status": "DraftReady",
-                    "artifact_type": "Workspace",
-                    "artifact_id": None,
-                    "summary": f"Found {len(rows)} XCO thread(s).",
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=f"Found {len(rows)} XCO thread(s).",
+                panel_key="thread_list",
+                params={"workspace_id": str(workspace.id)},
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
                     "intent": intent_payload,
-                    "prompt_interpretation": prompt_interpretation,
                     "conversation_action": action,
                     "operation_result": True,
                     "result": {"threads": rows},
-                    "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "thread_list", "label": "Open Threads", "params": {"workspace_id": str(workspace.id)}}
-                    ],
-                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
-                }
+                },
             )
         if thread is None:
             return JsonResponse(
@@ -27133,6 +27211,34 @@ def _execute_conversation_action(
             if summary_mode == "thread_progress_summary"
             else f"Showing XCO thread {thread.title}."
         )
+        direct_thread_target = _direct_panel_target_for_conversation_action(
+            action_type=action_type,
+            workspace_id=str(workspace.id),
+            action_payload=action_payload,
+            target={"id": str(thread.id)},
+        )
+        if direct_thread_target:
+            panel_key, params = direct_thread_target
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=summary,
+                panel_key=panel_key,
+                params=params,
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
+                    "summary_type": (
+                        "thread_diagnostic_summary"
+                        if summary_mode == "thread_diagnostic_summary"
+                        else "thread_progress_summary"
+                        if summary_mode == "thread_progress_summary"
+                        else None
+                    ),
+                    "intent": intent_payload,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"thread": detail},
+                },
+            )
         return JsonResponse(
             {
                 "status": "DraftReady",
@@ -27197,22 +27303,18 @@ def _execute_conversation_action(
         if action_type == ConversationActionType.LIST_APPLICATION_FACTORIES.value:
             rows = [_serialize_application_factory_summary(definition) for definition in list_application_factories()]
             summary = f"Found {len(rows)} application factor{'ies' if len(rows) != 1 else 'y'}."
-            return JsonResponse(
-                {
-                    "status": "DraftReady",
-                    "artifact_type": "Workspace",
-                    "artifact_id": None,
-                    "summary": summary,
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=summary,
+                panel_key="composer_detail",
+                params={"workspace_id": str(workspace.id)},
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
                     "intent": intent_payload,
-                    "prompt_interpretation": prompt_interpretation,
                     "conversation_action": action,
                     "operation_result": True,
                     "result": {"factories": rows},
-                    "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id)}}
-                    ],
-                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
-                }
+                },
             )
         if action_type == ConversationActionType.OPEN_COMPOSER.value:
             params = {
@@ -27228,22 +27330,18 @@ def _execute_conversation_action(
                 params["goal_id"] = str(action_payload.get("goal_id"))
             if action_payload.get("thread_id"):
                 params["thread_id"] = str(action_payload.get("thread_id"))
-            return JsonResponse(
-                {
-                    "status": "DraftReady",
-                    "artifact_type": "Workspace",
-                    "artifact_id": None,
-                    "summary": "Opening the unified composer.",
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary="Opening the unified composer.",
+                panel_key="composer_detail",
+                params=params,
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
                     "intent": intent_payload,
-                    "prompt_interpretation": prompt_interpretation,
                     "conversation_action": action,
                     "operation_result": True,
                     "result": {"workspace_id": str(workspace.id)},
-                    "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": params}
-                    ],
-                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
-                }
+                },
             )
         if action_type == ConversationActionType.GENERATE_APPLICATION_PLAN.value:
             objective = str(action_payload.get("objective") or action_payload.get("reference") or prompt).strip()
@@ -27381,28 +27479,19 @@ def _execute_conversation_action(
                     status=409,
                 )
             detail = _serialize_application_detail(application)
-            return JsonResponse(
-                {
-                    "status": "DraftReady",
-                    "artifact_type": "Workspace",
-                    "artifact_id": None,
-                    "summary": f"Showing application {application.name}.",
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=f"Showing application {application.name}.",
+                panel_key="composer_detail",
+                params={"workspace_id": str(workspace.id), "application_id": str(application.id)},
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
                     "intent": intent_payload,
-                    "prompt_interpretation": prompt_interpretation,
                     "conversation_action": action,
                     "operation_result": True,
                     "result": {"application": detail},
                     "application_id": str(application.id),
-                    "next_actions": [
-                        {
-                            "action": "OpenPanel",
-                            "panel_key": "composer_detail",
-                            "label": "Open Composer",
-                            "params": {"workspace_id": str(workspace.id), "application_id": str(application.id)},
-                        }
-                    ],
-                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
-                }
+                },
             )
         if action_type == ConversationActionType.LIST_GOALS.value:
             goal_objects = list(Goal.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100])
@@ -27433,6 +27522,20 @@ def _execute_conversation_action(
                     summary = f"Found {len(goals)} goal(s) with no dominant portfolio issue right now."
             else:
                 summary = f"Found {len(goals)} goal(s)."
+            if not summary_mode:
+                return _direct_panel_intent_response(
+                    request_id=request_id,
+                    summary=summary,
+                    panel_key="composer_detail",
+                    params={"workspace_id": str(workspace.id)},
+                    prompt_interpretation=prompt_interpretation,
+                    extra_payload={
+                        "intent": intent_payload,
+                        "conversation_action": action,
+                        "operation_result": True,
+                        "result": {"goals": goals, "portfolio_state": portfolio_state},
+                    },
+                )
             return JsonResponse(
                 {
                     "status": "DraftReady",
@@ -27660,6 +27763,36 @@ def _execute_conversation_action(
                 else str(((loop_summary.get("recommended_next_slice") or {}) if isinstance(loop_summary, dict) else {}).get("summary") or "").strip() or f"Showing goal {goal.title}."
             )
         detail = locals().get("detail") if isinstance(locals().get("detail"), dict) else _serialize_goal_detail(goal)
+        direct_goal_target = _direct_panel_target_for_conversation_action(
+            action_type=action_type,
+            workspace_id=str(workspace.id),
+            action_payload=action_payload,
+            target={"id": str(goal.id)},
+        )
+        if direct_goal_target:
+            panel_key, params = direct_goal_target
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=summary,
+                panel_key=panel_key,
+                params=params,
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
+                    "summary_type": (
+                        "goal_progress_summary"
+                        if summary_mode == "goal_progress_summary"
+                        else "goal_diagnostic_summary"
+                        if summary_mode == "goal_diagnostic_summary"
+                        else "goal_insight_summary"
+                        if summary_mode == "goal_insight_summary"
+                        else None
+                    ),
+                    "intent": intent_payload,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"goal": detail},
+                },
+            )
         return JsonResponse(
             {
                 "status": "DraftReady",

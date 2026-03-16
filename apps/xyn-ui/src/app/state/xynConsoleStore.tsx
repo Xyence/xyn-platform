@@ -178,6 +178,17 @@ function workspaceIdFromPathname(pathname: string): string {
   return match?.[1] ? decodeURIComponent(match[1]) : "";
 }
 
+function shouldAutoNavigateResolution(result: XynIntentResolutionResult | null | undefined): boolean {
+  if (!result || result.draft_payload) return false;
+  const nextActions = Array.isArray(result.next_actions) ? result.next_actions : [];
+  if (nextActions.some((item) => item.action === "CreateDraft")) return false;
+  return nextActions.some(
+    (item) =>
+      (item.action === "OpenPanel" && typeof item.panel_key === "string" && item.panel_key.trim().length > 0)
+      || (item.action === "OpenPath" && typeof item.path === "string" && item.path.trim().length > 0)
+  );
+}
+
 function readSessionsFromStorage(): PersistedSessions {
   if (typeof window === "undefined") return {};
   try {
@@ -519,7 +530,9 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
           inputText: "",
         }));
       }
-      setOpen(true);
+      if (!shouldAutoNavigateResolution(result)) {
+        setOpen(true);
+      }
       return result;
     } catch (error) {
       const failure: XynIntentResolutionResult = {

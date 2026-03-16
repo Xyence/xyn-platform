@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import XynConsoleNode from "./XynConsoleNode";
+import XynConsoleCore from "./XynConsoleCore";
 import { XynConsoleProvider, useXynConsole } from "../../state/xynConsoleStore";
 
 const apiMocks = vi.hoisted(() => ({
@@ -42,6 +43,19 @@ function renderConsoleAt(path: string) {
       </XynConsoleProvider>
     </MemoryRouter>
   );
+}
+
+function renderConsoleCoreAt(path: string, onOpenPanel = vi.fn()) {
+  return {
+    onOpenPanel,
+    ...render(
+      <MemoryRouter initialEntries={[path]}>
+        <XynConsoleProvider>
+          <XynConsoleCore mode="overlay" onOpenPanel={onOpenPanel} />
+        </XynConsoleProvider>
+      </MemoryRouter>
+    ),
+  };
 }
 
 function ConsoleBridgeHarness({
@@ -285,6 +299,33 @@ describe("XynConsole", () => {
     await screen.findByText("Will create and submit an app intent draft.");
     expect(screen.getByRole("button", { name: "Create draft" })).toBeInTheDocument();
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+  });
+
+  it("auto-opens direct navigation results without showing the draft dialog", async () => {
+    apiMocks.resolveXynIntent.mockResolvedValue({
+      status: "DraftReady",
+      action_type: "ValidateDraft",
+      artifact_type: "Workspace",
+      artifact_id: null,
+      summary: "Opening the unified composer.",
+      next_actions: [
+        {
+          action: "OpenPanel",
+          panel_key: "composer_detail",
+          label: "Open Composer",
+          params: { workspace_id: "ws-1" },
+        },
+      ],
+    });
+
+    const { onOpenPanel } = renderConsoleCoreAt("/w/ws-1/workbench");
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await userEvent.type(input, "open composer");
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => expect(onOpenPanel).toHaveBeenCalledWith("composer_detail", { workspace_id: "ws-1" }));
+    expect(screen.queryByText("Opening the unified composer.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Draft ready")).not.toBeInTheDocument();
   });
 
   it("clears the prompt input after a draft is created and submitted", async () => {
