@@ -16,6 +16,7 @@ import { useXynConsole } from "../../state/xynConsoleStore";
 import { emitEntityChange, inferEntityChangeFromPrompt } from "../../utils/entityChangeEvents";
 import { fromArtifactDetail, fromRecentArtifactItem } from "../../navigation/viewDescriptorBuilders";
 import type { ConsolePanelKey } from "./WorkbenchPanelHost";
+import { readComposerStoredSelection } from "./composerSelection";
 import RecentArtifactsMiniTable from "./RecentArtifactsMiniTable";
 import ConsolePromptCard from "./ConsolePromptCard";
 import PromptInterpretationPreview from "./PromptInterpretationPreview";
@@ -404,6 +405,20 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
     return { panelKey: "ems_dataset_schema", params: { dataset: match[1] } };
   }
   return null;
+}
+
+export function resolveDirectPanelOpenParams(
+  directPanel: ResolvedPanelCommand,
+  workspaceId?: string | null,
+): Record<string, unknown> {
+  if (directPanel.panelKey !== "composer_detail") {
+    return directPanel.params;
+  }
+  const composerSelection = workspaceId ? readComposerStoredSelection(workspaceId) : null;
+  return {
+    workspace_id: workspaceId || undefined,
+    ...(composerSelection || {}),
+  };
 }
 
 function stringifyValue(value: unknown): string {
@@ -1669,7 +1684,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       return;
     }
     if (directPanel && onOpenPanel) {
-      onOpenPanel(directPanel.panelKey, directPanel.params);
+      onOpenPanel(directPanel.panelKey, resolveDirectPanelOpenParams(directPanel, workspaceIdFromPath));
       setInputText("");
       clearSessionResolution();
       if (isOverlay) setOpen(false);

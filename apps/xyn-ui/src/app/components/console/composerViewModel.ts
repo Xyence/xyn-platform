@@ -250,11 +250,11 @@ export function deriveComposerStageSummary(payload: ComposerState, currentContex
       };
     case "application_overview":
       return {
-        label: "Reviewing current application work",
+        label: currentContainer ? "Reviewing current application work" : "Choose an application effort",
         explanation: currentContainer
           ? `${currentContainer.title} is the active application effort in Composer.`
-          : "Composer is summarizing the current application effort and its related work.",
-        nextStep: "Choose the goal or thread you want to continue.",
+          : "Composer needs a selected application effort before it can show focused goals, threads, and follow-up actions.",
+        nextStep: currentContainer ? "Choose the goal or thread you want to continue." : "Pick the application or plan you want to continue.",
       };
     default:
       return {
@@ -420,20 +420,20 @@ export function deriveComposerViewModel(payload: ComposerState): ComposerViewMod
   });
 
   const currentContainer =
-    containers.find((container) => container.isCurrent) || containers[0] || null;
+    containers.find((container) => container.isCurrent) || null;
   const currentTitle = selectedThread?.title
     || selectedGoal?.title
     || currentContainer?.title
-    || "No application effort selected";
+    || "Choose an application effort";
   const currentStatusLabel = selectedThread?.status
     || selectedGoal?.goal_progress?.goal_progress_status
     || currentContainer?.statusLabel
-    || "Idle";
+    || "Awaiting selection";
   const currentLatestResult = selectedThread?.thread_diagnostic?.provenance?.summary
     || selectedThread?.thread_diagnostic?.observations?.[0]
     || selectedGoal?.recommendation?.summary
     || currentContainer?.latestResult
-    || "Start by selecting an application effort or generating a new plan.";
+    || "Select an application effort to view its goals, threads, and latest workflow state.";
   const currentLatestActivityAt = latestTimestamp([
     selectedThread?.updated_at,
     selectedGoal?.updated_at,

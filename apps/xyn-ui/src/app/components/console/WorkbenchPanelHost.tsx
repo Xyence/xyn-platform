@@ -73,6 +73,7 @@ import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail
 import { applyRuntimeEventToRunDetail, applyRuntimeEventToRuns, refreshRuntimeRunDetail, refreshRuntimeRunSummary, subscribeRuntimeEventStream } from "../../utils/runtimeEventStream";
 import { deriveComposerStageSummary, deriveComposerViewModel } from "./composerViewModel";
 import type { ComposerContainerFilter, ComposerWorkContainer } from "./composerViewModel";
+import { clearComposerStoredSelection, readComposerStoredSelection, resolveComposerInitialSelection, writeComposerStoredSelection } from "./composerSelection";
 import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
 import JobDetailPage from "../../pages/JobDetailPage";
@@ -3578,6 +3579,13 @@ function ComposerDetailPanel({
     window.localStorage.setItem(`xyn:composer:hidden-efforts:${workspaceId}`, JSON.stringify(hiddenEffortIds));
   }, [hiddenEffortIds, workspaceId]);
 
+  useEffect(() => {
+    writeComposerStoredSelection(workspaceId, {
+      application_id: applicationId,
+      application_plan_id: applicationPlanId,
+    });
+  }, [applicationId, applicationPlanId, workspaceId]);
+
   async function reloadComposerState() {
     const next = await getComposerState({
       workspace_id: workspaceId,
@@ -3623,11 +3631,14 @@ function ComposerDetailPanel({
     onTitleChange?.("Composer");
   }, [onTitleChange]);
 
-  const openComposer = (params?: Record<string, unknown>) =>
-    onOpenPanel("composer_detail", {
+  const openComposer = (params?: Record<string, unknown>) => {
+    const nextParams = {
       workspace_id: workspaceId,
       ...(params || {}),
-    });
+    };
+    writeComposerStoredSelection(workspaceId, nextParams);
+    onOpenPanel("composer_detail", nextParams);
+  };
 
   async function handleGeneratePlan(targetFactoryKey?: string) {
     const objectiveText = objective.trim();
@@ -3742,25 +3753,21 @@ function ComposerDetailPanel({
     }
   }
 
-  if (loading) return <p className="muted">Loading composer…</p>;
-  if (error) return <p className="danger-text">{error}</p>;
-  if (!payload) return <p className="muted">Composer state unavailable.</p>;
-
-  const selectedFactory = payload.selected_factory;
-  const selectedGoal = payload.goal;
-  const selectedThread = payload.thread;
-  const selectedApplication = payload.application;
-  const selectedPlan = payload.application_plan;
+  const selectedFactory = payload?.selected_factory ?? null;
+  const selectedGoal = payload?.goal ?? null;
+  const selectedThread = payload?.thread ?? null;
+  const selectedApplication = payload?.application ?? null;
+  const selectedPlan = payload?.application_plan ?? null;
   const selectedPlanGoals = selectedPlan?.generated_goals || selectedPlan?.generated_plan?.generated_goals || [];
-  const portfolioInsights = payload.portfolio_context?.insights || [];
+  const portfolioInsights = payload?.portfolio_context?.insights || [];
   const threadDiagnosticSummary = selectedThread?.thread_diagnostic
     ? selectedThread.thread_diagnostic.observations[0]
       || selectedThread.thread_diagnostic.likely_causes[0]
       || selectedThread.thread_diagnostic.provenance?.summary
       || null
     : null;
-  const currentGoalId = selectedGoal?.id || payload.context.goal_id || undefined;
-  const currentThreadId = selectedThread?.id || payload.context.thread_id || undefined;
+  const currentGoalId = selectedGoal?.id || payload?.context.goal_id || undefined;
+  const currentThreadId = selectedThread?.id || payload?.context.thread_id || undefined;
   const threadNeedsBriefReview = Boolean(
     selectedThread?.thread_diagnostic && [
       selectedThread.thread_diagnostic.suggested_human_review_action,
@@ -3776,13 +3783,62 @@ function ComposerDetailPanel({
     selectedGoal && selectedGoal.recommendation && typeof selectedGoal.recommendation === "object"
       ? selectedGoal.recommendation
       : null;
-  const actionableBreadcrumbs = payload.breadcrumbs.filter(
-    (crumb) => !(crumb.kind === "composer" && payload.breadcrumbs.length === 1)
+  const breadcrumbRows = payload?.breadcrumbs || [];
+  const actionableBreadcrumbs = breadcrumbRows.filter(
+    (crumb) => !(crumb.kind === "composer" && breadcrumbRows.length === 1)
   );
-  const composerView = deriveComposerViewModel(payload);
-  const currentWork = composerView.currentContext;
-  const currentContainer = currentWork.container;
-  const stageSummary = deriveComposerStageSummary(payload, currentWork);
+  const composerView = payload ? deriveComposerViewModel(payload) : null;
+  const storedSelection = composerView ? readComposerStoredSelection(workspaceId) : null;
+  const hasExplicitComposerFocus = Boolean(
+    applicationId
+    || applicationPlanId
+    || goalId
+    || threadId
+    || payload?.context.application_id
+    || payload?.context.application_plan_id
+  );
+  const initialSelection = composerView && !hasExplicitComposerFocus
+    ? resolveComposerInitialSelection(composerView.containers, storedSelection)
+    : null;
+  useEffect(() => {
+    if (loading || !payload || !composerView || hasExplicitComposerFocus || !initialSelection) return;
+    openComposer(initialSelection);
+  }, [composerView, hasExplicitComposerFocus, initialSelection, loading, payload]);
+  const currentContainer = composerView?.containers.find((container) =>
+    (applicationId && container.kind === "application" && container.id === applicationId)
+    || (applicationPlanId && container.kind === "application_plan" && container.id === applicationPlanId)
+    || container.isCurrent
+  ) || null;
+  useEffect(() => {
+    if (!currentContainer) return;
+    writeComposerStoredSelection(workspaceId, currentContainer.selectionParams);
+  }, [currentContainer, workspaceId]);
+  useEffect(() => {
+    if (!composerView?.containers.length && !hasExplicitComposerFocus) {
+      clearComposerStoredSelection(workspaceId);
+    }
+  }, [composerView?.containers.length, hasExplicitComposerFocus, workspaceId]);
+  const currentWork = currentContainer
+    ? {
+      ...(composerView?.currentContext || { title: "Choose an application effort", statusLabel: "Awaiting selection", latestResult: "", latestActivityAt: null, container: null }),
+      title: currentContainer.title,
+      statusLabel: currentContainer.statusLabel,
+      latestResult: currentContainer.latestResult,
+      latestActivityAt: currentContainer.latestActivityAt,
+      container: currentContainer,
+    }
+    : (composerView?.currentContext || {
+      title: "Choose an application effort",
+      statusLabel: "Awaiting selection",
+      latestResult: "Select an application effort to view its goals, threads, and latest workflow state.",
+      latestActivityAt: null,
+      container: null,
+    });
+  const stageSummary = payload ? deriveComposerStageSummary(payload, currentWork) : null;
+
+  if (loading) return <p className="muted">Loading composer…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload || !composerView || !stageSummary) return <p className="muted">Composer state unavailable.</p>;
   const effortVisibilityKey = (container: ComposerWorkContainer) => `${container.kind}:${container.id}`;
   const isEffortHidden = (container: ComposerWorkContainer) => Boolean(hiddenEffortIds[effortVisibilityKey(container)]);
   const visibleEffortCount = (filter: ComposerContainerFilter) =>
@@ -3934,6 +3990,11 @@ function ComposerDetailPanel({
           ) : null}
         </div>
         <p className="muted small" style={{ marginTop: 8 }}>{latestQuickActionReason}</p>
+        {!currentContainer ? (
+          <p className="muted small" style={{ marginTop: 8 }}>
+            Composer is not focused on a single effort yet. Choose one from the effort list below.
+          </p>
+        ) : null}
         {currentContainer ? renderLifecycleActions(currentContainer, { compact: true }) : null}
         {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
       </section>

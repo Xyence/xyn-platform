@@ -104,6 +104,7 @@ vi.mock("../../utils/runtimeEventStream", async () => {
 describe("WorkbenchPanelHost entity refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
     apiMocks.getSystemReadiness.mockResolvedValue({
       ready: false,
       summary: "Configuration required",
@@ -2878,6 +2879,224 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Application Efforts")).toBeInTheDocument();
     expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Composer" })).not.toBeInTheDocument();
+  });
+
+  it("auto-selects the only viable composer effort when no explicit focus is provided", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [
+        {
+          id: "app-knowledgebase",
+          name: "Knowledgebase",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Current app effort",
+          request_objective: "Build a personal knowledgebase",
+          goal_count: 0,
+          created_at: "2026-03-16T10:00:00Z",
+          updated_at: "2026-03-16T16:00:00Z",
+        },
+      ],
+      application: null,
+      application_plan: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-auto", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(onOpenPanel).toHaveBeenCalled());
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "composer_detail",
+        params: expect.objectContaining({
+          workspace_id: "ws-1",
+          application_id: "app-knowledgebase",
+        }),
+      })
+    );
+  });
+
+  it("shows an unresolved chooser state when multiple efforts exist and none is current", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [],
+      application_plans: [
+        {
+          id: "plan-knowledgebase",
+          name: "Knowledgebase Plan",
+          status: "review",
+          source_factory_key: "generic_application_mvp",
+          summary: "Newer plan effort",
+          request_objective: "Build a personal knowledgebase",
+          created_at: "2026-03-16T15:00:00Z",
+          updated_at: "2026-03-16T15:00:00Z",
+        },
+      ],
+      applications: [
+        {
+          id: "app-lunch",
+          name: "Lunch Poll",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Older lunch app effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 1,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+      ],
+      application: null,
+      application_plan: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-chooser", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getAllByText("Choose an application effort").length).toBeGreaterThan(0);
+    expect(screen.getByText("Awaiting Selection")).toBeInTheDocument();
+    expect(screen.getByText("Composer is not focused on a single effort yet. Choose one from the effort list below.")).toBeInTheDocument();
+    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
+    expect(screen.getByText("Knowledgebase Plan")).toBeInTheDocument();
+  });
+
+  it("does not auto-select stale failed work when it is the only remaining history", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [
+        {
+          id: "app-lunch",
+          name: "Lunch Poll",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Older lunch app effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 1,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+      ],
+      application: null,
+      application_plan: null,
+      goal: null,
+      thread: null,
+      related_goals: [
+        {
+          id: "goal-1",
+          application_id: "app-lunch",
+          title: "Workflow and Stabilization",
+          planning_status: "decomposed",
+          goal_progress_status: "blocked",
+          thread_count: 1,
+          work_item_count: 2,
+          planning_summary: "Repair the lunch app workflow.",
+          resolution_notes: [],
+          created_at: "2026-03-15T11:05:00Z",
+          updated_at: "2026-03-15T11:05:00Z",
+        },
+      ],
+      related_threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          goal_title: "Workflow and Stabilization",
+          title: "Smoke test",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-1",
+          queued_work_items: 0,
+          running_work_items: 0,
+          awaiting_review_work_items: 1,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-15T11:06:00Z",
+          updated_at: "2026-03-15T11:06:00Z",
+        },
+      ],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-stale", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getAllByText("Choose an application effort").length).toBeGreaterThan(0);
+    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
+    expect(screen.getByText("Most recent")).toBeInTheDocument();
   });
 
   it("loads composer plan review state and applies plans through the existing apply seam", async () => {
