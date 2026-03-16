@@ -9,6 +9,7 @@ import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { useNotifications } from "../state/notificationsStore";
 import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
+import { deriveBuildToastEventKey } from "../drafts/buildToastEvents";
 import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
 
 type DraftStatusValue = "draft" | "ready" | "submitted" | "archived";
@@ -679,9 +680,11 @@ export default function DraftDetailPage({
   const [executionNotes, setExecutionNotes] = useState<AppExecutionNote[]>([]);
   const [executionNotesLoading, setExecutionNotesLoading] = useState(false);
   const [executionNotesError, setExecutionNotesError] = useState<string | null>(null);
+  const [executionNoteExpanded, setExecutionNoteExpanded] = useState(false);
   const { push } = useNotifications();
   const failureSummaryRef = useRef<HTMLElement | null>(null);
   const editorRef = useRef<HTMLDetailsElement | null>(null);
+  const announcedBuildToastRef = useRef("");
   const draftDescriptor = useMemo(
     () => getAppDraftViewDescriptor({ id: draftId, title: draft?.title || title }, workspaceId),
     [draft?.title, draftId, title, workspaceId]
@@ -856,6 +859,28 @@ export default function DraftDetailPage({
     [relatedJobs],
   );
   const latestJob = relatedJobs.length ? relatedJobs[relatedJobs.length - 1] : null;
+  const buildToastEventKey = useMemo(
+    () =>
+      deriveBuildToastEventKey({
+        overallState: viewModel.overallState,
+        latestFailedJob,
+        latestJob,
+        executionNote,
+      }),
+    [executionNote, latestFailedJob, latestJob, viewModel.overallState],
+  );
+
+  useEffect(() => {
+    if (!draftId || typeof window === "undefined") {
+      announcedBuildToastRef.current = "";
+      return;
+    }
+    try {
+      announcedBuildToastRef.current = window.sessionStorage.getItem(`xyn.app-draft.toast:${draftId}`) || "";
+    } catch {
+      announcedBuildToastRef.current = "";
+    }
+  }, [draftId]);
 
   const openGeneratedEnvironment = useCallback(() => {
     const target = deploymentUrls.siblingUiUrl || deploymentUrls.appUrl;
@@ -915,8 +940,11 @@ export default function DraftDetailPage({
   );
 
   useEffect(() => {
-    if (!relatedJobs.length) return;
-    if (viewModel.overallState !== "ready" && viewModel.overallState !== "build_blocked" && viewModel.overallState !== "needs_revision") return;
+    if (!relatedJobs.length || !buildToastEventKey) return;
+    if (announcedBuildToastRef.current === buildToastEventKey) return;
+    // Polling updates can refresh the page state many times while the user is
+    // reading diagnostics. Announce each unique build event once per session,
+    // then keep the persistent inline banner as the durable failure surface.
     push({
       level: viewModel.overallState === "ready" ? "success" : "error",
       title: viewModel.overallState === "ready" ? "App build completed" : "App build blocked",
@@ -929,9 +957,18 @@ export default function DraftDetailPage({
       status: viewModel.overallState === "ready" ? "succeeded" : "failed",
       href: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl || undefined,
       ctaLabel: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl ? "Open" : undefined,
-      dedupeKey: `app-build:${draftId}:${viewModel.overallState}`,
+      dedupeKey: `app-build:${draftId}:${buildToastEventKey}`,
     });
+    announcedBuildToastRef.current = buildToastEventKey;
+    if (typeof window !== "undefined") {
+      try {
+        window.sessionStorage.setItem(`xyn.app-draft.toast:${draftId}`, buildToastEventKey);
+      } catch {
+        // ignore storage failures; the in-memory ref still prevents repeats within this mount
+      }
+    }
   }, [
+    buildToastEventKey,
     deploymentUrls.appUrl,
     deploymentUrls.siblingUiUrl,
     draft?.title,
@@ -1037,6 +1074,13 @@ export default function DraftDetailPage({
           </div>
           <span className={`chip app-draft-state-chip ${overallStateTone(viewModel.overallState)}`}>{viewModel.overallLabel}</span>
         </div>
+        {viewModel.overallState === "build_blocked" || viewModel.overallState === "needs_revision" ? (
+          <InlineMessage
+            tone="error"
+            title={viewModel.currentStep}
+            body={viewModel.plainLanguageStatus}
+          />
+        ) : null}
         <div className="detail-grid" style={{ marginTop: 12 }}>
           <div>
             <strong>Current step</strong>
@@ -1136,7 +1180,19 @@ export default function DraftDetailPage({
           <section className="card" ref={failureSummaryRef}>
             <div className="card-header">
               <h3>{viewModel.failureSummaryTitle}</h3>
-              <span className={`chip ${overallStateTone(viewModel.overallState)}`}>{viewModel.currentStep}</span>
+              <div className="inline-actions">
+                <span className={`chip ${overallStateTone(viewModel.overallState)}`}>{viewModel.currentStep}</span>
+                {executionNote ? (
+                  <button
+                    type="button"
+                    className="ghost small"
+                    aria-expanded={executionNoteExpanded}
+                    onClick={() => setExecutionNoteExpanded((value) => !value)}
+                  >
+                    {executionNoteExpanded ? "Hide full execution note" : "View full execution note"}
+                  </button>
+                ) : null}
+              </div>
             </div>
             {executionNotesLoading || workflowLoading ? <p className="muted small">Loading build summary…</p> : null}
             {executionNotesError ? <InlineMessage tone="error" title="Diagnostics unavailable" body={executionNotesError} /> : null}
@@ -1181,6 +1237,25 @@ export default function DraftDetailPage({
                 </div>
               ) : null}
             </div>
+            {executionNote && executionNoteExpanded ? (
+              <div className="app-draft-inline-note-panel">
+                <div className="detail-grid">
+                  <div>
+                    <strong>Recorded</strong>
+                    <p className="muted small">{formatTimestamp(executionNote.updated_at || executionNote.timestamp)}</p>
+                  </div>
+                  <div>
+                    <strong>Match reason</strong>
+                    <p className="muted small">{executionNote.match_reason.replace(/_/g, " ")}</p>
+                  </div>
+                  <div className="span-full">
+                    <strong>Request</strong>
+                    <p className="muted small">{executionNote.prompt_or_request || "—"}</p>
+                  </div>
+                </div>
+                <pre className="code-block" style={{ marginTop: 12 }}>{prettyJson(executionNote)}</pre>
+              </div>
+            ) : null}
           </section>
         </div>
 
@@ -1339,7 +1414,6 @@ export default function DraftDetailPage({
                     </ul>
                   </>
                 ) : null}
-                <pre className="code-block" style={{ marginTop: 12 }}>{prettyJson(executionNote)}</pre>
               </>
             ) : (
               <p className="muted small" style={{ marginTop: 12 }}>No linked execution note is available for this draft yet.</p>

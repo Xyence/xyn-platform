@@ -4965,6 +4965,10 @@ button.sm {
   align-items: flex-start;
 }
 
+.app-draft-hero-card .inline-message {
+  margin-top: 12px;
+}
+
 .app-draft-state-chip.success,
 .chip.success {
   background: rgba(34, 197, 94, 0.18);
@@ -5087,6 +5091,14 @@ button.sm {
 
 .action-row-card__badge {
   flex: 0 0 auto;
+}
+
+.app-draft-inline-note-panel {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(148, 163, 184, 0.08);
 }
 
 @media (max-width: 1040px) {

@@ -81,6 +81,8 @@ export default function ToastHost() {
 
   return (
     <div className={`global-toast level-${active.level}`} role="status" aria-live="polite">
+      {/* Toasts stay non-modal and never take programmatic focus so background
+          polling updates cannot interrupt keyboard scrolling or in-page review. */}
       <div className="global-toast-body">
         <strong>{active.title}</strong>
         {active.message && <span>{active.message}</span>}
