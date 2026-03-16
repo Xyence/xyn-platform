@@ -3672,6 +3672,19 @@ function ComposerDetailPanel({
       || selectedThread.thread_diagnostic.provenance?.summary
       || null
     : null;
+  const currentGoalId = selectedGoal?.id || payload.context.goal_id || undefined;
+  const currentThreadId = selectedThread?.id || payload.context.thread_id || undefined;
+  const threadNeedsBriefReview = Boolean(
+    selectedThread?.thread_diagnostic && [
+      selectedThread.thread_diagnostic.suggested_human_review_action,
+      ...selectedThread.thread_diagnostic.observations,
+      ...selectedThread.thread_diagnostic.likely_causes,
+      threadDiagnosticSummary,
+    ].some((entry) => typeof entry === "string" && /brief review/i.test(entry))
+  );
+  const threadActionGuidance = threadNeedsBriefReview
+    ? "Next step: open the thread work items and review the blocking execution brief before queueing more coding work."
+    : null;
   const recommendation =
     selectedGoal && selectedGoal.recommendation && typeof selectedGoal.recommendation === "object"
       ? selectedGoal.recommendation
@@ -3819,8 +3832,14 @@ function ComposerDetailPanel({
                     <td>{goal.goal_progress_status || "—"}</td>
                     <td>{goal.thread_count}</td>
                     <td>
-                      <button type="button" className="ghost sm" onClick={() => openComposer({ application_id: selectedApplication?.id, goal_id: goal.id })}>
-                        Focus Goal
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        disabled={currentGoalId === goal.id}
+                        title={currentGoalId === goal.id ? "This goal is already focused." : undefined}
+                        onClick={() => openComposer({ application_id: selectedApplication?.id, goal_id: goal.id })}
+                      >
+                        {currentGoalId === goal.id ? "Current Goal" : "Focus Goal"}
                       </button>
                     </td>
                   </tr>
@@ -3884,6 +3903,8 @@ function ComposerDetailPanel({
                       <button
                         type="button"
                         className="ghost sm"
+                        disabled={currentThreadId === thread.id}
+                        title={currentThreadId === thread.id ? "This thread is already focused." : undefined}
                         onClick={() =>
                           openComposer({
                             application_id: selectedApplication?.id || selectedGoal?.application_id || undefined,
@@ -3892,7 +3913,7 @@ function ComposerDetailPanel({
                           })
                         }
                       >
-                        Focus Thread
+                        {currentThreadId === thread.id ? "Current Thread" : "Focus Thread"}
                       </button>
                     </td>
                   </tr>
@@ -3914,10 +3935,46 @@ function ComposerDetailPanel({
           {threadDiagnosticSummary ? (
             <InlineMessage tone="info" title="Thread Diagnostic" body={threadDiagnosticSummary} />
           ) : null}
+          {threadActionGuidance ? (
+            <InlineMessage tone="warn" title="Review Required Before Resuming" body={threadActionGuidance} />
+          ) : null}
           <div className="inline-action-row" style={{ marginTop: 12 }}>
-            <button type="button" className="ghost sm" onClick={() => handleThreadReview(selectedThread, "resume_thread")}>Resume Thread</button>
-            <button type="button" className="ghost sm" onClick={() => handleThreadReview(selectedThread, "queue_next_slice")}>Queue Next Slice</button>
-            <button type="button" className="ghost sm" onClick={() => handleThreadReview(selectedThread, "mark_thread_completed")}>Mark Thread Completed</button>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={selectedThread.status === "active"}
+              title={selectedThread.status === "active" ? "This thread is already active." : undefined}
+              onClick={() => handleThreadReview(selectedThread, "resume_thread")}
+            >
+              Resume Thread
+            </button>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={selectedThread.status !== "active" || threadNeedsBriefReview}
+              title={
+                threadNeedsBriefReview
+                  ? "Review the blocking execution brief before queueing the next slice."
+                  : selectedThread.status !== "active"
+                    ? "Queueing the next slice requires an active thread."
+                    : undefined
+              }
+              onClick={() => handleThreadReview(selectedThread, "queue_next_slice")}
+            >
+              Queue Next Slice
+            </button>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={selectedThread.status === "completed"}
+              title={selectedThread.status === "completed" ? "This thread is already completed." : undefined}
+              onClick={() => handleThreadReview(selectedThread, "mark_thread_completed")}
+            >
+              Mark Thread Completed
+            </button>
+            <button type="button" className="ghost sm" onClick={() => onOpenPanel("thread_detail", { thread_id: selectedThread.id })}>
+              Review Work Items
+            </button>
           </div>
         </section>
       ) : null}

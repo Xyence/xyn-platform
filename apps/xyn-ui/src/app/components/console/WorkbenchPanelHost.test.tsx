@@ -683,6 +683,145 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
   });
 
+  it("disables no-op composer focus actions and points blocked threads to work-item review", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "thread_focus",
+      context: {
+        application_id: "app-1",
+        goal_id: "goal-1",
+        thread_id: "thread-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application: {
+        id: "app-1",
+        name: "Lunch Poll",
+        status: "active",
+        source_factory_key: "lunch_poll",
+        summary: "Lunch polling app",
+        goal_count: 2,
+        goals: [],
+      },
+      goal: {
+        id: "goal-1",
+        application_id: "app-1",
+        title: "Workflow and Stabilization",
+        planning_status: "ready",
+        goal_progress_status: "active",
+        thread_count: 1,
+        threads: [],
+        work_items: [],
+      },
+      thread: {
+        id: "thread-1",
+        workspace_id: "ws-1",
+        goal_id: "goal-1",
+        title: "Verification and Smoke Test",
+        description: "",
+        owner: null,
+        priority: "high",
+        status: "active",
+        domain: "development",
+        work_in_progress_limit: 1,
+        execution_policy: { max_concurrent_runs: 1 },
+        source_conversation_id: "thread-conversation-1",
+        queued_work_items: 0,
+        running_work_items: 0,
+        awaiting_review_work_items: 1,
+        completed_work_items: 0,
+        failed_work_items: 0,
+        recent_run_ids: [],
+        work_items_completed: 0,
+        work_items_blocked: 1,
+        thread_diagnostic: {
+          status: "blocked",
+          observations: ["Execution brief review is still blocking coding dispatch for this thread."],
+          likely_causes: [],
+          evidence: [],
+          provenance: { summary: "Execution brief review is required before coding execution can proceed." },
+          suggested_human_review_action: "Review the blocking execution brief and approve it before dispatch.",
+        },
+      },
+      related_goals: [
+        {
+          id: "goal-1",
+          application_id: "app-1",
+          title: "Workflow and Stabilization",
+          planning_status: "ready",
+          goal_progress_status: "active",
+          thread_count: 1,
+        },
+      ],
+      related_threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          title: "Verification and Smoke Test",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: { max_concurrent_runs: 1 },
+          source_conversation_id: "thread-conversation-1",
+          queued_work_items: 0,
+          running_work_items: 0,
+          awaiting_review_work_items: 1,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+        },
+      ],
+      breadcrumbs: [
+        { kind: "composer", label: "Composer" },
+        { kind: "application", label: "Lunch Poll", id: "app-1" },
+        { kind: "goal", label: "Workflow and Stabilization", id: "goal-1" },
+        { kind: "thread", label: "Verification and Smoke Test", id: "thread-1" },
+      ],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", goal_id: "goal-1", thread_id: "thread-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Current Goal" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Current Thread" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resume Thread" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Queue Next Slice" })).toBeDisabled();
+    expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument();
+    expect(screen.getByText(/review the blocking execution brief/i)).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Review Work Items" }).click();
+    });
+
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "thread_detail",
+        params: { thread_id: "thread-1" },
+      })
+    );
+  });
+
   it("loads XCO thread detail with work item, run, artifact, and timeline navigation", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.reviewCoordinationThread.mockResolvedValue({
