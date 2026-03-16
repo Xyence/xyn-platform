@@ -14,26 +14,50 @@ function statusMarker(status?: string): string {
 }
 
 export default function CapabilityPathPanel({
-  path,
+  paths,
+  selectedPath,
+  selectedPathId,
+  onSelectPath,
   workspaceId,
   entityId,
   onInsertSuggestion,
 }: {
-  path: CapabilityPath;
+  paths: CapabilityPath[];
+  selectedPath: CapabilityPath;
+  selectedPathId: string;
+  onSelectPath: (pathId: string) => void;
   workspaceId?: string | null;
   entityId?: string | null;
   onInsertSuggestion: (text: string) => void;
 }) {
   const navigate = useNavigate();
+  const showSelector = paths.length > 1;
 
   return (
     <div className="xyn-console-guidance-card" aria-label="Guided workflow">
-      <h4>Guided Workflow</h4>
-      <strong>{path.name}</strong>
-      <p className="muted small">{path.description}</p>
+      <h4>{showSelector ? "Guided Workflows" : "Guided Workflow"}</h4>
+      {showSelector ? (
+        <label className="muted small" style={{ display: "block", marginBottom: 8 }}>
+          Workflow
+          <select
+            aria-label="Select guided workflow"
+            value={selectedPathId}
+            onChange={(event) => onSelectPath(event.target.value)}
+            style={{ display: "block", width: "100%", marginTop: 6 }}
+          >
+            {paths.map((path) => (
+              <option key={path.id} value={path.id}>
+                {path.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      <strong>{selectedPath.name}</strong>
+      <p className="muted small">{selectedPath.description}</p>
       <ol className="xyn-console-steps">
-        {path.steps.map((step) => (
-          <li key={`${path.id}:${step.capability_id}`}>
+        {selectedPath.steps.map((step) => (
+          <li key={`${selectedPath.id}:${step.capability_id}`}>
             <button
               type="button"
               className="ghost sm"

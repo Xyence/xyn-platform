@@ -13,6 +13,9 @@ type Model = {
   error: string | null;
   context: string;
   paths: CapabilityPath[];
+  selectedPath: CapabilityPath | null;
+  selectedPathId: string;
+  setSelectedPath: (pathId: string) => void;
 };
 
 export function useCapabilityPaths(params: Params): Model {
@@ -20,6 +23,7 @@ export function useCapabilityPaths(params: Params): Model {
   const [error, setError] = useState<string | null>(null);
   const [context, setContext] = useState("unknown");
   const [paths, setPaths] = useState<CapabilityPath[]>([]);
+  const [selectedPathId, setSelectedPathId] = useState("");
 
   const requestKey = useMemo(
     () => [String(params.context || "").trim().toLowerCase(), String(params.entityId || "").trim(), String(params.workspaceId || "").trim()].join("::"),
@@ -39,12 +43,18 @@ export function useCapabilityPaths(params: Params): Model {
         });
         if (!active) return;
         setContext(String(payload.context || "unknown"));
-        setPaths(Array.isArray(payload.paths) ? payload.paths : []);
+        const nextPaths = Array.isArray(payload.paths) ? payload.paths : [];
+        setPaths(nextPaths);
+        setSelectedPathId((current) => {
+          if (current && nextPaths.some((path) => path.id === current)) return current;
+          return nextPaths[0]?.id || "";
+        });
       } catch (err) {
         if (!active) return;
         setError(err instanceof Error ? err.message : "Failed to load capability paths");
         setContext(String(params.context || "unknown") || "unknown");
         setPaths([]);
+        setSelectedPathId("");
       } finally {
         if (active) setLoading(false);
       }
@@ -54,5 +64,15 @@ export function useCapabilityPaths(params: Params): Model {
     };
   }, [params.context, params.entityId, params.workspaceId, requestKey]);
 
-  return { loading, error, context, paths };
+  const selectedPath = paths.find((path) => path.id === selectedPathId) || paths[0] || null;
+
+  return {
+    loading,
+    error,
+    context,
+    paths,
+    selectedPath,
+    selectedPathId: selectedPath?.id || "",
+    setSelectedPath: setSelectedPathId,
+  };
 }

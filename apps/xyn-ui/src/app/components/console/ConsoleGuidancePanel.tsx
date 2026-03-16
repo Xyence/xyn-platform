@@ -37,7 +37,7 @@ export default function ConsoleGuidancePanel({
   const navigate = useNavigate();
   const resolvedEntityId = entityId || artifactId || applicationId || null;
   const { capabilities } = useContextualCapabilities({ context, entityId: resolvedEntityId, workspaceId });
-  const { paths } = useCapabilityPaths({ context, entityId: resolvedEntityId, workspaceId });
+  const { paths, selectedPath, selectedPathId, setSelectedPath } = useCapabilityPaths({ context, entityId: resolvedEntityId, workspaceId });
   const [selectedCapabilityId, setSelectedCapabilityId] = useState<string>("");
   const prompts = useMemo(
     () => ((capabilities.length ? capabilities : FALLBACK_PROMPTS) as ContextualCapability[]).slice(0, 4),
@@ -79,9 +79,12 @@ export default function ConsoleGuidancePanel({
       {loading ? <div className="xyn-console-guidance-card"><p className="muted small">Loading plan…</p></div> : null}
       {!loading && error ? <div className="xyn-console-guidance-card"><p className="danger-text">{error}</p></div> : null}
       {!loading && plan ? <CapabilityPlanSummary plan={plan} /> : null}
-      {paths[0] ? (
+      {selectedPath ? (
         <CapabilityPathPanel
-          path={paths[0]}
+          paths={paths}
+          selectedPath={selectedPath}
+          selectedPathId={selectedPathId}
+          onSelectPath={setSelectedPath}
           workspaceId={workspaceId}
           entityId={resolvedEntityId}
           onInsertSuggestion={onInsertSuggestion}
