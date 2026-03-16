@@ -5,7 +5,7 @@ from django.test import TestCase
 
 from xyn_orchestrator.capabilities.events import CapabilityEvent, contexts_for_event
 from xyn_orchestrator.capabilities.graph.capability_graph import get_capability_ids_for_context
-from xyn_orchestrator.capabilities.graph.graph_service import get_capabilities_for_context
+from xyn_orchestrator.capabilities.graph.graph_service import get_capabilities_for_context, get_capability_graph_introspection
 from xyn_orchestrator.capabilities.graph.path_service import get_capability_paths_for_context
 from xyn_orchestrator.models import RoleBinding, UserIdentity, Workspace
 
@@ -31,6 +31,21 @@ class CapabilityGraphTests(TestCase):
         self.assertEqual(
             get_capability_ids_for_context("landing"),
             ["build_application", "write_article", "create_explainer_video", "explore_artifacts"],
+        )
+
+    def test_graph_introspection_includes_contexts_capabilities_and_paths(self):
+        payload = get_capability_graph_introspection()
+        self.assertIn(
+            {"id": "landing", "name": "Landing", "description": "Top-level workspace landing guidance."},
+            payload["contexts"],
+        )
+        build_application = next(entry for entry in payload["capabilities"] if entry["id"] == "build_application")
+        self.assertEqual(build_application["action_type"], "prompt")
+        self.assertEqual(build_application["contexts"], ["landing"])
+        build_path = next(entry for entry in payload["paths"] if entry["id"] == "build_application")
+        self.assertEqual(
+            build_path["steps"],
+            ["build_application", "continue_application_draft", "view_execution_status", "open_application_workspace"],
         )
 
     def test_capability_event_maps_execution_completed_to_refresh_contexts(self):
@@ -160,6 +175,16 @@ class CapabilityGraphTests(TestCase):
         self.assertEqual(payload["capabilities"][0]["id"], "explore_artifacts")
         self.assertEqual(payload["capabilities"][0]["action_type"], "prompt")
         self.assertTrue(payload["capabilities"][0]["available"])
+
+    def test_graph_endpoint_returns_static_introspection_payload(self):
+        response = self.client.get("/xyn/api/capabilities/graph")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("contexts", payload)
+        self.assertIn("capabilities", payload)
+        self.assertIn("paths", payload)
+        self.assertTrue(any(entry["id"] == "open_application_workspace" for entry in payload["capabilities"]))
+        self.assertTrue(any(entry["id"] == "workspace_exploration" for entry in payload["paths"]))
 
     def test_endpoint_filters_app_draft_capabilities_from_runtime_state(self):
         draft_response = mock.Mock(

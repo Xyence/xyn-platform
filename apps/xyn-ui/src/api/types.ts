@@ -1963,6 +1963,40 @@ export type CapabilityEventResponse = {
   contexts: CapabilityEventContextRefresh[];
 };
 
+export type CapabilityGraphContext = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+export type CapabilityGraphCapability = {
+  id: string;
+  name: string;
+  description: string;
+  contexts: string[];
+  action_type: string;
+  preconditions?: Array<{
+    guard_type: string;
+    guard_target?: string | null;
+    failure_code?: string | null;
+    failure_message?: string | null;
+  }>;
+};
+
+export type CapabilityGraphPath = {
+  id: string;
+  name: string;
+  description: string;
+  contexts: string[];
+  steps: string[];
+};
+
+export type CapabilityGraphResponse = {
+  contexts: CapabilityGraphContext[];
+  capabilities: CapabilityGraphCapability[];
+  paths: CapabilityGraphPath[];
+};
+
 export type CapabilityPathStep = {
   capability_id: string;
   name: string;

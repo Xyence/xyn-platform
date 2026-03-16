@@ -24,6 +24,7 @@ import GuidesPage from "./pages/GuidesPage";
 import ToursPage from "./pages/ToursPage";
 import TourDetailPage from "./pages/TourDetailPage";
 import XynMapPage from "./pages/XynMapPage";
+import CapabilityExplorerPage from "./pages/CapabilityExplorerPage";
 import PlatformSettingsPage from "./pages/PlatformSettingsPage";
 import PlatformSettingsHubPage from "./pages/PlatformSettingsHubPage";
 import PlatformDeploySettingsPage from "./pages/PlatformDeploySettingsPage";
@@ -830,6 +831,7 @@ export default function AppShell() {
           <Routes>
             <Route path="/" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "/"} replace />} />
             <Route path="workbench" element={<WorkbenchPage workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />} />
+            <Route path="capabilities" element={<CapabilityExplorerPage />} />
             <Route path="console" element={<Navigate to={workspaceScopedTarget(DEFAULT_WORKSPACE_SUBPATH)} replace />} />
             <Route path="apps/articles/edit" element={<ArticleSurfaceEditorRedirectPage />} />
             <Route path="apps/articles/docs" element={<ArticleSurfaceDocsPage />} />

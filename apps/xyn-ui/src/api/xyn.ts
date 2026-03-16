@@ -150,6 +150,7 @@ import type {
   AiBootstrapStatusResponse,
   SystemReadinessResponse,
   ContextualCapabilityResponse,
+  CapabilityGraphResponse,
   CapabilityEventResponse,
   CapabilityPathResponse,
   ExecutionPlan,
@@ -4241,6 +4242,14 @@ export async function getContextualCapabilities(params?: {
     credentials: "include",
   });
   return handle<ContextualCapabilityResponse>(response);
+}
+
+export async function getCapabilityGraph(): Promise<CapabilityGraphResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/capabilities/graph`, {
+    credentials: "include",
+  });
+  return handle<CapabilityGraphResponse>(response);
 }
 
 export async function emitCapabilityRefreshEvent(params: {
