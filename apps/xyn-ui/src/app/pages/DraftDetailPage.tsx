@@ -1,6 +1,6 @@
 import { AlertTriangle, ExternalLink, FilePenLine, History, RefreshCw, Save, Send, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import InlineMessage from "../../components/InlineMessage";
 import ActionRowCard from "../components/ui/ActionRowCard";
 import { getAppIntentDraft, getDraftWorkflow, listAppExecutionNotes, listAppJobs, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
@@ -8,32 +8,14 @@ import type { AppExecutionNote, AppIntentDraft, AppJob, DraftWorkflow } from "..
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { useNotifications } from "../state/notificationsStore";
+import { useXynConsole } from "../state/xynConsoleStore";
 import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
 import { deriveBuildToastEventKey } from "../drafts/buildToastEvents";
+import { resolveDraftActions, type DraftActionId, type DraftPageOverallState, type DraftResolvedAction } from "../drafts/draftActionResolver";
 import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
 
 type DraftStatusValue = "draft" | "ready" | "submitted" | "archived";
-type DraftPageOverallState = "draft" | "building" | "build_blocked" | "ready" | "needs_revision" | "unavailable";
 type TimelineStepStatus = "complete" | "current" | "pending" | "failed";
-type DraftActionId =
-  | "review_failure"
-  | "retry_validation"
-  | "view_build_jobs"
-  | "edit_definition"
-  | "open_generated_environment"
-  | "open_application_workspace"
-  | "save_draft"
-  | "submit_draft";
-
-type DraftActionCard = {
-  id: DraftActionId;
-  title: string;
-  description: string;
-  badge: string;
-  available: boolean;
-  disabledReason?: string;
-  emphasis?: "primary" | "secondary";
-};
 
 type DraftTimelineStep = {
   key: string;
@@ -57,7 +39,6 @@ type DraftPageViewModel = {
   failureSummaryTitle: string;
   failureSummaryBody: string;
   buildTimeline: DraftTimelineStep[];
-  recommendedActions: DraftActionCard[];
 };
 
 function prettyJson(value: unknown): string {
@@ -255,6 +236,49 @@ function extractApplicationDefinition(allJobs: AppJob[]): {
   return null;
 }
 
+function collectPayloadFieldValues(value: unknown, keys: Set<string>, depth = 0, results: Map<string, string[]> = new Map()): Map<string, string[]> {
+  if (!value || depth > 3) return results;
+  if (Array.isArray(value)) {
+    value.forEach((entry) => collectPayloadFieldValues(entry, keys, depth + 1, results));
+    return results;
+  }
+  if (typeof value !== "object") return results;
+  for (const [rawKey, rawValue] of Object.entries(value as Record<string, unknown>)) {
+    if (keys.has(rawKey)) {
+      const normalized = String(rawValue || "").trim();
+      if (normalized) {
+        const current = results.get(rawKey) || [];
+        current.push(normalized);
+        results.set(rawKey, current);
+      }
+    }
+    collectPayloadFieldValues(rawValue, keys, depth + 1, results);
+  }
+  return results;
+}
+
+function extractDevelopmentRouting(allJobs: AppJob[]): {
+  applicationId: string | null;
+  goalId: string | null;
+  threadId: string | null;
+} {
+  const values = new Map<string, string[]>();
+  const keys = new Set(["application_id", "goal_id", "thread_id", "coordination_thread_id"]);
+  for (const job of allJobs) {
+    collectPayloadFieldValues(job.input_json, keys, 0, values);
+    collectPayloadFieldValues(job.output_json, keys, 0, values);
+  }
+  const first = (key: string) => {
+    const entries = values.get(key) || [];
+    return entries.length ? entries[0] : null;
+  };
+  return {
+    applicationId: first("application_id"),
+    goalId: first("goal_id"),
+    threadId: first("thread_id") || first("coordination_thread_id"),
+  };
+}
+
 function formatTimestamp(value?: string | null): string {
   const raw = String(value || "").trim();
   if (!raw) return "—";
@@ -325,7 +349,7 @@ function overallStateTone(value: DraftPageOverallState): "success" | "warn" | "d
   }
 }
 
-function actionTone(value: DraftActionCard["emphasis"], available: boolean): string {
+function actionTone(value: DraftResolvedAction["emphasis"], available: boolean): string {
   if (!available) return "muted";
   return value === "primary" ? "success" : "info";
 }
@@ -340,6 +364,8 @@ function actionIcon(actionId: DraftActionId) {
       return <History size={18} />;
     case "edit_definition":
       return <FilePenLine size={18} />;
+    case "continue_in_workbench":
+      return <Waypoints size={18} />;
     case "open_generated_environment":
       return <ExternalLink size={18} />;
     case "open_application_workspace":
@@ -521,89 +547,6 @@ function deriveDraftPageViewModel(args: {
     },
   ];
 
-  // Centralize which actions make sense so the page never shows contradictory
-  // "continue/open" affordances without explaining why they are blocked.
-  const recommendedActions: DraftActionCard[] = [
-    {
-      id: "review_failure",
-      title: "Review failure summary",
-      description: "Inspect the verification failure and the build notes for the blocked step.",
-      badge: overallState === "build_blocked" ? "Recommended" : "Available",
-      available: overallState === "build_blocked" || overallState === "needs_revision",
-      disabledReason: "No build failure summary is available yet.",
-      emphasis: "primary",
-    },
-    {
-      id: "retry_validation",
-      title: "Retry validation",
-      description: "Queue another build attempt after reviewing the failure and making any needed changes.",
-      badge: submitting ? "Submitting" : overallState === "build_blocked" ? "Next step" : "Available",
-      available: Boolean(draft) && !submitting && overallState !== "building" && overallState !== "unavailable",
-      disabledReason: overallState === "building" ? "A build is already in progress." : "This draft cannot be submitted right now.",
-      emphasis: "primary",
-    },
-    {
-      id: "view_build_jobs",
-      title: "View build jobs",
-      description: "Open the recorded build jobs for this draft and inspect step-by-step execution.",
-      badge: relatedJobs.length ? "Available" : "Unavailable",
-      available: relatedJobs.length > 0,
-      disabledReason: "No build jobs have been recorded yet.",
-      emphasis: "secondary",
-    },
-    {
-      id: "edit_definition",
-      title: "Edit app definition",
-      description: "Review the prompt, title, and raw draft JSON for this application draft.",
-      badge: saving ? "Saving" : "Available",
-      available: Boolean(draft),
-      disabledReason: "Draft details are not loaded yet.",
-      emphasis: "secondary",
-    },
-    {
-      id: "open_generated_environment",
-      title: "Open generated app environment",
-      description: "Open the deployed runtime environment that was provisioned for this generated application.",
-      badge: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl ? "Available" : "Unavailable",
-      available: Boolean(deploymentUrls.siblingUiUrl || deploymentUrls.appUrl),
-      disabledReason: "A generated app environment has not been provisioned yet.",
-      emphasis: "secondary",
-    },
-    {
-      id: "open_application_workspace",
-      title: "Open application workspace",
-      description: "Open the generated application workspace once a confirmed route is available.",
-      badge: workspaceRoutingConfirmed ? "Available" : "Not confirmed",
-      available: workspaceRoutingConfirmed,
-      disabledReason: "Workspace routing for the generated application is not confirmed yet.",
-      emphasis: "secondary",
-    },
-  ];
-
-  if (overallState === "draft") {
-    recommendedActions.push({
-      id: "submit_draft",
-      title: "Submit draft",
-      description: "Start the application build workflow for this draft.",
-      badge: submitting ? "Submitting" : "Primary",
-      available: Boolean(draft) && !submitting,
-      disabledReason: "Draft details are not loaded yet.",
-      emphasis: "primary",
-    });
-  }
-
-  if (overallState === "draft" || overallState === "needs_revision") {
-    recommendedActions.push({
-      id: "save_draft",
-      title: "Save draft",
-      description: "Persist the current title and raw draft JSON without starting a build.",
-      badge: saving ? "Saving" : "Available",
-      available: Boolean(draft) && !saving,
-      disabledReason: "Draft details are not loaded yet.",
-      emphasis: "secondary",
-    });
-  }
-
   return {
     overallState,
     overallLabel: overallStateLabel(overallState),
@@ -635,7 +578,6 @@ function deriveDraftPageViewModel(args: {
           : "Build summary",
     failureSummaryBody,
     buildTimeline,
-    recommendedActions,
   };
 }
 
@@ -662,6 +604,7 @@ export default function DraftDetailPage({
 }) {
   const params = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const draftId = String(explicitDraftId || params.draftId || "").trim();
   const [draft, setDraft] = useState<AppIntentDraft | null>(null);
   const [title, setTitle] = useState("");
@@ -682,6 +625,7 @@ export default function DraftDetailPage({
   const [executionNotesError, setExecutionNotesError] = useState<string | null>(null);
   const [executionNoteExpanded, setExecutionNoteExpanded] = useState(false);
   const { push } = useNotifications();
+  const { openPanel, clearSessionResolution, setContext, setInputText, setLastArtifactHint, setOpen } = useXynConsole();
   const failureSummaryRef = useRef<HTMLElement | null>(null);
   const editorRef = useRef<HTMLDetailsElement | null>(null);
   const announcedBuildToastRef = useRef("");
@@ -822,6 +766,7 @@ export default function DraftDetailPage({
   const installedCapability = useMemo(() => extractInstalledCapability(relatedJobs), [relatedJobs]);
   const siblingInstalledArtifact = useMemo(() => extractSiblingInstalledArtifact(relatedJobs), [relatedJobs]);
   const applicationDefinition = useMemo(() => extractApplicationDefinition(relatedJobs), [relatedJobs]);
+  const developmentRouting = useMemo(() => extractDevelopmentRouting(relatedJobs), [relatedJobs]);
   const viewModel = useMemo(
     () =>
       deriveDraftPageViewModel({
@@ -859,6 +804,52 @@ export default function DraftDetailPage({
     [relatedJobs],
   );
   const latestJob = relatedJobs.length ? relatedJobs[relatedJobs.length - 1] : null;
+  const isWorkbenchRoute = /^\/w\/[^/]+\/workbench\/?$/.test(location.pathname);
+  const composerThreadId = String(workflow?.thread_id || developmentRouting.threadId || "").trim();
+  const goalId = String(developmentRouting.goalId || "").trim();
+  const applicationId = String(developmentRouting.applicationId || "").trim();
+  const applicationWorkspaceReason =
+    applicationId || viewModel.overallState !== "ready"
+      ? ""
+      : "No durable application workspace route is available yet because this build has not exposed an application id.";
+  const resolvedActions = useMemo(
+    () =>
+      resolveDraftActions({
+        overallState: viewModel.overallState,
+        currentStep: viewModel.currentStep,
+        hasDraft: Boolean(draft),
+        hasRelatedJobs: relatedJobs.length > 0,
+        hasDeploymentEnvironment: Boolean(deploymentUrls.siblingUiUrl || deploymentUrls.appUrl),
+        hasThreadContext: Boolean(composerThreadId),
+        hasApplicationWorkspaceRoute: Boolean(applicationId),
+        workspaceRoutingConfirmed: viewModel.workspaceRoutingLabel === "Confirmed",
+        applicationWorkspaceReason,
+        saving,
+        submitting,
+      }),
+    [
+      applicationId,
+      applicationWorkspaceReason,
+      composerThreadId,
+      deploymentUrls.appUrl,
+      deploymentUrls.siblingUiUrl,
+      draft,
+      relatedJobs.length,
+      saving,
+      submitting,
+      viewModel.currentStep,
+      viewModel.overallState,
+      viewModel.workspaceRoutingLabel,
+    ],
+  );
+  const primaryHeaderActions = useMemo(
+    () => resolvedActions.filter((action) => action.enabled && ["continue_in_workbench", "view_build_jobs", "open_generated_environment"].includes(action.id)).slice(0, 3),
+    [resolvedActions],
+  );
+  const primarySubmitAction = useMemo(
+    () => resolvedActions.find((action) => action.id === "retry_validation" || action.id === "submit_draft") || null,
+    [resolvedActions],
+  );
   const buildToastEventKey = useMemo(
     () =>
       deriveBuildToastEventKey({
@@ -900,8 +891,60 @@ export default function DraftDetailPage({
     });
   }, []);
 
+  const primeWorkbenchContext = useCallback(() => {
+    const artifactId = String(applicationDefinition?.artifactSlug || installedCapability?.appSlug || draftId).trim();
+    const appTitle = draftDescriptor.title || installedCapability?.title || applicationDefinition?.title || "Application Draft";
+    setLastArtifactHint({
+      artifact_id: artifactId,
+      artifact_type: "GeneratedApplication",
+      artifact_state: viewModel.overallLabel,
+      title: `${appTitle} • ${viewModel.overallLabel}`,
+      route: toWorkspacePath(workspaceId, "workbench"),
+    });
+    setContext({ artifact_id: artifactId, artifact_type: "GeneratedApplication" });
+    clearSessionResolution();
+    setInputText(`${appTitle}\nBuild state: ${viewModel.overallLabel}\nCurrent step: ${viewModel.currentStep}\nRecommended next step: ${viewModel.primaryNextStep}`);
+    setOpen(true);
+  }, [
+    applicationDefinition?.artifactSlug,
+    applicationDefinition?.title,
+    clearSessionResolution,
+    draftDescriptor.title,
+    draftId,
+    installedCapability?.appSlug,
+    installedCapability?.title,
+    setContext,
+    setInputText,
+    setLastArtifactHint,
+    setOpen,
+    viewModel.currentStep,
+    viewModel.overallLabel,
+    viewModel.primaryNextStep,
+    workspaceId,
+  ]);
+
+  const logDraftAction = useCallback(
+    (action: DraftResolvedAction) => {
+      const detail = {
+        action_id: action.id,
+        draft_id: draftId,
+        workspace_id: workspaceId,
+        overall_state: viewModel.overallState,
+        enabled: action.enabled,
+      };
+      // eslint-disable-next-line no-console
+      console.info("[draft-action]", detail);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("xyn:draft-action", { detail }));
+      }
+    },
+    [draftId, viewModel.overallState, workspaceId],
+  );
+
   const handleAction = useCallback(
-    (actionId: DraftActionId) => {
+    (action: DraftResolvedAction) => {
+      logDraftAction(action);
+      const actionId = action.id;
       if (actionId === "review_failure") {
         reviewFailureSummary();
         return;
@@ -920,12 +963,42 @@ export default function DraftDetailPage({
         openEditor();
         return;
       }
+      if (actionId === "continue_in_workbench") {
+        primeWorkbenchContext();
+        openPanel({
+          key: "composer_detail",
+          params: {
+            workspace_id: workspaceId,
+            ...(applicationId ? { application_id: applicationId } : {}),
+            ...(goalId ? { goal_id: goalId } : {}),
+            ...(composerThreadId ? { thread_id: composerThreadId } : {}),
+          },
+          open_in: "new_panel",
+          title: `${draftDescriptor.title || "Application"} Workbench`,
+        });
+        if (!isWorkbenchRoute) navigate(toWorkspacePath(workspaceId, "workbench"));
+        return;
+      }
       if (actionId === "open_generated_environment") {
         openGeneratedEnvironment();
         return;
       }
       if (actionId === "open_application_workspace") {
-        setMessage("Generated application workspace routing is not confirmed yet for this build.");
+        if (!applicationId) {
+          setMessage(applicationWorkspaceReason);
+          return;
+        }
+        primeWorkbenchContext();
+        openPanel({
+          key: "application_detail",
+          params: {
+            workspace_id: workspaceId,
+            application_id: applicationId,
+          },
+          open_in: "new_panel",
+          title: `${draftDescriptor.title || "Application"} Workspace`,
+        });
+        if (!isWorkbenchRoute) navigate(toWorkspacePath(workspaceId, "workbench"));
         return;
       }
       if (actionId === "save_draft") {
@@ -936,7 +1009,24 @@ export default function DraftDetailPage({
         void submit();
       }
     },
-    [latestJobId, navigate, onOpenJob, openEditor, openGeneratedEnvironment, reviewFailureSummary, workspaceId],
+    [
+      applicationId,
+      applicationWorkspaceReason,
+      composerThreadId,
+      draftDescriptor.title,
+      goalId,
+      isWorkbenchRoute,
+      latestJobId,
+      logDraftAction,
+      navigate,
+      onOpenJob,
+      openEditor,
+      openGeneratedEnvironment,
+      openPanel,
+      primeWorkbenchContext,
+      reviewFailureSummary,
+      workspaceId,
+    ],
   );
 
   useEffect(() => {
@@ -1046,22 +1136,16 @@ export default function DraftDetailPage({
           <button className="ghost" onClick={() => (onBack ? onBack() : navigate(toWorkspacePath(workspaceId, "drafts")))}>
             {onBack ? "Back" : "Back to Drafts"}
           </button>
-          <button className="ghost" type="button" onClick={openEditor} disabled={!draft}>
-            Edit app definition
-          </button>
-          {latestJobId ? (
-            <button className="ghost" onClick={() => handleAction("view_build_jobs")}>
-              View build jobs
+          {primaryHeaderActions.map((action) => (
+            <button key={action.id} className="ghost" type="button" onClick={() => handleAction(action)}>
+              {action.title}
+            </button>
+          ))}
+          {primarySubmitAction ? (
+            <button className="primary" onClick={() => handleAction(primarySubmitAction)} disabled={!primarySubmitAction.enabled || !workspaceId}>
+              {primarySubmitAction.badge === "Submitting" ? "Submitting..." : primarySubmitAction.title}
             </button>
           ) : null}
-          {(deploymentUrls.siblingUiUrl || deploymentUrls.appUrl) ? (
-            <button className="ghost" type="button" onClick={openGeneratedEnvironment}>
-              Open generated app environment
-            </button>
-          ) : null}
-          <button className="primary" onClick={() => handleAction(viewModel.overallState === "draft" ? "submit_draft" : "retry_validation")} disabled={submitting || !workspaceId}>
-            {submitting ? "Submitting..." : viewModel.overallState === "draft" ? "Submit draft" : "Retry validation"}
-          </button>
         </div>
       </div>
       {message && <InlineMessage tone="info" title="Draft" body={message} />}
@@ -1140,16 +1224,16 @@ export default function DraftDetailPage({
               <h3>Suggested Actions</h3>
             </div>
             <div className="app-draft-action-list">
-              {viewModel.recommendedActions.map((action) => (
+              {resolvedActions.map((action) => (
                 <ActionRowCard
                   key={action.id}
                   title={action.title}
                   description={action.description}
-                  badge={<span className={`chip ${actionTone(action.emphasis, action.available)}`}>{action.badge}</span>}
+                  badge={<span className={`chip ${actionTone(action.emphasis, action.enabled)}`}>{action.badge}</span>}
                   icon={actionIcon(action.id)}
-                  disabled={!action.available}
+                  disabled={!action.enabled}
                   disabledReason={action.disabledReason}
-                  onClick={action.available ? () => handleAction(action.id) : undefined}
+                  onClick={action.enabled ? () => handleAction(action) : undefined}
                 />
               ))}
             </div>
