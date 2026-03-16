@@ -8,10 +8,12 @@ import { getMe } from "../../../api/xyn";
 import { executeAppPalettePrompt } from "../../../api/xyn";
 import type { PromptInterpretationClarificationOption, RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
+import { openViewDescriptor } from "../../navigation/openViewDescriptor";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import { emitEntityChange, inferEntityChangeFromPrompt } from "../../utils/entityChangeEvents";
+import { fromRecentArtifactItem } from "../../navigation/viewDescriptorBuilders";
 import type { ConsolePanelKey } from "./WorkbenchPanelHost";
 import RecentArtifactsMiniTable from "./RecentArtifactsMiniTable";
 import ConsolePromptCard from "./ConsolePromptCard";
@@ -1803,15 +1805,16 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       }}
       onToggleShowDeprecatedArticles={setShowDeprecatedArticles}
       onOpen={(item) => {
+        const descriptor = fromRecentArtifactItem(item, workspaceIdFromPath || undefined);
         setLastArtifactHint({
           artifact_id: item.artifact_id,
           artifact_type: item.artifact_type,
           artifact_state: item.artifact_state || null,
           title: item.title,
-          route: item.route,
+          route: descriptor.route,
           updated_at: item.updated_at,
         });
-        navigate(item.route);
+        openViewDescriptor(descriptor, navigate);
         if (isOverlay) {
           if (onRequestClose) onRequestClose();
           else setOpen(false);

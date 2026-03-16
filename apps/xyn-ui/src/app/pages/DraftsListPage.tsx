@@ -7,6 +7,7 @@ import type { AppIntentDraft, CanvasTableQuery, CanvasTableResponse } from "../.
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
+import { openViewDescriptor } from "../navigation/openViewDescriptor";
 
 export default function DraftsListPage({
   workspaceId,
@@ -121,7 +122,7 @@ export default function DraftsListPage({
               return;
             }
             const descriptor = getAppDraftViewDescriptor({ id: rowId, title: "" }, workspaceId);
-            navigate(descriptor.route);
+            openViewDescriptor(descriptor, navigate);
           }}
         />
       </section>

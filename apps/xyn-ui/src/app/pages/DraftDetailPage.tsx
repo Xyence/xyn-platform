@@ -9,6 +9,8 @@ import { toWorkspacePath } from "../routing/workspaceRouting";
 import { useNotifications } from "../state/notificationsStore";
 import { useXynConsole } from "../state/xynConsoleStore";
 import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
+import { fromApplicationWorkspace } from "../navigation/viewDescriptorBuilders";
+import { openViewDescriptor } from "../navigation/openViewDescriptor";
 
 type DraftDetailTab = "editor" | "meta";
 type DraftStatusValue = "draft" | "ready" | "submitted" | "archived";
@@ -283,6 +285,15 @@ export default function DraftDetailPage({
     () => getAppDraftViewDescriptor({ id: draftId, title: draft?.title || title }, workspaceId),
     [draft?.title, draftId, title, workspaceId]
   );
+  const workbenchDescriptor = useMemo(
+    () =>
+      fromApplicationWorkspace({
+        workspaceId,
+        title: draft?.title || title || "Application Workbench",
+        subtitle: "Continue application design and execution",
+      }),
+    [draft?.title, title, workspaceId],
+  );
   const rawPrompt = useMemo(() => {
     if (!draft?.content_json || typeof draft.content_json !== "object") return "";
     return String((draft.content_json as Record<string, unknown>).raw_prompt || "");
@@ -459,7 +470,7 @@ export default function DraftDetailPage({
             artifact_type: "GeneratedApplication",
             artifact_state: "installed",
             title: artifactTitle,
-            route: toWorkspacePath(workspaceId, "workbench"),
+            route: workbenchDescriptor.route,
           }
         : null,
     );
@@ -478,7 +489,7 @@ export default function DraftDetailPage({
     setOpen,
     siblingInstalledArtifact?.artifactId,
     siblingInstalledArtifact?.artifactSlug,
-    workspaceId,
+    workbenchDescriptor.route,
   ]);
 
   const continueInWorkbench = useCallback(() => {
@@ -493,7 +504,7 @@ export default function DraftDetailPage({
               artifact_type: "GeneratedApplication",
               artifact_state: "installed",
               title: artifactTitle,
-              route: toWorkspacePath(workspaceId, "workbench"),
+              route: workbenchDescriptor.route,
             }
           : null,
       );
@@ -503,7 +514,7 @@ export default function DraftDetailPage({
       setInputText(rawPrompt || `Continue application design for ${draft?.title || title || "this draft"}`);
     }
     setOpen(true);
-    navigate(toWorkspacePath(workspaceId, "workbench"));
+    openViewDescriptor(workbenchDescriptor, navigate);
   }, [
     applicationDefinition?.artifactSlug,
     applicationDefinition?.title,
@@ -518,7 +529,7 @@ export default function DraftDetailPage({
     siblingInstalledArtifact?.artifactId,
     siblingInstalledArtifact?.artifactSlug,
     title,
-    workspaceId,
+    workbenchDescriptor,
   ]);
 
   useEffect(() => {

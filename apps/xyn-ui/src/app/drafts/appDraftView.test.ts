@@ -13,8 +13,10 @@ describe("getAppDraftViewDescriptor", () => {
     );
 
     expect(descriptor.kind).toBe("app_intent_draft");
+    expect(descriptor.entityId).toBe("draft-123");
     expect(descriptor.route).toBe("/w/ws-1/drafts/draft-123");
     expect(descriptor.title).toBe("Team Lunch Poll");
+    expect(descriptor.panelKey).toBe("draft_detail");
     expect(descriptor.editorKey).toBe("application_workbench");
   });
 });

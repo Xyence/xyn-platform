@@ -5,6 +5,7 @@ import { createAppIntentDraft } from "../../api/xyn";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
+import { openViewDescriptor } from "../navigation/openViewDescriptor";
 
 const EXAMPLE_PROMPT = "Build a network inventory app that stores devices per workspace, with search and status tracking.";
 
@@ -44,7 +45,7 @@ export default function DraftCreatePage({
           initial_intent: {},
         },
       });
-      navigate(getAppDraftViewDescriptor(draft, workspaceId).route);
+      openViewDescriptor(getAppDraftViewDescriptor(draft, workspaceId), navigate);
     } catch (err) {
       setError((err as Error).message);
     } finally {

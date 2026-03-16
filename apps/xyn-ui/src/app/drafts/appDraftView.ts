@@ -1,21 +1,9 @@
 import type { AppIntentDraft } from "../../api/types";
+import { fromAppIntentDraft } from "../navigation/viewDescriptorBuilders";
+import type { AppIntentDraftViewDescriptor } from "../navigation/viewDescriptors";
 
-export type AppDraftViewDescriptor = {
-  kind: "app_intent_draft";
-  draftId: string;
-  route: string;
-  title: string;
-  editorKey: "application_workbench";
-};
+export type AppDraftViewDescriptor = AppIntentDraftViewDescriptor;
 
 export function getAppDraftViewDescriptor(draft: Pick<AppIntentDraft, "id" | "title">, workspaceId: string): AppDraftViewDescriptor {
-  const draftId = String(draft.id || "").trim();
-  const normalizedWorkspaceId = encodeURIComponent(String(workspaceId || "").trim());
-  return {
-    kind: "app_intent_draft",
-    draftId,
-    route: `/w/${normalizedWorkspaceId}/drafts/${encodeURIComponent(draftId)}`,
-    title: String(draft.title || "").trim() || draftId || "Application Draft",
-    editorKey: "application_workbench",
-  };
+  return fromAppIntentDraft(draft, workspaceId);
 }
