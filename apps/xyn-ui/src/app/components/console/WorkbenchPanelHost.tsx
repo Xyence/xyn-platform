@@ -3691,8 +3691,10 @@ function ComposerDetailPanel({
           ? `Applied ${response.application.name} into durable goals, threads, and work items.`
           : `${response.application.name} was already applied.`
       );
+      // After plan apply, Composer should move into the live application effort.
+      // Keeping both plan and application ids in focus leaves the user in a mixed
+      // review/execution state and obscures the next actionable step.
       openComposer({
-        application_plan_id: response.application_plan.id,
         application_id: response.application.id,
       });
     } catch (err) {

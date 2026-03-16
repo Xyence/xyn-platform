@@ -537,10 +537,24 @@ def _resolve_model_api_key(provider_slug: str, credential: Optional[ProviderCred
             .order_by("-updated_at", "-created_at")
             .first()
         )
-    api_key = _credential_api_key(selected_credential, provider_slug)
+    credential_error: AiConfigError | None = None
+    try:
+        api_key = _credential_api_key(selected_credential, provider_slug)
+    except AiConfigError as exc:
+        credential_error = exc
+        logger.warning(
+            "Falling back to provider env key after credential resolution failed",
+            extra={"provider": provider_slug, "credential_id": str(selected_credential.id) if selected_credential else None},
+        )
+        api_key = ""
     if api_key:
         return api_key
-    return _read_provider_env_key(provider_slug)
+    env_key = _read_provider_env_key(provider_slug)
+    if env_key:
+        return env_key
+    if credential_error is not None:
+        raise credential_error
+    return ""
 
 
 def _serialize_messages_for_provider(messages: List[Dict[str, str]]) -> List[Dict[str, str]]:

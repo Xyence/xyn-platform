@@ -8,6 +8,7 @@ from django.test import RequestFactory, TestCase
 from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
 from xyn_orchestrator.development_intelligence import compute_goal_development_insights, compute_goal_diagnostic
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
+from xyn_orchestrator.application_factories import apply_application_plan, create_or_get_application_plan
 from xyn_orchestrator.portfolio_intelligence import (
     build_goal_portfolio_row,
     build_goal_portfolio_state,
@@ -30,6 +31,7 @@ from xyn_orchestrator.xyn_api import (
     application_detail,
     application_factories_collection,
     application_plan_apply,
+    application_plan_detail,
     application_plans_collection,
     composer_state,
     goal_decompose,
@@ -565,6 +567,62 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(plan.status, "canceled")
         self.assertEqual(payload["status"], "canceled")
 
+    def test_create_or_get_application_plan_creates_fresh_plan_after_archived_application(self):
+        objective = "Build Team Lunch Poll"
+        plan, _definition, _generated, _created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            source_conversation_id="thread-1",
+        )
+        application, created = apply_application_plan(application_plan=plan, user=self.user)
+        self.assertTrue(created)
+        application.status = "archived"
+        application.save(update_fields=["status", "updated_at"])
+
+        next_plan, _definition2, _generated2, created_again = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            source_conversation_id="thread-2",
+        )
+
+        plan.refresh_from_db()
+        self.assertTrue(created_again)
+        self.assertNotEqual(next_plan.id, plan.id)
+        self.assertEqual(next_plan.status, "review")
+        self.assertIsNone(next_plan.application_id)
+        self.assertNotEqual(plan.plan_fingerprint, next_plan.plan_fingerprint)
+        self.assertEqual(ApplicationPlan.objects.filter(workspace=self.workspace).count(), 2)
+
+    def test_apply_application_plan_creates_fresh_application_when_archived_one_matches_fingerprint(self):
+        objective = "Build Team Lunch Poll"
+        plan, _definition, _generated, _created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            source_conversation_id="thread-1",
+        )
+        application, created = apply_application_plan(application_plan=plan, user=self.user)
+        self.assertTrue(created)
+        original_application_id = application.id
+        original_plan_fingerprint = application.plan_fingerprint
+        application.status = "archived"
+        application.save(update_fields=["status", "updated_at"])
+        plan.application = None
+        plan.status = "review"
+        plan.save(update_fields=["application", "status", "updated_at"])
+
+        next_application, created_again = apply_application_plan(application_plan=plan, user=self.user)
+
+        application.refresh_from_db()
+        plan.refresh_from_db()
+        self.assertTrue(created_again)
+        self.assertNotEqual(next_application.id, original_application_id)
+        self.assertEqual(next_application.status, "active")
+        self.assertEqual(plan.application_id, next_application.id)
+        self.assertNotEqual(application.plan_fingerprint, original_plan_fingerprint)
+
     def test_composer_state_defaults_to_factory_discovery(self):
         request = self._request("/xyn/api/composer/state", data={"workspace_id": str(self.workspace.id)})
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
@@ -666,6 +724,83 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(thread_response.status_code, 200)
         self.assertEqual(thread_payload["stage"], "thread_focus")
         self.assertEqual((thread_payload["thread"] or {}).get("id"), str(thread.id))
+
+    def test_composer_state_default_workspace_view_excludes_archived_application_work(self):
+        archived_application = Application.objects.create(
+            workspace=self.workspace,
+            name="Archived effort",
+            summary="Historical effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-archived",
+            requested_by=self.identity,
+            status="archived",
+            plan_fingerprint=f"archived-{uuid.uuid4().hex}",
+            request_objective="Historical application effort",
+        )
+        archived_goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=archived_application,
+            title="Archived goal",
+            description="Should not appear in the default composer queue view.",
+            source_conversation_id="thread-archived",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=archived_goal,
+            title="Archived thread",
+            owner=self.identity,
+            priority="normal",
+            status="queued",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-archived",
+        )
+
+        active_application = Application.objects.create(
+            workspace=self.workspace,
+            name="Active effort",
+            summary="Current effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-active",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"active-{uuid.uuid4().hex}",
+            request_objective="Current application effort",
+        )
+        active_goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=active_application,
+            title="Active goal",
+            description="Should appear in the default composer queue view.",
+            source_conversation_id="thread-active",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        active_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=active_goal,
+            title="Active thread",
+            owner=self.identity,
+            priority="normal",
+            status="queued",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-active",
+        )
+
+        request = self._request("/xyn/api/composer/state", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = composer_state(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([(goal or {}).get("id") for goal in payload["related_goals"]], [str(active_goal.id)])
+        self.assertEqual([(thread or {}).get("id") for thread in payload["related_threads"]], [str(active_thread.id)])
 
     def test_recommend_next_slice_includes_stable_recommendation_id_for_unchanged_state(self):
         goal = Goal.objects.create(

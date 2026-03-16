@@ -1427,7 +1427,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() =>
       expect(onOpenPanel).toHaveBeenCalledWith({
         key: "composer_detail",
-        params: { workspace_id: "ws-1", application_plan_id: "plan-1", application_id: "app-1" },
+        params: { workspace_id: "ws-1", application_id: "app-1" },
       })
     );
   });
@@ -3644,11 +3644,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(onOpenPanel).toHaveBeenCalledWith(
       expect.objectContaining({
         key: "composer_detail",
-        params: expect.objectContaining({
+        params: {
           workspace_id: "ws-1",
-          application_plan_id: "plan-1",
           application_id: "app-1",
-        }),
+        },
       })
     );
   });

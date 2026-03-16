@@ -16,7 +16,7 @@ class SystemReadinessTests(TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        os.environ.setdefault("XYN_CREDENTIALS_ENCRYPTION_KEY", "V2S8x7lAB2BaN8A-14EvhA-gF1kq4KOlnS2vPc9vulE=")
+        os.environ["XYN_CREDENTIALS_ENCRYPTION_KEY"] = "V2S8x7lAB2BaN8A-14EvhA-gF1kq4KOlnS2vPc9vulE="
         for key in (
             "XYN_AI_PROVIDER",
             "XYN_AI_MODEL",
@@ -106,6 +106,35 @@ class SystemReadinessTests(TestCase):
         workspace_check = next(check for check in report["checks"] if check["component"] == "workspace_storage")
         self.assertEqual(workspace_check["status"], "error")
         self.assertIn("not writable", workspace_check["message"])
+
+    def test_readiness_reports_agent_resolution_errors(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "XYN_WORKSPACE_ROOT": str(Path(self.tempdir.name) / "workspaces"),
+                "XYN_ARTIFACT_ROOT": str(Path(self.tempdir.name) / "artifacts"),
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-ready-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+        ProviderCredential.objects.update(api_key_encrypted="not-a-valid-fernet-payload")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "XYN_OPENAI_API_KEY": "",
+                "OPENAI_API_KEY": "",
+            },
+            clear=False,
+        ):
+            report = system_readiness_report()
+        planning = next(check for check in report["checks"] if check["component"] == "planning_agents")
+        coding = next(check for check in report["checks"] if check["component"] == "coding_agents")
+        self.assertEqual(planning["status"], "error")
+        self.assertEqual(coding["status"], "error")
+        self.assertIn("usable runtime credential", planning["message"])
 
     @override_settings(MEDIA_ROOT="/tmp/xyn-ready-media")
     def test_readiness_reports_ready_when_prerequisites_exist(self):

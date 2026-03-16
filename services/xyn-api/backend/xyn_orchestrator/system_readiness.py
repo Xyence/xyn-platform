@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .ai_runtime import AiConfigError, resolve_ai_config
 from .managed_repositories import ManagedRepositoryError, validate_managed_repository_registration
 from .managed_storage import managed_artifact_root, managed_workspace_root
 from .models import AgentDefinition, ProviderCredential, ManagedRepository
@@ -46,18 +47,39 @@ def _ai_provider_check() -> Dict[str, Any]:
 
 def _agent_purpose_check(purpose_slug: str) -> Dict[str, Any]:
     count = AgentDefinition.objects.filter(enabled=True, purposes__slug=purpose_slug).distinct().count()
-    return {
-        "component": f"{purpose_slug}_agents",
-        "status": _status(count > 0, missing=count == 0),
-        "message": (
-            f"{count} enabled {purpose_slug} agent(s) available."
-            if count > 0
-            else f"No enabled {purpose_slug} agents are configured."
-        ),
-        "details": {"enabled_agents": count, "purpose": purpose_slug},
-    }
-
-
+    if count <= 0:
+        return {
+            "component": f"{purpose_slug}_agents",
+            "status": "missing",
+            "message": f"No enabled {purpose_slug} agents are configured.",
+            "details": {"enabled_agents": count, "purpose": purpose_slug},
+        }
+    try:
+        resolved = resolve_ai_config(purpose_slug=purpose_slug)
+        return {
+            "component": f"{purpose_slug}_agents",
+            "status": "ok",
+            "message": (
+                f"{count} enabled {purpose_slug} agent(s) available. "
+                f"Using {resolved.get('provider')}:{resolved.get('model_name')}."
+            ),
+            "details": {
+                "enabled_agents": count,
+                "purpose": purpose_slug,
+                "provider": resolved.get("provider"),
+                "model_name": resolved.get("model_name"),
+                "agent_slug": resolved.get("agent_slug"),
+            },
+        }
+    except AiConfigError as exc:
+        return {
+            "component": f"{purpose_slug}_agents",
+            "status": "error",
+            "message": (
+                f"{count} enabled {purpose_slug} agent(s) exist, but no usable runtime credential could be resolved: {exc}"
+            ),
+            "details": {"enabled_agents": count, "purpose": purpose_slug, "error": str(exc)},
+        }
 def _repository_checks() -> List[Dict[str, Any]]:
     active_repositories = list(ManagedRepository.objects.filter(is_active=True).order_by("slug"))
     if not active_repositories:

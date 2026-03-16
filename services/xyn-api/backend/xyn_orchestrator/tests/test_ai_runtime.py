@@ -15,7 +15,7 @@ from xyn_orchestrator.models import AgentDefinition, AgentDefinitionPurpose, Age
 
 class AiRuntimeTests(TestCase):
     def setUp(self):
-        os.environ.setdefault("XYN_CREDENTIALS_ENCRYPTION_KEY", "V2S8x7lAB2BaN8A-14EvhA-gF1kq4KOlnS2vPc9vulE=")
+        os.environ["XYN_CREDENTIALS_ENCRYPTION_KEY"] = "V2S8x7lAB2BaN8A-14EvhA-gF1kq4KOlnS2vPc9vulE="
         for key in (
             "XYN_AI_PROVIDER",
             "XYN_AI_MODEL",
@@ -211,6 +211,30 @@ class AiRuntimeTests(TestCase):
         resolved = resolve_ai_config(agent_slug=agent.slug)
         self.assertEqual(resolved.get("provider"), "openai")
         self.assertEqual(resolved.get("api_key"), "sk-runtime-test-1234")
+
+    def test_resolve_ai_config_falls_back_to_env_when_encrypted_credential_cannot_be_decrypted(self):
+        provider, _ = ModelProvider.objects.get_or_create(slug="openai", defaults={"name": "OpenAI", "enabled": True})
+        credential = ProviderCredential.objects.create(
+            provider=provider,
+            name="broken-openai",
+            auth_type="api_key",
+            api_key_encrypted="not-a-valid-fernet-payload",
+            is_default=True,
+            enabled=True,
+        )
+        model = ModelConfig.objects.create(provider=provider, model_name="gpt-5-mini", credential=credential, enabled=True)
+        purpose, _ = AgentPurpose.objects.get_or_create(slug="coding", defaults={"name": "Coding", "status": "active", "enabled": True})
+        agent = AgentDefinition.objects.create(
+            slug="broken-credential-agent",
+            name="Broken Credential Agent",
+            model_config=model,
+            enabled=True,
+        )
+        AgentDefinitionPurpose.objects.create(agent_definition=agent, purpose=purpose)
+        with patch.dict(os.environ, {"XYN_OPENAI_API_KEY": "sk-env-fallback-openai"}, clear=False):
+            resolved = resolve_ai_config(agent_slug=agent.slug)
+        self.assertEqual(resolved.get("provider"), "openai")
+        self.assertEqual(resolved.get("api_key"), "sk-env-fallback-openai")
 
     def test_resolve_ai_config_prefers_planning_agent_and_falls_back_to_default(self):
         with patch.dict(

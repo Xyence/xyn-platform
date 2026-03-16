@@ -9,7 +9,16 @@ from django.utils import timezone
 from xyn_orchestrator.development_intelligence import compute_thread_diagnostic
 from xyn_orchestrator.execution_observability import build_thread_timeline, serialize_thread_timeline
 from xyn_orchestrator.goal_progress import compute_thread_execution_metrics, compute_thread_progress
-from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, UserIdentity, Workspace, WorkspaceMembership
+from xyn_orchestrator.models import (
+    Application,
+    CoordinationEvent,
+    CoordinationThread,
+    DevTask,
+    Goal,
+    UserIdentity,
+    Workspace,
+    WorkspaceMembership,
+)
 from xyn_orchestrator.xco import derive_work_queue
 from xyn_orchestrator.xyn_api import (
     _coordination_task_lookup_factory,
@@ -229,6 +238,61 @@ class XcoThreadTests(TestCase):
         self.assertEqual(payload["items"][0]["thread_priority"], "critical")
         self.assertEqual(payload["items"][0]["queue_state"]["status"], "queue_ready")
 
+    def test_xco_queue_endpoint_includes_fresh_goal_work_without_runtime_workspace_id(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Fresh effort",
+            summary="Current effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-fresh",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"fresh-{uuid.uuid4().hex}",
+            request_objective="Fresh application effort",
+        )
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Fresh goal",
+            description="Queueable fresh work",
+            source_conversation_id="thread-fresh",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        thread = self._create_thread(goal=goal, priority="critical")
+        self._create_task(
+            thread,
+            work_item_id="wi-fresh",
+            runtime_workspace_id=None,
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request("/xyn/api/xco/queue", data={"workspace_id": str(self.workspace.id)})
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = xco_queue_collection(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["items"][0]["work_item_id"], "wi-fresh")
+
+    def test_xco_queue_endpoint_includes_approved_work_on_queued_thread_without_auto_resume(self):
+        thread = self._create_thread(status="queued", priority="critical", execution_policy={"auto_resume": False})
+        self._create_task(
+            thread,
+            work_item_id="wi-queued-thread",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request("/xyn/api/xco/queue", data={"workspace_id": str(self.workspace.id)})
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = xco_queue_collection(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["items"][0]["work_item_id"], "wi-queued-thread")
+
     def test_xco_queue_endpoint_excludes_gated_unapproved_work(self):
         thread = self._create_thread(priority="critical")
         self._create_task(
@@ -244,6 +308,76 @@ class XcoThreadTests(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
         self.assertEqual(payload["items"], [])
+
+    def test_xco_queue_endpoint_excludes_work_from_archived_applications(self):
+        archived_application = Application.objects.create(
+            workspace=self.workspace,
+            name="Archived effort",
+            summary="Historical effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-archived",
+            requested_by=self.identity,
+            status="archived",
+            plan_fingerprint=f"archived-{uuid.uuid4().hex}",
+            request_objective="Historical application effort",
+        )
+        archived_goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=archived_application,
+            title="Archived goal",
+            description="Should not remain queue-eligible.",
+            source_conversation_id="thread-archived",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        archived_thread = self._create_thread(goal=archived_goal, title="Archived thread", priority="critical")
+        self._create_task(
+            archived_thread,
+            work_item_id="wi-archived",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+
+        active_application = Application.objects.create(
+            workspace=self.workspace,
+            name="Active effort",
+            summary="Current effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-active",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"active-{uuid.uuid4().hex}",
+            request_objective="Current application effort",
+        )
+        active_goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=active_application,
+            title="Active goal",
+            description="Should remain queue-eligible.",
+            source_conversation_id="thread-active",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        active_thread = self._create_thread(goal=active_goal, title="Active thread", priority="high")
+        self._create_task(
+            active_thread,
+            work_item_id="wi-active",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+
+        request = self._request("/xyn/api/xco/queue", data={"workspace_id": str(self.workspace.id)})
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = xco_queue_collection(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual([item["work_item_id"] for item in payload["items"]], ["wi-active"])
 
     def test_dispatch_next_queue_item_creates_runtime_dispatch_and_events(self):
         thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
@@ -396,6 +530,30 @@ class XcoThreadTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(payload["status"], "dispatched")
         self.assertEqual(payload["queue_item"]["work_item_id"], "wi-selected")
+
+    def test_dev_task_dispatch_endpoint_dispatches_selected_task_from_queued_thread_without_auto_resume(self):
+        thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": False})
+        task = self._create_task(
+            thread,
+            work_item_id="wi-selected-queued",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request(
+            f"/xyn/api/dev-tasks/{task.id}/dispatch",
+            method="post",
+            data=json.dumps({"workspace_id": str(self.workspace.id)}),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1], mock.patch(
+            "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
+            return_value={"run_id": "run-selected-queued", "status": "queued", "work_item_id": "wi-selected-queued"},
+        ):
+            response = dev_task_dispatch(request, str(task.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["status"], "dispatched")
+        self.assertEqual(payload["queue_item"]["work_item_id"], "wi-selected-queued")
 
     def test_dispatch_next_queue_item_skips_unapproved_work(self):
         blocked_thread = self._create_thread(status="queued", priority="critical", execution_policy={"auto_resume": True}, title="Blocked")

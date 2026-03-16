@@ -10,7 +10,7 @@ from xyn_orchestrator.models import AgentPurpose, ModelConfig, ModelProvider, Ro
 
 class AiConfigApiTests(TestCase):
     def setUp(self):
-        os.environ.setdefault("XYN_CREDENTIALS_ENCRYPTION_KEY", "V2S8x7lAB2BaN8A-14EvhA-gF1kq4KOlnS2vPc9vulE=")
+        os.environ["XYN_CREDENTIALS_ENCRYPTION_KEY"] = "V2S8x7lAB2BaN8A-14EvhA-gF1kq4KOlnS2vPc9vulE="
         os.environ["XYN_OPENAI_API_KEY"] = "sk-test-openai-1234"
         user_model = get_user_model()
         self.staff = user_model.objects.create_user(username="staff-ai", password="pass", is_staff=True)

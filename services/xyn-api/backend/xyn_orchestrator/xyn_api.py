@@ -26278,8 +26278,9 @@ def _serialize_selected_work_item_queue_state(task: DevTask, *, normalized_statu
     if not task.coordination_thread_id:
         return enriched_state
 
-    workspace_id = str(task.coordination_thread.workspace_id)
-    threads = CoordinationThread.objects.filter(workspace_id=workspace_id).select_related("workspace", "owner", "goal").prefetch_related("work_items")
+    workspace = task.coordination_thread.workspace
+    workspace_id = str(workspace.id)
+    threads = _active_coordination_threads_for_workspace(workspace).select_related("workspace", "goal")
     task_lookup = _coordination_task_lookup_factory(workspace_id)
     queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
     for thread in threads:
@@ -26707,7 +26708,7 @@ def _serialize_composer_state(
             related_goals = [_serialize_goal_summary(goal)]
             portfolio_context = _build_goal_portfolio_payload([goal])
     else:
-        goal_objects = list(Goal.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:20])
+        goal_objects = list(_active_goals_for_workspace(workspace).order_by("-updated_at", "-created_at")[:20])
         related_goals = [_serialize_goal_summary(item) for item in goal_objects]
         portfolio_context = _build_goal_portfolio_payload(goal_objects)
         if goal_objects:
@@ -27229,7 +27230,10 @@ def _execute_conversation_action(
                 }
             )
         if action_type == ConversationActionType.LIST_THREADS.value:
-            rows = [_coordination_thread_summary(item) for item in CoordinationThread.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100]]
+            rows = [
+                _coordination_thread_summary(item)
+                for item in _active_coordination_threads_for_workspace(workspace).order_by("-updated_at", "-created_at")[:100]
+            ]
             return _direct_panel_intent_response(
                 request_id=request_id,
                 summary=f"Found {len(rows)} XCO thread(s).",
@@ -27602,7 +27606,7 @@ def _execute_conversation_action(
                 },
             )
         if action_type == ConversationActionType.LIST_GOALS.value:
-            goal_objects = list(Goal.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100])
+            goal_objects = list(_active_goals_for_workspace(workspace).order_by("-updated_at", "-created_at")[:100])
             goals = [_serialize_goal_summary(item) for item in goal_objects]
             portfolio_state = _build_goal_portfolio_payload(goal_objects)
             recommended_goal = portfolio_state.get("recommended_goal") if isinstance(portfolio_state, dict) else None
@@ -28482,14 +28486,32 @@ def _coordination_thread_queryset(identity: UserIdentity, workspace_id: str):
     workspace = _resolve_workspace_for_identity(identity, workspace_id)
     if not workspace:
         raise PermissionDenied("workspace not accessible")
-    return workspace, CoordinationThread.objects.filter(workspace=workspace).select_related("owner").prefetch_related("work_items", "events")
+    return workspace, _active_coordination_threads_for_workspace(workspace)
 
 
 def _goal_queryset(identity: UserIdentity, workspace_id: str):
     workspace = _resolve_workspace_for_identity(identity, workspace_id)
     if not workspace:
         raise PermissionDenied("workspace not accessible")
-    return workspace, Goal.objects.filter(workspace=workspace).select_related("requested_by").prefetch_related("threads__work_items", "work_items")
+    return workspace, _active_goals_for_workspace(workspace)
+
+
+def _active_goals_for_workspace(workspace: Workspace):
+    return (
+        Goal.objects.filter(workspace=workspace)
+        .filter(Q(application__isnull=True) | ~Q(application__status="archived"))
+        .select_related("requested_by")
+        .prefetch_related("threads__work_items", "work_items")
+    )
+
+
+def _active_coordination_threads_for_workspace(workspace: Workspace):
+    return (
+        CoordinationThread.objects.filter(workspace=workspace)
+        .filter(Q(goal__application__isnull=True) | ~Q(goal__application__status="archived"))
+        .select_related("owner")
+        .prefetch_related("work_items", "events")
+    )
 
 
 def _activate_goal_first_slice(goal: Goal) -> Dict[str, Optional[str]]:
@@ -28641,6 +28663,7 @@ def _approve_goal_recommendation(
             "queue_seed": None,
         }
     task_lookup = {str(item.work_item_id or item.id): item for item in goal.work_items.all()}
+    activated_from_queue = False
     if thread.status == "queued" and action_type == "queue_first_slice":
         transition_thread_status(
             thread,
@@ -28649,6 +28672,7 @@ def _approve_goal_recommendation(
             payload={"reason": "goal_queue_first_slice", "goal_id": str(goal.id)},
         )
         thread.refresh_from_db()
+        activated_from_queue = True
     task_status = _thread_status_for_task(task)
     dependency_ids = task.dependency_work_item_ids if isinstance(task.dependency_work_item_ids, list) else []
     blocked_by_dependency = False
@@ -28669,7 +28693,7 @@ def _approve_goal_recommendation(
         status_lookup=lambda candidate: _thread_status_for_task(candidate),
         task_lookup=lambda work_item_id: task_lookup.get(str(work_item_id)),
     )
-    if queue and str(queue[0].task_id) == str(task.id) and thread.status == "active":
+    if queue and str(queue[0].task_id) == str(task.id) and thread.status == "active" and not activated_from_queue:
         return {
             "status": "already_queued",
             "summary": f"{task.title} is already the next eligible XCO queue item.",
@@ -28731,7 +28755,11 @@ def _coordination_task_lookup_factory(workspace_id: str):
                 key_uuid = uuid.UUID(key)
             except (TypeError, ValueError, AttributeError):
                 key_uuid = None
-            query = DevTask.objects.filter(runtime_workspace_id=workspace_id)
+            query = DevTask.objects.filter(
+                Q(runtime_workspace_id=workspace_id)
+                | Q(coordination_thread__workspace_id=workspace_id)
+                | Q(goal__workspace_id=workspace_id)
+            )
             if key_uuid is not None:
                 query = query.filter(Q(id=key_uuid) | Q(work_item_id=key))
             else:

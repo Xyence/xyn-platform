@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from django.contrib.auth import get_user_model
@@ -530,11 +531,23 @@ def create_or_get_application_plan(
         "plan_json": generated_plan.model_dump(mode="json"),
         "status": "review",
     }
-    plan, created = ApplicationPlan.objects.get_or_create(
-        workspace=workspace,
-        plan_fingerprint=fingerprint,
-        defaults=defaults,
+    plan = (
+        ApplicationPlan.objects.filter(workspace=workspace, plan_fingerprint=fingerprint)
+        .select_related("application")
+        .order_by("-updated_at", "-created_at")
+        .first()
     )
+    if plan is not None and _application_plan_is_historical(plan):
+        _retire_application_plan_fingerprint(plan)
+        plan = None
+    created = False
+    if plan is None:
+        plan = ApplicationPlan.objects.create(
+            workspace=workspace,
+            plan_fingerprint=fingerprint,
+            **defaults,
+        )
+        created = True
     if not created:
         dirty = False
         for field, value in defaults.items():
@@ -547,29 +560,47 @@ def create_or_get_application_plan(
 
 
 def apply_application_plan(*, application_plan: ApplicationPlan, user) -> Tuple[Application, bool]:
-    if application_plan.application_id:
+    if application_plan.application_id and application_plan.application and application_plan.application.status != "archived":
         return application_plan.application, False
+    if application_plan.application_id and application_plan.application and application_plan.application.status == "archived":
+        application_plan.application = None
+        application_plan.status = "review"
+        application_plan.save(update_fields=["application", "status", "updated_at"])
     payload = application_plan.plan_json if isinstance(application_plan.plan_json, dict) else {}
     generated_plan = GeneratedApplicationPlan.model_validate(payload)
-    application, created = Application.objects.get_or_create(
-        workspace=application_plan.workspace,
-        plan_fingerprint=application_plan.plan_fingerprint,
-        defaults={
-            "name": application_plan.name,
-            "summary": application_plan.summary,
-            "source_factory_key": application_plan.source_factory_key,
-            "source_conversation_id": application_plan.source_conversation_id,
-            "requested_by": application_plan.requested_by,
-            "target_repository": application_plan.target_repository,
-            "request_objective": application_plan.request_objective,
-            "status": "active",
-            "metadata_json": {
-                "ordering_hints": generated_plan.ordering_hints,
-                "dependency_hints": generated_plan.dependency_hints,
-                "resolution_notes": generated_plan.resolution_notes,
-            },
-        },
+    existing_application = (
+        Application.objects.filter(workspace=application_plan.workspace, plan_fingerprint=application_plan.plan_fingerprint)
+        .order_by("-updated_at", "-created_at")
+        .first()
     )
+    if existing_application is not None and existing_application.status == "archived":
+        _retire_application_fingerprint(existing_application)
+        existing_application = None
+    application_defaults = {
+        "name": application_plan.name,
+        "summary": application_plan.summary,
+        "source_factory_key": application_plan.source_factory_key,
+        "source_conversation_id": application_plan.source_conversation_id,
+        "requested_by": application_plan.requested_by,
+        "target_repository": application_plan.target_repository,
+        "request_objective": application_plan.request_objective,
+        "status": "active",
+        "metadata_json": {
+            "ordering_hints": generated_plan.ordering_hints,
+            "dependency_hints": generated_plan.dependency_hints,
+            "resolution_notes": generated_plan.resolution_notes,
+        },
+    }
+    if existing_application is None:
+        application = Application.objects.create(
+            workspace=application_plan.workspace,
+            plan_fingerprint=application_plan.plan_fingerprint,
+            **application_defaults,
+        )
+        created = True
+    else:
+        application = existing_application
+        created = False
     if created:
         user_model = get_user_model()
         for goal_seed in generated_plan.generated_goals:
@@ -601,3 +632,27 @@ def apply_application_plan(*, application_plan: ApplicationPlan, user) -> Tuple[
     application_plan.status = "applied"
     application_plan.save(update_fields=["application", "status", "updated_at"])
     return application, created
+
+
+def _retired_fingerprint(fingerprint: str) -> str:
+    return f"{fingerprint}:retired:{uuid.uuid4().hex[:8]}"
+
+
+def _application_plan_is_historical(plan: ApplicationPlan) -> bool:
+    return plan.status == "canceled" or bool(plan.application_id and plan.application and plan.application.status == "archived")
+
+
+def _retire_application_fingerprint(application: Application) -> None:
+    application.plan_fingerprint = _retired_fingerprint(application.plan_fingerprint or uuid.uuid4().hex)
+    application.save(update_fields=["plan_fingerprint", "updated_at"])
+
+
+def _retire_application_plan_fingerprint(plan: ApplicationPlan) -> None:
+    if plan.application_id and plan.application and plan.application.plan_fingerprint == plan.plan_fingerprint:
+        _retire_application_fingerprint(plan.application)
+    plan.plan_fingerprint = _retired_fingerprint(plan.plan_fingerprint or uuid.uuid4().hex)
+    if plan.status != "canceled":
+        plan.status = "canceled"
+        plan.save(update_fields=["plan_fingerprint", "status", "updated_at"])
+        return
+    plan.save(update_fields=["plan_fingerprint", "updated_at"])
