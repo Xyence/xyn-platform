@@ -598,6 +598,66 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(self.task.status, "awaiting_review")
         self.assertEqual(self.task.last_error, "human_review_required")
 
+    def test_dev_task_detail_tolerates_non_numeric_runtime_step_sequence(self):
+        runtime_run_id = uuid.uuid4()
+        self.task.runtime_run_id = runtime_run_id
+        self.task.runtime_workspace_id = self.workspace.id
+        self.task.save(update_fields=["runtime_run_id", "runtime_workspace_id", "updated_at"])
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}", method="get")
+
+        def _seed_api_request(*, method, path, workspace_id="", workspace_slug="", payload=None, timeout=20):
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}":
+                return _FakeResponse(
+                    body={
+                        "id": str(runtime_run_id),
+                        "run_id": str(runtime_run_id),
+                        "status": "queued",
+                        "summary": "Queued for execution",
+                        "failure_reason": None,
+                        "escalation_reason": None,
+                        "prompt_payload": {"target": {"workspace_id": str(self.workspace.id), "repo": "xyn-platform", "branch": "develop"}},
+                    }
+                )
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/steps":
+                return _FakeResponse(
+                    body=[
+                        {
+                            "id": str(uuid.uuid4()),
+                            "step_id": str(uuid.uuid4()),
+                            "step_key": "inspect_repository",
+                            "label": "Inspect repository",
+                            "status": "completed",
+                            "summary": "Repo inspected",
+                            "sequence_no": "phase-inspect",
+                            "started_at": "2026-03-11T12:00:00Z",
+                        },
+                        {
+                            "id": str(uuid.uuid4()),
+                            "step_id": str(uuid.uuid4()),
+                            "step_key": "execute_codex",
+                            "label": "Execute Codex task",
+                            "status": "queued",
+                            "summary": "Waiting for worker",
+                            "sequence_no": 2,
+                            "started_at": "2026-03-11T12:01:00Z",
+                        },
+                    ]
+                )
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/artifacts":
+                return _FakeResponse(body=[])
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request", side_effect=_seed_api_request
+        ):
+            response = dev_task_detail(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["execution_run"]["run_id"], str(runtime_run_id))
+        self.assertEqual(payload["execution_run"]["state"], "queued")
+        self.assertEqual(payload["result_run_detail"]["summary"], "Queued for execution")
+
     def test_dev_task_detail_reports_not_started_execution_when_no_run_exists(self):
         request = self._request(f"/xyn/api/dev-tasks/{self.task.id}", method="get")
         with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2]:

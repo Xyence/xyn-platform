@@ -17520,6 +17520,18 @@ def _runtime_run_detail_payload(
     artifacts: List[Dict[str, Any]],
     now: Optional[dt.datetime] = None,
 ) -> Dict[str, Any]:
+    def _step_sort_key(step: Dict[str, Any]) -> Tuple[int, str, str]:
+        raw_sequence = step.get("sequence_no")
+        try:
+            sequence_no = int(raw_sequence)
+        except (TypeError, ValueError):
+            sequence_no = 10_000
+        return (
+            sequence_no,
+            str(step.get("started_at") or ""),
+            str(step.get("step_key") or step.get("name") or ""),
+        )
+
     prompt_payload = run_payload.get("prompt_payload") if isinstance(run_payload.get("prompt_payload"), dict) else {}
     target = prompt_payload.get("target") if isinstance(prompt_payload.get("target"), dict) else {}
     prompt = prompt_payload.get("prompt") if isinstance(prompt_payload.get("prompt"), dict) else {}
@@ -17550,7 +17562,7 @@ def _runtime_run_detail_payload(
                 "started_at": step.get("started_at"),
                 "completed_at": step.get("completed_at"),
             }
-            for step in sorted(steps, key=lambda item: (int(item.get("sequence_no") or 0), str(item.get("started_at") or "")))
+            for step in sorted(steps, key=_step_sort_key)
         ],
         "artifacts": [
             {
