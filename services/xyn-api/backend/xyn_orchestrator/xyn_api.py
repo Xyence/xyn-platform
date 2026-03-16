@@ -195,6 +195,7 @@ from .execution_changes import (
 from .system_readiness import system_readiness_report
 from .capabilities.capability_service import get_capabilities as get_contextual_capabilities
 from .planning.plan_service import get_plan_for_capability
+from .workflows.workflow_service import get_draft_workflow
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -29050,6 +29051,53 @@ def capability_plan(request: HttpRequest) -> JsonResponse:
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=404)
     return JsonResponse(payload)
+
+
+@login_required
+def draft_workflow(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    draft_id = str(request.GET.get("draft_id") or "").strip()
+    if not draft_id:
+        return JsonResponse({"error": "draft_id is required"}, status=400)
+
+    workspace = _resolve_workspace_for_identity(identity, str(request.GET.get("workspace_id") or ""))
+    if workspace is None:
+        return JsonResponse({"error": "workspace context is required"}, status=400)
+
+    try:
+        draft_response = _seed_api_request(
+            method="GET",
+            path=f"/api/v1/drafts/{draft_id}",
+            workspace_slug=str(workspace.slug or ""),
+            timeout=20,
+        )
+        jobs_response = _seed_api_request(
+            method="GET",
+            path="/api/v1/jobs",
+            workspace_slug=str(workspace.slug or ""),
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return JsonResponse({"error": "failed to load draft workflow", "details": exc.__class__.__name__}, status=502)
+
+    if draft_response.status_code >= 300:
+        return JsonResponse({"error": "failed to load draft", "status_code": draft_response.status_code}, status=502)
+    if jobs_response.status_code >= 300:
+        return JsonResponse({"error": "failed to load draft jobs", "status_code": jobs_response.status_code}, status=502)
+
+    draft_payload = draft_response.json() if draft_response.content else {}
+    jobs_payload = jobs_response.json() if jobs_response.content else []
+    if not isinstance(draft_payload, dict):
+        return JsonResponse({"error": "draft payload is invalid"}, status=502)
+    if not isinstance(jobs_payload, list):
+        jobs_payload = []
+
+    return JsonResponse(get_draft_workflow(workspace=workspace, draft=draft_payload, jobs=jobs_payload))
 
 
 def _review_coordination_thread(

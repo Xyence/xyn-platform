@@ -3684,6 +3684,15 @@ export type AppDraftSubmitResponse = {
   job_status: "queued" | "running" | "succeeded" | "failed" | string;
 };
 
+export type DraftWorkflow = {
+  draft_id: string;
+  state: string;
+  plan_available: boolean;
+  thread_id?: string | null;
+  active_run_id?: string | null;
+  last_run_status?: string | null;
+};
+
 export type AppJob = {
   id: string;
   workspace_id: string;

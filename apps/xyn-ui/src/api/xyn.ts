@@ -176,6 +176,7 @@ import type {
   AppIntentDraftCreatePayload,
   AppIntentDraftPatchPayload,
   AppDraftSubmitResponse,
+  DraftWorkflow,
   AppJob,
   AppExecutionNote,
   AppBuilderArtifact,
@@ -868,6 +869,13 @@ export async function submitAppIntentDraft(draftId: string, workspaceId: string)
     credentials: "include",
   });
   return handle<AppDraftSubmitResponse>(response);
+}
+
+export async function getDraftWorkflow(draftId: string, workspaceId: string): Promise<DraftWorkflow> {
+  const url = withWorkspaceId("/xyn/api/draft_workflow", workspaceId);
+  url.searchParams.set("draft_id", draftId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<DraftWorkflow>(response);
 }
 
 export async function listAppJobs(workspaceId: string): Promise<AppJob[]> {

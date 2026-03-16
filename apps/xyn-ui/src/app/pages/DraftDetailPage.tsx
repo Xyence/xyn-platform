@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import InlineMessage from "../../components/InlineMessage";
 import Tabs from "../components/ui/Tabs";
-import { getAppIntentDraft, listAppExecutionNotes, listAppJobs, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
-import type { AppExecutionNote, AppIntentDraft, AppJob } from "../../api/types";
+import { getAppIntentDraft, getDraftWorkflow, listAppExecutionNotes, listAppJobs, submitAppIntentDraft, updateAppIntentDraft } from "../../api/xyn";
+import type { AppExecutionNote, AppIntentDraft, AppJob, DraftWorkflow } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
 import { useNotifications } from "../state/notificationsStore";
@@ -215,6 +215,26 @@ function formatTimestamp(value?: string | null): string {
   return parsed.toLocaleString();
 }
 
+function draftWorkflowStateLabel(state?: string | null): string {
+  switch (String(state || "").trim().toLowerCase()) {
+    case "plan_ready":
+      return "Plan Ready";
+    case "submitted":
+      return "Submitted";
+    case "queued":
+      return "Waiting in Queue";
+    case "executing":
+      return "Running";
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "draft":
+    default:
+      return "Draft";
+  }
+}
+
 export default function DraftDetailPage({
   workspaceId,
   workspaceName,
@@ -250,6 +270,8 @@ export default function DraftDetailPage({
   const [error, setError] = useState<string | null>(null);
   const [latestJobId, setLatestJobId] = useState<string>(String(linkedJobId || "").trim());
   const [relatedJobs, setRelatedJobs] = useState<AppJob[]>([]);
+  const [workflow, setWorkflow] = useState<DraftWorkflow | null>(null);
+  const [workflowLoading, setWorkflowLoading] = useState(false);
   const [executionNotes, setExecutionNotes] = useState<AppExecutionNote[]>([]);
   const [executionNotesLoading, setExecutionNotesLoading] = useState(false);
   const [executionNotesError, setExecutionNotesError] = useState<string | null>(null);
@@ -283,6 +305,27 @@ export default function DraftDetailPage({
   useEffect(() => {
     setLatestJobId(String(linkedJobId || "").trim());
   }, [linkedJobId]);
+
+  const loadWorkflow = useCallback(async () => {
+    if (!workspaceId || !draftId) {
+      setWorkflow(null);
+      return;
+    }
+    try {
+      setWorkflowLoading(true);
+      const payload = await getDraftWorkflow(draftId, workspaceId);
+      setWorkflow(payload);
+    } catch (err) {
+      setWorkflow(null);
+      setError((err as Error).message);
+    } finally {
+      setWorkflowLoading(false);
+    }
+  }, [draftId, workspaceId]);
+
+  useEffect(() => {
+    void loadWorkflow();
+  }, [loadWorkflow]);
 
   const loadJobs = useCallback(async () => {
     if (!workspaceId || !draftId) {
@@ -454,9 +497,12 @@ export default function DraftDetailPage({
 
   useEffect(() => {
     if (buildStatus !== "running") return;
-    const interval = window.setInterval(() => void loadJobs(), 4000);
+    const interval = window.setInterval(() => {
+      void loadJobs();
+      void loadWorkflow();
+    }, 4000);
     return () => window.clearInterval(interval);
-  }, [buildStatus, loadJobs]);
+  }, [buildStatus, loadJobs, loadWorkflow]);
 
   const save = async () => {
     if (!workspaceId || !draftId) return;
@@ -490,6 +536,7 @@ export default function DraftDetailPage({
       setDraft(payload.draft);
       setStatus("submitted");
       setLatestJobId(String(payload.job_id || ""));
+      void loadWorkflow();
       setMessage(`Draft submitted. Job queued: ${payload.job_id}`);
       if (!onOpenJob) {
         navigate(toWorkspacePath(workspaceId, `jobs/${payload.job_id}`));
@@ -539,12 +586,32 @@ export default function DraftDetailPage({
         </div>
         <div className="detail-grid" style={{ marginTop: 12, marginBottom: 12 }}>
           <div>
+            <strong>Draft lifecycle</strong>
+            <p className="muted small">{workflowLoading ? "Loading..." : draftWorkflowStateLabel(workflow?.state)}</p>
+          </div>
+          <div>
+            <strong>Coordination thread</strong>
+            <p className="muted small">{workflow?.thread_id || "Not linked yet"}</p>
+          </div>
+          <div>
+            <strong>Execution run</strong>
+            <p className="muted small">{workflow?.active_run_id || "Not started yet"}</p>
+          </div>
+          <div>
+            <strong>Last run status</strong>
+            <p className="muted small">{workflow?.last_run_status || "—"}</p>
+          </div>
+          <div>
             <strong>Build status</strong>
             <p className="muted small">{buildStatus}</p>
           </div>
           <div>
             <strong>Tracked jobs</strong>
             <p className="muted small">{relatedJobs.length || 0}</p>
+          </div>
+          <div>
+            <strong>Plan summary</strong>
+            <p className="muted small">{workflow?.plan_available ? "Available" : "Not available yet"}</p>
           </div>
           <div>
             <strong>Generated capability</strong>
