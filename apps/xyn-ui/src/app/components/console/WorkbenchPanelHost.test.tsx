@@ -1168,6 +1168,158 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
   });
 
+  it("keeps Composer focused on the new plan after restart instead of rendering stale application coordination state", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "plan_review",
+      context: { factory_key: "generic_application_mvp", application_plan_id: "plan-2", application_id: null, goal_id: null, thread_id: null },
+      factory_catalog: [],
+      application_plans: [
+        {
+          id: "plan-2",
+          workspace_id: "ws-1",
+          application_id: null,
+          name: "Lunch Poll",
+          summary: "Fresh reviewable plan",
+          source_factory_key: "generic_application_mvp",
+          status: "review",
+          request_objective: "Build a lunch poll app",
+          created_at: "2026-03-16T16:00:00Z",
+          updated_at: "2026-03-16T16:00:00Z",
+        },
+      ],
+      applications: [
+        {
+          id: "app-1",
+          name: "Lunch Poll",
+          status: "archived",
+          source_factory_key: "generic_application_mvp",
+          summary: "Old archived effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 2,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+      ],
+      application_plan: {
+        id: "plan-2",
+        workspace_id: "ws-1",
+        application_id: null,
+        name: "Lunch Poll",
+        summary: "Fresh reviewable plan",
+        source_factory_key: "generic_application_mvp",
+        status: "review",
+        request_objective: "Build a lunch poll app",
+        created_at: "2026-03-16T16:00:00Z",
+        updated_at: "2026-03-16T16:00:00Z",
+        generated_goals: [{ title: "Core Domain Foundation", planning_summary: "Start the next attempt cleanly.", threads: [], work_items: [] }],
+        factory: { key: "generic_application_mvp", name: "Generic Application MVP", description: "General app plan", use_case: "general" },
+      },
+      application: {
+        id: "app-1",
+        name: "Lunch Poll",
+        status: "archived",
+        source_factory_key: "generic_application_mvp",
+        summary: "Old archived effort",
+        request_objective: "Build a lunch poll app",
+        goal_count: 2,
+        goals: [],
+        created_at: "2026-03-15T10:00:00Z",
+        updated_at: "2026-03-15T11:00:00Z",
+      },
+      goal: {
+        id: "goal-1",
+        application_id: "app-1",
+        title: "Workflow and Stabilization",
+        planning_status: "in_progress",
+        goal_progress_status: "active",
+        thread_count: 2,
+        threads: [],
+        work_items: [],
+      },
+      thread: {
+        id: "thread-1",
+        workspace_id: "ws-1",
+        goal_id: "goal-1",
+        title: "Operational Surface",
+        description: "",
+        owner: null,
+        priority: "high",
+        status: "active",
+        domain: "development",
+        work_in_progress_limit: 1,
+        execution_policy: {},
+        source_conversation_id: "conv-1",
+        queued_work_items: 1,
+        running_work_items: 0,
+        awaiting_review_work_items: 0,
+        completed_work_items: 0,
+        failed_work_items: 0,
+        recent_run_ids: [],
+        work_items_completed: 0,
+        work_items_blocked: 0,
+      },
+      related_goals: [
+        {
+          id: "goal-1",
+          application_id: "app-1",
+          title: "Workflow and Stabilization",
+          planning_status: "in_progress",
+          goal_progress_status: "active",
+          thread_count: 2,
+        },
+      ],
+      related_threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          goal_title: "Workflow and Stabilization",
+          title: "Operational Surface",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-1",
+          queued_work_items: 1,
+          running_work_items: 0,
+          awaiting_review_work_items: 0,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+        },
+      ],
+      breadcrumbs: [
+        { kind: "composer", label: "Composer" },
+        { kind: "application_plan", label: "Lunch Poll", id: "plan-2" },
+      ],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-plan-clean", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1", application_plan_id: "plan-2" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getByText("Selected application plan")).toBeInTheDocument();
+    expect(screen.queryByText("Selected application overview")).not.toBeInTheDocument();
+    expect(screen.queryByText("Work goals for this application")).not.toBeInTheDocument();
+    expect(screen.queryByText("Selected work goal")).not.toBeInTheDocument();
+    expect(screen.queryByText("Selected execution thread")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Active (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Archived (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All (2)" })).toBeInTheDocument();
+  });
+
   it("loads composer plan review state and applies plans through the existing plan seam", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.getComposerState.mockResolvedValue({

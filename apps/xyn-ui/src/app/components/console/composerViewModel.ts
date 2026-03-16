@@ -124,7 +124,7 @@ function parseTimestamp(value?: string | null): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function latestTimestamp(values: Array<string | null | undefined>): string | null {
+export function latestTimestamp(values: Array<string | null | undefined>): string | null {
   let best: string | null = null;
   let bestTs = 0;
   for (const value of values) {
