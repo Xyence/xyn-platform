@@ -4,7 +4,7 @@ import uuid
 from unittest import mock
 
 from django.contrib.auth import get_user_model
-from django.test import RequestFactory, TestCase
+from django.test import Client, RequestFactory, TestCase
 
 from xyn_orchestrator.models import Application, DevTask, Goal, ManagedRepository, Run, RunArtifact, UserIdentity, Workspace, WorkspaceMembership
 from xyn_orchestrator.xyn_api import (
@@ -50,6 +50,11 @@ class DevTaskRuntimeBridgeTests(TestCase):
             role="admin",
             termination_authority=True,
         )
+        self.csrf_client = Client(enforce_csrf_checks=True)
+        self.csrf_client.force_login(self.user)
+        session = self.csrf_client.session
+        session["user_identity_id"] = str(self.identity.id)
+        session.save()
         self.source_run = Run.objects.create(
             entity_type="blueprint",
             entity_id=uuid.uuid4(),
@@ -414,6 +419,26 @@ class DevTaskRuntimeBridgeTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(payload["execution_brief_review"]["review_state"], "approved")
         self.assertTrue(payload["execution_brief_review"]["ready"])
+
+    def test_work_item_detail_patch_is_not_blocked_by_csrf_for_authenticated_ui_session(self):
+        self.task.execution_brief = {
+            "schema_version": "v1",
+            "summary": "Bounded handoff",
+            "objective": "Implement the explicit handoff",
+        }
+        self.task.execution_brief_review_state = "draft"
+        self.task.execution_policy = {"require_brief_approval": True}
+        self.task.save(update_fields=["execution_brief", "execution_brief_review_state", "execution_policy", "updated_at"])
+
+        response = self.csrf_client.patch(
+            f"/xyn/api/work-items/{self.task.id}",
+            data=json.dumps({"execution_brief_action": "approve"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.execution_brief_review_state, "approved")
 
     def test_dev_task_detail_patch_regenerates_execution_brief_and_supersedes_prior_version(self):
         self.task.execution_brief = {

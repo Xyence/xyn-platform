@@ -29856,6 +29856,7 @@ def dev_task_dispatch(request: HttpRequest, task_id: str) -> JsonResponse:
     )
 
 
+@csrf_exempt
 @login_required
 def dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse:
     if staff_error := _require_staff(request):
@@ -29926,6 +29927,7 @@ def dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse:
     return JsonResponse(_serialize_work_item_detail(task))
 
 
+@csrf_exempt
 @login_required
 def work_item_detail(request: HttpRequest, task_id: str) -> JsonResponse:
     return dev_task_detail(request, task_id)
