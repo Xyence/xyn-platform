@@ -390,6 +390,86 @@ def _ensure_bootstrap_model_config(*, provider: ModelProvider, model_name: str, 
     )
 
 
+def _migrate_legacy_default_assistant() -> bool:
+    legacy = (
+        AgentDefinition.objects.select_related("model_config")
+        .filter(slug="documentation-default")
+        .order_by("-updated_at", "-id")
+        .first()
+    )
+    if legacy is None or legacy.model_config_id is None:
+        return False
+
+    coding, _ = AgentPurpose.objects.get_or_create(
+        slug="coding",
+        defaults={
+            "name": "Coding",
+            "description": "Code generation and development tasks",
+            "status": "active",
+            "enabled": True,
+            "preamble": "Purpose: coding. Focus on production-ready implementation guidance.",
+            "model_config": legacy.model_config,
+        },
+    )
+    planning, _ = AgentPurpose.objects.get_or_create(
+        slug="planning",
+        defaults={
+            "name": "Planning",
+            "description": "Planning, decomposition, and implementation strategy tasks",
+            "status": "active",
+            "enabled": True,
+            "preamble": "Purpose: planning. Focus on decomposition, sequencing, and implementation guidance.",
+            "model_config": legacy.model_config,
+        },
+    )
+    documentation, _ = AgentPurpose.objects.get_or_create(
+        slug="documentation",
+        defaults={
+            "name": "Documentation",
+            "description": "Documentation drafting and editing",
+            "status": "active",
+            "enabled": True,
+            "preamble": "Purpose: documentation. Produce concise, accurate, publishable drafts.",
+            "model_config": legacy.model_config,
+        },
+    )
+
+    default_assistant, _ = AgentDefinition.objects.get_or_create(
+        slug="default-assistant",
+        defaults={
+            "name": BOOTSTRAP_ROLE_AGENT_META["default"]["name"],
+            "model_config": legacy.model_config,
+            "system_prompt_text": DEFAULT_ASSISTANT_PROMPT,
+            "context_pack_refs_json": [],
+            "is_default": True,
+            "enabled": True,
+        },
+    )
+    default_assistant.name = BOOTSTRAP_ROLE_AGENT_META["default"]["name"]
+    default_assistant.model_config = legacy.model_config
+    default_assistant.is_default = True
+    default_assistant.enabled = True
+    update_fields = ["name", "model_config", "is_default", "enabled", "updated_at"]
+    if DEFAULT_ASSISTANT_PROMPT and not str(default_assistant.system_prompt_text or "").strip():
+        default_assistant.system_prompt_text = DEFAULT_ASSISTANT_PROMPT
+        update_fields.append("system_prompt_text")
+    default_assistant.save(update_fields=update_fields)
+
+    desired_purposes = [coding, planning, documentation]
+    AgentDefinitionPurpose.objects.filter(agent_definition=default_assistant).exclude(purpose__in=desired_purposes).delete()
+    for purpose in desired_purposes:
+        link, _ = AgentDefinitionPurpose.objects.get_or_create(agent_definition=default_assistant, purpose=purpose)
+        should_be_default = purpose.slug in {"coding", "planning"}
+        if link.is_default_for_purpose != should_be_default:
+            link.is_default_for_purpose = should_be_default
+            link.save(update_fields=["is_default_for_purpose"])
+
+    AgentDefinition.objects.exclude(id=default_assistant.id).filter(is_default=True).update(is_default=False)
+    AgentDefinition.objects.filter(slug="documentation-default").exclude(id=default_assistant.id).delete()
+    AgentDefinition.objects.filter(name__iexact="Documentation Default").exclude(id=default_assistant.id).delete()
+    return True
+
+
 def _resolve_runtime_agent_for_purpose(purpose_slug: str) -> Optional[AgentDefinition]:
     purpose = str(purpose_slug or "").strip().lower()
     if not purpose:
@@ -731,6 +811,7 @@ def ensure_default_ai_seeds() -> None:
         if spec is not None
     }
     if "default" not in role_specs:
+        _migrate_legacy_default_assistant()
         return
 
     credential_cache: Dict[tuple[str, str], ProviderCredential] = {}
