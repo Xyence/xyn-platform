@@ -63,6 +63,96 @@ def _title_case_label(value: str) -> str:
     return " ".join(words) or "Application"
 
 
+def _normalize_objective_lines(value: str) -> List[str]:
+    return [line.strip() for line in re.split(r"[\r\n]+", str(value or "")) if line.strip()]
+
+
+def _extract_objective_sections(objective: str) -> Dict[str, List[str]]:
+    sections: Dict[str, List[str]] = {
+        "core_entities": [],
+        "behavior": [],
+        "views": [],
+        "validation": [],
+    }
+    text = re.sub(r"\s+", " ", str(objective or "")).strip()
+    if not text:
+        return sections
+    section_patterns = {
+        "core_entities": re.compile(
+            r"core entities\s*:\s*(.*?)(?=\bbehavior\s*:|\bviews\s*/\s*usability\s*:|\bviews\s*:|\bvalidation\s*/\s*rules\s*:|\bvalidation\s*:|$)",
+            re.IGNORECASE,
+        ),
+        "behavior": re.compile(
+            r"behavior\s*:\s*(.*?)(?=\bviews\s*/\s*usability\s*:|\bviews\s*:|\bvalidation\s*/\s*rules\s*:|\bvalidation\s*:|$)",
+            re.IGNORECASE,
+        ),
+        "views": re.compile(
+            r"(?:views\s*/\s*usability|views)\s*:\s*(.*?)(?=\bvalidation\s*/\s*rules\s*:|\bvalidation\s*:|$)",
+            re.IGNORECASE,
+        ),
+        "validation": re.compile(r"(?:validation\s*/\s*rules|validation)\s*:\s*(.*)$", re.IGNORECASE),
+    }
+    for section_name, pattern in section_patterns.items():
+        match = pattern.search(text)
+        if not match:
+            continue
+        body = str(match.group(1) or "").strip()
+        if not body:
+            continue
+        if section_name == "core_entities":
+            sections[section_name].extend(part.strip() for part in re.split(r"\s+(?=\d+\.)", body) if part.strip())
+            continue
+        sections[section_name].extend(
+            re.sub(r"^\s*[-*]\s*", "", part).strip()
+            for part in re.split(r"\s+-\s+", body)
+            if re.sub(r"^\s*[-*]\s*", "", part).strip()
+        )
+    return sections
+
+
+def _extract_objective_entities(objective: str) -> List[str]:
+    entities: List[str] = []
+    for line in _extract_objective_sections(objective).get("core_entities", []):
+        cleaned_line = re.sub(r"^\s*\d+\.\s*", "", line).strip()
+        token = re.split(r"\s+-\s+|:\s*", cleaned_line, maxsplit=1)[0].strip()
+        normalized = _title_case_label(token)
+        if normalized and normalized not in entities:
+            entities.append(normalized)
+    return entities
+
+
+def _human_join(values: Iterable[str]) -> str:
+    items = [str(value or "").strip() for value in values if str(value or "").strip()]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def _generic_objective_context(objective: str) -> Dict[str, str]:
+    sections = _extract_objective_sections(objective)
+    entities = _extract_objective_entities(objective)
+    primary_entities = entities[:3]
+    entity_phrase = _human_join(primary_entities) or "the first application entities"
+    lead_entity = primary_entities[0] if primary_entities else "the primary domain record"
+    views = sections.get("views", [])
+    behavior = sections.get("behavior", [])
+    validation = sections.get("validation", [])
+    view_phrase = _human_join(views[:2]) or "List and inspect the first durable records"
+    workflow_phrase = behavior[0] if behavior else "Create and operate the first slice through a simple user workflow"
+    validation_phrase = validation[0] if validation else "Protect the first slice with the minimum durable rules"
+    return {
+        "entity_phrase": entity_phrase,
+        "lead_entity": lead_entity,
+        "view_phrase": view_phrase,
+        "workflow_phrase": workflow_phrase,
+        "validation_phrase": validation_phrase,
+    }
+
+
 def _application_plan_fingerprint(*, factory_key: str, application_name: str, objective: str, plan: GeneratedApplicationPlan) -> str:
     payload = {
         "factory_key": factory_key,
@@ -328,36 +418,78 @@ def _reseller_portal_factory_plan(application_name: str, objective: str) -> Gene
 
 
 def _generic_application_plan(application_name: str, objective: str) -> GeneratedApplicationPlan:
+    context = _generic_objective_context(objective)
     goals = [
         _goal_plan(
             title="Core Domain Foundation",
-            description="Define the first durable domain records and make the initial slice inspectable.",
+            description=f"Define durable records for {context['entity_phrase']} and make the first slice inspectable.",
             priority="high",
-            planning_summary="Start with the smallest durable domain slice that proves the application objective.",
+            planning_summary=(
+                f"Start with {context['lead_entity']} and the related records needed for the first user-visible slice, "
+                f"then make that slice inspectable through {context['view_phrase'].lower()}."
+            ),
             resolution_notes=["Prefer one vertical slice over broad component enumeration."],
             threads=[
-                ("Core Domain Slice", "Define the minimum durable model for the first working slice.", "high", "application", 1),
-                ("Operational Surface", "Expose list/detail inspection for the first slice.", "normal", "ui", 2),
+                ("Core Domain Slice", f"Define the durable model for {context['entity_phrase']}.", "high", "application", 1),
+                ("Operational Surface", f"Expose the first user-facing inspection flow: {context['view_phrase']}.", "normal", "ui", 2),
             ],
             work_items=[
-                ("Core Domain Slice", "Define the minimum durable model for the first working slice", "Model the first end-to-end slice as durable Xyn records.", "high", 1, []),
-                ("Core Domain Slice", "Implement the first executable vertical slice", "Deliver the smallest runnable slice that proves the application objective.", "high", 2, ["Define the minimum durable model for the first working slice"]),
-                ("Operational Surface", "Expose list/detail inspection for the first slice", "Make the slice inspectable in panels and generated app surfaces.", "normal", 3, ["Implement the first executable vertical slice"]),
+                (
+                    "Core Domain Slice",
+                    f"Define the {context['entity_phrase']} entity model",
+                    f"Model {context['entity_phrase']} as durable Xyn records with the relationships and statuses needed for the first slice.",
+                    "high",
+                    1,
+                    [],
+                ),
+                (
+                    "Core Domain Slice",
+                    f"Implement the first {context['lead_entity']} workflow slice",
+                    f"Deliver the smallest runnable slice that proves the objective: {context['workflow_phrase']}.",
+                    "high",
+                    2,
+                    [f"Define the {context['entity_phrase']} entity model"],
+                ),
+                (
+                    "Operational Surface",
+                    f"Expose {context['lead_entity']} list and detail inspection",
+                    f"Make the slice inspectable in panels and generated app surfaces through {context['view_phrase']}.",
+                    "normal",
+                    3,
+                    [f"Implement the first {context['lead_entity']} workflow slice"],
+                ),
             ],
         ),
         _goal_plan(
             title="Workflow and Stabilization",
-            description="Add the first operator workflow and validate the slice with tests and runtime visibility.",
+            description=f"Add the first operator workflow for {context['lead_entity']} and validate the slice with tests and runtime visibility.",
             priority="normal",
-            planning_summary="Once the first slice exists, add the operator workflow that proves it is usable and stable.",
+            planning_summary=(
+                f"Once the first {context['lead_entity'].lower()} slice exists, add the operator workflow and validation rules "
+                f"that prove it is usable and stable."
+            ),
             resolution_notes=["Keep the first workflow operational and testable before broadening scope."],
             threads=[
-                ("Operator Workflow", "Add the first operator-facing workflow state.", "normal", "workflow", 1),
-                ("Stabilization", "Validate the first slice with tests and runtime observability.", "normal", "quality", 2),
+                ("Operator Workflow", f"Add the first operator-facing workflow for {context['lead_entity']}.", "normal", "workflow", 1),
+                ("Stabilization", f"Validate the first slice and protect rules like: {context['validation_phrase']}.", "normal", "quality", 2),
             ],
             work_items=[
-                ("Operator Workflow", "Define the first operator workflow state", "Persist the minimum workflow needed to operate the slice.", "normal", 1, []),
-                ("Stabilization", "Validate the first slice with tests and runtime observability", "Prove the initial application slice is stable enough to extend.", "normal", 2, []),
+                (
+                    "Operator Workflow",
+                    f"Define the first {context['lead_entity']} workflow state",
+                    f"Persist the minimum workflow needed to operate the slice: {context['workflow_phrase']}.",
+                    "normal",
+                    1,
+                    [],
+                ),
+                (
+                    "Stabilization",
+                    f"Validate the {context['lead_entity']} slice with tests and runtime observability",
+                    f"Prove the initial application slice is stable enough to extend and enforce rules such as {context['validation_phrase']}.",
+                    "normal",
+                    2,
+                    [],
+                ),
             ],
         ),
     ]

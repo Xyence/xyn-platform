@@ -303,7 +303,7 @@ def recommend_portfolio_goal(
     }
     priority_rank = {"high": 0, "medium": 1, "low": 2}
     candidates: List[tuple[int, int, str, Goal, Any]] = []
-    for goal in ordered_goals:
+    for index, goal in enumerate(ordered_goals):
         recommendation = recommend_next_slice(goal)
         queue_suggestion = getattr(recommendation, "queue_suggestion", None)
         actionable = bool(queue_suggestion or getattr(recommendation, "thread_id", None))
@@ -316,7 +316,7 @@ def recommend_portfolio_goal(
             (
                 priority_rank.get(row.coordination_priority.value, 99),
                 0 if queue_suggestion else 1,
-                row.goal_id,
+                index,
                 goal,
                 recommendation,
             )

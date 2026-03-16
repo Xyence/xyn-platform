@@ -389,7 +389,7 @@ def _generic_seed(goal: Goal) -> GoalPlanningOutput:
         GoalWorkItemDefinition(
             thread_title="Core Domain Slice",
             title="Define the minimum durable model for the first working slice",
-            description="Model the first end-to-end slice so it can be created, inspected, and executed durably.",
+            description="Model the first end-to-end slice as durable Xyn records.",
             priority="high",
             sequence=1,
         ),
@@ -505,7 +505,7 @@ def persist_goal_plan(goal: Goal, plan: GoalPlanningOutput, *, user) -> Dict[str
             continue
         execution_brief = build_execution_brief(
             summary=work_item_def.title,
-            objective=goal.planning_summary or goal.description or goal.title,
+            objective=work_item_def.description or goal.planning_summary or goal.description or goal.title,
             implementation_intent=work_item_def.description or work_item_def.title,
             target=target,
             allowed_areas=[thread.domain] if str(thread.domain or "").strip() else [],

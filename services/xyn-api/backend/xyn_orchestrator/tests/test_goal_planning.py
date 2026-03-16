@@ -150,6 +150,24 @@ class GoalPlanningTests(TestCase):
         self.assertIn("smallest vertical slice", plan_a.planning_summary.lower())
         self.assertEqual(plan_a.work_items[0].title, "Identify the first listing source and capture the ingestion contract")
 
+    def test_generic_goal_decomposition_starts_with_durable_xyn_records(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Generic MVP Goal",
+            description="Build a useful application with one MVP slice.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+
+        plan = decompose_goal(goal)
+
+        self.assertEqual(plan.work_items[0].title, "Define the minimum durable model for the first working slice")
+        self.assertEqual(plan.work_items[0].description, "Model the first end-to-end slice as durable Xyn records.")
+        self.assertEqual(plan.work_items[0].priority, "high")
+        self.assertEqual(plan.work_items[0].sequence, 1)
+
     def test_persist_goal_plan_creates_threads_and_work_items(self):
         goal = Goal.objects.create(
             workspace=self.workspace,
@@ -185,6 +203,50 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(
             (((first_task.execution_brief or {}).get("target") or {}).get("goal_id")),
             str(goal.id),
+        )
+
+    def test_generic_application_plan_carries_request_entities_into_first_slice(self):
+        objective = (
+            "Build a simple internal web app called Team Lunch Poll. "
+            "Core entities: 1. Poll - title - poll_date - status 2. Lunch Option - poll - name 3. Vote - poll - lunch option - voter_name. "
+            "Views / usability: - List all polls - View a poll with its options and vote counts. "
+            "Behavior: - Users can create a poll, add lunch options, and cast votes."
+        )
+        plan, _definition, generated, created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            application_name="Team Lunch Poll",
+        )
+        self.assertTrue(created)
+        self.assertEqual(plan.status, "review")
+        self.assertIn("Poll", generated.generated_goals[0].description)
+        self.assertIn("Lunch Option", generated.generated_goals[0].description)
+        self.assertEqual(generated.generated_goals[0].work_items[0].title, "Define the Poll, Lunch Option, and Vote entity model")
+        self.assertIn("vote counts", generated.generated_goals[0].work_items[2].description.lower())
+
+    def test_apply_application_plan_uses_work_item_description_as_execution_objective(self):
+        objective = (
+            "Build a simple internal web app called Team Lunch Poll. "
+            "Core entities: 1. Poll - title - poll_date - status 2. Lunch Option - poll - name 3. Vote - poll - lunch option - voter_name. "
+            "Views / usability: - List all polls - View a poll with its options and vote counts. "
+            "Behavior: - Users can create a poll, add lunch options, and cast votes."
+        )
+        plan, _definition, _generated, _created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            application_name="Team Lunch Poll",
+        )
+        application, created = apply_application_plan(application_plan=plan, user=self.user)
+        self.assertTrue(created)
+        first_goal = application.goals.order_by("created_at").first()
+        self.assertIsNotNone(first_goal)
+        first_task = first_goal.work_items.order_by("priority", "created_at", "id").first()
+        self.assertIsNotNone(first_task)
+        self.assertEqual(
+            (first_task.execution_brief or {}).get("objective"),
+            "Model Poll, Lunch Option, and Vote as durable Xyn records with the relationships and statuses needed for the first slice.",
         )
 
     def test_goal_decompose_endpoint_persists_plan(self):
@@ -1905,6 +1967,87 @@ class GoalPlanningTests(TestCase):
         self.assertIsNotNone(recommendation)
         self.assertEqual(recommendation.goal_id, str(dominant_goal.id))
         self.assertEqual(recommendation.queue_action_type, "resume_thread")
+
+    def test_recommend_portfolio_goal_preserves_input_order_when_priority_ties(self):
+        first_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="First Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        first_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=first_goal,
+            title="First Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="First queued task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=first_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=first_goal,
+            coordination_thread=first_thread,
+            work_item_id="first-task",
+        )
+        second_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Second Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        second_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=second_goal,
+            title="Second Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Second queued task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=second_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=second_goal,
+            coordination_thread=second_thread,
+            work_item_id="second-task",
+        )
+
+        recommendation = recommend_portfolio_goal([first_goal, second_goal], runtime_detail_lookup=lambda _task: None)
+
+        self.assertIsNotNone(recommendation)
+        self.assertEqual(recommendation.goal_id, str(first_goal.id))
 
     def test_compute_portfolio_insights_detects_blocked_goal(self):
         goal = Goal.objects.create(
