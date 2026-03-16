@@ -15,7 +15,7 @@ describe("resolveDirectPanelOpenParams", () => {
     ).toEqual({ slug: "core.authn-jwt" });
   });
 
-  it("reuses the stored composer effort for generic composer opens", () => {
+  it("opens generic composer in neutral workspace context", () => {
     window.localStorage.setItem(
       "xyn:composer:selected-effort:ws-1",
       JSON.stringify({ application_id: "app-knowledgebase" }),
@@ -27,7 +27,6 @@ describe("resolveDirectPanelOpenParams", () => {
       )
     ).toEqual({
       workspace_id: "ws-1",
-      application_id: "app-knowledgebase",
     });
   });
 });

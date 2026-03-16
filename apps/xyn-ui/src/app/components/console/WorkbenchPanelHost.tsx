@@ -3803,12 +3803,11 @@ function ComposerDetailPanel({
   const composerView = payload ? deriveComposerViewModel(payload) : null;
   const storedSelection = composerView ? readComposerStoredSelection(workspaceId) : null;
   const hasExplicitComposerFocus = Boolean(
-    applicationId
+    factoryKey
     || applicationPlanId
+    || applicationId
     || goalId
     || threadId
-    || payload?.context.application_id
-    || payload?.context.application_plan_id
   );
   const initialSelection = composerView && !hasExplicitComposerFocus
     ? resolveComposerInitialSelection(composerView.containers, storedSelection)
@@ -3820,7 +3819,6 @@ function ComposerDetailPanel({
   const currentContainer = composerView?.containers.find((container) =>
     (applicationId && container.kind === "application" && container.id === applicationId)
     || (applicationPlanId && container.kind === "application_plan" && container.id === applicationPlanId)
-    || container.isCurrent
   ) || null;
   const currentApplication =
     currentContainer?.kind === "application" && selectedApplication?.id === currentContainer.id

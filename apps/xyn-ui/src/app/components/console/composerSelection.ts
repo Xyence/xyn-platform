@@ -46,20 +46,8 @@ export function clearComposerStoredSelection(workspaceId: string): void {
 
 export function resolveComposerInitialSelection(
   containers: ComposerWorkContainer[],
-  storedSelection: ComposerStoredSelection | null,
+  _storedSelection: ComposerStoredSelection | null,
 ): ComposerStoredSelection | null {
-  const fromStored = storedSelection
-    ? containers.find((container) => (
-      (storedSelection.application_id && container.kind === "application" && container.id === storedSelection.application_id)
-      || (storedSelection.application_plan_id && container.kind === "application_plan" && container.id === storedSelection.application_plan_id)
-    ))
-    : null;
-  if (fromStored && fromStored.lifecycleState !== "archived") {
-    return fromStored.kind === "application"
-      ? { application_id: fromStored.id }
-      : { application_plan_id: fromStored.id };
-  }
-
   const viable = containers.filter((container) =>
     container.lifecycleState !== "archived"
     && container.lifecycleState !== "failed"
@@ -70,4 +58,3 @@ export function resolveComposerInitialSelection(
     ? { application_id: viable[0].id }
     : { application_plan_id: viable[0].id };
 }
-
