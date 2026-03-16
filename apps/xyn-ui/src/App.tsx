@@ -4,10 +4,10 @@ import AppShell from "./app/AppShell";
 import LegacyAppRedirect from "./app/routing/LegacyAppRedirect";
 import RootRedirect from "./app/routing/RootRedirect";
 import PublicShell from "./public/PublicShell";
-const PageRoute = lazy(() => import("./public/pages/PageRoute"));
-const ArticlesIndex = lazy(() => import("./public/pages/ArticlesIndex"));
-const ArticleDetail = lazy(() => import("./public/pages/ArticleDetail"));
-const HomePage = lazy(() => import("./public/pages/HomePage"));
+import PageRoute from "./public/pages/PageRoute";
+import ArticlesIndex from "./public/pages/ArticlesIndex";
+import ArticleDetail from "./public/pages/ArticleDetail";
+import HomePage from "./public/pages/HomePage";
 
 function RouteLoadingShell() {
   return <div style={{ padding: 24 }}>Loading…</div>;
