@@ -4480,7 +4480,7 @@ export async function runDevTask(id: string, force = false): Promise<{ run_id: s
   return handle<{ run_id: string; status: string }>(response);
 }
 
-export async function retryDevTask(id: string): Promise<{ run_id: string; status: string }> {
+export async function retryDevTask(id: string): Promise<{ run_id: string; status: string; work_item?: WorkItemDetail }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/retry`, {
     method: "POST",

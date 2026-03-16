@@ -162,6 +162,14 @@ describe("XynConsole", () => {
     expect(screen.getByRole("dialog", { name: "Xyn Console" })).toBeInTheDocument();
   });
 
+  it("stays open when launched from a platform settings subpage", async () => {
+    renderConsoleAt("/app/platform/access-control");
+    await userEvent.click(screen.getByRole("button", { name: "Xyn (⌘K / Ctrl+K)" }));
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(screen.getByRole("dialog", { name: "Xyn Console" })).toBeInTheDocument();
+  });
+
   it("submits intent with Enter from the textarea", async () => {
     apiMocks.resolveXynIntent.mockResolvedValue({
       status: "UnsupportedIntent",

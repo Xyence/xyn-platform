@@ -711,6 +711,29 @@ class XcoThreadTests(TestCase):
         self.assertEqual(diagnostic.status, "blocked")
         self.assertIn("blocked work item", " ".join(diagnostic.evidence).lower())
 
+    def test_thread_diagnostic_detects_execution_brief_review_block(self):
+        thread = self._create_thread(title="Brief Review Thread", status="active")
+        self._create_task(
+            thread,
+            title="Needs brief review",
+            status="queued",
+            work_item_id="wi-brief-review",
+            execution_brief={"schema_version": "v1", "summary": "Blocked handoff"},
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
+        )
+        diagnostic = compute_thread_diagnostic(
+            thread,
+            progress=compute_thread_progress(thread),
+            metrics=compute_thread_execution_metrics(thread),
+            timeline=build_thread_timeline(thread),
+            recent_runs=[],
+            recent_artifacts=[],
+        )
+        self.assertEqual(diagnostic.status, "blocked")
+        self.assertTrue(any("execution brief review" in entry.lower() for entry in diagnostic.observations))
+        self.assertTrue(any("brief review" in entry.lower() for entry in diagnostic.evidence))
+
     def test_thread_diagnostic_detects_high_artifact_churn(self):
         thread = self._create_thread(title="Churn Thread", status="active")
         self._create_task(thread, title="Artifact work", status="completed", work_item_id="wi-artifact")
@@ -838,6 +861,28 @@ class XcoThreadTests(TestCase):
                 event_type="approval_queue_next_slice",
             ).exists()
         )
+
+    def test_thread_review_queue_next_slice_surfaces_brief_review_block(self):
+        thread = self._create_thread(status="active", priority="high")
+        self._create_task(
+            thread,
+            work_item_id="wi-needs-brief-review",
+            status="queued",
+            execution_brief={"schema_version": "v1", "summary": "Blocked handoff"},
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request(
+            f"/xyn/api/threads/{thread.id}/review",
+            method="post",
+            data=json.dumps({"review_action": "queue_next_slice"}),
+        )
+        with self._auth_patches()[0]:
+            response = thread_review(request, str(thread.id))
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["status"], "brief_review_required")
+        self.assertIn("execution brief review", payload["summary"].lower())
 
     def test_thread_review_resume_and_complete_follow_coordination_state_rules(self):
         thread = self._create_thread(status="paused")

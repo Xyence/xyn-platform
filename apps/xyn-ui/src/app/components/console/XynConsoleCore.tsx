@@ -1164,14 +1164,20 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
 
   const isOverlay = mode === "overlay";
   const isSurfaceVisible = isOverlay ? open : true;
+  const isOnWorkbench = /\/w\/[^/]+\/workbench\/?$/.test(location.pathname);
   const isWorkbenchPath =
-    /\/(?:w\/[^/]+\/)?workbench\/?$/.test(location.pathname) || /^\/app\/platform(?:\/|$)/.test(location.pathname);
+    isOnWorkbench || /^\/app\/platform(?:\/|$)/.test(location.pathname);
   const hasContextArtifact = Boolean(context.artifact_id && context.artifact_type);
   const isGlobalContext = !hasContextArtifact;
   const workspaceIdFromPath = useMemo(() => {
     const match = String(location.pathname || "").match(/^\/w\/([^/]+)(?:\/|$)/);
     return match?.[1] ? decodeURIComponent(match[1]) : "";
   }, [location.pathname]);
+  const ensureWorkbench = () => {
+    if (!isOnWorkbench && workspaceIdFromPath) {
+      navigate(`/w/${encodeURIComponent(workspaceIdFromPath)}/workbench`);
+    }
+  };
 
   useEffect(() => {
     if (!isSurfaceVisible) return;
@@ -1387,9 +1393,11 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     }
     // Resolve canonical core prompt surfaces without relying on surface API fetches.
     // This keeps global actions (like Platform Settings) deterministic even when nav APIs fail.
+    // Pass platform_admin so all core surfaces are reachable in the fast path; the real
+    // access gate happens server-side when the page loads.
     const coreTarget = resolvePromptSurfaceTarget(prompt, {
       workspaceId: workspaceIdFromPath,
-      user: { roles: [], permissions: [] },
+      user: { roles: ["platform_admin"], permissions: [] },
     });
     if (coreTarget?.source === "core_surface" && coreTarget.route) {
       if (coreTarget.key === "platform_settings" && onOpenPanel) {
@@ -1454,6 +1462,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
           params: { query },
           open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "current_panel",
         });
+        ensureWorkbench();
         clearSessionResolution();
         if (isOverlay) setOpen(false);
         return;
@@ -1472,12 +1481,13 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
         if (String(action.params.entity_type || "") === "run") {
           const runId = String(action.params.entity_id || "").trim();
           if (runId) {
-          openPanel({
-            key: "run_detail",
-            params: { run_id: runId },
-            open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
-            return_to_panel_id: returnTarget,
-          });
+            openPanel({
+              key: "run_detail",
+              params: { run_id: runId },
+              open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
+              return_to_panel_id: returnTarget,
+            });
+            ensureWorkbench();
             clearSessionResolution();
             if (isOverlay) setOpen(false);
             return;
@@ -1492,6 +1502,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
               open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
               return_to_panel_id: returnTarget,
             });
+            ensureWorkbench();
             clearSessionResolution();
             if (isOverlay) setOpen(false);
             return;
@@ -1509,6 +1520,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
             open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
             return_to_panel_id: returnTarget,
           });
+          ensureWorkbench();
           clearSessionResolution();
           if (isOverlay) setOpen(false);
           return;
@@ -1526,6 +1538,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
               open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
               return_to_panel_id: returnTarget,
             });
+            ensureWorkbench();
             clearSessionResolution();
             if (isOverlay) setOpen(false);
             return;

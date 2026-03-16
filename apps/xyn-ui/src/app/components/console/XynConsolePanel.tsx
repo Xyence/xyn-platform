@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import XynConsoleCore from "./XynConsoleCore";
 
 export default function XynConsolePanel() {
   const { open, setOpen, pendingCloseBlock, openPanel } = useXynConsole();
+  const location = useLocation();
+  const navigate = useNavigate();
   const panelRef = useRef<HTMLElement | null>(null);
   const mobileHistoryEntryRef = useRef(false);
   const ignoreNextPopRef = useRef(false);
@@ -96,6 +99,15 @@ export default function XynConsolePanel() {
         onOpenPanel={(panelKey, params) => {
           openPanel({ key: panelKey, params: params || {}, open_in: "new_panel" });
           setOpen(false);
+          // Navigate to workbench so the new panel is actually visible.
+          const onWorkbench = /\/w\/[^/]+\/workbench\/?$/.test(location.pathname);
+          if (!onWorkbench) {
+            const match = location.pathname.match(/^\/w\/([^/]+)(?:\/|$)/);
+            const wsId = match?.[1] ? decodeURIComponent(match[1]) : "";
+            if (wsId) {
+              navigate(`/w/${encodeURIComponent(wsId)}/workbench`);
+            }
+          }
         }}
       />
     </section>

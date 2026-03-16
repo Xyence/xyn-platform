@@ -28895,6 +28895,23 @@ def _review_coordination_thread(
 
     if review_action == "resume_thread":
         if thread.status == "active":
+            blocked_brief_reviews = sum(
+                1
+                for task in thread.work_items.all()
+                if evaluate_dev_task_queue_state(task, normalized_status=str(task.status or "")).reason == "brief_not_ready"
+            )
+            if blocked_brief_reviews:
+                return (
+                    {
+                        "status": "already_active",
+                        "thread": _coordination_thread_detail(thread),
+                        "summary": (
+                            f"{thread.title} is already active, but {blocked_brief_reviews} work item(s) still require "
+                            "execution brief review before coding can be dispatched."
+                        ),
+                    },
+                    200,
+                )
             return ({"status": "already_active", "thread": _coordination_thread_detail(thread), "summary": f"{thread.title} is already active."}, 200)
         if not valid_thread_transition(thread.status, "active"):
             return (
@@ -28957,6 +28974,23 @@ def _review_coordination_thread(
     )
     entry = next((candidate for candidate in queue if candidate.thread_id == str(thread.id)), None)
     if not entry:
+        blocked_brief_reviews = sum(
+            1
+            for task in thread.work_items.all()
+            if evaluate_dev_task_queue_state(task, normalized_status=str(task.status or "")).reason == "brief_not_ready"
+        )
+        if blocked_brief_reviews:
+            return (
+                {
+                    "status": "brief_review_required",
+                    "thread": _coordination_thread_detail(thread),
+                    "summary": (
+                        f"No queueable work is ready for {thread.title} because {blocked_brief_reviews} work item(s) "
+                        "still require execution brief review."
+                    ),
+                },
+                409,
+            )
         return (
             {
                 "status": "no_queueable_work",
@@ -28966,6 +29000,31 @@ def _review_coordination_thread(
             409,
         )
     task = thread.work_items.filter(id=entry.task_id).first()
+    task_state = (
+        evaluate_dev_task_queue_state(task, normalized_status=str(task.status or ""))
+        if task is not None
+        else None
+    )
+    if task is None or task_state is None or not task_state.dispatchable:
+        if task_state is not None and task_state.reason == "brief_not_ready":
+            return (
+                {
+                    "status": "brief_review_required",
+                    "thread": _coordination_thread_detail(thread),
+                    "summary": (
+                        f"The next slice for {thread.title} still requires execution brief review before coding can be dispatched."
+                    ),
+                },
+                409,
+            )
+        return (
+            {
+                "status": "no_queueable_work",
+                "thread": _coordination_thread_detail(thread),
+                "summary": f"No queueable work is ready for {thread.title}.",
+            },
+            409,
+        )
     record_thread_event(
         thread=thread,
         event_type="approval_queue_next_slice",

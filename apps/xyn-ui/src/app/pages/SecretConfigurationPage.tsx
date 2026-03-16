@@ -43,11 +43,14 @@ export default function SecretConfigurationPage() {
   const createButtonRef = useRef<HTMLButtonElement | null>(null);
   const modalFirstFieldRef = useRef<HTMLInputElement | null>(null);
 
-  const tabParam = String(searchParams.get("tab") || "").trim();
-  const activeTab: SecretTab = (SECRET_TABS.find((item) => item.value === tabParam)?.value || "stores") as SecretTab;
+  const activeTab = useMemo(() => {
+    const tabParam = String(searchParams.get("tab") || "").trim();
+    return (SECRET_TABS.find((item) => item.value === tabParam)?.value || "stores") as SecretTab;
+  }, [searchParams]);
   const selectedStore = useMemo(() => stores.find((item) => item.id === selectedStoreId) || null, [stores, selectedStoreId]);
 
   const updateTab = (next: string) => {
+    if (next === activeTab) return;
     const params = new URLSearchParams(searchParams);
     params.set("tab", next);
     setSearchParams(params, { replace: true });
@@ -239,6 +242,7 @@ export default function SecretConfigurationPage() {
               {stores.map((item) => (
                 <button
                   key={item.id}
+                  type="button"
                   className={`instance-row ${selectedStoreId === item.id ? "active" : ""}`}
                   onClick={() => setSelectedStoreId(item.id)}
                 >

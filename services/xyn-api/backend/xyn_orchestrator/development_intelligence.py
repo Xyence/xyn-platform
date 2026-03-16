@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from .execution_queue import evaluate_dev_task_queue_state
 from .execution_observability import ThreadTimelineEntry, build_thread_timeline, serialize_thread_timeline
 from .goal_progress import (
     GoalExecutionMetrics,
@@ -84,6 +85,15 @@ class DevelopmentInsight:
     evidence: List[str]
 
 
+def _thread_queue_blockers(thread: CoordinationThread) -> Counter[str]:
+    blockers: Counter[str] = Counter()
+    for task in thread.work_items.all():
+        state = evaluate_dev_task_queue_state(task, normalized_status=str(task.status or ""))
+        if state.blocked and state.reason:
+            blockers[state.reason] += 1
+    return blockers
+
+
 def _assess_thread_provenance(
     thread: CoordinationThread,
     *,
@@ -140,6 +150,7 @@ def compute_thread_diagnostic(
     recent_artifacts: List[Dict[str, object]],
 ) -> ThreadDiagnostic:
     provenance = _assess_thread_provenance(thread, timeline=timeline)
+    queue_blockers = _thread_queue_blockers(thread)
     observations: List[str] = []
     likely_causes: List[str] = []
     evidence: List[str] = list(provenance.evidence)
@@ -167,6 +178,13 @@ def compute_thread_diagnostic(
         likely_causes.append("The thread is retrying or re-entering failure states without stabilizing.")
         evidence.append(f"{recent_failure_count or metrics.failed_work_items} recent failed or blocked run/result state(s) were observed.")
         suggested_action = "Inspect the most recent failing runs and associated artifacts before queueing more work."
+    elif queue_blockers.get("brief_not_ready"):
+        blocked_count = int(queue_blockers.get("brief_not_ready") or 0)
+        status = "blocked"
+        observations.append("Execution brief review is still blocking coding dispatch for this thread.")
+        likely_causes.append("Planned coding work exists, but the next execution brief is still in draft or not yet approved.")
+        evidence.append(f"{blocked_count} work item(s) are blocked by execution brief review.")
+        suggested_action = "Approve or mark ready the next execution brief before queueing more work."
     elif progress.thread_status == "blocked" or progress.work_items_blocked > 0:
         status = "blocked"
         observations.append("This thread has unfinished work that cannot currently proceed.")

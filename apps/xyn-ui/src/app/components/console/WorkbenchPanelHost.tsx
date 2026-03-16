@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   applyApplicationPlan,
@@ -1916,7 +1916,7 @@ function WorkItemDetailPanel({
     try {
       setActionState({ status: "submitting", message: null });
       const response = await retryDevTask(workItemId);
-      setPayload(await getWorkItem(workItemId));
+      setPayload(response.work_item || (await getWorkItem(workItemId)));
       setActionState({
         status: "idle",
         message: response.run_id
@@ -2819,10 +2819,32 @@ function RunDetailPanel({
   );
 }
 
-function PlatformSettingsPanel() {
-  const [section, setSection] = useState<"general" | "security" | "integrations" | "deploy" | "workspaces">("security");
-  return <PlatformSettingsHubPage sectionOverride={section} onSectionChange={setSection} />;
-}
+type SettingsSection = "general" | "security" | "integrations" | "deploy" | "workspaces";
+const VALID_SETTINGS_SECTIONS: SettingsSection[] = ["general", "security", "integrations", "deploy", "workspaces"];
+
+const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
+  initialSection,
+  onSectionChange,
+}: {
+  initialSection?: string;
+  onSectionChange?: (section: SettingsSection) => void;
+}) {
+  const parsed = String(initialSection || "").trim().toLowerCase();
+  const init: SettingsSection = (VALID_SETTINGS_SECTIONS as string[]).includes(parsed) ? (parsed as SettingsSection) : "security";
+  const [section, setSection] = useState<SettingsSection>(init);
+
+  useEffect(() => {
+    setSection(init);
+  }, [init]);
+
+  const handleChange = (next: SettingsSection) => {
+    if (next === section) return;
+    setSection(next);
+    onSectionChange?.(next);
+  };
+
+  return <PlatformSettingsHubPage sectionOverride={section} onSectionChange={handleChange} />;
+});
 
 function ArtifactListPanel({
   namespace,
@@ -4013,7 +4035,7 @@ export default function WorkbenchPanelHost({
   }, [workspaceId]);
 
   const content = useMemo(() => {
-    if (!panel) return null;
+    if (!panel || panel.key === "platform_settings") return null;
     const openPanel = (
       panelKey: ConsolePanelKey,
       params?: Record<string, unknown>,
@@ -4026,9 +4048,6 @@ export default function WorkbenchPanelHost({
         return_to_panel_id: options?.return_to_panel_id,
       });
 
-    if (panel.key === "platform_settings") {
-      return <PlatformSettingsPanel />;
-    }
 
     if (panel.key === "composer_detail") {
       return (
@@ -4398,6 +4417,22 @@ export default function WorkbenchPanelHost({
 
   if (!panel) {
     return null;
+  }
+
+  if (panel.key === "platform_settings") {
+    return (
+      <div>
+        <SystemReadinessBanner readiness={systemReadiness} />
+        <div className="card ems-panel-host">
+          <PlatformSettingsPanel
+            initialSection={String(panel.params?.section || "")}
+            onSectionChange={(next) => {
+              if (panel.params) panel.params.section = next;
+            }}
+          />
+        </div>
+      </div>
+    );
   }
 
   return (

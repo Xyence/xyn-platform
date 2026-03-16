@@ -3354,9 +3354,10 @@ button.sm {
   inset: 0;
   background: rgba(15, 23, 42, 0.45);
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: 24px;
+  overflow-y: auto;
   z-index: 1000;
 }
 
@@ -3365,6 +3366,9 @@ button.sm {
   border-radius: 18px;
   padding: 24px;
   width: min(560px, 100%);
+  max-height: calc(100vh - 48px);
+  margin: auto 0;
+  overflow-y: auto;
   box-shadow: var(--shadow);
   border: 1px solid var(--border);
   transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;

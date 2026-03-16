@@ -51,8 +51,10 @@ export default function WorkspacesPage({
 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tabParam = String(searchParams.get("tab") || "").trim();
-  const activeTab: WorkspacesTab = (WORKSPACE_TABS.find((tab) => tab.value === tabParam)?.value || "management") as WorkspacesTab;
+  const activeTab = useMemo(() => {
+    const tabParam = String(searchParams.get("tab") || "").trim();
+    return (WORKSPACE_TABS.find((tab) => tab.value === tabParam)?.value || "management") as WorkspacesTab;
+  }, [searchParams]);
 
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("");
@@ -111,6 +113,7 @@ export default function WorkspacesPage({
   }, [selectedWorkspace]);
 
   const updateTab = (next: WorkspacesTab) => {
+    if (next === activeTab) return;
     const params = new URLSearchParams(searchParams);
     params.set("tab", next);
     setSearchParams(params, { replace: true });

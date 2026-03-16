@@ -114,6 +114,7 @@ export default function PlatformSettingsHubPage({
           value={activeSection}
           options={SECTIONS.map((section) => ({ value: section.value, label: section.label }))}
           onChange={(nextSection) => {
+            if (nextSection === activeSection) return;
             if (onSectionChange) {
               onSectionChange(nextSection as HubSection);
             } else {
@@ -125,8 +126,8 @@ export default function PlatformSettingsHubPage({
         />
       </div>
 
-      <section className="card" style={{ marginBottom: 12, minHeight: "auto" }}>
-        <p className="muted">{SECTIONS.find((section) => section.value === activeSection)?.description}</p>
+      <section className="card" style={{ marginBottom: 12, padding: "12px 16px", gap: 0 }}>
+        <p className="muted" style={{ margin: 0 }}>{SECTIONS.find((section) => section.value === activeSection)?.description}</p>
       </section>
 
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>

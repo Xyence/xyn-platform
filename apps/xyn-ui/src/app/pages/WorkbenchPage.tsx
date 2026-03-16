@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layout, Model, Actions, type IJsonModel, type TabNode } from "flexlayout-react";
 import { useParams, useSearchParams } from "react-router-dom";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
@@ -37,7 +37,41 @@ export default function WorkbenchPage({
   const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
 
   const panelById = useMemo(() => new Map(panels.map((entry) => [entry.panel_id, entry] as const)), [panels]);
-  const model = useMemo(() => Model.fromJson(syncFlexLayoutModel(layoutJson, panels, activePanel?.panel_id || null)), [layoutJson, panels, activePanel?.panel_id]);
+
+  // Stabilize the model: only recreate via Model.fromJson when the set of panel
+  // IDs or the layout JSON changes.  Active-tab selection is applied in-place via
+  // model.doAction so that flexlayout does NOT remount tab components (which
+  // would destroy local state like the settings-hub section selector and
+  // multi-select values).
+  const panelIdSignature = useMemo(() => panels.map((p) => p.panel_id).join("|"), [panels]);
+  const modelRef = useRef<Model | null>(null);
+  // Guard: when true, the next onModelChange is from a programmatic doAction
+  // and should NOT feed back into setLayoutJson (which would recreate the model).
+  const suppressModelChangeRef = useRef(false);
+
+  const model = useMemo(() => {
+    const json = syncFlexLayoutModel(layoutJson, panels, activePanel?.panel_id || null);
+    const m = Model.fromJson(json);
+    modelRef.current = m;
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- panels is
+    // intentionally excluded; panelIdSignature captures structural changes
+    // without triggering on param/title updates.
+  }, [layoutJson, panelIdSignature]);
+
+  // When only the active panel changes, update the selection in-place so the
+  // model reference stays stable and tabs are NOT remounted.
+  useEffect(() => {
+    if (!modelRef.current || !activePanel?.panel_id) return;
+    try {
+      suppressModelChangeRef.current = true;
+      modelRef.current.doAction(Actions.selectTab(activePanel.panel_id));
+    } catch {
+      // Tab may not exist yet — will be handled on next structural sync.
+    } finally {
+      suppressModelChangeRef.current = false;
+    }
+  }, [activePanel?.panel_id]);
 
   useEffect(() => {
     setContext({ artifact_id: null, artifact_type: null });
@@ -167,6 +201,10 @@ export default function WorkbenchPage({
   }, [panelById, workspaceId, workspaceName, workspaceColor, openPanel, setCanvasContext, closePanel]);
 
   const handleModelChange = (nextModel: Model) => {
+    // Skip feedback when the change came from our own programmatic doAction
+    // (e.g. selecting the active tab).  Feeding it back would recreate the
+    // model and potentially remount tab components.
+    if (suppressModelChangeRef.current) return;
     const nextJson = nextModel.toJson();
     setLayoutJson(nextJson);
     syncPanelGroups(derivePanelGroupAssignments(nextJson as IJsonModel));

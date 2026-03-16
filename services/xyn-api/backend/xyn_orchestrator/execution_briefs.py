@@ -258,15 +258,16 @@ def resolve_execution_brief(task: DevTask, *, work_item: Optional[Dict[str, Any]
     except (TypeError, ValueError):
         revision_int = len(history) + 1 if structured else 0
     resolved["revision"] = revision_int
+    resolved_target = resolved.get("target") if isinstance(resolved.get("target"), dict) else {}
     resolved["target"] = {
-        **(resolved.get("target") if isinstance(resolved.get("target"), dict) else {}),
-        "repository_slug": _clean_text(target.repository_slug) or None,
-        "branch": _clean_text(target.branch) or None,
-        "source_kind": _clean_text(target.source_kind) or None,
-        "application_id": _clean_text(target.application_id) or None,
-        "application_plan_id": _clean_text(target.application_plan_id) or None,
-        "goal_id": _clean_text(target.goal_id) or None,
-        "unresolved_reason": _clean_text(target.unresolved_reason) or None,
+        **resolved_target,
+        "repository_slug": _clean_text(target.repository_slug) or _clean_text(resolved_target.get("repository_slug")) or None,
+        "branch": _clean_text(target.branch) or _clean_text(resolved_target.get("branch")) or None,
+        "source_kind": _clean_text(target.source_kind) or _clean_text(resolved_target.get("source_kind")) or None,
+        "application_id": _clean_text(target.application_id) or _clean_text(resolved_target.get("application_id")) or None,
+        "application_plan_id": _clean_text(target.application_plan_id) or _clean_text(resolved_target.get("application_plan_id")) or None,
+        "goal_id": _clean_text(target.goal_id) or _clean_text(resolved_target.get("goal_id")) or None,
+        "unresolved_reason": _clean_text(target.unresolved_reason) or _clean_text(resolved_target.get("unresolved_reason")) or None,
     }
     return ExecutionBriefResolution(
         brief=resolved,

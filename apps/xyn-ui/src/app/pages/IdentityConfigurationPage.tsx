@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import Tabs from "../components/ui/Tabs";
 import IdentityProvidersPage from "./IdentityProvidersPage";
@@ -12,10 +13,13 @@ const IDENTITY_TABS: Array<{ value: IdentityTab; label: string }> = [
 
 export default function IdentityConfigurationPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const tabParam = String(searchParams.get("tab") || "").trim();
-  const activeTab: IdentityTab = (IDENTITY_TABS.find((item) => item.value === tabParam)?.value || "identity-providers") as IdentityTab;
+  const activeTab = useMemo(() => {
+    const tabParam = String(searchParams.get("tab") || "").trim();
+    return (IDENTITY_TABS.find((item) => item.value === tabParam)?.value || "identity-providers") as IdentityTab;
+  }, [searchParams]);
 
   const updateTab = (next: string) => {
+    if (next === activeTab) return;
     const params = new URLSearchParams(searchParams);
     params.set("tab", next);
     setSearchParams(params, { replace: true });
