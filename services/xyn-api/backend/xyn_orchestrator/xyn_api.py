@@ -15,7 +15,7 @@ import fnmatch
 from functools import wraps
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit, quote, unquote
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Set, Tuple, TypedDict
+from typing import Any, Dict, Iterable, Optional, List, Set, Tuple, TypedDict
 
 import requests
 import boto3

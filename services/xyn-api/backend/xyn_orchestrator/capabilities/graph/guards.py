@@ -42,3 +42,30 @@ def evaluate_capability_guard(capability: Capability, entity_state: Dict[str, An
         return bool(state.get("workspace_available"))
 
     return False
+
+
+def evaluate_path_condition(condition: str | None, entity_state: Dict[str, Any] | None = None) -> bool:
+    token = _token(condition)
+    if not token:
+        return False
+
+    state = entity_state if isinstance(entity_state, dict) else {}
+    draft_state = _token(state.get("draft_state"))
+    execution_state = _token(state.get("execution_state"))
+
+    if token == "draft_completed":
+        return draft_state == "completed"
+
+    if token == "execution_running":
+        return execution_state in {"submitted", "queued", "executing"}
+
+    if token == "execution_completed":
+        return execution_state == "completed"
+
+    if token == "artifact_exists":
+        return bool(state.get("application_exists") or state.get("artifact_exists"))
+
+    if token == "workspace_initialized":
+        return bool(state.get("workspace_available") or state.get("application_exists"))
+
+    return False

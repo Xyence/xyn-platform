@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from ..capability_registry import get_capability_by_id
-from .guards import evaluate_capability_guard
+from .guards import evaluate_capability_guard, evaluate_path_condition
 from .capability_paths import get_paths_for_context
 from .context_nodes import normalize_context_id
 
@@ -17,7 +17,12 @@ def get_capability_paths_for_context(
     resolved_state = entity_state if isinstance(entity_state, dict) else {}
     for path in get_paths_for_context(resolved_context):
         steps = []
-        for step in path.steps:
+        ordered_steps = sorted(path.steps, key=lambda step: step.priority if step.priority is not None else 0, reverse=True)
+        for step in ordered_steps:
+            if evaluate_path_condition(step.skip_if, resolved_state):
+                continue
+            if evaluate_path_condition(step.stop_if, resolved_state):
+                break
             capability = get_capability_by_id(step.capability_id)
             if capability is None:
                 continue

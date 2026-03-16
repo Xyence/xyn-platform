@@ -4,6 +4,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class CapabilityPathStep:
     capability_id: str
+    skip_if: str | None = None
+    stop_if: str | None = None
+    priority: int | None = None
 
 
 @dataclass(frozen=True)
@@ -20,12 +23,12 @@ CAPABILITY_PATHS = [
         id="build_application",
         name="Build an Application",
         description="Create the application draft, continue design, monitor execution, and open the workspace.",
-        contexts=["landing", "console"],
+        contexts=["landing", "console", "app_intent_draft"],
         steps=[
-            CapabilityPathStep(capability_id="build_application"),
-            CapabilityPathStep(capability_id="continue_application_draft"),
-            CapabilityPathStep(capability_id="view_execution_status"),
-            CapabilityPathStep(capability_id="open_application_workspace"),
+            CapabilityPathStep(capability_id="build_application", priority=100),
+            CapabilityPathStep(capability_id="continue_application_draft", skip_if="draft_completed", priority=90),
+            CapabilityPathStep(capability_id="view_execution_status", skip_if="execution_completed", priority=80),
+            CapabilityPathStep(capability_id="open_application_workspace", priority=70),
         ],
     ),
     CapabilityPath(
@@ -44,9 +47,9 @@ CAPABILITY_PATHS = [
         description="Continue the application workspace and inspect related goals and artifacts.",
         contexts=["application_workspace", "artifact_registry"],
         steps=[
-            CapabilityPathStep(capability_id="open_application_workspace"),
-            CapabilityPathStep(capability_id="inspect_application_goals"),
-            CapabilityPathStep(capability_id="explore_artifacts"),
+            CapabilityPathStep(capability_id="open_application_workspace", priority=100),
+            CapabilityPathStep(capability_id="inspect_application_goals", stop_if="workspace_initialized", priority=90),
+            CapabilityPathStep(capability_id="explore_artifacts", priority=80),
         ],
     ),
 ]
