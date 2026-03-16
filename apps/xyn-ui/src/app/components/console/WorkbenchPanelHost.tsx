@@ -75,6 +75,8 @@ import JobDetailPage from "../../pages/JobDetailPage";
 import JobsListPage from "../../pages/JobsListPage";
 import PlatformSettingsHubPage from "../../pages/PlatformSettingsHubPage";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
+import CapabilityPlanSummary from "./CapabilityPlanSummary";
+import { useExecutionPlan } from "./useExecutionPlan";
 
 export type ConsolePanelKey =
   | "platform_settings"
@@ -3552,6 +3554,11 @@ function ComposerDetailPanel({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [objective, setObjective] = useState("");
+  const showApplicationPlanSummary =
+    Boolean(factoryKey || applicationPlanId || applicationId) || (!goalId && !threadId);
+  const { loading: planSummaryLoading, error: planSummaryError, plan: applicationPlanSummary } = useExecutionPlan(
+    showApplicationPlanSummary ? "build_application" : null
+  );
 
   useEffect(() => {
     let active = true;
@@ -3773,6 +3780,20 @@ function ComposerDetailPanel({
             </button>
           </div>
         </section>
+      ) : null}
+
+      {showApplicationPlanSummary ? (
+        planSummaryLoading ? (
+          <section className="card">
+            <p className="muted small">Loading plan summary…</p>
+          </section>
+        ) : planSummaryError ? (
+          <section className="card">
+            <p className="danger-text">{planSummaryError}</p>
+          </section>
+        ) : applicationPlanSummary ? (
+          <CapabilityPlanSummary plan={applicationPlanSummary} />
+        ) : null
       ) : null}
 
       {selectedApplication ? (

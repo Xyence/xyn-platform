@@ -4,6 +4,8 @@ import { useParams, useSearchParams } from "react-router-dom";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
 import { useXynConsole } from "../state/xynConsoleStore";
 import { useContextualCapabilities } from "../components/console/contextualCapabilities";
+import { useExecutionPlan } from "../components/console/useExecutionPlan";
+import CapabilityPlanSummary from "../components/console/CapabilityPlanSummary";
 import { buildWorkspaceLayout, derivePanelGroupAssignments, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
 export default function WorkbenchPage({
@@ -34,6 +36,7 @@ export default function WorkbenchPage({
   const workspaceId = String(params.workspaceId || "").trim();
   const { capabilities: landingCapabilities } = useContextualCapabilities({ context: "landing" });
   const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
+  const [selectedCapabilityId, setSelectedCapabilityId] = useState("");
 
   const panelById = useMemo(() => new Map(panels.map((entry) => [entry.panel_id, entry] as const)), [panels]);
 
@@ -152,8 +155,10 @@ export default function WorkbenchPage({
           { id: "explore_artifacts", label: "Explore artifacts", description: "View existing artifacts in the workspace.", prompt: "Show my artifacts" },
         ]
   ).slice(0, 6);
+  const { loading: planLoading, error: planError, plan: selectedPlanSummary } = useExecutionPlan(selectedCapabilityId || null);
 
-  const handleSuggestion = (prompt: string) => {
+  const handleSuggestion = (capabilityId: string, prompt: string) => {
+    setSelectedCapabilityId(capabilityId);
     setInputText(prompt);
     setOpen(true);
   };
@@ -228,13 +233,16 @@ export default function WorkbenchPage({
             {suggestions.length ? (
               <div className="workbench-suggestion-grid">
                 {suggestions.map((entry) => (
-                  <button key={entry.id} type="button" className="ghost workbench-suggestion-chip" onClick={() => handleSuggestion(entry.prompt)}>
+                  <button key={entry.id} type="button" className="ghost workbench-suggestion-chip" onClick={() => handleSuggestion(entry.id, entry.prompt)}>
                     <strong>{entry.label}</strong>
                     <span className="muted small">{entry.description}</span>
                   </button>
                 ))}
               </div>
             ) : null}
+            {planLoading ? <p className="muted small" style={{ marginTop: 12 }}>Loading plan…</p> : null}
+            {!planLoading && planError ? <p className="danger-text" style={{ marginTop: 12 }}>{planError}</p> : null}
+            {!planLoading && selectedPlanSummary ? <CapabilityPlanSummary plan={selectedPlanSummary} /> : null}
           </section>
         </div>
       ) : null}

@@ -1926,6 +1926,16 @@ export type ContextualCapabilityResponse = {
   capabilities: ContextualCapability[];
 };
 
+export type ExecutionPlan = {
+  capability_id: string;
+  architecture: Record<string, unknown>;
+  defaults: Record<string, unknown>;
+  dependencies: string[];
+  components: string[];
+  generated_commands: string[];
+  artifacts: string[];
+};
+
 export type LocalProvisionJobResult = {
   status: string;
   job_artifact_id?: string | null;

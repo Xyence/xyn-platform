@@ -4294,6 +4294,25 @@ button.sm {
   text-align: left;
 }
 
+.xyn-console-option-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.capability-plan-card {
+  gap: 0;
+}
+
+.capability-plan-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .xyn-console-recent {
   gap: 8px;
 }

@@ -150,6 +150,7 @@ import type {
   AiBootstrapStatusResponse,
   SystemReadinessResponse,
   ContextualCapabilityResponse,
+  ExecutionPlan,
   AiInvokeResponse,
   AiModelConfigCompat,
   AccessRegistryResponse,
@@ -4225,6 +4226,16 @@ export async function getContextualCapabilities(params?: {
     credentials: "include",
   });
   return handle<ContextualCapabilityResponse>(response);
+}
+
+export async function getExecutionPlan(capabilityId: string): Promise<ExecutionPlan> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/plan`);
+  url.searchParams.set("capability_id", capabilityId);
+  const response = await apiFetch(url.toString(), {
+    credentials: "include",
+  });
+  return handle<ExecutionPlan>(response);
 }
 
 export async function updateWorkItem(

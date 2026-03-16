@@ -194,6 +194,7 @@ from .execution_changes import (
 )
 from .system_readiness import system_readiness_report
 from .capabilities.capability_service import get_capabilities as get_contextual_capabilities
+from .planning.plan_service import get_plan_for_capability
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -29032,6 +29033,23 @@ def contextual_capabilities(request: HttpRequest) -> JsonResponse:
             application_id=str(request.GET.get("application_id") or "").strip() or None,
         )
     )
+
+
+@login_required
+def capability_plan(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    capability_id = str(request.GET.get("capability_id") or "").strip()
+    if not capability_id:
+        return JsonResponse({"error": "capability_id is required"}, status=400)
+    try:
+        payload = get_plan_for_capability(capability_id)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=404)
+    return JsonResponse(payload)
 
 
 def _review_coordination_thread(

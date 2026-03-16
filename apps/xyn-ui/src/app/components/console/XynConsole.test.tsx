@@ -15,6 +15,7 @@ const apiMocks = vi.hoisted(() => ({
   getRecentArtifacts: vi.fn(),
   executeAppPalettePrompt: vi.fn(),
   getContextualCapabilities: vi.fn(),
+  getExecutionPlan: vi.fn(),
 }));
 
 vi.mock("../../../api/xyn", () => ({
@@ -25,6 +26,7 @@ vi.mock("../../../api/xyn", () => ({
   getRecentArtifacts: apiMocks.getRecentArtifacts,
   executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
   getContextualCapabilities: apiMocks.getContextualCapabilities,
+  getExecutionPlan: apiMocks.getExecutionPlan,
 }));
 
 function renderConsole() {
@@ -175,6 +177,23 @@ describe("XynConsole", () => {
         },
       ],
     });
+    apiMocks.getExecutionPlan.mockResolvedValue({
+      capability_id: "build_application",
+      architecture: {
+        interface: "Xyn language interface",
+        database: "PostgreSQL",
+        deployment: "Kubernetes service",
+      },
+      defaults: {
+        interface: "Xyn language interface",
+        database: "PostgreSQL",
+        deployment: "Kubernetes service",
+      },
+      dependencies: ["FastAPI", "SQLAlchemy"],
+      components: ["application_service", "data_models", "api_endpoints"],
+      generated_commands: [],
+      artifacts: ["application"],
+    });
     apiMocks.previewXynIntent.mockResolvedValue({
       status: "UnsupportedIntent",
       action_type: "ValidateDraft",
@@ -206,6 +225,7 @@ describe("XynConsole", () => {
     await userEvent.click(capability);
     expect(await screen.findByDisplayValue("Build an application that...")).toBeInTheDocument();
     expect(apiMocks.getContextualCapabilities).toHaveBeenCalled();
+    expect(await screen.findByText("Application Plan")).toBeInTheDocument();
   });
 
   it("stays open when launched from a platform settings subpage", async () => {

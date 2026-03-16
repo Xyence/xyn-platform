@@ -10,6 +10,14 @@ CAPABILITIES = [
         prompt_template="Build an application that...",
         visibility="primary",
         priority=10,
+        default_assumptions={
+            "database": "PostgreSQL",
+            "interface": "Xyn language interface",
+            "deployment": "Kubernetes service",
+        },
+        default_dependencies=["FastAPI", "SQLAlchemy"],
+        default_components=["application_service", "data_models", "api_endpoints"],
+        generated_artifacts=["application"],
     ),
     Capability(
         id="write_article",
@@ -19,6 +27,13 @@ CAPABILITIES = [
         prompt_template="Write an article about...",
         visibility="primary",
         priority=9,
+        default_assumptions={
+            "format": "Markdown article draft",
+            "workflow": "editor-first revision flow",
+        },
+        default_dependencies=["Markdown renderer", "Article governance lifecycle"],
+        default_components=["article_draft", "revision_history", "publication_controls"],
+        generated_artifacts=["article"],
     ),
     Capability(
         id="create_explainer_video",
@@ -28,6 +43,13 @@ CAPABILITIES = [
         prompt_template="Create an explainer video explaining...",
         visibility="primary",
         priority=8,
+        default_assumptions={
+            "interface": "Article-to-video generation flow",
+            "delivery": "Generated video artifact",
+        },
+        default_dependencies=["Storyboard generation", "Narration generation"],
+        default_components=["script", "storyboard", "visual_prompts", "video_render"],
+        generated_artifacts=["video_render"],
     ),
     Capability(
         id="explore_artifacts",
@@ -37,6 +59,9 @@ CAPABILITIES = [
         prompt_template="Show my artifacts",
         visibility="secondary",
         priority=7,
+        default_assumptions={"surface": "Artifact registry"},
+        default_components=["artifact_registry", "artifact_search"],
+        generated_artifacts=["artifact_list"],
     ),
     Capability(
         id="revise_draft",
@@ -46,6 +71,10 @@ CAPABILITIES = [
         prompt_template="Revise this draft to...",
         visibility="primary",
         priority=10,
+        default_assumptions={"workflow": "draft revision"},
+        default_dependencies=["Draft session context", "Validation checks"],
+        default_components=["draft_editor", "revision_summary"],
+        generated_artifacts=["draft_revision"],
     ),
     Capability(
         id="summarize_draft",
@@ -55,6 +84,9 @@ CAPABILITIES = [
         prompt_template="Summarize this draft and highlight what should change.",
         visibility="secondary",
         priority=7,
+        default_assumptions={"workflow": "draft analysis"},
+        default_components=["draft_summary", "change_recommendations"],
+        generated_artifacts=["draft_summary"],
     ),
     Capability(
         id="continue_application",
@@ -64,6 +96,13 @@ CAPABILITIES = [
         prompt_template="Continue building this application.",
         visibility="primary",
         priority=10,
+        default_assumptions={
+            "execution": "threaded development workflow",
+            "review": "brief inspection before execution",
+        },
+        default_dependencies=["Planning assistant", "Coding assistant"],
+        default_components=["goal_portfolio", "coordination_threads", "dev_tasks"],
+        generated_artifacts=["application_progress"],
     ),
     Capability(
         id="inspect_application_goals",
@@ -73,6 +112,9 @@ CAPABILITIES = [
         prompt_template="Show the current goals for this application.",
         visibility="secondary",
         priority=8,
+        default_assumptions={"surface": "Composer workspace review"},
+        default_components=["goals", "threads", "execution_summaries"],
+        generated_artifacts=["goal_review"],
     ),
     Capability(
         id="review_plan",
@@ -82,6 +124,14 @@ CAPABILITIES = [
         prompt_template="Review this application plan and highlight the next decision.",
         visibility="primary",
         priority=10,
+        default_assumptions={
+            "database": "PostgreSQL",
+            "interface": "Xyn language interface",
+            "deployment": "Kubernetes service",
+        },
+        default_dependencies=["FastAPI", "SQLAlchemy"],
+        default_components=["application_service", "data_models", "api_endpoints"],
+        generated_artifacts=["application_plan"],
     ),
 ]
 

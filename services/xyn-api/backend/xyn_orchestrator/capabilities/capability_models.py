@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -11,3 +11,7 @@ class Capability:
     prompt_template: Optional[str]
     visibility: str
     priority: int
+    default_assumptions: Optional[Dict[str, str]] = None
+    default_dependencies: Optional[List[str]] = None
+    default_components: Optional[List[str]] = None
+    generated_artifacts: Optional[List[str]] = None

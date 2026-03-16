@@ -31,6 +31,7 @@ const apiMocks = vi.hoisted(() => ({
   updateWorkItem: vi.fn(),
   getRuntimeRunArtifactContent: vi.fn(),
   getSystemReadiness: vi.fn(),
+  getExecutionPlan: vi.fn(),
 }));
 
 const streamMocks = vi.hoisted(() => {
@@ -80,6 +81,7 @@ vi.mock("../../../api/xyn", async () => {
     updateWorkItem: apiMocks.updateWorkItem,
     getRuntimeRunArtifactContent: apiMocks.getRuntimeRunArtifactContent,
     getSystemReadiness: apiMocks.getSystemReadiness,
+    getExecutionPlan: apiMocks.getExecutionPlan,
   };
 });
 
@@ -112,6 +114,23 @@ describe("WorkbenchPanelHost entity refresh", () => {
         workspace_root: "/app/workspaces",
         artifact_root: "/app/media",
       },
+    });
+    apiMocks.getExecutionPlan.mockResolvedValue({
+      capability_id: "build_application",
+      architecture: {
+        interface: "Xyn language interface",
+        database: "PostgreSQL",
+        deployment: "Kubernetes service",
+      },
+      defaults: {
+        interface: "Xyn language interface",
+        database: "PostgreSQL",
+        deployment: "Kubernetes service",
+      },
+      dependencies: ["FastAPI", "SQLAlchemy"],
+      components: ["application_service", "data_models", "api_endpoints"],
+      generated_commands: [],
+      artifacts: ["application"],
     });
   });
 
@@ -651,6 +670,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(screen.getByText(/plan review/i)).toBeInTheDocument());
     expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
+    expect(await screen.findByText("Application Plan")).toBeInTheDocument();
     await act(async () => {
       screen.getByRole("button", { name: "Apply Plan" }).click();
     });
