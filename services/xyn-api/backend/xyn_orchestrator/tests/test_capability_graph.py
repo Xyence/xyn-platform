@@ -57,6 +57,7 @@ class CapabilityGraphTests(TestCase):
     def test_graph_service_normalizes_legacy_artifact_draft_context(self):
         payload = get_capabilities_for_context(context="artifact_draft")
         self.assertEqual(payload["context"], "artifact_detail")
+        self.assertEqual(payload["attributes"]["workspace_state"], "empty")
         self.assertEqual(payload["capabilities"][0]["id"], "view_artifact_details")
         self.assertEqual(payload["capabilities"][0]["action_type"], "open_descriptor")
         self.assertEqual(payload["capabilities"][0]["action_target"], "fromArtifactDetail")
@@ -64,6 +65,43 @@ class CapabilityGraphTests(TestCase):
     def test_graph_service_filters_console_workspace_open_without_application_state(self):
         payload = get_capabilities_for_context(context="console", workspace_id="ws-1", entity_state={})
         self.assertEqual([entry["id"] for entry in payload["capabilities"]], ["build_application", "explore_artifacts"])
+
+    def test_graph_service_enriches_application_artifact_detail_attributes(self):
+        payload = get_capabilities_for_context(
+            context="artifact_detail",
+            entity_id="artifact-1",
+            workspace_id="ws-1",
+            entity_state={
+                "artifact_type": "application",
+                "execution_state": "completed",
+                "application_exists": True,
+                "entity_exists": True,
+                "workspace_initialized": True,
+            },
+        )
+        self.assertEqual(
+            payload["attributes"],
+            {
+                "artifact_type": "application",
+                "draft_state": None,
+                "execution_state": "completed",
+                "workspace_state": "initialized",
+                "entity_exists": True,
+            },
+        )
+        self.assertEqual(
+            [entry["id"] for entry in payload["capabilities"]],
+            ["view_artifact_details", "open_application_workspace", "view_execution_status", "explore_artifacts"],
+        )
+
+    def test_graph_service_hides_application_specific_actions_for_article_artifact(self):
+        payload = get_capabilities_for_context(
+            context="artifact_detail",
+            entity_id="artifact-2",
+            workspace_id="ws-1",
+            entity_state={"artifact_type": "article", "entity_exists": True},
+        )
+        self.assertEqual([entry["id"] for entry in payload["capabilities"]], ["view_artifact_details", "explore_artifacts"])
 
     def test_endpoint_returns_context_capabilities(self):
         response = self.client.get("/xyn/api/capabilities/context", {"context": "artifact_registry", "workspaceId": "ws-1"})
@@ -120,6 +158,39 @@ class CapabilityGraphTests(TestCase):
         self.assertEqual(
             [entry["id"] for entry in payload["capabilities"]],
             ["open_application_workspace", "view_execution_status"],
+        )
+        self.assertEqual(
+            payload["attributes"],
+            {
+                "artifact_type": "application",
+                "draft_state": "executing",
+                "execution_state": "executing",
+                "workspace_state": "initialized",
+                "entity_exists": True,
+            },
+        )
+
+    def test_endpoint_enriches_artifact_detail_context_attributes(self):
+        artifact = mock.Mock(type_id=1, status="active", workspace_id=self.workspace.id)
+        artifact.type = mock.Mock(slug="workflow")
+
+        with (
+            mock.patch("xyn_orchestrator.xyn_api._resolve_artifact_for_capability_context", return_value=artifact),
+            mock.patch("xyn_orchestrator.xyn_api._artifact_slug", return_value="app.team-lunch-poll"),
+        ):
+            response = self.client.get(
+                "/xyn/api/capabilities/context",
+                {"context": "artifact_detail", "entityId": "artifact-1", "workspaceId": str(self.workspace.id)},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["context"], "artifact_detail")
+        self.assertEqual(payload["attributes"]["artifact_type"], "application")
+        self.assertEqual(payload["attributes"]["execution_state"], "completed")
+        self.assertEqual(
+            [entry["id"] for entry in payload["capabilities"]],
+            ["view_artifact_details", "open_application_workspace", "view_execution_status", "explore_artifacts"],
         )
 
     def test_path_service_returns_build_application_path(self):

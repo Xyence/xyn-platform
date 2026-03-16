@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { getContextualCapabilities } from "../../../api/xyn";
-import type { ContextualCapability } from "../../../api/types";
+import type { CapabilityContextAttributes, ContextualCapability } from "../../../api/types";
 
 type Params = {
   context?: string;
@@ -12,6 +12,7 @@ type Model = {
   loading: boolean;
   error: string | null;
   context: string;
+  attributes: CapabilityContextAttributes;
   capabilities: ContextualCapability[];
 };
 
@@ -19,6 +20,7 @@ export function useContextualCapabilities(params: Params): Model {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [context, setContext] = useState("unknown");
+  const [attributes, setAttributes] = useState<CapabilityContextAttributes>({});
   const [capabilities, setCapabilities] = useState<ContextualCapability[]>([]);
 
   const requestKey = useMemo(
@@ -43,11 +45,13 @@ export function useContextualCapabilities(params: Params): Model {
         });
         if (!active) return;
         setContext(String(payload.context || "unknown"));
+        setAttributes(payload.attributes || {});
         setCapabilities(Array.isArray(payload.capabilities) ? payload.capabilities : []);
       } catch (err) {
         if (!active) return;
         setError(err instanceof Error ? err.message : "Failed to load contextual capabilities");
         setContext(String(params.context || "unknown") || "unknown");
+        setAttributes({});
         setCapabilities([]);
       } finally {
         if (active) setLoading(false);
@@ -58,5 +62,5 @@ export function useContextualCapabilities(params: Params): Model {
     };
   }, [params.context, params.entityId, params.workspaceId, requestKey]);
 
-  return { loading, error, context, capabilities };
+  return { loading, error, context, attributes, capabilities };
 }

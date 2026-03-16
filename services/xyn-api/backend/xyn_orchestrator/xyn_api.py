@@ -29065,11 +29065,59 @@ def _capability_state_has_application(related_jobs: Iterable[Dict[str, Any]]) ->
     return False
 
 
+def _normalize_capability_artifact_type(*, kind: str = "", slug: str = "") -> Optional[str]:
+    normalized_kind = str(kind or "").strip().lower()
+    normalized_slug = str(slug or "").strip().lower()
+    if normalized_kind == ARTICLE_ARTIFACT_TYPE_SLUG:
+        return "article"
+    if normalized_kind == WORKFLOW_ARTIFACT_TYPE_SLUG and normalized_slug.startswith("app."):
+        return "application"
+    if normalized_kind in {"video", "video_render", "explainer"}:
+        return "explainer_video"
+    return normalized_kind or None
+
+
 def _normalize_capability_execution_state(workflow_state: Any) -> Optional[str]:
     token = str(workflow_state or "").strip().lower()
     if token in {"submitted", "queued", "executing", "completed", "failed"}:
         return token
     return None
+
+
+def _normalize_artifact_execution_state(status: Any, artifact_type: Optional[str]) -> Optional[str]:
+    if artifact_type != "application":
+        return None
+    token = str(status or "").strip().lower()
+    if token in {"queued", "pending"}:
+        return "queued"
+    if token in {"running", "building", "executing", "deploying"}:
+        return "executing"
+    if token in {"completed", "succeeded", "ready", "active", "published"}:
+        return "completed"
+    if token in {"failed", "error"}:
+        return "failed"
+    return "completed"
+
+
+def _resolve_artifact_for_capability_context(entity_id: str, workspace_id: str = "") -> Optional[Artifact]:
+    token = str(entity_id or "").strip()
+    if not token:
+        return None
+    artifact = None
+    try:
+        parsed_id = uuid.UUID(token)
+    except (TypeError, ValueError, AttributeError):
+        parsed_id = None
+    if parsed_id is not None:
+        artifact = Artifact.objects.select_related("type", "workspace").filter(id=parsed_id).first()
+    if artifact is None:
+        artifact = _resolve_artifact_by_slug(token)
+    if artifact is None:
+        return None
+    normalized_workspace_id = str(workspace_id or "").strip()
+    if normalized_workspace_id and str(artifact.workspace_id or "") != normalized_workspace_id:
+        return None
+    return artifact
 
 
 def _resolve_capability_entity_state(
@@ -29083,25 +29131,42 @@ def _resolve_capability_entity_state(
     normalized_entity_id = str(entity_id or "").strip() or None
     normalized_workspace_id = str(workspace_id or "").strip() or None
     state: Dict[str, Any] = {
+        "artifact_type": None,
         "draft_state": None,
         "execution_state": None,
         "application_exists": False,
         "workspace_available": False,
         "workspace_initialized": False,
+        "entity_exists": False,
     }
 
     if resolved_context == "application_workspace":
         state["application_exists"] = bool(normalized_entity_id)
         state["workspace_available"] = bool(normalized_entity_id or normalized_workspace_id)
         state["workspace_initialized"] = bool(normalized_entity_id or normalized_workspace_id)
+        state["entity_exists"] = bool(normalized_entity_id)
+        state["artifact_type"] = "application" if normalized_entity_id else None
         return state
 
     workspace = _resolve_workspace_for_identity(identity, normalized_workspace_id or "")
-    if workspace is None:
+    if workspace is None and resolved_context != "artifact_detail":
         return state
-    state["workspace_available"] = True
+    state["workspace_available"] = workspace is not None
 
-    if resolved_context != "app_intent_draft" or not normalized_entity_id:
+    if resolved_context == "artifact_detail" and normalized_entity_id:
+        artifact = _resolve_artifact_for_capability_context(normalized_entity_id, normalized_workspace_id)
+        if artifact is not None:
+            state["entity_exists"] = True
+            state["artifact_type"] = _normalize_capability_artifact_type(
+                kind=artifact.type.slug if artifact.type_id else "",
+                slug=_artifact_slug(artifact),
+            )
+            state["application_exists"] = state["artifact_type"] == "application"
+            state["execution_state"] = _normalize_artifact_execution_state(artifact.status, state["artifact_type"])
+            state["workspace_initialized"] = bool(artifact.workspace_id)
+        return state
+
+    if resolved_context != "app_intent_draft" or not normalized_entity_id or workspace is None:
         return state
 
     try:
@@ -29133,9 +29198,11 @@ def _resolve_capability_entity_state(
     workflow = get_draft_workflow(workspace=workspace, draft=draft_payload, jobs=jobs_payload)
     related_jobs = find_related_draft_jobs(normalized_entity_id, jobs_payload)
     workflow_state = str(workflow.get("state") or "").strip().lower() or None
+    state["entity_exists"] = True
     state["draft_state"] = workflow_state
     state["execution_state"] = _normalize_capability_execution_state(workflow_state)
     state["application_exists"] = _capability_state_has_application(related_jobs)
+    state["artifact_type"] = "application"
     return state
 
 

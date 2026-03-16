@@ -1924,8 +1924,17 @@ export type ContextualCapability = {
   available?: boolean;
 };
 
+export type CapabilityContextAttributes = {
+  artifact_type?: string | null;
+  draft_state?: string | null;
+  execution_state?: string | null;
+  workspace_state?: string | null;
+  entity_exists?: boolean;
+};
+
 export type ContextualCapabilityResponse = {
   context: string;
+  attributes?: CapabilityContextAttributes;
   capabilities: ContextualCapability[];
 };
 

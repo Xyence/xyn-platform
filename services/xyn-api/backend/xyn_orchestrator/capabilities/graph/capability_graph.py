@@ -24,6 +24,8 @@ _CONTEXT_CAPABILITY_IDS = {
     ],
     "artifact_detail": [
         "view_artifact_details",
+        "open_application_workspace",
+        "view_execution_status",
         "explore_artifacts",
     ],
     "app_intent_draft": [

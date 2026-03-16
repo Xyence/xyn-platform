@@ -1,6 +1,7 @@
 from typing import Any, Dict
 
 from ..capability_registry import get_capability_by_id
+from .capability_context import build_context_attributes
 from .guards import evaluate_capability_guard
 from .capability_graph import get_capability_ids_for_context
 from .context_nodes import normalize_context_id
@@ -36,6 +37,7 @@ def get_capabilities_for_context(
         )
     return {
         "context": resolved_context,
+        "attributes": build_context_attributes(resolved_state),
         "entityId": str(entity_id or "").strip() or None,
         "workspaceId": str(workspace_id or "").strip() or None,
         "capabilities": capabilities,

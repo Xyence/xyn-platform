@@ -16,6 +16,13 @@ def _tokens(value: Any) -> set[str]:
     return {_token(part) for part in raw.split(",") if _token(part)}
 
 
+def _attribute_value(state: Dict[str, Any], key: str) -> str:
+    attributes = state.get("attributes")
+    if isinstance(attributes, dict) and key in attributes:
+        return _token(attributes.get(key))
+    return _token(state.get(key))
+
+
 def evaluate_capability_guard(capability: Capability, entity_state: Dict[str, Any] | None = None) -> bool:
     guard_type = _token(capability.guard_type)
     if not guard_type:
@@ -40,6 +47,14 @@ def evaluate_capability_guard(capability: Capability, entity_state: Dict[str, An
 
     if guard_type == "workspace_state":
         return bool(state.get("workspace_available"))
+
+    if guard_type == "attribute_equals":
+        key, _, raw_value = str(guard_target or "").partition(":")
+        return bool(key and raw_value) and _attribute_value(state, key) == _token(raw_value)
+
+    if guard_type == "attribute_in":
+        key, _, raw_value = str(guard_target or "").partition(":")
+        return bool(key and raw_value) and _attribute_value(state, key) in _tokens(raw_value)
 
     return False
 
