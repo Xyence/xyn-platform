@@ -624,8 +624,163 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalledWith({ workspace_id: "ws-1" }));
+    expect(screen.getByText("Application Efforts")).toBeInTheDocument();
     expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Generate Plan" })).toBeInTheDocument();
+  });
+
+  it("groups composer work under application efforts and isolates unlinked coordination items", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: { factory_key: null, application_plan_id: null, application_id: "app-2", goal_id: null, thread_id: null },
+      factory_catalog: [],
+      application_plans: [
+        {
+          id: "plan-1",
+          name: "Knowledgebase Plan",
+          status: "review",
+          source_factory_key: "generic_application_mvp",
+          summary: "Plan ready for review",
+          request_objective: "Build a personal knowledgebase",
+          created_at: "2026-03-16T15:00:00Z",
+          updated_at: "2026-03-16T15:00:00Z",
+        },
+      ],
+      applications: [
+        {
+          id: "app-1",
+          name: "Lunch Poll",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Older lunch app effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 1,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+        {
+          id: "app-2",
+          name: "Knowledgebase",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Current app effort",
+          request_objective: "Build a personal knowledgebase",
+          goal_count: 1,
+          created_at: "2026-03-16T10:00:00Z",
+          updated_at: "2026-03-16T16:00:00Z",
+        },
+      ],
+      application: {
+        id: "app-2",
+        name: "Knowledgebase",
+        status: "active",
+        source_factory_key: "generic_application_mvp",
+        summary: "Current app effort",
+        request_objective: "Build a personal knowledgebase",
+        goal_count: 1,
+        goals: [],
+        created_at: "2026-03-16T10:00:00Z",
+        updated_at: "2026-03-16T16:00:00Z",
+      },
+      related_goals: [
+        {
+          id: "goal-1",
+          application_id: "app-1",
+          title: "Workflow and Stabilization",
+          planning_status: "decomposed",
+          goal_progress_status: "blocked",
+          thread_count: 1,
+          work_item_count: 2,
+          planning_summary: "Repair the lunch app workflow.",
+          resolution_notes: [],
+          created_at: "2026-03-15T11:05:00Z",
+          updated_at: "2026-03-15T11:05:00Z",
+        },
+        {
+          id: "goal-legacy",
+          application_id: null,
+          title: "Legacy cleanup",
+          planning_status: "decomposed",
+          goal_progress_status: "active",
+          thread_count: 1,
+          work_item_count: 1,
+          planning_summary: "Unlinked work.",
+          resolution_notes: [],
+          created_at: "2026-03-14T10:00:00Z",
+          updated_at: "2026-03-14T10:10:00Z",
+        },
+      ],
+      related_threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          goal_title: "Workflow and Stabilization",
+          title: "Smoke test",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-1",
+          queued_work_items: 0,
+          running_work_items: 0,
+          awaiting_review_work_items: 1,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-15T11:06:00Z",
+          updated_at: "2026-03-15T11:06:00Z",
+        },
+        {
+          id: "thread-legacy",
+          workspace_id: "ws-1",
+          goal_id: "goal-legacy",
+          goal_title: "Legacy cleanup",
+          title: "Cleanup slice",
+          description: "",
+          owner: null,
+          priority: "normal",
+          status: "queued",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-0",
+          queued_work_items: 1,
+          running_work_items: 0,
+          awaiting_review_work_items: 0,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-14T10:11:00Z",
+          updated_at: "2026-03-14T10:11:00Z",
+        },
+      ],
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-grouped", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1", application_id: "app-2" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getByText("Current Work Context")).toBeInTheDocument();
+    expect(screen.getByText("Application Efforts")).toBeInTheDocument();
+    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
+    expect(screen.getAllByText("Knowledgebase").length).toBeGreaterThan(0);
+    expect(screen.getByText("Unlinked Work")).toBeInTheDocument();
+    expect(screen.getAllByText("Legacy cleanup").length).toBeGreaterThan(0);
   });
 
   it("loads composer plan review state and applies plans through the existing plan seam", async () => {
@@ -668,11 +823,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
       </MemoryRouter>
     );
 
-    await waitFor(() => expect(screen.getByText(/plan review/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0));
+    expect(screen.getByText("Selected Application Plan")).toBeInTheDocument();
     expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
     expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
     await act(async () => {
-      screen.getByRole("button", { name: "Apply Plan" }).click();
+      screen.getAllByRole("button", { name: "Apply Plan" })[0].click();
     });
     await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
     await waitFor(() =>
@@ -808,10 +964,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByRole("button", { name: "Resume Thread" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Queue Next Slice" })).toBeDisabled();
     expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument();
-    expect(screen.getByText(/review the blocking execution brief/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/review the blocking execution brief/i).length).toBeGreaterThan(0);
 
     await act(async () => {
-      screen.getByRole("button", { name: "Review Work Items" }).click();
+      screen.getAllByRole("button", { name: "Review Work Items" })[0].click();
     });
 
     expect(onOpenPanel).toHaveBeenCalledWith(
@@ -2487,7 +2643,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
       })
     );
     expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
-    expect(screen.getByText(/factory discovery/i)).toBeInTheDocument();
+    expect(screen.getByText("Application Efforts")).toBeInTheDocument();
     expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Composer" })).not.toBeInTheDocument();
   });
@@ -2562,10 +2718,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
       </MemoryRouter>
     );
 
-    await waitFor(() => expect(screen.getByText(/plan review/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0));
+    expect(screen.getByText("Selected Application Plan")).toBeInTheDocument();
     expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
     await act(async () => {
-      screen.getByRole("button", { name: /apply plan/i }).click();
+      screen.getAllByRole("button", { name: /apply plan/i })[0].click();
     });
     await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
     expect(onOpenPanel).toHaveBeenCalledWith(

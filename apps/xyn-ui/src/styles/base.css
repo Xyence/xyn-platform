@@ -5173,6 +5173,60 @@ button.sm {
   cursor: pointer;
 }
 
+.composer-effort-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.composer-effort-card {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 16px;
+  background: color-mix(in srgb, var(--panel) 88%, white 12%);
+}
+
+.composer-effort-card.is-current {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.composer-effort-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.composer-effort-header h3 {
+  margin: 4px 0 0;
+  font-size: 1rem;
+  line-height: 1.3;
+}
+
+.composer-effort-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.composer-effort-summary {
+  margin: 12px 0;
+  color: var(--muted);
+}
+
+.composer-effort-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-bottom: 12px;
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+
+.composer-effort-children {
+  margin-top: 12px;
+}
+
 @media (max-width: 768px) {
   .app-draft-layout {
     grid-template-columns: 1fr;
@@ -5211,6 +5265,10 @@ button.sm {
     box-shadow: none;
     padding: 14px 12px;
     z-index: 1600;
+  }
+
+  .composer-effort-header {
+    flex-direction: column;
   }
 }
 

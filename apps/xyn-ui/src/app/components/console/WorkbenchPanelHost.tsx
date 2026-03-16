@@ -69,6 +69,7 @@ import InlineMessage from "../../../components/InlineMessage";
 import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityRegistry";
 import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail } from "../../utils/entityChangeEvents";
 import { applyRuntimeEventToRunDetail, applyRuntimeEventToRuns, refreshRuntimeRunDetail, refreshRuntimeRunSummary, subscribeRuntimeEventStream } from "../../utils/runtimeEventStream";
+import { deriveComposerViewModel } from "./composerViewModel";
 import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
 import JobDetailPage from "../../pages/JobDetailPage";
@@ -133,6 +134,12 @@ function titleCaseLabel(value: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function formatPanelTimestamp(value?: string | null): string {
+  const parsed = new Date(String(value || ""));
+  if (Number.isNaN(parsed.getTime())) return "—";
+  return parsed.toLocaleString();
 }
 
 function briefReviewLabel(item: Pick<WorkItemSummary, "execution_brief_review" | "execution_queue">): string {
@@ -3692,16 +3699,40 @@ function ComposerDetailPanel({
   const actionableBreadcrumbs = payload.breadcrumbs.filter(
     (crumb) => !(crumb.kind === "composer" && payload.breadcrumbs.length === 1)
   );
+  const composerView = deriveComposerViewModel(payload);
+  const currentWork = composerView.currentContext;
+  const currentContainer = currentWork.container;
+  const selectedContainerGoals = currentContainer?.kind === "application" ? currentContainer.goals : [];
+  const selectedContainerGoalIds = new Set(selectedContainerGoals.map((goal) => goal.id));
+  const selectedContainerThreads = currentContainer?.kind === "application"
+    ? currentContainer.threads
+    : [];
+  const selectedGoalThreads = selectedGoal
+    ? selectedContainerThreads.filter((thread) => thread.goal_id === selectedGoal.id)
+    : [];
+  const latestQuickActionReason = selectedThread
+    ? threadActionGuidance || "Review the currently focused thread and decide whether it is safe to queue more coding work."
+    : recommendation
+      ? recommendation.summary
+      : currentWork.latestResult;
+  const showPlanningTools = payload.stage === "factory_discovery" || payload.stage === "plan_review";
 
   return (
     <div className="panel-section-stack">
       <section className="card">
         <div className="card-header">
           <div>
-            <div className="field-label">Composer Stage</div>
-            <div className="field-value">{payload.stage.replace(/_/g, " ")}</div>
+            <div className="field-label">Current Work Context</div>
+            <div className="field-value">{currentWork.title}</div>
           </div>
         </div>
+        <div className="detail-grid">
+          <div><div className="field-label">Overall state</div><div className="field-value">{titleCaseLabel(currentWork.statusLabel)}</div></div>
+          <div><div className="field-label">Container</div><div className="field-value">{currentContainer ? `${currentContainer.kind === "application" ? "Application" : "Application Plan"} · ${currentContainer.title}` : "No application effort selected"}</div></div>
+          <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(currentWork.latestActivityAt)}</div></div>
+          <div><div className="field-label">Stage</div><div className="field-value">{titleCaseLabel(payload.stage)}</div></div>
+        </div>
+        <p className="muted" style={{ marginTop: 12 }}>{currentWork.latestResult}</p>
         {actionableBreadcrumbs.length ? (
           <div className="inline-action-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
             {actionableBreadcrumbs.map((crumb, index) => (
@@ -3722,12 +3753,175 @@ function ComposerDetailPanel({
             ))}
           </div>
         ) : null}
+        <div className="inline-action-row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+          {selectedPlan ? (
+            <button type="button" className="ghost sm" disabled={selectedPlan.status === "applied"} onClick={() => handleApplyPlan(selectedPlan.id)}>
+              Apply Plan
+            </button>
+          ) : null}
+          {selectedGoal ? (
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={!recommendation}
+              onClick={() => recommendation && handleApproveNextSlice(selectedGoal, String(recommendation.recommendation_id || ""))}
+            >
+              Approve Next Slice
+            </button>
+          ) : null}
+          {selectedThread ? (
+            <button type="button" className="ghost sm" onClick={() => onOpenPanel("thread_detail", { thread_id: selectedThread.id })}>
+              Review Work Items
+            </button>
+          ) : null}
+        </div>
+        <p className="muted small" style={{ marginTop: 8 }}>{latestQuickActionReason}</p>
         {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
       </section>
 
-      {(payload.stage === "factory_discovery" || payload.stage === "plan_review") && (
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <div className="field-label">Application Efforts</div>
+            <div className="field-value">Choose the application or plan you want to work on</div>
+          </div>
+        </div>
+        <p className="muted" style={{ marginBottom: 12 }}>
+          Composer now groups goals and threads under their parent application effort. Older efforts stay visible, but they are clearly separated from the current one.
+        </p>
+        <div className="composer-effort-grid">
+          {composerView.containers.map((container) => (
+            <article
+              key={`${container.kind}:${container.id}`}
+              className={`composer-effort-card${container.isCurrent ? " is-current" : ""}`}
+            >
+              <div className="composer-effort-header">
+                <div>
+                  <div className="field-label">{container.kind === "application" ? "Application" : "Application Plan"}</div>
+                  <h3>{container.title}</h3>
+                </div>
+                <div className="composer-effort-badges">
+                  <span className="pill">{container.statusLabel}</span>
+                  <span className="pill ghost">{container.recencyLabel}</span>
+                </div>
+              </div>
+              <p className="composer-effort-summary">{container.promptSummary}</p>
+              <div className="composer-effort-meta">
+                <span><strong>Updated</strong> {formatPanelTimestamp(container.latestActivityAt)}</span>
+                <span><strong>Goals</strong> {container.goalCount}</span>
+                <span><strong>Threads</strong> {container.threadCount}</span>
+              </div>
+              <p className="muted small">{container.latestResult}</p>
+              {container.kind === "application" ? (
+                <div className="composer-effort-children">
+                  <div className="field-label">Related goals</div>
+                  {container.goals.length ? (
+                    <ul className="detail-list">
+                      {container.goals.slice(0, 4).map((goal) => (
+                        <li key={goal.id}>
+                          <strong>{goal.title}</strong> · {goal.goal_progress_status || goal.planning_status || "planned"} · {goal.threads.length} thread{goal.threads.length === 1 ? "" : "s"}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="muted small">
+                      {container.goalCount > 0
+                        ? "This application has goals, but only counts are available until you open the effort."
+                        : "No goals are attached yet."}
+                    </p>
+                  )}
+                </div>
+              ) : null}
+              <div className="inline-action-row" style={{ marginTop: 12 }}>
+                <button
+                  type="button"
+                  className="ghost sm"
+                  disabled={container.isCurrent}
+                  title={container.isCurrent ? "This application effort is already selected." : undefined}
+                  onClick={() => openComposer(container.selectionParams)}
+                >
+                  {container.isCurrent ? "Current Effort" : "Open Effort"}
+                </button>
+              </div>
+            </article>
+          ))}
+          {!composerView.containers.length ? (
+            <p className="muted">No application efforts have been created in this workspace yet.</p>
+          ) : null}
+        </div>
+      </section>
+
+      {composerView.unlinkedGoals.length || composerView.unlinkedThreads.length ? (
         <section className="card">
-          <div className="field-label">Application Objective</div>
+          <div className="card-header">
+            <div>
+              <div className="field-label">Unlinked Work</div>
+              <div className="field-value">Legacy or orphaned coordination items</div>
+            </div>
+          </div>
+          <p className="muted" style={{ marginBottom: 12 }}>
+            These items could not be attached to a durable application effort from the current payload, so Composer keeps them separate instead of implying they belong to the selected app.
+          </p>
+          {composerView.unlinkedGoals.length ? (
+            <>
+              <div className="field-label">Goals</div>
+              <div className="canvas-table-wrap">
+                <table className="canvas-table">
+                  <thead>
+                    <tr>
+                      <th>Goal</th>
+                      <th>Status</th>
+                      <th>Updated</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {composerView.unlinkedGoals.map((goal) => (
+                      <tr key={goal.id}>
+                        <td>{goal.title}</td>
+                        <td>{goal.goal_progress_status || goal.planning_status}</td>
+                        <td>{formatPanelTimestamp(goal.updated_at)}</td>
+                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: goal.id })}>Open Goal</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+          {composerView.unlinkedThreads.length ? (
+            <>
+              <div className="field-label" style={{ marginTop: 12 }}>Threads</div>
+              <div className="canvas-table-wrap">
+                <table className="canvas-table">
+                  <thead>
+                    <tr>
+                      <th>Thread</th>
+                      <th>Status</th>
+                      <th>Goal</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {composerView.unlinkedThreads.map((thread) => (
+                      <tr key={thread.id}>
+                        <td>{thread.title}</td>
+                        <td>{thread.status}</td>
+                        <td>{thread.goal_title || "—"}</td>
+                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: thread.goal_id || undefined, thread_id: thread.id })}>Open Thread</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+        </section>
+      ) : null}
+
+      {showPlanningTools && (
+        <section className="card">
+          <div className="field-label">Plan a New Application</div>
           <textarea
             className="input"
             value={objective}
@@ -3743,9 +3937,9 @@ function ComposerDetailPanel({
         </section>
       )}
 
-      {(payload.stage === "factory_discovery" || payload.stage === "plan_review") && (
+      {showPlanningTools && (
         <section className="card">
-          <div className="field-label">Factory Catalog</div>
+          <div className="field-label">Application Factories</div>
           <div className="canvas-table-wrap">
             <table className="canvas-table">
               <thead>
@@ -3777,6 +3971,7 @@ function ComposerDetailPanel({
 
       {selectedPlan ? (
         <section className="card">
+          <div className="card-header"><div><div className="field-label">Selected Application Plan</div></div></div>
           <div className="detail-grid">
             <div><div className="field-label">Plan</div><div className="field-value">{selectedPlan.name}</div></div>
             <div><div className="field-label">Factory</div><div className="field-value">{selectedPlan.factory?.name || selectedPlan.source_factory_key}</div></div>
@@ -3794,6 +3989,7 @@ function ComposerDetailPanel({
 
       {selectedApplication ? (
         <section className="card">
+          <div className="card-header"><div><div className="field-label">Selected Application</div></div></div>
           <div className="detail-grid">
             <div><div className="field-label">Application</div><div className="field-value">{selectedApplication.name}</div></div>
             <div><div className="field-label">Factory</div><div className="field-value">{selectedApplication.source_factory_key}</div></div>
@@ -3810,9 +4006,9 @@ function ComposerDetailPanel({
         </section>
       ) : null}
 
-      {payload.related_goals.length ? (
+      {selectedContainerGoals.length ? (
         <section className="card">
-          <div className="field-label">{selectedApplication ? "Goals" : "Related Goals"}</div>
+          <div className="field-label">Goals in This Application</div>
           <div className="canvas-table-wrap">
             <table className="canvas-table">
               <thead>
@@ -3825,12 +4021,12 @@ function ComposerDetailPanel({
                 </tr>
               </thead>
               <tbody>
-                {payload.related_goals.map((goal) => (
+                {selectedContainerGoals.map((goal) => (
                   <tr key={goal.id}>
                     <td>{goal.title}</td>
                     <td>{goal.planning_status}</td>
                     <td>{goal.goal_progress_status || "—"}</td>
-                    <td>{goal.thread_count}</td>
+                    <td>{goal.threads.length || goal.thread_count}</td>
                     <td>
                       <button
                         type="button"
@@ -3852,6 +4048,7 @@ function ComposerDetailPanel({
 
       {selectedGoal ? (
         <section className="card">
+          <div className="card-header"><div><div className="field-label">Current Goal</div></div></div>
           <div className="detail-grid">
             <div><div className="field-label">Goal</div><div className="field-value">{selectedGoal.title}</div></div>
             <div><div className="field-label">Planning Status</div><div className="field-value">{selectedGoal.planning_status}</div></div>
@@ -3878,9 +4075,9 @@ function ComposerDetailPanel({
         </section>
       ) : null}
 
-      {payload.related_threads.length ? (
+      {selectedContainerThreads.length ? (
         <section className="card">
-          <div className="field-label">{selectedGoal ? "Threads" : "Related Threads"}</div>
+          <div className="field-label">Threads in This Application</div>
           <div className="canvas-table-wrap">
             <table className="canvas-table">
               <thead>
@@ -3893,7 +4090,7 @@ function ComposerDetailPanel({
                 </tr>
               </thead>
               <tbody>
-                {payload.related_threads.map((thread) => (
+                {selectedContainerThreads.map((thread) => (
                   <tr key={thread.id}>
                     <td>{thread.title}</td>
                     <td>{thread.status}</td>
@@ -3924,8 +4121,37 @@ function ComposerDetailPanel({
         </section>
       ) : null}
 
+      {selectedGoalThreads.length ? (
+        <section className="card">
+          <div className="field-label">Threads in Current Goal</div>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Thread</th>
+                  <th>Status</th>
+                  <th>Queued</th>
+                  <th>Blocked</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedGoalThreads.map((thread) => (
+                  <tr key={thread.id}>
+                    <td>{thread.title}</td>
+                    <td>{thread.status}</td>
+                    <td>{thread.queued_work_items}</td>
+                    <td>{thread.awaiting_review_work_items + thread.failed_work_items}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
       {selectedThread ? (
         <section className="card">
+          <div className="card-header"><div><div className="field-label">Current Thread</div></div></div>
           <div className="detail-grid">
             <div><div className="field-label">Thread</div><div className="field-value">{selectedThread.title}</div></div>
             <div><div className="field-label">Status</div><div className="field-value">{selectedThread.status}</div></div>
