@@ -150,6 +150,7 @@ import type {
   AiBootstrapStatusResponse,
   SystemReadinessResponse,
   ContextualCapabilityResponse,
+  CapabilityEventResponse,
   CapabilityPathResponse,
   ExecutionPlan,
   AiInvokeResponse,
@@ -4240,6 +4241,21 @@ export async function getContextualCapabilities(params?: {
     credentials: "include",
   });
   return handle<ContextualCapabilityResponse>(response);
+}
+
+export async function emitCapabilityRefreshEvent(params: {
+  event_type: string;
+  entity_id?: string;
+  workspace_id?: string;
+}): Promise<CapabilityEventResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/capabilities/events`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(params),
+  });
+  return handle<CapabilityEventResponse>(response);
 }
 
 export async function getCapabilityPaths(params?: {

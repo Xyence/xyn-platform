@@ -11,6 +11,7 @@ import { useXynConsole } from "../state/xynConsoleStore";
 import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
 import { fromApplicationWorkspace } from "../navigation/viewDescriptorBuilders";
 import { openViewDescriptor } from "../navigation/openViewDescriptor";
+import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
 
 type DraftDetailTab = "editor" | "meta";
 type DraftStatusValue = "draft" | "ready" | "submitted" | "archived";
@@ -342,6 +343,15 @@ export default function DraftDetailPage({
   useEffect(() => {
     void loadWorkflow();
   }, [loadWorkflow]);
+
+  useEffect(() => {
+    if (!draftId || !workspaceId || !workflow?.state) return;
+    void emitCapabilityEvent({
+      eventType: "draft_state_changed",
+      entityId: draftId,
+      workspaceId,
+    });
+  }, [draftId, workspaceId, workflow?.state]);
 
   const loadJobs = useCallback(async () => {
     if (!workspaceId || !draftId) {

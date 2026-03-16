@@ -3,6 +3,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
+from xyn_orchestrator.capabilities.events import CapabilityEvent, contexts_for_event
 from xyn_orchestrator.capabilities.graph.capability_graph import get_capability_ids_for_context
 from xyn_orchestrator.capabilities.graph.graph_service import get_capabilities_for_context
 from xyn_orchestrator.capabilities.graph.path_service import get_capability_paths_for_context
@@ -30,6 +31,12 @@ class CapabilityGraphTests(TestCase):
         self.assertEqual(
             get_capability_ids_for_context("landing"),
             ["build_application", "write_article", "create_explainer_video", "explore_artifacts"],
+        )
+
+    def test_capability_event_maps_execution_completed_to_refresh_contexts(self):
+        self.assertEqual(
+            contexts_for_event(CapabilityEvent(type="execution_completed", entity_id="draft-1", workspace_id="ws-1")),
+            ["app_intent_draft", "artifact_detail", "application_workspace", "console"],
         )
 
     def test_graph_service_returns_app_draft_capabilities_when_state_is_valid(self):
@@ -312,6 +319,40 @@ class CapabilityGraphTests(TestCase):
         self.assertEqual(payload["context"], "artifact_detail")
         self.assertEqual(payload["paths"][0]["id"], "artifact_review")
         self.assertEqual(payload["paths"][0]["steps"][0]["capability_id"], "view_artifact_details")
+
+    def test_event_endpoint_returns_refreshed_capabilities_and_paths(self):
+        with mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_capability_entity_state",
+            return_value={
+                "draft_state": "completed",
+                "execution_state": "completed",
+                "application_exists": True,
+                "workspace_initialized": True,
+                "entity_exists": True,
+                "artifact_type": "application",
+            },
+        ):
+            response = self.client.post(
+                "/xyn/api/capabilities/events",
+                data='{"event_type":"execution_completed","entity_id":"draft-1","workspace_id":"ws-1"}',
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["event_type"], "execution_completed")
+        self.assertEqual(
+            [entry["context"] for entry in payload["contexts"]],
+            ["app_intent_draft", "artifact_detail", "application_workspace", "console"],
+        )
+        app_draft_context = payload["contexts"][0]
+        self.assertEqual(
+            [entry["id"] for entry in app_draft_context["capabilities"]],
+            ["continue_application_draft", "open_application_workspace", "view_execution_status"],
+        )
+        self.assertFalse(app_draft_context["capabilities"][0]["available"])
+        self.assertEqual(app_draft_context["capabilities"][0]["failure_code"], "draft_not_editable")
+        self.assertEqual(app_draft_context["paths"][0]["id"], "build_application")
 
     def test_path_service_filters_invalid_app_draft_steps(self):
         payload = get_capability_paths_for_context(

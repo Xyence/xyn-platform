@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getCapabilityPaths } from "../../../api/xyn";
 import type { CapabilityPath } from "../../../api/types";
+import { capabilityRefreshMatchesRequest, XYN_CAPABILITY_REFRESH_EVENT, type CapabilityRefreshDetail } from "../../events/capabilityEvents";
 
 type Params = {
   context?: string;
@@ -24,11 +25,23 @@ export function useCapabilityPaths(params: Params): Model {
   const [context, setContext] = useState("unknown");
   const [paths, setPaths] = useState<CapabilityPath[]>([]);
   const [selectedPathId, setSelectedPathId] = useState("");
+  const [refreshToken, setRefreshToken] = useState(0);
 
   const requestKey = useMemo(
     () => [String(params.context || "").trim().toLowerCase(), String(params.entityId || "").trim(), String(params.workspaceId || "").trim()].join("::"),
     [params.context, params.entityId, params.workspaceId],
   );
+
+  useEffect(() => {
+    const onCapabilityRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<CapabilityRefreshDetail>).detail;
+      if (!detail) return;
+      if (!capabilityRefreshMatchesRequest(detail, params)) return;
+      setRefreshToken((current) => current + 1);
+    };
+    window.addEventListener(XYN_CAPABILITY_REFRESH_EVENT, onCapabilityRefresh as EventListener);
+    return () => window.removeEventListener(XYN_CAPABILITY_REFRESH_EVENT, onCapabilityRefresh as EventListener);
+  }, [params.context, params.entityId, params.workspaceId]);
 
   useEffect(() => {
     let active = true;
@@ -62,7 +75,7 @@ export function useCapabilityPaths(params: Params): Model {
     return () => {
       active = false;
     };
-  }, [params.context, params.entityId, params.workspaceId, requestKey]);
+  }, [params.context, params.entityId, params.workspaceId, requestKey, refreshToken]);
 
   const selectedPath = paths.find((path) => path.id === selectedPathId) || paths[0] || null;
 

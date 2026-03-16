@@ -1,5 +1,6 @@
 import { resolveApiBaseUrl } from "../../api/client";
 import type { AiActivityEntry, RuntimeRunArtifact, RuntimeRunDetail, RuntimeRunStep, RuntimeRunSummary, RuntimeStreamEvent } from "../../api/types";
+import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
 
 const RUNTIME_EVENT_TYPES = [
   "run.started",
@@ -46,6 +47,22 @@ function parseRuntimeStreamEvent(raw: MessageEvent<string>): RuntimeStreamEvent 
   }
 }
 
+function emitCapabilityRefreshForRuntimeEvent(event: RuntimeStreamEvent) {
+  const workspaceId = String(event.workspace_id || "").trim() || null;
+  if (event.event_type === "run.started") {
+    void emitCapabilityEvent({ eventType: "execution_started", workspaceId });
+    return;
+  }
+  if (event.event_type === "run.completed" || event.event_type === "run.failed" || event.event_type === "run.blocked") {
+    void emitCapabilityEvent({ eventType: "execution_completed", workspaceId });
+    return;
+  }
+  if (event.event_type === "run.artifact.created") {
+    const entityId = String(event.payload?.artifact_id || "").trim() || null;
+    void emitCapabilityEvent({ eventType: "artifact_created", entityId, workspaceId });
+  }
+}
+
 export function subscribeRuntimeEventStream(options: RuntimeStreamOptions): RuntimeSubscription {
   let closed = false;
   let eventSource: EventSource | null = null;
@@ -62,6 +79,7 @@ export function subscribeRuntimeEventStream(options: RuntimeStreamOptions): Runt
       const parsed = parseRuntimeStreamEvent(raw as MessageEvent<string>);
       if (!parsed) return;
       latestEventId = parsed.event_id || latestEventId;
+      emitCapabilityRefreshForRuntimeEvent(parsed);
       options.onEvent(parsed);
     };
     for (const eventType of RUNTIME_EVENT_TYPES) {

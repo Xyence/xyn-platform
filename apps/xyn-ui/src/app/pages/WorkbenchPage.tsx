@@ -8,6 +8,7 @@ import { useExecutionPlan } from "../components/console/useExecutionPlan";
 import CapabilityPlanSummary from "../components/console/CapabilityPlanSummary";
 import { resolveCapabilityGraphContext } from "../navigation/capabilityContext";
 import { executeCapabilityAction } from "../navigation/executeCapabilityAction";
+import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
 import type { ContextualCapability } from "../../api/types";
 import { buildWorkspaceLayout, derivePanelGroupAssignments, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
@@ -111,6 +112,14 @@ export default function WorkbenchPage({
   useEffect(() => {
     if (!activePanel) setCanvasContext(null);
   }, [activePanel, setCanvasContext]);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    void emitCapabilityEvent({
+      eventType: "workspace_initialized",
+      workspaceId,
+    });
+  }, [workspaceId]);
 
   useEffect(() => {
     if (!workspaceId) return;

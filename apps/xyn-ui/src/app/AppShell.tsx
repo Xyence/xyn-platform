@@ -71,6 +71,7 @@ import {
 } from "./routing/workspaceRouting";
 import { requiresPlatformInitialization, resolveDefaultWorkspaceForUser, resolvePostLoginDestination } from "./routing/bootstrapResolver";
 import { canonicalLegacyRouteForPlatformSettings } from "./routing/promptSurfaceResolver";
+import { emitCapabilityEvent } from "./events/emitCapabilityEvent";
 
 function readFlag(value: unknown): boolean {
   return String(value || "").trim().toLowerCase() === "true";
@@ -415,10 +416,17 @@ export default function AppShell() {
   }, [authed, activeWorkspaceId, inWorkspaceScope, navRefreshToken, push]);
 
   useEffect(() => {
-    const onWorkspaceArtifactsChanged = () => setNavRefreshToken((value) => value + 1);
+    const onWorkspaceArtifactsChanged = () => {
+      const workspaceId = activeWorkspaceId || workspaceIdFromRoute || "";
+      setNavRefreshToken((value) => value + 1);
+      void emitCapabilityEvent({
+        eventType: "artifact_created",
+        workspaceId,
+      });
+    };
     window.addEventListener("xyn:workspace-artifacts-changed", onWorkspaceArtifactsChanged);
     return () => window.removeEventListener("xyn:workspace-artifacts-changed", onWorkspaceArtifactsChanged);
-  }, []);
+  }, [activeWorkspaceId, workspaceIdFromRoute]);
 
   useEffect(() => {
     if (activeWorkspaceId) {

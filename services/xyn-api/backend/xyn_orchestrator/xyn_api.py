@@ -197,6 +197,7 @@ from .capabilities.capability_service import get_capabilities as get_contextual_
 from .capabilities.graph.graph_service import get_capabilities_for_context as get_capability_graph_context
 from .capabilities.graph.context_nodes import normalize_context_id
 from .capabilities.graph.path_service import get_capability_paths_for_context
+from .capabilities.events import CapabilityEvent, contexts_for_event
 from .planning.plan_service import get_plan_for_capability
 from .workflows.workflow_service import find_related_draft_jobs, get_draft_workflow
 from .goal_progress import (
@@ -29230,6 +29231,61 @@ def capabilities_context(request: HttpRequest) -> JsonResponse:
             ),
             include_unavailable=include_unavailable,
         )
+    )
+
+
+@login_required
+def capability_events(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    event = CapabilityEvent(
+        type=str(payload.get("event_type") or "").strip(),
+        entity_id=str(payload.get("entity_id") or "").strip() or None,
+        workspace_id=str(payload.get("workspace_id") or "").strip() or None,
+    )
+    if not event.type:
+        return JsonResponse({"error": "event_type is required"}, status=400)
+
+    contexts = []
+    for context in contexts_for_event(event):
+        entity_state = _resolve_capability_entity_state(
+            identity=identity,
+            context=context,
+            entity_id=event.entity_id,
+            workspace_id=event.workspace_id,
+        )
+        contexts.append(
+            {
+                **get_capability_graph_context(
+                    context=context,
+                    entity_id=event.entity_id,
+                    workspace_id=event.workspace_id,
+                    entity_state=entity_state,
+                    include_unavailable=True,
+                ),
+                "paths": get_capability_paths_for_context(
+                    context=context,
+                    entity_id=event.entity_id,
+                    workspace_id=event.workspace_id,
+                    entity_state=entity_state,
+                ).get("paths", []),
+            }
+        )
+
+    return JsonResponse(
+        {
+            "event_type": event.type,
+            "entityId": event.entity_id,
+            "workspaceId": event.workspace_id,
+            "contexts": contexts,
+        }
     )
 
 

@@ -1940,6 +1940,29 @@ export type ContextualCapabilityResponse = {
   capabilities: ContextualCapability[];
 };
 
+export type CapabilityEventType =
+  | "execution_started"
+  | "execution_completed"
+  | "draft_state_changed"
+  | "artifact_created"
+  | "workspace_initialized";
+
+export type CapabilityEventContextRefresh = {
+  context: string;
+  attributes?: CapabilityContextAttributes;
+  entityId?: string | null;
+  workspaceId?: string | null;
+  capabilities: ContextualCapability[];
+  paths: CapabilityPath[];
+};
+
+export type CapabilityEventResponse = {
+  event_type: string;
+  entityId?: string | null;
+  workspaceId?: string | null;
+  contexts: CapabilityEventContextRefresh[];
+};
+
 export type CapabilityPathStep = {
   capability_id: string;
   name: string;

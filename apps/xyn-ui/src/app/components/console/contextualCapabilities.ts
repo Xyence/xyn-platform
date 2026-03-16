@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getContextualCapabilities } from "../../../api/xyn";
 import type { CapabilityContextAttributes, ContextualCapability } from "../../../api/types";
+import { capabilityRefreshMatchesRequest, XYN_CAPABILITY_REFRESH_EVENT, type CapabilityRefreshDetail } from "../../events/capabilityEvents";
 
 type Params = {
   context?: string;
@@ -23,6 +24,7 @@ export function useContextualCapabilities(params: Params): Model {
   const [context, setContext] = useState("unknown");
   const [attributes, setAttributes] = useState<CapabilityContextAttributes>({});
   const [capabilities, setCapabilities] = useState<ContextualCapability[]>([]);
+  const [refreshToken, setRefreshToken] = useState(0);
 
   const requestKey = useMemo(
     () => [
@@ -33,6 +35,17 @@ export function useContextualCapabilities(params: Params): Model {
     ].join("::"),
     [params.context, params.entityId, params.workspaceId, params.includeUnavailable]
   );
+
+  useEffect(() => {
+    const onCapabilityRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<CapabilityRefreshDetail>).detail;
+      if (!detail) return;
+      if (!capabilityRefreshMatchesRequest(detail, params)) return;
+      setRefreshToken((current) => current + 1);
+    };
+    window.addEventListener(XYN_CAPABILITY_REFRESH_EVENT, onCapabilityRefresh as EventListener);
+    return () => window.removeEventListener(XYN_CAPABILITY_REFRESH_EVENT, onCapabilityRefresh as EventListener);
+  }, [params.context, params.entityId, params.workspaceId]);
 
   useEffect(() => {
     let active = true;
@@ -63,7 +76,7 @@ export function useContextualCapabilities(params: Params): Model {
     return () => {
       active = false;
     };
-  }, [params.context, params.entityId, params.workspaceId, params.includeUnavailable, requestKey]);
+  }, [params.context, params.entityId, params.workspaceId, params.includeUnavailable, requestKey, refreshToken]);
 
   return { loading, error, context, attributes, capabilities };
 }
