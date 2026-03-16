@@ -1928,6 +1928,31 @@ export type ContextualCapabilityResponse = {
   capabilities: ContextualCapability[];
 };
 
+export type CapabilityPathStep = {
+  capability_id: string;
+  name: string;
+  description: string;
+  prompt_template?: string;
+  visibility: string;
+  priority?: number;
+  action_type?: "prompt" | "open_descriptor" | "route" | string;
+  action_target?: string | null;
+};
+
+export type CapabilityPath = {
+  id: string;
+  name: string;
+  description: string;
+  steps: CapabilityPathStep[];
+};
+
+export type CapabilityPathResponse = {
+  context: string;
+  entityId?: string | null;
+  workspaceId?: string | null;
+  paths: CapabilityPath[];
+};
+
 export type ExecutionPlan = {
   capability_id: string;
   architecture: Record<string, unknown>;

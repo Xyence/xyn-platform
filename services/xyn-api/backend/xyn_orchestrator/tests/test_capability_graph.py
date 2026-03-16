@@ -3,6 +3,7 @@ from django.test import TestCase
 
 from xyn_orchestrator.capabilities.graph.capability_graph import get_capability_ids_for_context
 from xyn_orchestrator.capabilities.graph.graph_service import get_capabilities_for_context
+from xyn_orchestrator.capabilities.graph.path_service import get_capability_paths_for_context
 from xyn_orchestrator.models import RoleBinding, UserIdentity
 
 
@@ -55,3 +56,21 @@ class CapabilityGraphTests(TestCase):
         self.assertGreaterEqual(len(payload["capabilities"]), 1)
         self.assertEqual(payload["capabilities"][0]["id"], "explore_artifacts")
         self.assertEqual(payload["capabilities"][0]["action_type"], "prompt")
+
+    def test_path_service_returns_build_application_path(self):
+        payload = get_capability_paths_for_context(context="landing", workspace_id="ws-1")
+        self.assertEqual(payload["context"], "landing")
+        self.assertEqual(payload["paths"][0]["id"], "build_application")
+        self.assertEqual(payload["paths"][0]["steps"][0]["capability_id"], "build_application")
+        self.assertEqual(payload["paths"][0]["steps"][-1]["capability_id"], "open_application_workspace")
+
+    def test_path_endpoint_returns_artifact_review_path(self):
+        response = self.client.get(
+            "/xyn/api/capability-paths/context",
+            {"context": "artifact_detail", "entityId": "artifact-1", "workspaceId": "ws-1"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["context"], "artifact_detail")
+        self.assertEqual(payload["paths"][0]["id"], "artifact_review")
+        self.assertEqual(payload["paths"][0]["steps"][0]["capability_id"], "view_artifact_details")

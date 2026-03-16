@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useContextualCapabilities } from "./contextualCapabilities";
+import { useCapabilityPaths } from "./capabilityPaths";
 import { useExecutionPlan } from "./useExecutionPlan";
 import CapabilityPlanSummary from "./CapabilityPlanSummary";
 import { executeCapabilityAction } from "../../navigation/executeCapabilityAction";
 import type { ContextualCapability } from "../../../api/types";
+import CapabilityPathPanel from "./CapabilityPathPanel";
 
 type Props = {
   onInsertSuggestion: (text: string) => void;
@@ -35,6 +37,7 @@ export default function ConsoleGuidancePanel({
   const navigate = useNavigate();
   const resolvedEntityId = entityId || artifactId || applicationId || null;
   const { capabilities } = useContextualCapabilities({ context, entityId: resolvedEntityId, workspaceId });
+  const { paths } = useCapabilityPaths({ context, entityId: resolvedEntityId, workspaceId });
   const [selectedCapabilityId, setSelectedCapabilityId] = useState<string>("");
   const prompts = useMemo(
     () => ((capabilities.length ? capabilities : FALLBACK_PROMPTS) as ContextualCapability[]).slice(0, 4),
@@ -76,6 +79,14 @@ export default function ConsoleGuidancePanel({
       {loading ? <div className="xyn-console-guidance-card"><p className="muted small">Loading plan…</p></div> : null}
       {!loading && error ? <div className="xyn-console-guidance-card"><p className="danger-text">{error}</p></div> : null}
       {!loading && plan ? <CapabilityPlanSummary plan={plan} /> : null}
+      {paths[0] ? (
+        <CapabilityPathPanel
+          path={paths[0]}
+          workspaceId={workspaceId}
+          entityId={resolvedEntityId}
+          onInsertSuggestion={onInsertSuggestion}
+        />
+      ) : null}
       <div className="xyn-console-guidance-card">
         <h4>Quick start</h4>
         <ol className="xyn-console-steps">
