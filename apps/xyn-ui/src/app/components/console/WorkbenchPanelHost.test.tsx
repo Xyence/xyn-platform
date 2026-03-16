@@ -637,6 +637,160 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByRole("button", { name: "Build plan" })).toBeInTheDocument();
   });
 
+  it("surfaces already queued next-slice guidance and focuses the recommended thread in Composer", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.reviewGoal.mockResolvedValue({
+      status: "already_queued",
+      goal: {
+        id: "goal-1",
+        application_id: "app-1",
+        title: "Workflow and Stabilization",
+        description: "Keep the app stable while extending the workflow.",
+        source_conversation_id: "conv-1",
+        requested_by: "admin@example.com",
+        goal_type: "delivery",
+        planning_status: "in_progress",
+        priority: "high",
+        planning_summary: "Queue the next smallest slice from Operator Workflow.",
+        resolution_notes: [],
+        thread_count: 4,
+        work_item_count: 4,
+        created_at: "2026-03-16T10:00:00Z",
+        updated_at: "2026-03-16T10:10:00Z",
+        recommendation: {
+          recommendation_id: "rec-1",
+          goal_id: "goal-1",
+          thread_id: "thread-operator",
+          thread_title: "Operator Workflow",
+          work_item_id: "task-operator-1",
+          work_item_title: "Define the first operator workflow state",
+          recommended_work_items: [
+            {
+              id: "task-operator-1",
+              title: "Define the first operator workflow state",
+              thread_id: "thread-operator",
+              thread_title: "Operator Workflow",
+            },
+          ],
+          queue_suggestion: {
+            action_type: "queue_next_slice",
+            thread_id: "thread-operator",
+            work_item_id: "task-operator-1",
+            reason: "It is first in deterministic order.",
+            summary: "Queue the next operator workflow slice.",
+          },
+          actions: [{ type: "approve_and_queue", label: "Approve and queue", queueable: true, target_thread: "thread-operator" }],
+          summary: "Queue the next operator workflow slice.",
+          reasoning_summary: "Operator Workflow is the next unblocked slice.",
+        },
+        threads: [],
+        work_items: [],
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "goal_focus",
+      context: {
+        application_id: "app-1",
+        goal_id: "goal-1",
+        thread_id: null,
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application: {
+        id: "app-1",
+        name: "Lunch Poll",
+        status: "active",
+        source_factory_key: "lunch_poll",
+        summary: "Lunch polling app",
+        goal_count: 2,
+        goals: [],
+      },
+      goal: {
+        id: "goal-1",
+        application_id: "app-1",
+        title: "Workflow and Stabilization",
+        planning_status: "in_progress",
+        goal_progress_status: "active",
+        thread_count: 4,
+        threads: [],
+        work_items: [],
+        recommendation: {
+          recommendation_id: "rec-1",
+          goal_id: "goal-1",
+          thread_id: "thread-operator",
+          thread_title: "Operator Workflow",
+          work_item_id: "task-operator-1",
+          work_item_title: "Define the first operator workflow state",
+          recommended_work_items: [
+            {
+              id: "task-operator-1",
+              title: "Define the first operator workflow state",
+              thread_id: "thread-operator",
+              thread_title: "Operator Workflow",
+            },
+          ],
+          queue_suggestion: {
+            action_type: "queue_next_slice",
+            thread_id: "thread-operator",
+            work_item_id: "task-operator-1",
+            reason: "It is first in deterministic order.",
+            summary: "Queue the next operator workflow slice.",
+          },
+          actions: [{ type: "approve_and_queue", label: "Approve and queue", queueable: true, target_thread: "thread-operator" }],
+          summary: "Queue the next operator workflow slice.",
+          reasoning_summary: "Operator Workflow is the next unblocked slice.",
+        },
+      },
+      related_goals: [],
+      related_threads: [],
+      breadcrumbs: [
+        { kind: "composer", label: "Composer" },
+        { kind: "application", label: "Lunch Poll", id: "app-1" },
+        { kind: "goal", label: "Workflow and Stabilization", id: "goal-1" },
+      ],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", goal_id: "goal-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Approve Next Slice" })).toBeEnabled());
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Approve Next Slice" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.reviewGoal).toHaveBeenCalledWith("goal-1", "approve_and_queue", "rec-1"));
+    expect(screen.getByText("That slice is already queued. Open the thread and dispatch the ready work item.")).toBeInTheDocument();
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "composer_detail",
+        params: expect.objectContaining({
+          workspace_id: "ws-1",
+          application_id: "app-1",
+          goal_id: "goal-1",
+          thread_id: "thread-operator",
+          work_item_id: "task-operator-1",
+        }),
+      })
+    );
+  });
+
   it("groups composer work under application efforts and isolates unlinked coordination items", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.getComposerState.mockResolvedValue({

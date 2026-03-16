@@ -3739,8 +3739,37 @@ function ComposerDetailPanel({
   async function handleApproveNextSlice(goal: GoalDetail, recommendationId?: string | null) {
     try {
       const response = await reviewGoal(goal.id, "approve_and_queue", recommendationId);
-      setMessage(response.status === "approved" ? "Approved and queued the next slice." : response.status.replace(/_/g, " "));
-      openComposer({ goal_id: goal.id, application_id: goal.application_id || undefined });
+      const nextRecommendation =
+        response.goal?.recommendation && typeof response.goal.recommendation === "object"
+          ? response.goal.recommendation
+          : null;
+      const nextThreadId =
+        nextRecommendation?.thread_id
+        || nextRecommendation?.queue_suggestion?.thread_id
+        || nextRecommendation?.recommended_work_items?.[0]?.thread_id
+        || null;
+      const nextWorkItemId =
+        nextRecommendation?.work_item_id
+        || nextRecommendation?.queue_suggestion?.work_item_id
+        || nextRecommendation?.recommended_work_items?.[0]?.id
+        || null;
+      const nextMessage =
+        response.status === "approved"
+          ? "Approved and queued the next slice."
+          : response.status === "already_queued"
+            ? "That slice is already queued. Open the thread and dispatch the ready work item."
+            : response.status === "no_recommendation"
+              ? "No queueable next slice is available right now."
+              : response.status === "stale_recommendation"
+                ? "That recommendation is no longer current. Refresh the goal and review the latest next slice."
+                : response.status.replace(/_/g, " ");
+      setMessage(nextMessage);
+      openComposer({
+        goal_id: goal.id,
+        application_id: goal.application_id || undefined,
+        thread_id: nextThreadId || undefined,
+        work_item_id: nextWorkItemId || undefined,
+      });
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Failed to approve the next slice");
     }
