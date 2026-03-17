@@ -86,7 +86,15 @@ import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
 import JobDetailPage from "../../pages/JobDetailPage";
 import JobsListPage from "../../pages/JobsListPage";
-import PlatformSettingsHubPage from "../../pages/PlatformSettingsHubPage";
+import PlatformSettingsHubPage, { type HubSection } from "../../pages/PlatformSettingsHubPage";
+import AccessControlPage from "../../pages/AccessControlPage";
+import IdentityConfigurationPage from "../../pages/IdentityConfigurationPage";
+import SecretConfigurationPage from "../../pages/SecretConfigurationPage";
+import ActivityPage from "../../pages/ActivityPage";
+import AIConfigPage from "../../pages/AIConfigPage";
+import PlatformRenderingSettingsPage from "../../pages/PlatformRenderingSettingsPage";
+import PlatformDeploySettingsPage from "../../pages/PlatformDeploySettingsPage";
+import PlatformBrandingPage from "../../pages/PlatformBrandingPage";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 
 export type ConsolePanelKey =
@@ -2850,31 +2858,201 @@ function RunDetailPanel({
   );
 }
 
-type SettingsSection = "general" | "security" | "integrations" | "deploy" | "workspaces";
-const VALID_SETTINGS_SECTIONS: SettingsSection[] = ["general", "security", "integrations", "deploy", "workspaces"];
+const VALID_SETTINGS_SECTIONS: HubSection[] = ["general", "security", "integrations", "deploy", "workspaces"];
+
+type PlatformSettingsSurface =
+  | "hub"
+  | "access_control"
+  | "identity_configuration"
+  | "secrets"
+  | "activity"
+  | "ai_agents"
+  | "rendering_settings"
+  | "deploy_settings"
+  | "branding";
+
+type PlatformSettingsTab = {
+  id: string;
+  surface: PlatformSettingsSurface;
+  label: string;
+};
+
+const DEFAULT_PLATFORM_SETTINGS_TAB: PlatformSettingsTab = {
+  id: "platform-settings-hub",
+  surface: "hub",
+  label: "Platform Settings",
+};
+
+function platformSettingsSurfaceLabel(surface: PlatformSettingsSurface): string {
+  switch (surface) {
+    case "access_control":
+      return "Access Control";
+    case "identity_configuration":
+      return "Identity Configuration";
+    case "secrets":
+      return "Secrets";
+    case "activity":
+      return "Activity";
+    case "ai_agents":
+      return "AI Agents";
+    case "rendering_settings":
+      return "Rendering Settings";
+    case "deploy_settings":
+      return "Deploy Settings";
+    case "branding":
+      return "Branding";
+    default:
+      return "Platform Settings";
+  }
+}
+
+function mapPlatformSettingsRouteToSurface(route: string): PlatformSettingsSurface | null {
+  const path = String(route || "").split("?", 1)[0].trim().toLowerCase();
+  if (path.endsWith("/platform/access-control")) return "access_control";
+  if (path.endsWith("/platform/identity-configuration")) return "identity_configuration";
+  if (path.endsWith("/platform/secrets")) return "secrets";
+  if (path.endsWith("/platform/activity")) return "activity";
+  if (path.endsWith("/platform/ai-agents")) return "ai_agents";
+  if (path.endsWith("/platform/rendering-settings")) return "rendering_settings";
+  if (path.endsWith("/platform/deploy")) return "deploy_settings";
+  if (path.endsWith("/platform/branding")) return "branding";
+  return null;
+}
 
 const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
   initialSection,
   onSectionChange,
+  initialSurface,
+  onSurfaceChange,
 }: {
   initialSection?: string;
-  onSectionChange?: (section: SettingsSection) => void;
+  onSectionChange?: (section: HubSection) => void;
+  initialSurface?: string;
+  onSurfaceChange?: (surface: PlatformSettingsSurface) => void;
 }) {
   const parsed = String(initialSection || "").trim().toLowerCase();
-  const init: SettingsSection = (VALID_SETTINGS_SECTIONS as string[]).includes(parsed) ? (parsed as SettingsSection) : "security";
-  const [section, setSection] = useState<SettingsSection>(init);
+  const init: HubSection = (VALID_SETTINGS_SECTIONS as string[]).includes(parsed) ? (parsed as HubSection) : "security";
+  const [section, setSection] = useState<HubSection>(init);
+  const parsedSurface = String(initialSurface || "").trim().toLowerCase();
+  const initialPanelSurface = ([
+    "access_control",
+    "identity_configuration",
+    "secrets",
+    "activity",
+    "ai_agents",
+    "rendering_settings",
+    "deploy_settings",
+    "branding",
+  ] as string[]).includes(parsedSurface)
+    ? (parsedSurface as PlatformSettingsSurface)
+    : "hub";
+  const [tabs, setTabs] = useState<PlatformSettingsTab[]>(() =>
+    initialPanelSurface === "hub"
+      ? [DEFAULT_PLATFORM_SETTINGS_TAB]
+      : [DEFAULT_PLATFORM_SETTINGS_TAB, { id: `platform-settings-${initialPanelSurface}`, surface: initialPanelSurface, label: platformSettingsSurfaceLabel(initialPanelSurface) }]
+  );
+  const [activeTabId, setActiveTabId] = useState<string>(
+    initialPanelSurface === "hub" ? DEFAULT_PLATFORM_SETTINGS_TAB.id : `platform-settings-${initialPanelSurface}`
+  );
 
   useEffect(() => {
     setSection(init);
   }, [init]);
 
-  const handleChange = (next: SettingsSection) => {
+  useEffect(() => {
+    if (initialPanelSurface === "hub") return;
+    const tabId = `platform-settings-${initialPanelSurface}`;
+    setTabs((current) => {
+      if (current.some((item) => item.id === tabId)) return current;
+      return [...current, { id: tabId, surface: initialPanelSurface, label: platformSettingsSurfaceLabel(initialPanelSurface) }];
+    });
+    setActiveTabId(tabId);
+  }, [initialPanelSurface]);
+
+  const handleChange = (next: HubSection) => {
     if (next === section) return;
     setSection(next);
     onSectionChange?.(next);
   };
 
-  return <PlatformSettingsHubPage sectionOverride={section} onSectionChange={handleChange} />;
+  const openSurfaceTab = (surface: PlatformSettingsSurface) => {
+    if (surface === "hub") {
+      setActiveTabId(DEFAULT_PLATFORM_SETTINGS_TAB.id);
+      onSurfaceChange?.("hub");
+      return;
+    }
+    const tabId = `platform-settings-${surface}`;
+    setTabs((current) => {
+      if (current.some((item) => item.id === tabId)) return current;
+      return [...current, { id: tabId, surface, label: platformSettingsSurfaceLabel(surface) }];
+    });
+    setActiveTabId(tabId);
+    onSurfaceChange?.(surface);
+  };
+
+  const closeSurfaceTab = (tabId: string) => {
+    if (tabId === DEFAULT_PLATFORM_SETTINGS_TAB.id) return;
+    setTabs((current) => {
+      const next = current.filter((item) => item.id !== tabId);
+      return next.length ? next : [DEFAULT_PLATFORM_SETTINGS_TAB];
+    });
+    setActiveTabId((current) => (current === tabId ? DEFAULT_PLATFORM_SETTINGS_TAB.id : current));
+  };
+
+  const activeSurface =
+    tabs.find((item) => item.id === activeTabId)?.surface ||
+    tabs[tabs.length - 1]?.surface ||
+    DEFAULT_PLATFORM_SETTINGS_TAB.surface;
+
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div className="page-tabs" aria-label="Platform settings panel tabs">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {tabs.map((tab) => (
+            <div key={tab.id} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <button
+                type="button"
+                className={activeTabId === tab.id ? "ghost active" : "ghost"}
+                onClick={() => {
+                  setActiveTabId(tab.id);
+                  onSurfaceChange?.(tab.surface);
+                }}
+                aria-current={activeTabId === tab.id ? "page" : undefined}
+              >
+                {tab.label}
+              </button>
+              {tab.id !== DEFAULT_PLATFORM_SETTINGS_TAB.id ? (
+                <button type="button" className="ghost sm" onClick={() => closeSurfaceTab(tab.id)} aria-label={`Close ${tab.label}`}>
+                  x
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {activeSurface === "hub" ? (
+        <PlatformSettingsHubPage
+          sectionOverride={section}
+          onSectionChange={handleChange}
+          onOpenRoute={(route) => {
+            const mapped = mapPlatformSettingsRouteToSurface(route);
+            if (mapped) {
+              openSurfaceTab(mapped);
+            }
+          }}
+        />
+      ) : null}
+      {activeSurface === "access_control" ? <AccessControlPage /> : null}
+      {activeSurface === "identity_configuration" ? <IdentityConfigurationPage /> : null}
+      {activeSurface === "secrets" ? <SecretConfigurationPage /> : null}
+      {activeSurface === "activity" ? <ActivityPage workspaceId="" /> : null}
+      {activeSurface === "ai_agents" ? <AIConfigPage /> : null}
+      {activeSurface === "rendering_settings" ? <PlatformRenderingSettingsPage /> : null}
+      {activeSurface === "deploy_settings" ? <PlatformDeploySettingsPage /> : null}
+      {activeSurface === "branding" ? <PlatformBrandingPage /> : null}
+    </div>
+  );
 });
 
 function ArtifactListPanel({
@@ -5106,8 +5284,13 @@ export default function WorkbenchPanelHost({
         <div className="card ems-panel-host">
           <PlatformSettingsPanel
             initialSection={String(panel.params?.section || "")}
+            initialSurface={String(panel.params?.surface || "")}
             onSectionChange={(next) => {
               if (panel.params) panel.params.section = next;
+            }}
+            onSurfaceChange={(next) => {
+              if (!panel.params) return;
+              panel.params.surface = next;
             }}
           />
         </div>

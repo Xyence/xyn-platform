@@ -196,7 +196,7 @@ def _lunch_poll_policy_bundle():
         "title": "Team Lunch Poll Policy Bundle",
         "scope": {"artifact_slug": "app.team-lunch-poll", "applies_to": ["generated_runtime"]},
         "ownership": {"owner_kind": "generated_application", "editable": True, "source": "generated_from_prompt"},
-        "policy_families": ["validation_policies", "relation_constraints", "transition_policies", "derived_policies", "trigger_policies"],
+        "policy_families": ["validation_policies", "relation_constraints", "transition_policies", "invariant_policies", "derived_policies", "trigger_policies"],
         "policies": {
             "validation_policies": [
                 {
@@ -248,6 +248,40 @@ def _lunch_poll_policy_bundle():
                     },
                 }
             ],
+            "invariant_policies": [
+                {
+                    "id": "team-lunch-poll-206",
+                    "description": "At most one selected lunch option per poll.",
+                    "explanation": {"user_summary": "Only one lunch option can be selected for each poll."},
+                    "parameters": {
+                        "runtime_rule": "at_most_one_matching_child_per_parent",
+                        "entity_key": "lunch_options",
+                        "parent_entity": "polls",
+                        "parent_relation_field": "poll_id",
+                        "match_field": "selected",
+                        "match_value": "yes",
+                        "on_operations": ["create", "update"],
+                    },
+                },
+                {
+                    "id": "team-lunch-poll-207",
+                    "description": "A poll in selected status must have exactly one selected lunch option.",
+                    "explanation": {"user_summary": "A poll in selected status must have exactly one selected Lunch Option."},
+                    "parameters": {
+                        "runtime_rule": "at_least_one_matching_child_per_parent",
+                        "entity_key": "lunch_options",
+                        "parent_entity": "polls",
+                        "parent_relation_field": "poll_id",
+                        "match_field": "selected",
+                        "match_value": "yes",
+                        "parent_state_field": "status",
+                        "parent_state_value": "selected",
+                        "on_parent_operations": ["create", "update"],
+                        "on_child_operations": ["create", "update", "delete"],
+                    },
+                },
+                {"id": "unsupported-invariant", "parameters": {"runtime_rule": "conditional_exactly_one"}},
+            ],
             "derived_policies": [
                 {
                     "id": "team-lunch-poll-204",
@@ -288,6 +322,13 @@ def _lunch_poll_policy_bundle():
         "configurable_parameters": [],
         "explanation": {"summary": "test", "coverage": {}, "future_capabilities": []},
     }
+
+
+def _lunch_poll_policy_bundle_without_triggers():
+    bundle = copy.deepcopy(_lunch_poll_policy_bundle())
+    policies = bundle.get("policies") if isinstance(bundle.get("policies"), dict) else {}
+    policies["trigger_policies"] = []
+    return bundle
 
 
 class NetInventoryCrudTests(unittest.TestCase):
@@ -428,11 +469,14 @@ class NetInventoryCrudTests(unittest.TestCase):
         self.assertIn("votes", compiled["status_write_policies"])
         self.assertIn("votes", compiled["relation_constraints"])
         self.assertIn("polls", compiled["transition_guards"])
+        self.assertIn("lunch_options", compiled["selection_invariants"])
+        self.assertIn("lunch_options", compiled["required_selection_invariants"])
         self.assertIn("lunch_options", compiled["derived_policies"])
         self.assertIn("lunch_options", compiled["trigger_policies"])
         self.assertEqual(len(compiled["unsupported"]["validation_policies"]) if "validation_policies" in compiled["unsupported"] else 0, 0)
         self.assertEqual(len(compiled["unsupported"]["relation_constraints"]) if "relation_constraints" in compiled["unsupported"] else 0, 0)
         self.assertEqual(len(compiled["unsupported"]["transition_policies"]) if "transition_policies" in compiled["unsupported"] else 0, 0)
+        self.assertEqual(len(compiled["unsupported"]["invariant_policies"]) if "invariant_policies" in compiled["unsupported"] else 0, 1)
         self.assertEqual(len(compiled["unsupported"]["derived_policies"]) if "derived_policies" in compiled["unsupported"] else 0, 1)
         self.assertEqual(len(compiled["unsupported"]["trigger_policies"]) if "trigger_policies" in compiled["unsupported"] else 0, 1)
 
@@ -600,6 +644,290 @@ class NetInventoryCrudTests(unittest.TestCase):
         poll_detail = client.get(f"/polls/{poll['id']}", params={"workspace_id": self.workspace_id})
         self.assertEqual(poll_detail.status_code, 200, poll_detail.text)
         self.assertEqual(poll_detail.json()["status"], "closed")
+
+    def test_invariant_allows_first_selected_option_per_poll(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "open"}).json()
+
+        selected = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        )
+
+        self.assertEqual(selected.status_code, 201, selected.text)
+        self.assertEqual(selected.json()["selected"], "yes")
+
+    def test_invariant_rejects_second_selected_option_for_same_poll(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "open"}).json()
+        first = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+
+        second = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Sushi", "restaurant": "Uchi", "active": "yes", "selected": "yes"},
+        )
+
+        self.assertEqual(second.status_code, 400, second.text)
+        self.assertIn("Only one lunch option can be selected", second.text)
+
+    def test_invariant_allows_selected_option_for_different_poll(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll_a = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "open"}).json()
+        poll_b = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Monday Lunch", "poll_date": "2026-03-18", "status": "open"}).json()
+        first = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll_a["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+
+        second = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll_b["id"], "name": "Sushi", "restaurant": "Uchi", "active": "yes", "selected": "yes"},
+        )
+
+        self.assertEqual(second.status_code, 201, second.text)
+        self.assertEqual(second.json()["poll_id"], poll_b["id"])
+
+    def test_invariant_rejects_update_that_creates_duplicate_selection(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "open"}).json()
+        option_a = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        ).json()
+        option_b = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Sushi", "restaurant": "Uchi", "active": "yes", "selected": "no"},
+        ).json()
+
+        rejected = client.patch(
+            f"/lunch_options/{option_b['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"selected": "yes"},
+        )
+
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertIn("Only one lunch option can be selected", rejected.text)
+
+    def test_invariant_does_not_self_conflict_on_selected_record_update(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "open"}).json()
+        option = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        ).json()
+
+        updated = client.patch(
+            f"/lunch_options/{option['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"notes": "still selected"},
+        )
+
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["selected"], "yes")
+
+    def test_required_selection_invariant_rejects_parent_selected_state_with_zero_selected_children(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "closed"}).json()
+
+        updated = client.patch(
+            f"/polls/{poll['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"status": "selected"},
+        )
+
+        self.assertEqual(updated.status_code, 400, updated.text)
+        self.assertIn("must have exactly one selected", updated.text)
+
+    def test_required_selection_invariant_allows_parent_selected_state_with_one_selected_child(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "closed"}).json()
+        client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        )
+
+        updated = client.patch(
+            f"/polls/{poll['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"status": "selected"},
+        )
+
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["status"], "selected")
+
+    def test_required_selection_invariant_blocks_unselecting_last_selected_child_when_parent_is_selected(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "closed"}).json()
+        option = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        ).json()
+        promote = client.patch(
+            f"/polls/{poll['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"status": "selected"},
+        )
+        self.assertEqual(promote.status_code, 200, promote.text)
+
+        rejected = client.patch(
+            f"/lunch_options/{option['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"selected": "no"},
+        )
+
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        self.assertIn("must have exactly one selected", rejected.text)
+
+    def test_required_selection_invariant_allows_unselecting_when_parent_not_in_gated_state(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "open"}).json()
+        option = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        ).json()
+
+        updated = client.patch(
+            f"/lunch_options/{option['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"selected": "no"},
+        )
+
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.assertEqual(updated.json()["selected"], "no")
+
+    def test_required_selection_invariant_prevents_deleting_last_selected_child_when_parent_is_selected(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "closed"}).json()
+        option = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        ).json()
+        promote = client.patch(
+            f"/polls/{poll['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"status": "selected"},
+        )
+        self.assertEqual(promote.status_code, 200, promote.text)
+
+        deleted = client.delete(
+            f"/lunch_options/{option['id']}",
+            params={"workspace_id": self.workspace_id},
+        )
+
+        self.assertEqual(deleted.status_code, 400, deleted.text)
+        self.assertIn("must have exactly one selected", deleted.text)
+
+    def test_trigger_driven_parent_selected_update_respects_required_selection_invariant(self):
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=_lunch_poll_policy_bundle(),
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "closed"}).json()
+        option = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "no"},
+        ).json()
+
+        updated = client.patch(
+            f"/lunch_options/{option['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"selected": "yes"},
+        )
+
+        self.assertEqual(updated.status_code, 200, updated.text)
+        poll_detail = client.get(f"/polls/{poll['id']}", params={"workspace_id": self.workspace_id})
+        self.assertEqual(poll_detail.status_code, 200, poll_detail.text)
+        self.assertEqual(poll_detail.json()["status"], "selected")
+
+    def test_writes_work_without_invariant_policy(self):
+        bundle = _lunch_poll_policy_bundle_without_triggers()
+        policies = bundle.get("policies") if isinstance(bundle.get("policies"), dict) else {}
+        policies["invariant_policies"] = []
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=bundle,
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "open"}).json()
+        first = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "yes"},
+        )
+        second = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Sushi", "restaurant": "Uchi", "active": "yes", "selected": "yes"},
+        )
+
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(second.status_code, 201, second.text)
 
 
 if __name__ == "__main__":

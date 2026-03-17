@@ -2901,7 +2901,7 @@ export async function deleteContact(id: string): Promise<void> {
 
 export async function listIdentities(): Promise<IdentityListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/identities`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/identities`, {
     credentials: "include",
   });
   return handle<IdentityListResponse>(response);
@@ -2909,7 +2909,7 @@ export async function listIdentities(): Promise<IdentityListResponse> {
 
 export async function listRoleBindings(identityId?: string): Promise<RoleBindingListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const url = new URL(`${apiBaseUrl}/xyn/internal/role_bindings`);
+  const url = new URL(`${apiBaseUrl}/xyn/api/platform/role-bindings`);
   if (identityId) {
     url.searchParams.set("identity_id", identityId);
   }
@@ -2919,7 +2919,7 @@ export async function listRoleBindings(identityId?: string): Promise<RoleBinding
 
 export async function createRoleBinding(payload: RoleBindingCreatePayload): Promise<{ id: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/role_bindings`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/role-bindings`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",
@@ -2930,7 +2930,7 @@ export async function createRoleBinding(payload: RoleBindingCreatePayload): Prom
 
 export async function deleteRoleBinding(id: string): Promise<void> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/role_bindings/${id}`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/role-bindings/${id}`, {
     method: "DELETE",
     credentials: "include",
   });
@@ -4648,7 +4648,7 @@ export async function listIdentityProviders(): Promise<IdentityProviderListRespo
 
 export async function listSecretStores(): Promise<SecretStoreListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secret-stores`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secret-stores`, {
     credentials: "include",
   });
   return handle<SecretStoreListResponse>(response);
@@ -4661,7 +4661,7 @@ export async function createSecretStore(payload: {
   config_json?: SecretStore["config_json"];
 }): Promise<{ id: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secret-stores`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secret-stores`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",
@@ -4672,7 +4672,7 @@ export async function createSecretStore(payload: {
 
 export async function updateSecretStore(id: string, payload: Partial<SecretStore>): Promise<{ id: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secret-stores/${id}`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secret-stores/${id}`, {
     method: "PATCH",
     headers: buildHeaders(),
     credentials: "include",
@@ -4683,7 +4683,7 @@ export async function updateSecretStore(id: string, payload: Partial<SecretStore
 
 export async function setDefaultSecretStore(id: string): Promise<{ id: string; is_default: boolean }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secret-stores/${id}/set_default`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secret-stores/${id}/set_default`, {
     method: "POST",
     credentials: "include",
   });
@@ -4695,7 +4695,7 @@ export async function listSecretRefs(filters?: {
   scope_id?: string;
 }): Promise<SecretRefListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const url = new URL(`${apiBaseUrl}/xyn/internal/secret-refs`);
+  const url = new URL(`${apiBaseUrl}/xyn/api/platform/secret-refs`);
   if (filters?.scope_kind) url.searchParams.set("scope_kind", filters.scope_kind);
   if (filters?.scope_id) url.searchParams.set("scope_id", filters.scope_id);
   const response = await apiFetch(url.toString(), {
@@ -4722,7 +4722,7 @@ export async function createSecretValue(payload: {
   };
 }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secrets`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secrets`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",

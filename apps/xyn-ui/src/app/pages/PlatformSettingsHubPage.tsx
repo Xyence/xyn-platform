@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Tabs from "../components/ui/Tabs";
 
-type HubSection = "general" | "security" | "integrations" | "deploy" | "workspaces";
+export type HubSection = "general" | "security" | "integrations" | "deploy" | "workspaces";
 
 type SurfaceCard = {
   id: string;
@@ -89,9 +89,11 @@ const SURFACES: SurfaceCard[] = [
 export default function PlatformSettingsHubPage({
   sectionOverride,
   onSectionChange,
+  onOpenRoute,
 }: {
   sectionOverride?: HubSection;
   onSectionChange?: (section: HubSection) => void;
+  onOpenRoute?: (route: string) => void;
 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -138,7 +140,17 @@ export default function PlatformSettingsHubPage({
             </div>
             <p className="muted">{card.description}</p>
             <div className="form-actions">
-              <button type="button" className="ghost" onClick={() => navigate(card.route)}>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  if (onOpenRoute) {
+                    onOpenRoute(card.route);
+                    return;
+                  }
+                  navigate(card.route);
+                }}
+              >
                 Open
               </button>
             </div>

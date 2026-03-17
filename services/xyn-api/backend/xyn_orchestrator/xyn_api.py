@@ -5009,17 +5009,61 @@ def _platform_storage_status(payload: Optional[Dict[str, Any]]) -> Dict[str, Any
         local_path = str(local_cfg.get("base_path") or "").strip() or "/tmp/xyn-uploads"
         configured_summary = f"Local platform-managed storage at {local_path}"
 
-    runtime_root = str(managed_artifact_root())
+    runtime_provider = str(
+        os.environ.get("XYN_RUNTIME_ARTIFACT_PROVIDER")
+        or os.environ.get("XYN_ARTIFACT_STORE_PROVIDER")
+        or "local"
+    ).strip().lower()
+    if runtime_provider in {"filesystem", "fs"}:
+        runtime_provider = "local"
+    runtime_s3_bucket = str(
+        os.environ.get("XYN_RUNTIME_ARTIFACT_S3_BUCKET")
+        or os.environ.get("XYN_ARTIFACT_S3_BUCKET")
+        or ""
+    ).strip()
+    runtime_s3_region = str(
+        os.environ.get("XYN_RUNTIME_ARTIFACT_S3_REGION")
+        or os.environ.get("XYN_ARTIFACT_S3_REGION")
+        or ""
+    ).strip()
+    runtime_s3_prefix = str(
+        os.environ.get("XYN_RUNTIME_ARTIFACT_S3_PREFIX")
+        or os.environ.get("XYN_ARTIFACT_S3_PREFIX")
+        or "runtime-artifacts"
+    ).strip().strip("/")
+    runtime_root = str(
+        os.environ.get("XYN_ARTIFACT_ROOT")
+        or os.environ.get("ARTIFACT_STORE_PATH")
+        or managed_artifact_root()
+    )
+
+    runtime_provider_effective = "local"
+    runtime_mode = "filesystem"
+    runtime_path = runtime_root
+    runtime_configured = True
     remote_durability_active = False
+    if runtime_provider == "s3":
+        runtime_configured = bool(runtime_s3_bucket)
+        if runtime_configured:
+            runtime_provider_effective = "s3"
+            runtime_mode = "object_storage"
+            runtime_path = f"s3://{runtime_s3_bucket}/{runtime_s3_prefix}" if runtime_s3_prefix else f"s3://{runtime_s3_bucket}"
+            remote_durability_active = True
+
     warnings: list[str] = []
     if not remote_durability_active:
         warnings.append(
             "Artifacts are currently stored only on local filesystem storage. Remote-backed storage is not active, so artifacts may not be preserved across host loss or environment rebuilds."
         )
-    if primary_type == "s3" and configured_complete:
+    if runtime_provider == "s3" and not runtime_configured:
         warnings.append(
-            "S3 is configured for platform-managed storage, but core runtime artifacts still use local filesystem storage today."
+            "Runtime artifact storage provider is set to S3, but XYN_RUNTIME_ARTIFACT_S3_BUCKET is missing. Falling back to local filesystem storage."
         )
+    if primary_type == "s3" and configured_complete:
+        if runtime_provider_effective != "s3":
+            warnings.append(
+                "S3 is configured for platform-managed storage, but core runtime artifacts still use local filesystem storage today."
+            )
     elif primary_type == "s3" and not configured_complete:
         warnings.append(
             "S3 is selected in Platform Settings, but the configuration is incomplete and is not active for platform-managed storage."
@@ -5041,9 +5085,14 @@ def _platform_storage_status(payload: Optional[Dict[str, Any]]) -> Dict[str, Any
             "configured": configured_complete,
         },
         "effective_runtime_artifact_storage": {
-            "provider": "local",
-            "mode": "filesystem",
-            "path": runtime_root,
+            "provider": runtime_provider_effective,
+            "mode": runtime_mode,
+            "path": runtime_path,
+            "configured": runtime_configured,
+            "raw_provider": runtime_provider,
+            "bucket": runtime_s3_bucket or None,
+            "region": runtime_s3_region or None,
+            "prefix": runtime_s3_prefix or None,
         },
         "remote_durability_active": remote_durability_active,
         "warnings": warnings,

@@ -258,6 +258,8 @@ def _compiled_policy_map() -> dict[str, dict[str, list[dict[str, Any]]]]:
         "relation_constraints": {},
         "status_write_policies": {},
         "transition_guards": {},
+        "selection_invariants": {},
+        "required_selection_invariants": {},
         "derived_policies": {},
         "trigger_policies": {},
         "unsupported": {},
@@ -371,6 +373,63 @@ def compile_policy_bundle(*, policy_bundle: dict[str, Any], entity_contracts: It
                 "message": str((policy.get("explanation") or {}).get("user_summary") or policy.get("description") or "Transition not allowed.").strip(),
             }
         )
+
+    for policy in _policy_entries(policy_bundle, "invariant_policies"):
+        params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else {}
+        runtime_rule = str(params.get("runtime_rule") or "").strip()
+        if runtime_rule == "at_most_one_matching_child_per_parent":
+            params = _require_policy_parameters(
+                policy,
+                ["entity_key", "parent_relation_field", "match_field", "match_value"],
+            )
+            entity_key = str(params["entity_key"]).strip()
+            if entity_key not in contracts:
+                raise RuntimeError(f"Policy '{policy.get('id')}' references unknown entity '{entity_key}'")
+            compiled["selection_invariants"].setdefault(entity_key, []).append(
+                {
+                    "policy_id": str(policy.get("id") or policy.get("name") or "selection-invariant").strip(),
+                    "runtime_rule": "at_most_one_matching_child_per_parent",
+                    "parent_entity": str(params.get("parent_entity") or "").strip(),
+                    "parent_relation_field": str(params["parent_relation_field"]).strip(),
+                    "match_field": str(params["match_field"]).strip(),
+                    "match_value": params["match_value"],
+                    "on_operations": [str(value).strip() for value in params.get("on_operations") or [] if str(value).strip()] or ["create", "update"],
+                    "message": str((policy.get("explanation") or {}).get("user_summary") or policy.get("description") or "Only one matching child record is allowed per parent.").strip(),
+                }
+            )
+            continue
+        if runtime_rule == "at_least_one_matching_child_per_parent":
+            params = _require_policy_parameters(
+                policy,
+                ["entity_key", "parent_entity", "parent_relation_field", "match_field", "match_value"],
+            )
+            entity_key = str(params["entity_key"]).strip()
+            parent_entity = str(params["parent_entity"]).strip()
+            if entity_key not in contracts:
+                raise RuntimeError(f"Policy '{policy.get('id')}' references unknown child entity '{entity_key}'")
+            if parent_entity not in contracts:
+                raise RuntimeError(f"Policy '{policy.get('id')}' references unknown parent entity '{parent_entity}'")
+            compiled["required_selection_invariants"].setdefault(entity_key, []).append(
+                {
+                    "policy_id": str(policy.get("id") or policy.get("name") or "required-selection-invariant").strip(),
+                    "runtime_rule": "at_least_one_matching_child_per_parent",
+                    "entity_key": entity_key,
+                    "parent_entity": parent_entity,
+                    "parent_relation_field": str(params["parent_relation_field"]).strip(),
+                    "match_field": str(params["match_field"]).strip(),
+                    "match_value": params["match_value"],
+                    "parent_state_field": str(params.get("parent_state_field") or "").strip(),
+                    "parent_state_value": params.get("parent_state_value"),
+                    "on_parent_operations": [str(value).strip() for value in params.get("on_parent_operations") or [] if str(value).strip()] or ["create", "update"],
+                    "on_child_operations": [str(value).strip() for value in params.get("on_child_operations") or [] if str(value).strip()] or ["create", "update", "delete"],
+                    "message": str((policy.get("explanation") or {}).get("user_summary") or policy.get("description") or "At least one matching child record is required for this parent state.").strip(),
+                }
+            )
+            continue
+        if runtime_rule:
+            compiled["unsupported"].setdefault("invariant_policies", []).append(copy.deepcopy(policy))
+            continue
+        compiled["unsupported"].setdefault("invariant_policies", []).append(copy.deepcopy(policy))
 
     for policy in _policy_entries(policy_bundle, "derived_policies"):
         params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else {}
@@ -794,6 +853,27 @@ class GenericEntityOperationsService:
                 existing=target_row,
                 candidate=candidate,
             )
+            self._enforce_selection_invariants(
+                str(policy.get("target_entity") or "").strip(),
+                operation="update",
+                candidate=candidate,
+                existing=target_row,
+                workspace_id=target_workspace_id,
+            )
+            self._enforce_required_selection_invariants_for_parent(
+                str(policy.get("target_entity") or "").strip(),
+                operation="update",
+                candidate=candidate,
+                existing=target_row,
+                workspace_id=target_workspace_id,
+            )
+            self._enforce_required_selection_invariants_for_child(
+                str(policy.get("target_entity") or "").strip(),
+                operation="update",
+                candidate=candidate,
+                existing=target_row,
+                workspace_id=target_workspace_id,
+            )
             self._storage.update(
                 target_contract,
                 record_id=str(target_row.get("id")),
@@ -878,6 +958,215 @@ class GenericEntityOperationsService:
                     meta={"policy_id": policy["policy_id"], "from": previous, "to": current, "field_name": field_name},
                 )
 
+    def _enforce_selection_invariants(
+        self,
+        entity_key: str,
+        *,
+        operation: str,
+        candidate: Dict[str, Any],
+        existing: Optional[Dict[str, Any]],
+        workspace_id: Optional[str],
+    ) -> None:
+        if not workspace_id:
+            return
+        contract = self.entity_contract(entity_key)
+        current_record_id = _parse_uuid((existing or {}).get("id") or candidate.get("id"))
+        for policy in self._compiled_policies.get("selection_invariants", {}).get(entity_key, []):
+            if operation not in set(policy.get("on_operations") or []):
+                continue
+            match_field = str(policy.get("match_field") or "").strip()
+            parent_field = str(policy.get("parent_relation_field") or "").strip()
+            if not match_field or not parent_field:
+                continue
+            match_value = policy.get("match_value")
+            current_value = candidate.get(match_field) if match_field in candidate else (existing or {}).get(match_field)
+            if str(current_value) != str(match_value):
+                continue
+            parent_id = _parse_uuid(candidate.get(parent_field) or (existing or {}).get(parent_field))
+            if not parent_id:
+                continue
+            rows = self._storage.list(contract, workspace_id=workspace_id)
+            for row in rows:
+                row_id = _parse_uuid(row.get("id"))
+                if current_record_id and row_id and row_id == current_record_id:
+                    continue
+                if _parse_uuid(row.get(parent_field)) != parent_id:
+                    continue
+                if str(row.get(match_field)) != str(match_value):
+                    continue
+                raise EntityOperationError(
+                    400,
+                    policy["message"],
+                    meta={
+                        "policy_id": policy["policy_id"],
+                        "parent_relation_field": parent_field,
+                        "match_field": match_field,
+                        "match_value": match_value,
+                    },
+                )
+
+    def _matching_child_count(
+        self,
+        *,
+        child_contract: Dict[str, Any],
+        parent_field: str,
+        parent_id: str,
+        match_field: str,
+        match_value: Any,
+        workspace_id: Optional[str],
+        exclude_record_id: Optional[str] = None,
+        include_row: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        if not workspace_id:
+            return 0
+        count = 0
+        rows = self._storage.list(child_contract, workspace_id=workspace_id)
+        excluded_id = _parse_uuid(exclude_record_id) if exclude_record_id else None
+        normalized_parent_id = _parse_uuid(parent_id)
+        for row in rows:
+            row_id = _parse_uuid(row.get("id"))
+            if excluded_id and row_id and row_id == excluded_id:
+                continue
+            if _parse_uuid(row.get(parent_field)) != normalized_parent_id:
+                continue
+            if str(row.get(match_field)) != str(match_value):
+                continue
+            count += 1
+        if include_row is not None:
+            if _parse_uuid(include_row.get(parent_field)) == normalized_parent_id and str(include_row.get(match_field)) == str(match_value):
+                count += 1
+        return count
+
+    def _parent_state_gate_applies(
+        self,
+        *,
+        policy: Dict[str, Any],
+        parent_row: Optional[Dict[str, Any]],
+        parent_candidate: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        parent_state_field = str(policy.get("parent_state_field") or "").strip()
+        if not parent_state_field:
+            return True
+        required_value = policy.get("parent_state_value")
+        if parent_candidate is not None and parent_state_field in parent_candidate:
+            current_value = parent_candidate.get(parent_state_field)
+        elif parent_row is not None:
+            current_value = parent_row.get(parent_state_field)
+        else:
+            return False
+        return str(current_value) == str(required_value)
+
+    def _enforce_required_selection_invariants_for_parent(
+        self,
+        entity_key: str,
+        *,
+        operation: str,
+        candidate: Dict[str, Any],
+        existing: Optional[Dict[str, Any]],
+        workspace_id: Optional[str],
+    ) -> None:
+        if not workspace_id:
+            return
+        parent_record_id = _parse_uuid((existing or {}).get("id") or candidate.get("id"))
+        for child_entity, policies in self._compiled_policies.get("required_selection_invariants", {}).items():
+            for policy in policies:
+                if str(policy.get("parent_entity") or "").strip() != entity_key:
+                    continue
+                if operation not in set(policy.get("on_parent_operations") or []):
+                    continue
+                if not self._parent_state_gate_applies(policy=policy, parent_row=existing, parent_candidate=candidate):
+                    continue
+                child_contract = self.entity_contract(child_entity)
+                parent_field = str(policy.get("parent_relation_field") or "").strip()
+                match_field = str(policy.get("match_field") or "").strip()
+                match_value = policy.get("match_value")
+                matching_count = 0
+                if parent_record_id:
+                    matching_count = self._matching_child_count(
+                        child_contract=child_contract,
+                        parent_field=parent_field,
+                        parent_id=parent_record_id,
+                        match_field=match_field,
+                        match_value=match_value,
+                        workspace_id=workspace_id,
+                    )
+                if matching_count < 1:
+                    raise EntityOperationError(
+                        400,
+                        policy["message"],
+                        meta={
+                            "policy_id": policy["policy_id"],
+                            "parent_entity": entity_key,
+                            "child_entity": child_entity,
+                            "required_count": 1,
+                            "matching_count": matching_count,
+                        },
+                    )
+
+    def _enforce_required_selection_invariants_for_child(
+        self,
+        entity_key: str,
+        *,
+        operation: str,
+        candidate: Optional[Dict[str, Any]],
+        existing: Optional[Dict[str, Any]],
+        workspace_id: Optional[str],
+    ) -> None:
+        if not workspace_id:
+            return
+        child_contract = self.entity_contract(entity_key)
+        for policy in self._compiled_policies.get("required_selection_invariants", {}).get(entity_key, []):
+            if operation not in set(policy.get("on_child_operations") or []):
+                continue
+            parent_field = str(policy.get("parent_relation_field") or "").strip()
+            match_field = str(policy.get("match_field") or "").strip()
+            match_value = policy.get("match_value")
+            impacted_parents: set[str] = set()
+            old_parent_id = _parse_uuid((existing or {}).get(parent_field))
+            new_parent_id = _parse_uuid((candidate or {}).get(parent_field))
+            if old_parent_id:
+                impacted_parents.add(old_parent_id)
+            if new_parent_id:
+                impacted_parents.add(new_parent_id)
+            for parent_id in impacted_parents:
+                parent_contract = self.entity_contract(str(policy.get("parent_entity") or "").strip())
+                parent_row = self._record_for_policy(parent_contract, record_id=parent_id, workspace_id=workspace_id)
+                if not parent_row:
+                    continue
+                if not self._parent_state_gate_applies(policy=policy, parent_row=parent_row):
+                    continue
+                include_row = None
+                exclude_record_id = None
+                if operation == "create":
+                    include_row = candidate
+                elif operation == "update":
+                    exclude_record_id = str((existing or {}).get("id") or "")
+                    include_row = candidate
+                elif operation == "delete":
+                    exclude_record_id = str((existing or {}).get("id") or "")
+                matching_count = self._matching_child_count(
+                    child_contract=child_contract,
+                    parent_field=parent_field,
+                    parent_id=parent_id,
+                    match_field=match_field,
+                    match_value=match_value,
+                    workspace_id=workspace_id,
+                    exclude_record_id=exclude_record_id,
+                    include_row=include_row,
+                )
+                if matching_count < 1:
+                    raise EntityOperationError(
+                        400,
+                        policy["message"],
+                        meta={
+                            "policy_id": policy["policy_id"],
+                            "parent_entity": policy.get("parent_entity"),
+                            "child_entity": entity_key,
+                            "required_count": 1,
+                            "matching_count": matching_count,
+                        },
+                    )
+
     def list_records(self, entity_key: str, *, context: RecordContext) -> list[Dict[str, Any]]:
         contract = self._operation_contract(entity_key, "list")
         if not context.workspace_id:
@@ -897,6 +1186,21 @@ class GenericEntityOperationsService:
         normalized = self._normalize_payload(contract, fields, mode="create", workspace_id=workspace_id)
         self._enforce_status_write_policies(entity_key, operation="create", candidate=normalized, existing=None, workspace_id=workspace_id)
         self._enforce_relation_constraints(entity_key, candidate=normalized, workspace_id=workspace_id)
+        self._enforce_selection_invariants(entity_key, operation="create", candidate=normalized, existing=None, workspace_id=workspace_id)
+        self._enforce_required_selection_invariants_for_parent(
+            entity_key,
+            operation="create",
+            candidate=normalized,
+            existing=None,
+            workspace_id=workspace_id,
+        )
+        self._enforce_required_selection_invariants_for_child(
+            entity_key,
+            operation="create",
+            candidate=normalized,
+            existing=None,
+            workspace_id=workspace_id,
+        )
         row = self._storage.insert(contract, values=normalized)
         self._apply_post_write_triggers(entity_key, operation="create", row=row, workspace_id=workspace_id)
         return self._augment_with_derived_fields(entity_key, row=row, workspace_id=workspace_id, surface="detail")
@@ -911,6 +1215,21 @@ class GenericEntityOperationsService:
         self._enforce_status_write_policies(entity_key, operation="update", candidate=candidate, existing=existing, workspace_id=workspace_id)
         self._enforce_relation_constraints(entity_key, candidate=candidate, workspace_id=workspace_id)
         self._enforce_transition_guards(entity_key, existing=existing, candidate=candidate)
+        self._enforce_selection_invariants(entity_key, operation="update", candidate=candidate, existing=existing, workspace_id=workspace_id)
+        self._enforce_required_selection_invariants_for_parent(
+            entity_key,
+            operation="update",
+            candidate=candidate,
+            existing=existing,
+            workspace_id=workspace_id,
+        )
+        self._enforce_required_selection_invariants_for_child(
+            entity_key,
+            operation="update",
+            candidate=candidate,
+            existing=existing,
+            workspace_id=workspace_id,
+        )
         row = self._storage.update(contract, record_id=str(existing.get("id")), workspace_id=workspace_id, values=normalized)
         self._apply_post_write_triggers(entity_key, operation="update", row=row, workspace_id=workspace_id)
         return self._augment_with_derived_fields(entity_key, row=row, workspace_id=workspace_id, surface="detail")
@@ -919,4 +1238,11 @@ class GenericEntityOperationsService:
         contract = self._operation_contract(entity_key, "delete")
         existing = self._resolve_record_reference(entity_key, id_or_reference, workspace_id=context.workspace_id)
         workspace_id = str(existing.get("workspace_id") or context.workspace_id or "").strip() or None
+        self._enforce_required_selection_invariants_for_child(
+            entity_key,
+            operation="delete",
+            candidate=None,
+            existing=existing,
+            workspace_id=workspace_id,
+        )
         return self._storage.delete(contract, record_id=str(existing.get("id")), workspace_id=workspace_id)

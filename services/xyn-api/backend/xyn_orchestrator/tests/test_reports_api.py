@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -179,3 +180,24 @@ class ReportsApiTests(TestCase):
         self.assertEqual(status["effective_runtime_artifact_storage"]["provider"], "local")
         self.assertFalse(status["remote_durability_active"])
         self.assertTrue(any("core runtime artifacts still use local filesystem storage today" in warning for warning in status["warnings"]))
+
+    @override_settings(MEDIA_ROOT="/tmp/xyn-platform-test-artifacts")
+    def test_platform_config_reports_runtime_s3_when_runtime_provider_is_enabled(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "XYN_RUNTIME_ARTIFACT_PROVIDER": "s3",
+                "XYN_RUNTIME_ARTIFACT_S3_BUCKET": "runtime-artifacts",
+                "XYN_RUNTIME_ARTIFACT_S3_REGION": "us-east-1",
+                "XYN_RUNTIME_ARTIFACT_S3_PREFIX": "xyn/runtime",
+            },
+            clear=False,
+        ):
+            response = self.client.get("/api/v1/platform-config")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        status = body["storage_status"]
+        self.assertEqual(status["effective_runtime_artifact_storage"]["provider"], "s3")
+        self.assertEqual(status["effective_runtime_artifact_storage"]["mode"], "object_storage")
+        self.assertTrue(status["remote_durability_active"])
+        self.assertFalse(any("Remote-backed storage is not active" in warning for warning in status["warnings"]))
