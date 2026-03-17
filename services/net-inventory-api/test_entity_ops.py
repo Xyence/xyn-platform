@@ -185,6 +185,49 @@ class NetInventoryCrudTests(unittest.TestCase):
 
         self.assertEqual(deleted.status_code, 405, deleted.text)
 
+    def test_runtime_can_serve_non_inventory_entity_contracts(self):
+        workspace_id = str(uuid.uuid4())
+        lunch_poll_contracts = [
+            {
+                "key": "polls",
+                "singular_label": "poll",
+                "plural_label": "polls",
+                "collection_path": "/polls",
+                "item_path_template": "/polls/{id}",
+                "operations": {
+                    "list": {"declared": True, "method": "GET", "path": "/polls"},
+                    "get": {"declared": True, "method": "GET", "path": "/polls/{id}"},
+                    "create": {"declared": True, "method": "POST", "path": "/polls"},
+                    "update": {"declared": True, "method": "PATCH", "path": "/polls/{id}"},
+                    "delete": {"declared": True, "method": "DELETE", "path": "/polls/{id}"},
+                },
+                "fields": [
+                    {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                    {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                    {"name": "title", "type": "string", "required": True, "readable": True, "writable": True, "identity": True},
+                    {"name": "poll_date", "type": "string", "required": True, "readable": True, "writable": True, "identity": False},
+                    {"name": "status", "type": "string", "required": True, "readable": True, "writable": True, "identity": False, "options": ["draft", "open", "closed", "selected"]},
+                    {"name": "created_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
+                    {"name": "updated_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
+                ],
+                "presentation": {"default_list_fields": ["title", "poll_date", "status"], "default_detail_fields": ["id", "title", "poll_date", "status"], "title_field": "title"},
+                "validation": {"required_on_create": ["workspace_id", "title", "poll_date", "status"], "allowed_on_update": ["title", "poll_date", "status"]},
+                "relationships": [],
+            }
+        ]
+        service = GenericEntityOperationsService(entity_contracts=lunch_poll_contracts, storage_adapter=InMemoryStorageAdapter())
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+
+        created = client.post(
+            "/polls",
+            json={"workspace_id": workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "draft"},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+
+        listed = client.get("/polls", params={"workspace_id": workspace_id})
+        self.assertEqual(listed.status_code, 200, listed.text)
+        self.assertEqual(listed.json()["items"][0]["title"], "Friday Lunch")
+
 
 if __name__ == "__main__":
     unittest.main()
