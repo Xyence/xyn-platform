@@ -22,8 +22,11 @@ function parseRuntimeArtifactObjectId(objectId: string): { run_id: string; artif
 function panelToConsoleSpec(panel: Panel, params?: Record<string, unknown>, title?: string): ConsolePanelSpec {
   const registered = resolvePanelComponent(panel);
   const nextParams = { ...(params || {}) };
+  if (panel.panel_type === "composer_detail") nextParams.workspace_id = panel.workspace_id;
   if (panel.panel_type === "run_detail") nextParams.run_id = panel.object_id;
   if (panel.panel_type === "goal_detail") nextParams.goal_id = panel.object_id;
+  if (panel.panel_type === "application_plan_detail") nextParams.application_plan_id = panel.object_id;
+  if (panel.panel_type === "application_detail") nextParams.application_id = panel.object_id;
   if (panel.panel_type === "goal_list") nextParams.workspace_id = panel.workspace_id;
   if (panel.panel_type === "thread_detail") nextParams.thread_id = panel.object_id;
   if (panel.panel_type === "thread_list") nextParams.workspace_id = panel.workspace_id;
@@ -57,8 +60,11 @@ function panelToConsoleSpec(panel: Panel, params?: Record<string, unknown>, titl
 export function createWorkspacePanel(input: CreatePanelInput): Panel {
   let object_type: Panel["object_type"] = "log";
   if (input.panel_type === "conversation") object_type = "conversation";
+  else if (input.panel_type === "composer_detail") object_type = "workspace";
   else if (input.panel_type === "goal_list") object_type = "workspace";
   else if (input.panel_type === "goal_detail") object_type = "goal";
+  else if (input.panel_type === "application_plan_detail") object_type = "application_plan";
+  else if (input.panel_type === "application_detail") object_type = "application";
   else if (input.panel_type === "thread_list") object_type = "workspace";
   else if (input.panel_type === "thread_detail") object_type = "thread";
   else if (input.panel_type === "run_detail") object_type = "run";

@@ -45,6 +45,11 @@ import type {
   CoordinationThreadListResponse,
   GoalDetail,
   GoalListResponse,
+  ApplicationFactorySummary,
+  ComposerState,
+  ApplicationPlanDetail,
+  ApplicationSummary,
+  ApplicationDetail,
   WorkQueueResponse,
   ContextPackCreatePayload,
   ContextPackDetail,
@@ -143,6 +148,12 @@ import type {
   AiModelConfig,
   AiAgent,
   AiBootstrapStatusResponse,
+  SystemReadinessResponse,
+  ContextualCapabilityResponse,
+  CapabilityGraphResponse,
+  CapabilityEventResponse,
+  CapabilityPathResponse,
+  ExecutionPlan,
   AiInvokeResponse,
   AiModelConfigCompat,
   AccessRegistryResponse,
@@ -168,6 +179,7 @@ import type {
   AppIntentDraftCreatePayload,
   AppIntentDraftPatchPayload,
   AppDraftSubmitResponse,
+  DraftWorkflow,
   AppJob,
   AppExecutionNote,
   AppBuilderArtifact,
@@ -860,6 +872,13 @@ export async function submitAppIntentDraft(draftId: string, workspaceId: string)
     credentials: "include",
   });
   return handle<AppDraftSubmitResponse>(response);
+}
+
+export async function getDraftWorkflow(draftId: string, workspaceId: string): Promise<DraftWorkflow> {
+  const url = withWorkspaceId("/xyn/api/draft_workflow", workspaceId);
+  url.searchParams.set("draft_id", draftId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<DraftWorkflow>(response);
 }
 
 export async function listAppJobs(workspaceId: string): Promise<AppJob[]> {
@@ -2882,7 +2901,7 @@ export async function deleteContact(id: string): Promise<void> {
 
 export async function listIdentities(): Promise<IdentityListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/identities`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/identities`, {
     credentials: "include",
   });
   return handle<IdentityListResponse>(response);
@@ -2890,7 +2909,7 @@ export async function listIdentities(): Promise<IdentityListResponse> {
 
 export async function listRoleBindings(identityId?: string): Promise<RoleBindingListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const url = new URL(`${apiBaseUrl}/xyn/internal/role_bindings`);
+  const url = new URL(`${apiBaseUrl}/xyn/api/platform/role-bindings`);
   if (identityId) {
     url.searchParams.set("identity_id", identityId);
   }
@@ -2900,7 +2919,7 @@ export async function listRoleBindings(identityId?: string): Promise<RoleBinding
 
 export async function createRoleBinding(payload: RoleBindingCreatePayload): Promise<{ id: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/role_bindings`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/role-bindings`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",
@@ -2911,7 +2930,7 @@ export async function createRoleBinding(payload: RoleBindingCreatePayload): Prom
 
 export async function deleteRoleBinding(id: string): Promise<void> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/role_bindings/${id}`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/role-bindings/${id}`, {
     method: "DELETE",
     credentials: "include",
   });
@@ -4196,6 +4215,104 @@ export async function getWorkItem(id: string): Promise<WorkItemDetail> {
   return handle<WorkItemDetail>(response);
 }
 
+export async function getSystemReadiness(): Promise<SystemReadinessResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/system/readiness`, {
+    credentials: "include",
+  });
+  return handle<SystemReadinessResponse>(response);
+}
+
+export async function getContextualCapabilities(params?: {
+  context?: string;
+  artifact_id?: string;
+  application_id?: string;
+  entityId?: string;
+  workspaceId?: string;
+  includeUnavailable?: boolean;
+}): Promise<ContextualCapabilityResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/capabilities/context`);
+  if (params?.context) url.searchParams.set("context", params.context);
+  const entityId = params?.entityId || params?.artifact_id || params?.application_id;
+  if (entityId) url.searchParams.set("entityId", entityId);
+  if (params?.workspaceId) url.searchParams.set("workspaceId", params.workspaceId);
+  if (params?.includeUnavailable) url.searchParams.set("include_unavailable", "true");
+  const response = await apiFetch(url.toString(), {
+    credentials: "include",
+  });
+  return handle<ContextualCapabilityResponse>(response);
+}
+
+export async function getCapabilityGraph(): Promise<CapabilityGraphResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/capabilities/graph`, {
+    credentials: "include",
+  });
+  return handle<CapabilityGraphResponse>(response);
+}
+
+export async function emitCapabilityRefreshEvent(params: {
+  event_type: string;
+  entity_id?: string;
+  workspace_id?: string;
+}): Promise<CapabilityEventResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/capabilities/events`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(params),
+  });
+  return handle<CapabilityEventResponse>(response);
+}
+
+export async function getCapabilityPaths(params?: {
+  context?: string;
+  entityId?: string;
+  workspaceId?: string;
+}): Promise<CapabilityPathResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/capability-paths/context`);
+  if (params?.context) url.searchParams.set("context", params.context);
+  if (params?.entityId) url.searchParams.set("entityId", params.entityId);
+  if (params?.workspaceId) url.searchParams.set("workspaceId", params.workspaceId);
+  const response = await apiFetch(url.toString(), {
+    credentials: "include",
+  });
+  return handle<CapabilityPathResponse>(response);
+}
+
+export async function getExecutionPlan(capabilityId: string): Promise<ExecutionPlan> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/plan`);
+  url.searchParams.set("capability_id", capabilityId);
+  const response = await apiFetch(url.toString(), {
+    credentials: "include",
+  });
+  return handle<ExecutionPlan>(response);
+}
+
+export async function updateWorkItem(
+  id: string,
+  payload: {
+    execution_brief_action?: "mark_ready" | "approve" | "reject" | "regenerate" | "replace";
+    execution_brief_review_state?: string;
+    execution_brief_review_notes?: string;
+    execution_brief_revision_reason?: string;
+    execution_brief?: Record<string, unknown>;
+  }
+): Promise<WorkItemDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/work-items/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<WorkItemDetail>(response);
+}
+
 export async function listGoals(workspaceId: string, planningStatus?: string): Promise<GoalListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/goals`);
@@ -4258,6 +4375,115 @@ export async function reviewGoal(
     body: JSON.stringify({ review_action: reviewAction, recommendation_id: recommendationId || undefined }),
   });
   return handle<{ status: string; goal: GoalDetail; queue_seed?: Record<string, unknown> }>(response);
+}
+
+export async function listApplicationFactories(): Promise<{ factories: ApplicationFactorySummary[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-factories`, {
+    credentials: "include",
+  });
+  return handle<{ factories: ApplicationFactorySummary[] }>(response);
+}
+
+export async function getComposerState(params: {
+  workspace_id: string;
+  factory_key?: string;
+  application_plan_id?: string;
+  application_id?: string;
+  goal_id?: string;
+  thread_id?: string;
+}): Promise<ComposerState> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/composer/state`);
+  url.searchParams.set("workspace_id", params.workspace_id);
+  if (params.factory_key) url.searchParams.set("factory_key", params.factory_key);
+  if (params.application_plan_id) url.searchParams.set("application_plan_id", params.application_plan_id);
+  if (params.application_id) url.searchParams.set("application_id", params.application_id);
+  if (params.goal_id) url.searchParams.set("goal_id", params.goal_id);
+  if (params.thread_id) url.searchParams.set("thread_id", params.thread_id);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<ComposerState>(response);
+}
+
+export async function listApplicationPlans(workspaceId: string): Promise<{ application_plans: ApplicationPlanDetail[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/application-plans`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<{ application_plans: ApplicationPlanDetail[] }>(response);
+}
+
+export async function generateApplicationPlan(payload: {
+  workspace_id: string;
+  objective: string;
+  source_conversation_id?: string;
+  factory_key?: string;
+  application_name?: string;
+}): Promise<ApplicationPlanDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-plans`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<ApplicationPlanDetail>(response);
+}
+
+export async function getApplicationPlan(id: string): Promise<ApplicationPlanDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-plans/${id}`, {
+    credentials: "include",
+  });
+  return handle<ApplicationPlanDetail>(response);
+}
+
+export async function updateApplicationPlan(id: string, payload: { status: "review" | "applied" | "canceled" | string }): Promise<ApplicationPlanDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-plans/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<ApplicationPlanDetail>(response);
+}
+
+export async function applyApplicationPlan(id: string): Promise<{ status: string; application: ApplicationDetail; application_plan: ApplicationPlanDetail }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/application-plans/${id}/apply`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ status: string; application: ApplicationDetail; application_plan: ApplicationPlanDetail }>(response);
+}
+
+export async function listApplications(workspaceId: string): Promise<{ applications: ApplicationSummary[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/applications`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<{ applications: ApplicationSummary[] }>(response);
+}
+
+export async function getApplication(id: string): Promise<ApplicationDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${id}`, {
+    credentials: "include",
+  });
+  return handle<ApplicationDetail>(response);
+}
+
+export async function updateApplication(id: string, payload: { status: "active" | "completed" | "archived" | string }): Promise<ApplicationDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<ApplicationDetail>(response);
 }
 
 export async function listCoordinationThreads(workspaceId: string, status?: string): Promise<CoordinationThreadListResponse> {
@@ -4332,6 +4558,20 @@ export async function dispatchNextWorkQueueItem(workspaceId: string): Promise<{ 
   return handle<{ status: string; queue_item?: Record<string, unknown>; run_id?: string }>(response);
 }
 
+export async function dispatchWorkItem(
+  id: string,
+  workspaceId: string
+): Promise<{ status: string; queue_item?: Record<string, unknown>; run_id?: string; work_item?: WorkItemDetail }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/dispatch`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify({ workspace_id: workspaceId }),
+  });
+  return handle<{ status: string; queue_item?: Record<string, unknown>; run_id?: string; work_item?: WorkItemDetail }>(response);
+}
+
 export async function runDevTask(id: string, force = false): Promise<{ run_id: string; status: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/run`);
@@ -4345,13 +4585,40 @@ export async function runDevTask(id: string, force = false): Promise<{ run_id: s
   return handle<{ run_id: string; status: string }>(response);
 }
 
-export async function retryDevTask(id: string): Promise<{ run_id: string; status: string }> {
+export async function retryDevTask(id: string): Promise<{ run_id: string; status: string; work_item?: WorkItemDetail }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/retry`, {
     method: "POST",
     credentials: "include",
   });
-  return handle<{ run_id: string; status: string }>(response);
+  return handle<{ run_id: string; status: string; work_item?: WorkItemDetail }>(response);
+}
+
+export async function requeueDevTask(id: string): Promise<{ status: string; work_item?: WorkItemDetail }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/requeue`, {
+    method: "POST",
+    credentials: "include",
+  });
+  return handle<{ status: string; work_item?: WorkItemDetail }>(response);
+}
+
+export async function publishDevTask(
+  id: string,
+  payload: { push?: boolean } = {}
+): Promise<{ status: string; push?: boolean; work_item?: WorkItemDetail }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/publish`);
+  if (payload.push) {
+    url.searchParams.set("push", "1");
+  }
+  const response = await apiFetch(url.toString(), {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<{ status: string; push?: boolean; work_item?: WorkItemDetail }>(response);
 }
 
 export async function cancelDevTask(id: string): Promise<{ status: string }> {
@@ -4381,7 +4648,7 @@ export async function listIdentityProviders(): Promise<IdentityProviderListRespo
 
 export async function listSecretStores(): Promise<SecretStoreListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secret-stores`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secret-stores`, {
     credentials: "include",
   });
   return handle<SecretStoreListResponse>(response);
@@ -4394,7 +4661,7 @@ export async function createSecretStore(payload: {
   config_json?: SecretStore["config_json"];
 }): Promise<{ id: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secret-stores`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secret-stores`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",
@@ -4405,7 +4672,7 @@ export async function createSecretStore(payload: {
 
 export async function updateSecretStore(id: string, payload: Partial<SecretStore>): Promise<{ id: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secret-stores/${id}`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secret-stores/${id}`, {
     method: "PATCH",
     headers: buildHeaders(),
     credentials: "include",
@@ -4416,7 +4683,7 @@ export async function updateSecretStore(id: string, payload: Partial<SecretStore
 
 export async function setDefaultSecretStore(id: string): Promise<{ id: string; is_default: boolean }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secret-stores/${id}/set_default`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secret-stores/${id}/set_default`, {
     method: "POST",
     credentials: "include",
   });
@@ -4428,7 +4695,7 @@ export async function listSecretRefs(filters?: {
   scope_id?: string;
 }): Promise<SecretRefListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const url = new URL(`${apiBaseUrl}/xyn/internal/secret-refs`);
+  const url = new URL(`${apiBaseUrl}/xyn/api/platform/secret-refs`);
   if (filters?.scope_kind) url.searchParams.set("scope_kind", filters.scope_kind);
   if (filters?.scope_id) url.searchParams.set("scope_id", filters.scope_id);
   const response = await apiFetch(url.toString(), {
@@ -4455,7 +4722,7 @@ export async function createSecretValue(payload: {
   };
 }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/internal/secrets`, {
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/platform/secrets`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",

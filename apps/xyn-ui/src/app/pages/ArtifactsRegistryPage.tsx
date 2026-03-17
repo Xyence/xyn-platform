@@ -4,7 +4,8 @@ import InlineMessage from "../../components/InlineMessage";
 import { listWorkspaceArtifacts, uninstallWorkspaceArtifact } from "../../api/xyn";
 import type { WorkspaceInstalledArtifactSummary } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
-import { toWorkspacePath } from "../routing/workspaceRouting";
+import { openViewDescriptor } from "../navigation/openViewDescriptor";
+import { fromWorkspaceInstalledArtifact } from "../navigation/viewDescriptorBuilders";
 
 function formatDate(value?: string): string {
   if (!value) return "-";
@@ -80,14 +81,9 @@ export default function ArtifactsRegistryPage({
   };
 
   const handleArtifactOpen = (item: WorkspaceInstalledArtifactSummary) => {
-    const manage = item.manifest_summary?.surfaces?.manage || [];
-    const firstManage = manage[0];
-    if (firstManage?.path) {
-      navigate(firstManage.path);
-      return;
-    }
-    if (String(item.kind || "").toLowerCase() === "article") {
-      navigate(toWorkspacePath(workspaceId, `build/artifacts/${item.artifact_id}`));
+    const descriptor = fromWorkspaceInstalledArtifact(item, workspaceId);
+    if (descriptor) {
+      openViewDescriptor(descriptor, navigate);
       return;
     }
     setSelectedUnsupported(item);

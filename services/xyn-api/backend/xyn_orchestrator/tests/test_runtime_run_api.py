@@ -6,8 +6,9 @@ from django.http import JsonResponse
 from django.test import RequestFactory, SimpleTestCase, TestCase
 
 from xyn_orchestrator.development_intelligence import compute_artifact_analysis
+from xyn_orchestrator.execution_observability import build_artifact_evolution
 from xyn_orchestrator import xyn_api as intent_api
-from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, Workspace
+from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, Workspace
 from xyn_orchestrator.xyn_api import (
     ai_activity_stream,
     _runtime_activity_item_from_event,
@@ -338,6 +339,9 @@ class RuntimeRunApiTests(SimpleTestCase):
                     "is_current": True,
                 },
             ],
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api.build_artifact_analysis_context",
+            return_value={"run_status_by_run_id": {str(run_id): "completed"}, "supervised_run_ids": {str(run_id)}},
         ):
             response = runtime_run_artifact_detail(request, run_id, artifact_id)
         self.assertEqual(response.status_code, 200)
@@ -461,6 +465,116 @@ class ArtifactAnalysisTests(SimpleTestCase):
         self.assertIn("not fully attributable", analysis.provenance.summary)
         self.assertNotIn("queued through the supervised loop", analysis.provenance.summary.lower())
 
+
+class ArtifactEvolutionTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.workspace = Workspace.objects.create(name="Artifact WS", slug=f"artifact-ws-{uuid.uuid4().hex[:8]}")
+
+    def _create_task(self, *, work_item_id: str, title: str = "Artifact Task"):
+        return DevTask.objects.create(
+            title=title,
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=uuid.uuid4(),
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            runtime_workspace_id=self.workspace.id,
+            work_item_id=work_item_id,
+        )
+
+    def test_build_artifact_evolution_orders_equal_timestamps_deterministically(self):
+        task = self._create_task(work_item_id="wi-1")
+        lookup = {
+            task.id: {
+                "id": "run-2",
+                "run_id": "run-2",
+                "artifacts": [
+                    {
+                        "id": "artifact-b",
+                        "artifact_type": "summary",
+                        "label": "final_summary.md",
+                        "uri": "artifact://runs/run-2/final_summary.md",
+                        "created_at": "2026-03-12T10:00:00Z",
+                    },
+                    {
+                        "id": "artifact-a",
+                        "artifact_type": "summary",
+                        "label": "final_summary.md",
+                        "uri": "artifact://runs/run-2/final_summary.md",
+                        "created_at": "2026-03-12T10:00:00Z",
+                    },
+                ],
+            }
+        }
+        first = build_artifact_evolution(
+            workspace=self.workspace,
+            current_run_id="run-2",
+            current_artifact_id="artifact-b",
+            current_artifact={"artifact_type": "summary", "label": "final_summary.md", "work_item_id": "wi-1"},
+            runtime_detail_lookup=lambda task: lookup.get(task.id),
+        )
+        second = build_artifact_evolution(
+            workspace=self.workspace,
+            current_run_id="run-2",
+            current_artifact_id="artifact-b",
+            current_artifact={"artifact_type": "summary", "label": "final_summary.md", "work_item_id": "wi-1"},
+            runtime_detail_lookup=lambda task: lookup.get(task.id),
+        )
+        self.assertEqual([row["artifact_id"] for row in first], ["artifact-a", "artifact-b"])
+        self.assertEqual([row["artifact_id"] for row in first], [row["artifact_id"] for row in second])
+
+    def test_build_artifact_evolution_handles_missing_intermediate_versions(self):
+        task = self._create_task(work_item_id="wi-1")
+        lookup = {
+            task.id: {
+                "id": "run-3",
+                "run_id": "run-3",
+                "artifacts": [
+                    {
+                        "id": "artifact-v1",
+                        "artifact_type": "summary",
+                        "label": "final_summary.md",
+                        "uri": "artifact://runs/run-1/final_summary.md",
+                        "created_at": "2026-03-12T10:00:00Z",
+                    },
+                    {
+                        "id": "artifact-v3",
+                        "artifact_type": "summary",
+                        "label": "final_summary.md",
+                        "uri": "artifact://runs/run-3/final_summary.md",
+                        "created_at": "2026-03-12T10:10:00Z",
+                    },
+                ],
+            }
+        }
+        rows = build_artifact_evolution(
+            workspace=self.workspace,
+            current_run_id="run-3",
+            current_artifact_id="artifact-v3",
+            current_artifact={"artifact_type": "summary", "label": "final_summary.md", "work_item_id": "wi-1"},
+            runtime_detail_lookup=lambda task: lookup.get(task.id),
+        )
+        self.assertEqual([row["artifact_id"] for row in rows], ["artifact-v1", "artifact-v3"])
+        self.assertTrue(rows[-1]["is_current"])
+
+    def test_build_artifact_evolution_handles_orphan_artifact_record_safely(self):
+        self._create_task(work_item_id="wi-2")
+        rows = build_artifact_evolution(
+            workspace=self.workspace,
+            current_run_id="run-orphan",
+            current_artifact_id="artifact-orphan",
+            current_artifact={"artifact_type": "summary", "label": "final_summary.md", "work_item_id": "wi-1"},
+            runtime_detail_lookup=lambda _task: None,
+        )
+        self.assertEqual(rows, [])
+
     def test_work_item_alias_endpoints_return_work_item_shapes(self):
         request = self.factory.get("/xyn/api/work-items")
         request.user = mock.Mock(is_authenticated=True)
@@ -482,7 +596,7 @@ class CoordinationActivityApiTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.identity = object()
-        self.workspace = Workspace.objects.create(name="Coordination WS", slug="coordination-ws")
+        self.workspace = Workspace.objects.create(name="Coordination WS", slug=f"coordination-ws-{uuid.uuid4().hex[:8]}")
         self.thread = CoordinationThread.objects.create(
             workspace=self.workspace,
             title="Runtime Refactor",

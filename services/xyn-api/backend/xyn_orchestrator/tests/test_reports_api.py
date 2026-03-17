@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -139,3 +140,64 @@ class ReportsApiTests(TestCase):
         resolve_secret_mock.assert_called_once_with(
             {"type": "aws.secrets_manager", "ref": "arn:aws:secretsmanager:us-east-1:123:secret:xyn/discord"}
         )
+
+    @override_settings(MEDIA_ROOT="/tmp/xyn-platform-test-artifacts")
+    def test_platform_config_reports_local_runtime_storage_by_default(self):
+        response = self.client.get("/api/v1/platform-config")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        status = body["storage_status"]
+        self.assertEqual(status["configured_provider"]["type"], "local")
+        self.assertEqual(status["effective_runtime_artifact_storage"]["provider"], "local")
+        self.assertFalse(status["remote_durability_active"])
+        self.assertTrue(any("Remote-backed storage is not active" in warning for warning in status["warnings"]))
+
+    @override_settings(MEDIA_ROOT="/tmp/xyn-platform-test-artifacts")
+    def test_platform_config_distinguishes_configured_s3_from_effective_runtime_storage(self):
+        payload = {
+            "storage": {
+                "primary": {"type": "s3", "name": "default"},
+                "providers": [
+                    {"name": "local", "type": "local", "local": {"base_path": "/tmp/xyn-uploads"}},
+                    {
+                        "name": "default",
+                        "type": "s3",
+                        "s3": {"bucket": "xyn-artifacts", "region": "us-east-1", "prefix": "xyn/", "acl": "private"},
+                    },
+                ],
+            },
+            "notifications": {"enabled": True, "channels": []},
+        }
+        PlatformConfigDocument.objects.create(version=1, config_json=payload, created_by=self.user)
+
+        response = self.client.get("/api/v1/platform-config")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        status = body["storage_status"]
+        self.assertEqual(status["configured_provider"]["type"], "s3")
+        self.assertTrue(status["configured_provider"]["complete"])
+        self.assertEqual(status["effective_platform_storage"]["provider"], "s3")
+        self.assertEqual(status["effective_runtime_artifact_storage"]["provider"], "local")
+        self.assertFalse(status["remote_durability_active"])
+        self.assertTrue(any("core runtime artifacts still use local filesystem storage today" in warning for warning in status["warnings"]))
+
+    @override_settings(MEDIA_ROOT="/tmp/xyn-platform-test-artifacts")
+    def test_platform_config_reports_runtime_s3_when_runtime_provider_is_enabled(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "XYN_RUNTIME_ARTIFACT_PROVIDER": "s3",
+                "XYN_RUNTIME_ARTIFACT_S3_BUCKET": "runtime-artifacts",
+                "XYN_RUNTIME_ARTIFACT_S3_REGION": "us-east-1",
+                "XYN_RUNTIME_ARTIFACT_S3_PREFIX": "xyn/runtime",
+            },
+            clear=False,
+        ):
+            response = self.client.get("/api/v1/platform-config")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        status = body["storage_status"]
+        self.assertEqual(status["effective_runtime_artifact_storage"]["provider"], "s3")
+        self.assertEqual(status["effective_runtime_artifact_storage"]["mode"], "object_storage")
+        self.assertTrue(status["remote_durability_active"])
+        self.assertFalse(any("Remote-backed storage is not active" in warning for warning in status["warnings"]))

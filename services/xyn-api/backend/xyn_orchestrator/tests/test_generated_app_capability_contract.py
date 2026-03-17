@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from xyn_orchestrator.models import Artifact, ArtifactType, RoleBinding, UserIdentity, Workspace, WorkspaceAppInstance, WorkspaceArtifactBinding
+from xyn_orchestrator.xyn_api import _resolve_manifest_surface_path
 
 
 class _FakeResponse:
@@ -35,6 +36,17 @@ class GeneratedAppCapabilityContractTests(TestCase):
         session.save()
         self.workspace = Workspace.objects.create(slug="capability-lab", name="Capability Lab")
         self.application_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+
+    def test_manifest_surface_path_prefixes_workspace_scoped_apps(self):
+        manifest = {
+            "roles": [
+                {"role": "ui_mount", "scope": "workspace"},
+            ]
+        }
+
+        path = _resolve_manifest_surface_path(manifest, "/apps/team-lunch-poll", workspace_id=str(self.workspace.id))
+
+        self.assertEqual(path, f"/w/{self.workspace.id}/apps/team-lunch-poll")
 
     def _manifest(
         self,
@@ -372,6 +384,8 @@ class GeneratedAppCapabilityContractTests(TestCase):
         *,
         include_interfaces: bool,
         package_version: str,
+        app_slug: str = "net-inventory",
+        title: str = "Generated Net Inventory",
         stale_top_level_interfaces: bool = False,
         stale_top_level_interface_surface: bool = False,
         omit_entity_contracts: bool = False,
@@ -381,20 +395,25 @@ class GeneratedAppCapabilityContractTests(TestCase):
             stale_top_level_interfaces=stale_top_level_interfaces,
             stale_top_level_interface_surface=stale_top_level_interface_surface,
         )
+        artifact_slug = f"app.{app_slug}"
+        manifest_artifact = manifest.get("artifact") if isinstance(manifest.get("artifact"), dict) else {}
+        manifest_artifact["id"] = artifact_slug
+        manifest_artifact["slug"] = artifact_slug
+        manifest["artifact"] = manifest_artifact
         if omit_entity_contracts:
             manifest["resolved_capability_manifest"]["entities"] = []
             manifest["content"]["resolved_capability_manifest"]["entities"] = []
         artifact = Artifact.objects.create(
             workspace=self.workspace,
             type=self.application_type,
-            title="Generated Net Inventory",
-            slug="app.net-inventory",
+            title=title,
+            slug=artifact_slug,
             status="published",
             version=1,
             package_version=package_version,
             visibility="team",
             scope_json={
-                "slug": "app.net-inventory",
+                "slug": artifact_slug,
                 "imported_manifest": manifest,
             },
         )
@@ -405,18 +424,18 @@ class GeneratedAppCapabilityContractTests(TestCase):
         )
         return binding
 
-    def _ensure_runtime(self):
+    def _ensure_runtime(self, *, app_slug: str = "net-inventory", runtime_base_url: str = "http://generated-runtime:8080"):
         WorkspaceAppInstance.objects.create(
             workspace=self.workspace,
             artifact=None,
-            app_slug="net-inventory",
+            app_slug=app_slug,
             fqdn="capability-lab.localhost",
             status="active",
             dns_config_json={
                 "runtime_target": {
                     "runtime_owner": "sibling",
-                    "runtime_base_url": "http://generated-runtime:8080",
-                    "app_slug": "net-inventory",
+                    "runtime_base_url": runtime_base_url,
+                    "app_slug": app_slug,
                 }
             },
         )
@@ -479,6 +498,32 @@ class GeneratedAppCapabilityContractTests(TestCase):
         self.assertEqual(payload.get("meta", {}).get("base_url"), "http://generated-runtime:8080")
         self.assertEqual(runtime_request.call_count, 1)
         self.assertEqual(runtime_request.call_args.kwargs.get("url"), "http://generated-runtime:8080/devices")
+
+    def test_palette_execute_resolves_non_default_generated_app_slug(self):
+        self._bind_generated_artifact(
+            include_interfaces=False,
+            package_version="0.0.1-dev",
+            app_slug="team-lunch-poll",
+            title="Team Lunch Poll",
+        )
+        self._ensure_runtime(app_slug="team-lunch-poll", runtime_base_url="http://team-lunch-poll-runtime:8080")
+
+        with mock.patch(
+            "xyn_orchestrator.xyn_api.requests.request",
+            return_value=_FakeResponse(body={"items": [{"id": "poll-1", "name": "Today", "status": "open"}]}),
+        ) as runtime_request:
+            response = self.client.post(
+                f"/xyn/api/palette/execute?workspace_slug={self.workspace.slug}",
+                data=json.dumps({"prompt": "show devices"}),
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("kind"), "table")
+        self.assertEqual(payload.get("meta", {}).get("base_url"), "http://team-lunch-poll-runtime:8080")
+        self.assertEqual(payload.get("meta", {}).get("app_slug"), "team-lunch-poll")
+        self.assertEqual(runtime_request.call_args.kwargs.get("url"), "http://team-lunch-poll-runtime:8080/devices")
 
     def test_workspace_artifact_listing_ignores_stale_top_level_generated_suggestions(self):
         self._bind_generated_artifact(

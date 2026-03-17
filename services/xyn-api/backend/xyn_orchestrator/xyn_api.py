@@ -15,7 +15,7 @@ import fnmatch
 from functools import wraps
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit, quote, unquote
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Set, Tuple, TypedDict
+from typing import Any, Dict, Iterable, Optional, List, Set, Tuple, TypedDict
 
 import requests
 import boto3
@@ -25,6 +25,7 @@ from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db import models, transaction
+from django.db.models import Q
 from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -65,6 +66,8 @@ from .models import (
     CoordinationThread,
     DevTask,
     Goal,
+    Application,
+    ApplicationPlan,
     Environment,
     EnvironmentAppState,
     Module,
@@ -127,6 +130,7 @@ from .models import (
     ProviderCredential,
     AgentDefinition,
     AgentDefinitionPurpose,
+    ManagedRepository,
     PlatformConfigDocument,
     Report,
     ReportAttachment,
@@ -141,6 +145,7 @@ from .xco import (
     valid_thread_transition,
     work_item_is_blocked,
 )
+from .managed_storage import managed_artifact_root
 from .goal_planning import (
     GoalPlanningOutput,
     decompose_goal,
@@ -151,6 +156,55 @@ from .goal_planning import (
     serialize_goal_summary,
     valid_goal_transition,
 )
+from .application_factories import (
+    ApplicationFactoryDefinition,
+    GeneratedApplicationPlan,
+    apply_application_plan,
+    create_or_get_application_plan,
+    get_application_factory,
+    list_application_factories,
+)
+from .development_targets import repo_target_payload_for_resolution, resolve_development_target
+from .execution_briefs import (
+    ensure_execution_brief_ready,
+    normalize_execution_brief_review_state,
+    regenerate_execution_brief,
+    replace_execution_brief,
+    resolve_execution_brief,
+    serialize_execution_brief_review,
+    valid_execution_brief_review_transition,
+)
+from .execution_queue import (
+    evaluate_dev_task_queue_state,
+    find_dispatchable_queue_entry,
+    select_next_dispatchable_queue_entry,
+    serialize_dev_task_queue_state,
+)
+from .execution_recovery import (
+    evaluate_dev_task_recovery_state,
+    record_execution_failure_snapshot,
+    serialize_dev_task_recovery_state,
+)
+from .execution_publish import (
+    ExecutionPublishError,
+    publish_dev_task,
+    serialize_dev_task_publish_state,
+)
+from .execution_changes import (
+    resolve_dev_task_change_set,
+    serialize_dev_task_change_summary,
+)
+from .system_readiness import system_readiness_report
+from .capabilities.capability_service import get_capabilities as get_contextual_capabilities
+from .capabilities.graph.graph_service import (
+    get_capabilities_for_context as get_capability_graph_context,
+    get_capability_graph_introspection,
+)
+from .capabilities.graph.context_nodes import normalize_context_id
+from .capabilities.graph.path_service import get_capability_paths_for_context
+from .capabilities.events import CapabilityEvent, contexts_for_event
+from .planning.plan_service import get_plan_for_capability
+from .workflows.workflow_service import find_related_draft_jobs, get_draft_workflow
 from .goal_progress import (
     compute_goal_development_loop_summary,
     compute_goal_execution_metrics,
@@ -158,6 +212,12 @@ from .goal_progress import (
     compute_goal_progress,
     compute_thread_execution_metrics,
     compute_thread_progress,
+)
+from .portfolio_intelligence import (
+    build_goal_portfolio_row,
+    build_goal_portfolio_state,
+    compute_portfolio_insights,
+    recommend_portfolio_goal,
 )
 from .execution_observability import build_artifact_evolution, build_thread_timeline, serialize_thread_timeline
 from .development_intelligence import (
@@ -529,6 +589,8 @@ def _intent_goal_candidates(identity: UserIdentity, query: str, workspace_id: st
 
 
 def _conversation_execution_context(identity: UserIdentity, workspace_id: str, thread_id: str = "") -> ConversationExecutionContext:
+    active_application_id: Optional[str] = None
+    active_application_plan_id: Optional[str] = None
     active_goal_id: Optional[str] = None
     active_coordination_thread_id: Optional[str] = None
     current_work_item_id: Optional[str] = None
@@ -581,6 +643,14 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
             continue
         conversation_action = meta.get("conversation_action") if isinstance(meta.get("conversation_action"), dict) else {}
         interpretation = meta.get("prompt_interpretation") if isinstance(meta.get("prompt_interpretation"), dict) else {}
+        if not active_application_id:
+            target_object = conversation_action.get("target_object") if isinstance(conversation_action.get("target_object"), dict) else {}
+            if str(target_object.get("kind") or "").strip() == "application":
+                active_application_id = str(target_object.get("id") or "").strip() or None
+        if not active_application_plan_id:
+            target_object = conversation_action.get("target_object") if isinstance(conversation_action.get("target_object"), dict) else {}
+            if str(target_object.get("kind") or "").strip() == "application_plan":
+                active_application_plan_id = str(target_object.get("id") or "").strip() or None
         if not active_goal_id:
             active_goal_id = (
                 str(meta.get("goal_id") or "").strip()
@@ -625,6 +695,8 @@ def _conversation_execution_context(identity: UserIdentity, workspace_id: str, t
 
     return ConversationExecutionContext(
         thread_id=thread_token or None,
+        active_application_id=active_application_id,
+        active_application_plan_id=active_application_plan_id,
         active_goal_id=active_goal_id,
         active_coordination_thread_id=active_coordination_thread_id,
         current_work_item_id=current_work_item_id,
@@ -920,6 +992,11 @@ def _prompt_interpretation_from_intent(
         "decompose_goal": ("plan", "Decompose goal"),
         "summarize_plan": ("show", "Summarize plan"),
         "queue_first_slice": ("queue", "Queue first slice"),
+        "list_application_factories": ("show", "List application factories"),
+        "open_composer": ("show", "Open composer"),
+        "generate_application_plan": ("plan", "Generate application plan"),
+        "apply_application_plan": ("apply", "Apply application plan"),
+        "show_application": ("show", "Show application"),
         "list_goals": ("show", "List goals"),
         "show_goal": ("show", "Show goal"),
         "approve_plan": ("approve", "Approve plan"),
@@ -941,6 +1018,27 @@ def _prompt_interpretation_from_intent(
             status=str(resolved_subject.get("planning_status") or "") or None,
         )
         if intent.intent_family == "goal_planning" and (resolved_subject.get("id") or resolved_subject.get("label") or action_payload.get("title") or action_payload.get("reference"))
+        else None
+    )
+    target_application = (
+        PromptInterpretationTarget(
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or action_payload.get("application_name") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            status=str(resolved_subject.get("status") or "") or None,
+        )
+        if intent.intent_type == "show_application" and (resolved_subject.get("id") or resolved_subject.get("label") or action_payload.get("reference"))
+        else None
+    )
+    target_application_plan = (
+        PromptInterpretationTarget(
+            id=str(resolved_subject.get("id") or "") or None,
+            label=str(resolved_subject.get("label") or action_payload.get("application_name") or action_payload.get("title") or "") or None,
+            reference=str(action_payload.get("reference") or "") or None,
+            status=str(resolved_subject.get("status") or "") or None,
+        )
+        if intent.intent_type in {"generate_application_plan", "apply_application_plan"}
+        and (resolved_subject.get("id") or action_payload.get("application_name") or action_payload.get("reference"))
         else None
     )
     entity_key = str(
@@ -1010,8 +1108,10 @@ def _prompt_interpretation_from_intent(
         execution_mode = PromptInterpretationExecutionMode.QUEUED_RUN.value
     elif intent.intent_type in {"create_thread", "create_goal"}:
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
-    elif intent.intent_type in {"decompose_goal", "approve_plan", "approve_recommendation", "queue_first_slice", "queue_next_slice"}:
+    elif intent.intent_type in {"decompose_goal", "approve_plan", "approve_recommendation", "queue_first_slice", "queue_next_slice", "apply_application_plan"}:
         execution_mode = PromptInterpretationExecutionMode.AWAITING_REVIEW.value
+    elif intent.intent_type in {"generate_application_plan", "create_goal"}:
+        execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
     elif intent.intent_type in {"unsupported_declared_entity", "unsupported_intent"}:
         execution_mode = PromptInterpretationExecutionMode.BLOCKED.value
     else:
@@ -1074,6 +1174,8 @@ def _prompt_interpretation_from_intent(
     interpretation = PromptInterpretation(
         intent_family=intent.intent_family,
         intent_type=intent.intent_type,
+        target_application=target_application,
+        target_application_plan=target_application_plan,
         target_goal=target_goal,
         target_entity=target_entity,
         target_record=target_record,
@@ -1212,6 +1314,11 @@ def _conversation_action_from_intent(
             IntentType.QUEUE_FIRST_SLICE.value: ConversationActionType.QUEUE_FIRST_SLICE.value,
             IntentType.LIST_GOALS.value: ConversationActionType.LIST_GOALS.value,
             IntentType.SHOW_GOAL.value: ConversationActionType.SHOW_GOAL.value,
+            IntentType.LIST_APPLICATION_FACTORIES.value: ConversationActionType.LIST_APPLICATION_FACTORIES.value,
+            IntentType.OPEN_COMPOSER.value: ConversationActionType.OPEN_COMPOSER.value,
+            IntentType.GENERATE_APPLICATION_PLAN.value: ConversationActionType.GENERATE_APPLICATION_PLAN.value,
+            IntentType.APPLY_APPLICATION_PLAN.value: ConversationActionType.APPLY_APPLICATION_PLAN.value,
+            IntentType.SHOW_APPLICATION.value: ConversationActionType.SHOW_APPLICATION.value,
             IntentType.APPROVE_PLAN.value: ConversationActionType.APPROVE_PLAN.value,
             IntentType.APPROVE_RECOMMENDATION.value: ConversationActionType.APPROVE_RECOMMENDATION.value,
             IntentType.DEFER_EXECUTION.value: ConversationActionType.DEFER_EXECUTION.value,
@@ -1220,8 +1327,17 @@ def _conversation_action_from_intent(
             IntentType.QUEUE_NEXT_SLICE.value: ConversationActionType.QUEUE_NEXT_SLICE.value,
         }
         action_type = action_map.get(intent.intent_type)
+        target_kind = "goal"
+        if intent.intent_type == IntentType.LIST_APPLICATION_FACTORIES.value:
+            target_kind = "workspace"
+        elif intent.intent_type == IntentType.GENERATE_APPLICATION_PLAN.value:
+            target_kind = "application_plan"
+        elif intent.intent_type == IntentType.APPLY_APPLICATION_PLAN.value:
+            target_kind = "application_plan"
+        elif intent.intent_type == IntentType.SHOW_APPLICATION.value:
+            target_kind = "application"
         target = ConversationActionTarget(
-            kind="goal",
+            kind=target_kind,
             id=str(resolved_subject.get("id") or "") or None,
             label=str(resolved_subject.get("label") or action_payload.get("title") or "") or None,
             reference=str(action_payload.get("reference") or "") or None,
@@ -2562,6 +2678,10 @@ def _ensure_default_article_categories_and_bindings() -> None:
         slug="guide",
         defaults={"name": "Guide", "description": "Guides and route-bound in-app docs", "enabled": True},
     )
+    ArticleCategory.objects.get_or_create(
+        slug="demo",
+        defaults={"name": "Demo", "description": "Demo and explainer content", "enabled": True},
+    )
     web, _ = ArticleCategory.objects.get_or_create(
         slug="web",
         defaults={"name": "Web", "description": "Public website articles", "enabled": True},
@@ -3333,11 +3453,23 @@ def _resolve_context_packs_for_purpose(
             deduped.append(row)
         return deduped
 
-    default_rows: List[ContextPack] = []
+    purpose_default_rows: List[ContextPack] = []
+    purpose_default = AgentPurpose.objects.filter(slug=purpose_slug).first()
+    if purpose_default and isinstance(purpose_default.default_context_pack_refs_json, list):
+        purpose_default_rows, default_err = _resolve_many(purpose_default.default_context_pack_refs_json)
+        if default_err:
+            return [], "purpose_default", "", default_err, "extend", []
+
+    agent_default_rows: List[ContextPack] = []
     if agent and isinstance(agent.context_pack_refs_json, list):
-        default_rows, default_err = _resolve_many(agent.context_pack_refs_json)
+        agent_default_rows, default_err = _resolve_many(agent.context_pack_refs_json)
         if default_err:
             return [], "agent_default", "", default_err, "extend", []
+
+    default_rows = _dedupe(purpose_default_rows + agent_default_rows)
+    default_sources = {str(row.id): "purpose_default" for row in purpose_default_rows}
+    for row in agent_default_rows:
+        default_sources.setdefault(str(row.id), "agent_default")
 
     if override_present:
         override_refs = raw_override
@@ -3364,13 +3496,14 @@ def _resolve_context_packs_for_purpose(
         refs_with_source: List[Dict[str, Any]] = []
         override_ids = {str(item.id) for item in rows}
         for ref in resolved.get("refs", []):
-            source = "override" if str(ref.get("id") or "") in override_ids else "agent_default"
+            source = "override" if str(ref.get("id") or "") in override_ids else default_sources.get(str(ref.get("id") or ""), "agent_default")
             refs_with_source.append({**ref, "source": source})
         return merged_rows, "override", resolved.get("hash", ""), None, override_mode, refs_with_source
 
     resolved = _resolve_context_pack_list(default_rows)
-    refs_with_source = [{**ref, "source": "agent_default"} for ref in resolved.get("refs", [])]
-    return default_rows, "agent_default", resolved.get("hash", ""), None, "extend", refs_with_source
+    refs_with_source = [{**ref, "source": default_sources.get(str(ref.get("id") or ""), "agent_default")} for ref in resolved.get("refs", [])]
+    source = "agent_default" if agent_default_rows else "purpose_default" if purpose_default_rows else "agent_default"
+    return default_rows, source, resolved.get("hash", ""), None, "extend", refs_with_source
 
 
 def _effective_video_ai_config(artifact: Artifact) -> Dict[str, Any]:
@@ -3482,7 +3615,10 @@ def _create_render_package_artifact(
     title = f"{article.title} Render Package"
     slug = _normalize_artifact_slug(
         "",
-        fallback_title=f"{article.slug or slugify(article.title) or 'article'}-render-package-{timezone.now().strftime('%Y%m%d%H%M%S')}",
+        fallback_title=(
+            f"{article.slug or slugify(article.title) or 'article'}-render-package-"
+            f"{(input_snapshot_hash or spec_snapshot_hash or uuid.uuid4().hex)[:12]}"
+        ),
     )
     render_package = Artifact.objects.create(
         workspace=article.workspace,
@@ -4751,7 +4887,14 @@ def _default_platform_config() -> Dict[str, Any]:
                 {
                     "name": "local",
                     "type": "local",
-                    "local": {"base_path": os.environ.get("XYN_UPLOADS_LOCAL_PATH", "/tmp/xyn-uploads")},
+                    "local": {
+                        "base_path": (
+                            os.environ.get("XYN_UPLOADS_LOCAL_PATH")
+                            or os.environ.get("XYN_ARTIFACT_ROOT")
+                            or os.environ.get("XYN_MEDIA_ROOT")
+                            or "/tmp/xyn-uploads"
+                        )
+                    },
                 }
             ],
         },
@@ -4824,6 +4967,136 @@ def _load_platform_config() -> Dict[str, Any]:
     merged = _default_platform_config()
     merged.update(cfg)
     return _migrate_video_generation_to_video(merged)
+
+
+def _platform_storage_status(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    cfg = payload if isinstance(payload, dict) else _default_platform_config()
+    storage = cfg.get("storage") if isinstance(cfg.get("storage"), dict) else {}
+    primary = storage.get("primary") if isinstance(storage.get("primary"), dict) else {}
+    providers = storage.get("providers") if isinstance(storage.get("providers"), list) else []
+
+    provider_map: Dict[str, Dict[str, Any]] = {}
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        name = str(provider.get("name") or "").strip()
+        if not name:
+            continue
+        provider_map[name] = provider
+
+    primary_name = str(primary.get("name") or "").strip()
+    primary_type = str(primary.get("type") or "local").strip().lower() or "local"
+    primary_provider = provider_map.get(primary_name, {})
+
+    configured_complete = True
+    configured_summary = ""
+    if primary_type == "s3":
+        s3_cfg = primary_provider.get("s3") if isinstance(primary_provider.get("s3"), dict) else {}
+        bucket = str(s3_cfg.get("bucket") or "").strip()
+        region = str(s3_cfg.get("region") or "").strip()
+        configured_complete = bool(bucket and region)
+        if configured_complete:
+            configured_summary = f"S3 bucket {bucket} in {region}"
+        else:
+            missing: list[str] = []
+            if not bucket:
+                missing.append("bucket")
+            if not region:
+                missing.append("region")
+            configured_summary = f"S3 configuration is incomplete: missing {', '.join(missing)}"
+    else:
+        local_cfg = primary_provider.get("local") if isinstance(primary_provider.get("local"), dict) else {}
+        local_path = str(local_cfg.get("base_path") or "").strip() or "/tmp/xyn-uploads"
+        configured_summary = f"Local platform-managed storage at {local_path}"
+
+    runtime_provider = str(
+        os.environ.get("XYN_RUNTIME_ARTIFACT_PROVIDER")
+        or os.environ.get("XYN_ARTIFACT_STORE_PROVIDER")
+        or "local"
+    ).strip().lower()
+    if runtime_provider in {"filesystem", "fs"}:
+        runtime_provider = "local"
+    runtime_s3_bucket = str(
+        os.environ.get("XYN_RUNTIME_ARTIFACT_S3_BUCKET")
+        or os.environ.get("XYN_ARTIFACT_S3_BUCKET")
+        or ""
+    ).strip()
+    runtime_s3_region = str(
+        os.environ.get("XYN_RUNTIME_ARTIFACT_S3_REGION")
+        or os.environ.get("XYN_ARTIFACT_S3_REGION")
+        or ""
+    ).strip()
+    runtime_s3_prefix = str(
+        os.environ.get("XYN_RUNTIME_ARTIFACT_S3_PREFIX")
+        or os.environ.get("XYN_ARTIFACT_S3_PREFIX")
+        or "runtime-artifacts"
+    ).strip().strip("/")
+    runtime_root = str(
+        os.environ.get("XYN_ARTIFACT_ROOT")
+        or os.environ.get("ARTIFACT_STORE_PATH")
+        or managed_artifact_root()
+    )
+
+    runtime_provider_effective = "local"
+    runtime_mode = "filesystem"
+    runtime_path = runtime_root
+    runtime_configured = True
+    remote_durability_active = False
+    if runtime_provider == "s3":
+        runtime_configured = bool(runtime_s3_bucket)
+        if runtime_configured:
+            runtime_provider_effective = "s3"
+            runtime_mode = "object_storage"
+            runtime_path = f"s3://{runtime_s3_bucket}/{runtime_s3_prefix}" if runtime_s3_prefix else f"s3://{runtime_s3_bucket}"
+            remote_durability_active = True
+
+    warnings: list[str] = []
+    if not remote_durability_active:
+        warnings.append(
+            "Artifacts are currently stored only on local filesystem storage. Remote-backed storage is not active, so artifacts may not be preserved across host loss or environment rebuilds."
+        )
+    if runtime_provider == "s3" and not runtime_configured:
+        warnings.append(
+            "Runtime artifact storage provider is set to S3, but XYN_RUNTIME_ARTIFACT_S3_BUCKET is missing. Falling back to local filesystem storage."
+        )
+    if primary_type == "s3" and configured_complete:
+        if runtime_provider_effective != "s3":
+            warnings.append(
+                "S3 is configured for platform-managed storage, but core runtime artifacts still use local filesystem storage today."
+            )
+    elif primary_type == "s3" and not configured_complete:
+        warnings.append(
+            "S3 is selected in Platform Settings, but the configuration is incomplete and is not active for platform-managed storage."
+        )
+
+    # Platform Settings configures platform-managed storage providers, but the core runtime
+    # artifact store remains filesystem-backed today. Report both so the UI can avoid
+    # implying remote durability where it does not exist.
+    return {
+        "configured_provider": {
+            "name": primary_name or ("default" if primary_type == "s3" else "local"),
+            "type": primary_type,
+            "complete": configured_complete,
+            "summary": configured_summary,
+        },
+        "effective_platform_storage": {
+            "provider": primary_type if configured_complete else "local",
+            "mode": "object_storage" if primary_type == "s3" and configured_complete else "filesystem",
+            "configured": configured_complete,
+        },
+        "effective_runtime_artifact_storage": {
+            "provider": runtime_provider_effective,
+            "mode": runtime_mode,
+            "path": runtime_path,
+            "configured": runtime_configured,
+            "raw_provider": runtime_provider,
+            "bucket": runtime_s3_bucket or None,
+            "region": runtime_s3_region or None,
+            "prefix": runtime_s3_prefix or None,
+        },
+        "remote_durability_active": remote_durability_active,
+        "warnings": warnings,
+    }
 
 
 def _video_rendering_config(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -5483,6 +5756,7 @@ def platform_config_collection(request: HttpRequest) -> JsonResponse:
             {
                 "version": int(latest.version) if latest else 0,
                 "config": payload,
+                "storage_status": _platform_storage_status(payload),
             }
         )
     if request.method in {"PUT", "PATCH"}:
@@ -5500,7 +5774,13 @@ def platform_config_collection(request: HttpRequest) -> JsonResponse:
             config_json=payload,
             created_by=request.user if request.user.is_authenticated else None,
         )
-        return JsonResponse({"version": int(document.version), "config": document.config_json})
+        return JsonResponse(
+            {
+                "version": int(document.version),
+                "config": document.config_json,
+                "storage_status": _platform_storage_status(document.config_json),
+            }
+        )
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 
@@ -6864,7 +7144,10 @@ def auth_login(request: HttpRequest) -> HttpResponse:
     token_login_enabled = mode == "token"
     login_error = str(request.GET.get("error") or "").strip()
     login_email = str(request.GET.get("email") or "").strip()
-    if mode == "oidc" and client:
+    env = _resolve_environment(request)
+    has_env_oidc = bool(env and _get_oidc_env_config(env))
+    effective_mode = "oidc" if client or has_env_oidc else mode
+    if client:
         config = _build_oidc_config_payload(client)
         providers = config.get("providers") or []
         if not providers and config.get("allowed_providers"):
@@ -6884,7 +7167,7 @@ def auth_login(request: HttpRequest) -> HttpResponse:
             "default_provider_id": config.get("defaultProviderId"),
             "branding": branding,
             "login_title": f"Sign in to {branding.get('display_name') or app_id}",
-            "auth_mode": mode,
+            "auth_mode": effective_mode,
             "local_login_enabled": local_login_enabled,
             "token_login_enabled": token_login_enabled,
             "login_error": login_error,
@@ -6895,7 +7178,7 @@ def auth_login(request: HttpRequest) -> HttpResponse:
         response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response["Pragma"] = "no-cache"
         return response
-    if mode == "oidc":
+    if mode == "oidc" or has_env_oidc:
         return _start_env_fallback_login(request, app_id=app_id, return_to=return_to)
     branding = _merge_branding_for_app(app_id)
     context = {
@@ -6905,7 +7188,7 @@ def auth_login(request: HttpRequest) -> HttpResponse:
         "default_provider_id": "",
         "branding": branding,
         "login_title": f"Sign in to {branding.get('display_name') or app_id}",
-        "auth_mode": mode,
+        "auth_mode": effective_mode,
         "local_login_enabled": local_login_enabled,
         "token_login_enabled": token_login_enabled,
         "login_error": login_error,
@@ -7280,8 +7563,6 @@ def workspace_auth_callback_api(request: HttpRequest, workspace_id: str) -> Http
 
 @csrf_exempt
 def auth_callback(request: HttpRequest) -> HttpResponse:
-    if _auth_mode() != "oidc":
-        return _auth_state_error(request, reason="oidc callback requested while XYN_AUTH_MODE is not oidc")
     provider_id = request.session.get("oidc_provider_id")
     state = request.POST.get("state") if request.method == "POST" else request.GET.get("state")
     if not provider_id:
@@ -7317,10 +7598,10 @@ def auth_callback(request: HttpRequest) -> HttpResponse:
         )
     env = _resolve_environment(request)
     if not env:
-        return JsonResponse({"error": "environment not found"}, status=404)
+        return _auth_state_error(request, reason="environment not found")
     config = _get_oidc_env_config(env)
     if not config:
-        return JsonResponse({"error": "OIDC not configured"}, status=500)
+        return _auth_state_error(request, reason="OIDC not configured")
     issuer = config.get("issuer_url")
     client_id = config.get("client_id")
     secret_ref = config.get("client_secret_ref") or {}
@@ -8349,6 +8630,17 @@ def _sanitize_return_to(raw_value: str, request: HttpRequest, client: Optional[A
         return fallback
     split = urlsplit(value)
     if split.scheme or split.netloc:
+        if split.scheme != "https" or not split.netloc or not client:
+            return fallback
+        allowed_redirects = client.redirect_uris_json if isinstance(client.redirect_uris_json, list) else []
+        requested_host = str(split.hostname or "").strip().lower()
+        for redirect_uri in allowed_redirects:
+            redirect_split = urlsplit(str(redirect_uri or "").strip())
+            allowed_host = str(redirect_split.hostname or "").strip().lower()
+            if not allowed_host:
+                continue
+            if requested_host == allowed_host or requested_host.endswith(f".{allowed_host}"):
+                return urlunsplit(split)
         return fallback
     if not value.startswith("/") or value.startswith("//"):
         return fallback
@@ -9495,7 +9787,7 @@ def validate_artifact(artifact: Artifact) -> Tuple[str, List[str]]:
         latest = _latest_artifact_revision(artifact)
         content = latest.content_json if latest and isinstance(latest.content_json, dict) else {}
         if not str(content.get("body_markdown") or "").strip():
-            errors.append("article body_markdown is required")
+            warnings.append("article body_markdown is empty")
         if not str(content.get("summary") or "").strip():
             warnings.append("article summary is empty")
     elif slug == "workflow":
@@ -9887,6 +10179,11 @@ def _raw_path_to_key(raw_path: str) -> str:
     return normalized
 
 
+def _raw_path_is_invalid(raw_path: str) -> bool:
+    normalized = str(raw_path or "").strip().replace("\\", "/")
+    return any(part == ".." for part in normalized.split("/"))
+
+
 def _artifact_raw_entries(file_map: Dict[str, bytes], directory: str) -> List[Dict[str, Any]]:
     directory = f"/{_raw_path_to_key(directory)}".rstrip("/")
     if directory == "":
@@ -9914,12 +10211,22 @@ def _artifact_raw_entries(file_map: Dict[str, bytes], directory: str) -> List[Di
     return sorted(entries.values(), key=lambda row: (row["kind"] != "dir", str(row["name"]).lower()))
 
 
+def _require_artifact_debug_view(request: HttpRequest) -> Tuple[Optional[UserIdentity], Optional[JsonResponse]]:
+    identity = _require_authenticated(request)
+    if not identity:
+        return None, JsonResponse({"error": "not authenticated"}, status=401)
+    if not _is_platform_admin(identity):
+        return identity, JsonResponse({"error": "forbidden"}, status=403)
+    return identity, None
+
+
 @csrf_exempt
 def artifact_raw_metadata(request: HttpRequest, artifact_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     artifact = get_object_or_404(Artifact.objects.select_related("type"), id=artifact_id)
     return JsonResponse(
         {
@@ -9945,8 +10252,9 @@ def artifact_raw_metadata(request: HttpRequest, artifact_id: str) -> JsonRespons
 def artifact_raw_artifact_json(request: HttpRequest, artifact_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     artifact = get_object_or_404(Artifact.objects.select_related("type"), id=artifact_id)
     return JsonResponse(_artifact_raw_payload(artifact))
 
@@ -9955,10 +10263,13 @@ def artifact_raw_artifact_json(request: HttpRequest, artifact_id: str) -> JsonRe
 def artifact_raw_files(request: HttpRequest, artifact_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     artifact = get_object_or_404(Artifact, id=artifact_id)
     directory = str(request.GET.get("path") or "/")
+    if _raw_path_is_invalid(directory):
+        return JsonResponse({"error": "invalid path"}, status=400)
     file_map = _artifact_raw_file_map(artifact)
     return JsonResponse({"path": directory, "entries": _artifact_raw_entries(file_map, directory)})
 
@@ -9967,12 +10278,15 @@ def artifact_raw_files(request: HttpRequest, artifact_id: str) -> JsonResponse:
 def artifact_raw_file(request: HttpRequest, artifact_id: str) -> HttpResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     artifact = get_object_or_404(Artifact, id=artifact_id)
     raw_path = str(request.GET.get("path") or "").strip()
     if not raw_path:
         return JsonResponse({"error": "path is required"}, status=400)
+    if _raw_path_is_invalid(raw_path):
+        return JsonResponse({"error": "invalid path"}, status=400)
     key = _raw_path_to_key(raw_path)
     blob = _artifact_raw_file_map(artifact).get(key)
     if blob is None:
@@ -10106,8 +10420,9 @@ def artifact_by_slug_files(request: HttpRequest, artifact_slug: str) -> JsonResp
 def artifact_package_raw_manifest(request: HttpRequest, package_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     package = get_object_or_404(ArtifactPackage, id=package_id)
     return JsonResponse({"manifest": package.manifest if isinstance(package.manifest, dict) else {}})
 
@@ -10116,8 +10431,9 @@ def artifact_package_raw_manifest(request: HttpRequest, package_id: str) -> Json
 def artifact_package_raw_tree(request: HttpRequest, package_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     package = get_object_or_404(ArtifactPackage, id=package_id)
     manifest = package.manifest if isinstance(package.manifest, dict) else {}
     artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
@@ -10136,12 +10452,15 @@ def artifact_package_raw_tree(request: HttpRequest, package_id: str) -> JsonResp
 def artifact_package_raw_file(request: HttpRequest, package_id: str) -> HttpResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    _, access_error = _require_artifact_debug_view(request)
+    if access_error:
+        return access_error
     package = get_object_or_404(ArtifactPackage, id=package_id)
     path_value = str(request.GET.get("path") or "").strip()
     if not path_value:
         return JsonResponse({"error": "path is required"}, status=400)
+    if _raw_path_is_invalid(path_value):
+        return JsonResponse({"error": "invalid path"}, status=400)
     key = _raw_path_to_key(path_value)
     manifest = package.manifest if isinstance(package.manifest, dict) else {}
     if key == "manifest.json":
@@ -10319,15 +10638,24 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
 
     manifest = package.manifest if isinstance(package.manifest, dict) else {}
     artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
-    invalid = [
-        f"{item.get('type')}:{item.get('slug')}@{item.get('version')}"
-        for item in artifacts
-        if isinstance(item, dict) and not str(item.get("slug") or "").strip().startswith("app.")
-    ]
+    invalid = []
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        artifact_type = str(item.get("type") or "").strip()
+        slug = str(item.get("slug") or "").strip()
+        allowed = (
+            artifact_type == "application" and slug.startswith("app.")
+        ) or (
+            artifact_type == "policy_bundle" and slug.startswith("policy.")
+        )
+        if allowed:
+            continue
+        invalid.append(f"{artifact_type}:{slug}@{item.get('version')}")
     if invalid:
         return JsonResponse(
             {
-                "error": "generated artifact import only accepts app.* slugs",
+                "error": "generated artifact import only accepts application app.* and policy_bundle policy.* slugs",
                 "details": invalid,
             },
             status=400,
@@ -11053,7 +11381,7 @@ def workspace_artifacts_collection(request: HttpRequest, workspace_id: str) -> J
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     membership = _workspace_membership(identity, workspace_id)
-    if not membership:
+    if not membership and not _is_platform_admin(identity):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method == "POST":
         if not _workspace_has_role(identity, workspace_id, "contributor"):
@@ -11193,7 +11521,7 @@ def workspace_artifacts_collection(request: HttpRequest, workspace_id: str) -> J
         qs = qs.filter(artifact__type__slug=artifact_type)
     if status:
         qs = qs.filter(artifact__status=status)
-    if membership.role == "reader":
+    if membership and membership.role == "reader":
         qs = qs.filter(artifact__status="published").filter(artifact__visibility__in=["team", "public"])
     data: List[Dict[str, Any]] = []
     for item in qs.order_by("-artifact__updated_at", "-updated_at"):
@@ -13235,11 +13563,23 @@ def _process_video_render(video_render: VideoRender) -> VideoRender:
     render_mode = str(provider_cfg.get("rendering_mode") or "").strip().lower()
     provider_configured = bool(raw_result.get("provider_configured")) if isinstance(raw_result, dict) else False
     has_video_asset = any(str((asset or {}).get("type") or "").strip().lower() == "video" for asset in (assets or []))
+    has_export_package = any(str((asset or {}).get("type") or "").strip().lower() == "export_package" for asset in (assets or []))
     requires_external_output = render_mode in {"render_via_adapter", "render_via_endpoint", "render_via_model_config"}
+    normalized_outcome = str((raw_result or {}).get("outcome") or "").strip().lower() if isinstance(raw_result, dict) else ""
     finished_at = timezone.now()
     video_render.provider = provider or "unknown"
-    if requires_external_output and (not provider_configured or not has_video_asset):
+    video_render.export_package_generated = has_export_package
+    if normalized_outcome == "filtered":
+        video_render.status = "filtered"
+        video_render.outcome = "filtered"
+        video_render.provider_filtered_count = int((raw_result or {}).get("provider_filtered_count") or 0)
+        reasons = (raw_result or {}).get("provider_filtered_reasons")
+        video_render.provider_filtered_reasons = reasons if isinstance(reasons, list) else []
+        video_render.error_message = str((raw_result or {}).get("message") or "")
+        video_render.error_details_json = {}
+    elif requires_external_output and (not provider_configured or not has_video_asset):
         video_render.status = "failed"
+        video_render.outcome = "failed"
         message = str((raw_result or {}).get("message") or "Render did not produce a video asset")
         video_render.error_message = message
         video_render.error_details_json = {
@@ -13249,6 +13589,7 @@ def _process_video_render(video_render: VideoRender) -> VideoRender:
         }
     else:
         video_render.status = "succeeded"
+        video_render.outcome = "succeeded"
         video_render.error_message = ""
         video_render.error_details_json = {}
     video_render.completed_at = finished_at
@@ -13258,6 +13599,10 @@ def _process_video_render(video_render: VideoRender) -> VideoRender:
         update_fields=[
             "provider",
             "status",
+            "outcome",
+            "provider_filtered_count",
+            "provider_filtered_reasons",
+            "export_package_generated",
             "completed_at",
             "result_payload_json",
             "output_assets",
@@ -13271,7 +13616,7 @@ def _process_video_render(video_render: VideoRender) -> VideoRender:
         **(spec.get("generation") if isinstance(spec.get("generation"), dict) else {}),
         "provider": video_render.provider,
         "model_name": video_render.model_name or "",
-        "status": "failed" if video_render.status == "failed" else "succeeded",
+        "status": "failed" if video_render.status == "failed" else ("filtered" if video_render.status == "filtered" else "succeeded"),
         "last_render_id": str(video_render.id),
         "spec_snapshot_hash": video_render.spec_snapshot_hash or "",
         "input_snapshot_hash": video_render.input_snapshot_hash or "",
@@ -14914,6 +15259,7 @@ def tour_detail(request: HttpRequest, tour_slug: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     _ensure_workflow_artifact_type()
+    default_payload = _default_tour_payload(tour_slug)
     artifact = (
         Artifact.objects.filter(
             type__slug=WORKFLOW_ARTIFACT_TYPE_SLUG,
@@ -14925,7 +15271,9 @@ def tour_detail(request: HttpRequest, tour_slug: str) -> JsonResponse:
         .first()
     )
     if not artifact:
-        return JsonResponse({"error": "tour not found"}, status=404)
+        if default_payload.get("error"):
+            return JsonResponse({"error": "tour not found"}, status=404)
+        return JsonResponse(default_payload)
     if not _can_view_workflow(identity, artifact):
         return JsonResponse({"error": "forbidden"}, status=403)
     spec = _normalize_workflow_spec(
@@ -15150,6 +15498,16 @@ def ai_bootstrap_status(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "forbidden"}, status=403)
     _ensure_default_agent_purposes()
     return JsonResponse({"default_agent": get_default_agent_bootstrap_status()})
+
+
+@csrf_exempt
+def system_readiness(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(system_readiness_report())
 
 
 @csrf_exempt
@@ -16321,10 +16679,16 @@ def app_palette_execute(request: HttpRequest) -> JsonResponse:
     prompt = str(payload.get("prompt") or "").strip()
     prompt_key = _normalize_palette_prompt(prompt)
     request_id = str(uuid.uuid4())
-    runtime_target_record = _workspace_runtime_target(workspace, "net-inventory")
-    generated_artifact_issue = _workspace_generated_artifact_issue(workspace, "net-inventory")
-    capability_manifest = _workspace_installed_capability_manifest(workspace, "net-inventory")
-    if runtime_target_record and generated_artifact_issue and _looks_like_generated_crud_prompt(prompt):
+    generated_app_slug = _resolve_generated_app_slug(workspace) or "net-inventory"
+    runtime_target_record = _workspace_runtime_target(workspace, generated_app_slug)
+    generated_artifact_issue = _workspace_generated_artifact_issue(workspace, generated_app_slug)
+    capability_manifest = _workspace_installed_capability_manifest(workspace, generated_app_slug)
+    if (
+        runtime_target_record
+        and generated_artifact_issue
+        and _looks_like_generated_crud_prompt(prompt)
+        and not _match_generated_app_evolution_command(prompt, workspace)
+    ):
         result = _generated_app_invalid_contract_response(prompt=prompt, issue=generated_artifact_issue)
         _log_prompt_activity(
             request_id=request_id,
@@ -16760,29 +17124,67 @@ def _direct_panel_intent_response(
     panel_key: str,
     params: Optional[Dict[str, Any]] = None,
     prompt_interpretation: Optional[Dict[str, Any]] = None,
+    extra_payload: Optional[Dict[str, Any]] = None,
 ) -> JsonResponse:
-    return JsonResponse(
-        {
-            "status": "IntentResolved",
-            "action_type": "ValidateDraft",
-            "artifact_type": "Workspace",
-            "artifact_id": None,
-            "summary": summary,
-            "prompt_interpretation": prompt_interpretation or {},
-            "next_actions": [
-                {
-                    "label": "Open panel",
-                    "action": "OpenPanel",
-                    "panel_key": panel_key,
-                    "params": params or {},
-                }
-            ],
-            "audit": {
-                "request_id": request_id,
-                "timestamp": timezone.now().isoformat(),
-            },
-        }
-    )
+    payload: Dict[str, Any] = {
+        "status": "IntentResolved",
+        "action_type": "ValidateDraft",
+        "artifact_type": "Workspace",
+        "artifact_id": None,
+        "summary": summary,
+        "prompt_interpretation": prompt_interpretation or {},
+        "next_actions": [
+            {
+                "label": "Open panel",
+                "action": "OpenPanel",
+                "panel_key": panel_key,
+                "params": params or {},
+            }
+        ],
+        "audit": {
+            "request_id": request_id,
+            "timestamp": timezone.now().isoformat(),
+        },
+    }
+    if isinstance(extra_payload, dict):
+        payload.update(extra_payload)
+    return JsonResponse(payload)
+
+
+def _direct_panel_target_for_conversation_action(
+    *,
+    action_type: str,
+    workspace_id: str,
+    action_payload: Optional[Dict[str, Any]] = None,
+    target: Optional[Dict[str, Any]] = None,
+) -> Optional[Tuple[str, Dict[str, Any]]]:
+    payload = action_payload if isinstance(action_payload, dict) else {}
+    target_object = target if isinstance(target, dict) else {}
+    summary_mode = str(payload.get("summary_mode") or "").strip()
+    target_id = str(target_object.get("id") or "").strip()
+
+    if action_type == ConversationActionType.LIST_APPLICATION_FACTORIES.value:
+        return "composer_detail", {"workspace_id": workspace_id}
+    if action_type == ConversationActionType.OPEN_COMPOSER.value:
+        params: Dict[str, Any] = {"workspace_id": workspace_id}
+        for key in ("factory_key", "application_plan_id", "application_id", "goal_id", "thread_id"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                params[key] = value
+        return "composer_detail", params
+    if action_type == ConversationActionType.LIST_THREADS.value:
+        return "thread_list", {"workspace_id": workspace_id}
+    if action_type == ConversationActionType.SHOW_THREAD_REVIEW.value and target_id:
+        return "composer_detail", {"workspace_id": workspace_id, "thread_id": target_id}
+    if action_type == ConversationActionType.SHOW_THREAD.value and target_id and not summary_mode:
+        return "composer_detail", {"workspace_id": workspace_id, "thread_id": target_id}
+    if action_type == ConversationActionType.LIST_GOALS.value and not summary_mode:
+        return "composer_detail", {"workspace_id": workspace_id}
+    if action_type == ConversationActionType.SHOW_GOAL.value and target_id and not summary_mode:
+        return "composer_detail", {"workspace_id": workspace_id, "goal_id": target_id}
+    if action_type == ConversationActionType.SHOW_APPLICATION.value and target_id:
+        return "composer_detail", {"workspace_id": workspace_id, "application_id": target_id}
+    return None
 
 
 def _direct_panel_prompt_interpretation(
@@ -16964,6 +17366,29 @@ def _installed_generated_app_contexts(workspace: Workspace) -> List[Dict[str, An
     return contexts
 
 
+def _resolve_generated_app_slug(workspace: Workspace, *, preferred_app_slug: str = "") -> Optional[str]:
+    preferred = str(preferred_app_slug or "").strip()
+    if preferred:
+        artifact_slug = f"app.{preferred}"
+        if _workspace_has_installed_artifact_slug(workspace, artifact_slug) or _workspace_runtime_target(workspace, preferred):
+            return preferred
+    contexts = _installed_generated_app_contexts(workspace)
+    if not contexts:
+        return None
+    if len(contexts) == 1:
+        return str(contexts[0].get("app_slug") or "").strip() or None
+    active_contexts = [row for row in contexts if str(row.get("runtime_instance_id") or "").strip()]
+    if len(active_contexts) == 1:
+        return str(active_contexts[0].get("app_slug") or "").strip() or None
+    legacy_default = next(
+        (str(row.get("app_slug") or "").strip() for row in contexts if str(row.get("app_slug") or "").strip() == "net-inventory"),
+        "",
+    )
+    if legacy_default:
+        return legacy_default
+    return str(contexts[0].get("app_slug") or "").strip() or None
+
+
 def _looks_like_generated_app_evolution_request(message: str) -> bool:
     text = str(message or "").strip()
     if not text:
@@ -16992,6 +17417,9 @@ def _match_generated_app_evolution_command(message: str, workspace: Workspace) -
     if len(contexts) != 1:
         return None
     context = contexts[0]
+    current_app_spec = context.get("current_app_spec") if isinstance(context.get("current_app_spec"), dict) else {}
+    if not current_app_spec:
+        return None
     fields = _extract_app_intent_fields(message)
     current_app_summary = context.get("current_app_summary") if isinstance(context.get("current_app_summary"), dict) else {}
     current_entities = current_app_summary.get("entities") if isinstance(current_app_summary.get("entities"), list) else []
@@ -17024,7 +17452,7 @@ def _match_generated_app_evolution_command(message: str, workspace: Workspace) -
         "raw_prompt": str(fields.get("raw_prompt") or message),
         "revision_anchor": revision_anchor,
         "current_app_summary": current_app_summary,
-        "current_app_spec": context.get("current_app_spec") if isinstance(context.get("current_app_spec"), dict) else {},
+        "current_app_spec": current_app_spec,
         "latest_appspec_ref": latest_appspec_ref,
     }
 
@@ -17264,6 +17692,18 @@ def _runtime_run_detail_payload(
     artifacts: List[Dict[str, Any]],
     now: Optional[dt.datetime] = None,
 ) -> Dict[str, Any]:
+    def _step_sort_key(step: Dict[str, Any]) -> Tuple[int, str, str]:
+        raw_sequence = step.get("sequence_no")
+        try:
+            sequence_no = int(raw_sequence)
+        except (TypeError, ValueError):
+            sequence_no = 10_000
+        return (
+            sequence_no,
+            str(step.get("started_at") or ""),
+            str(step.get("step_key") or step.get("name") or ""),
+        )
+
     prompt_payload = run_payload.get("prompt_payload") if isinstance(run_payload.get("prompt_payload"), dict) else {}
     target = prompt_payload.get("target") if isinstance(prompt_payload.get("target"), dict) else {}
     prompt = prompt_payload.get("prompt") if isinstance(prompt_payload.get("prompt"), dict) else {}
@@ -17294,7 +17734,7 @@ def _runtime_run_detail_payload(
                 "started_at": step.get("started_at"),
                 "completed_at": step.get("completed_at"),
             }
-            for step in sorted(steps, key=lambda item: (int(item.get("sequence_no") or 0), str(item.get("started_at") or "")))
+            for step in sorted(steps, key=_step_sort_key)
         ],
         "artifacts": [
             {
@@ -17658,6 +18098,8 @@ def _should_use_legacy_intake_fallback(prompt: str, *, context_artifact: Optiona
     text = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
     if not text:
         return False
+    if re.search(r"\b(create|make|start|new)\s+draft\b", text):
+        return True
     if re.search(r"^(show options|what categories|what formats|available categories|available formats)\b", text):
         return True
     if "context pack" in text and re.search(r"\b(add|set|update|rewrite|change|edit|patch)\b", text):
@@ -17843,6 +18285,15 @@ def _entity_allowed_update_fields(contract: Dict[str, Any]) -> List[str]:
     return [str(field).strip() for field in (validation.get("allowed_on_update") if isinstance(validation.get("allowed_on_update"), list) else []) if str(field).strip()]
 
 
+def _should_use_direct_generated_target_reference(target_reference: str) -> bool:
+    token = str(target_reference or "").strip()
+    if not token:
+        return False
+    if re.match(r"^[0-9a-fA-F-]{32,36}$", token):
+        return True
+    return bool(re.search(r"[-._]|\\d", token))
+
+
 def _entity_table_columns(contract: Dict[str, Any], *, detail: bool) -> List[str]:
     presentation = contract.get("presentation") if isinstance(contract.get("presentation"), dict) else {}
     preferred = presentation.get("default_detail_fields" if detail else "default_list_fields")
@@ -17864,6 +18315,10 @@ def _entity_field_aliases(contract: Dict[str, Any]) -> Dict[str, str]:
         aliases[name.casefold()] = name
         if name.endswith("_id"):
             aliases[name[:-3].casefold()] = name
+    for name in _entity_allowed_update_fields(contract):
+        aliases.setdefault(name.casefold(), name)
+        if name.endswith("_id"):
+            aliases.setdefault(name[:-3].casefold(), name)
     title_field = _entity_title_field(contract)
     if title_field:
         aliases["title"] = title_field
@@ -18022,6 +18477,7 @@ def _resolve_generated_entity_operation(prompt: str, capability_manifest: Dict[s
                     "contract": contract,
                     "command_key": f"delete {singular}",
                     "target_reference": str(delete_match.group("target") or "").strip(),
+                    "direct_target_reference": _should_use_direct_generated_target_reference(str(delete_match.group("target") or "").strip()),
                 }
         rename_match = re.match(rf"^\s*rename\s+{singular_pattern}\s+(?P<target>\S+)\s+to\s+(?P<value>.+?)\s*$", normalized_source, flags=re.IGNORECASE)
         if rename_match:
@@ -18035,6 +18491,7 @@ def _resolve_generated_entity_operation(prompt: str, capability_manifest: Dict[s
                     "command_key": f"update {singular}",
                     "target_reference": str(rename_match.group("target") or "").strip(),
                     "field_mutations": {title_field: str(rename_match.group("value") or "").strip()},
+                    "direct_target_reference": True,
                     "example": f"rename {singular} old-name to new-name",
                 }
         update_match = re.match(rf"^\s*(update|change)\s+{singular_pattern}\b(?P<rest>.*)$", normalized_source, flags=re.IGNORECASE)
@@ -18051,6 +18508,7 @@ def _resolve_generated_entity_operation(prompt: str, capability_manifest: Dict[s
                     "field_mutations": mutations,
                     "missing_fields": missing,
                     "target_required": target_required or not target_reference,
+                    "direct_target_reference": _should_use_direct_generated_target_reference(target_reference),
                     "example": f"update {singular} demo-{singular} status offline",
                 }
     if explicit_entity_operation_requested:
@@ -18099,63 +18557,91 @@ def _resolve_generated_entity_operation_with_runtime(
         flags=re.IGNORECASE,
     ).strip()
     entities = _manifest_entity_contracts(capability_manifest)
+    target_change_match = re.match(r"^\s*(change|update)\s+(?P<target>\S+)\s+to\s+(?P<value>.+?)\s*$", normalized_source, flags=re.IGNORECASE)
+    if target_change_match:
+        target_reference = str(target_change_match.group("target") or "").strip()
+        value = str(target_change_match.group("value") or "").strip()
+        update_candidates = [
+            (entity_key, contract)
+            for entity_key, contract in entities.items()
+            if _entity_operation_declared(contract, "update") and "status" in set(_entity_allowed_update_fields(contract))
+        ]
+        if len(update_candidates) > 1:
+            for entity_key, contract in update_candidates:
+                resolution = _resolve_generated_entity_reference(
+                    contract=contract,
+                    target_reference=target_reference,
+                    runtime_base_url=runtime_base_url,
+                    workspace=workspace,
+                )
+                if resolution.get("status") == "resolved":
+                    singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip()
+                    return {
+                        "operation": "update",
+                        "entity_key": entity_key,
+                        "contract": contract,
+                        "command_key": f"update {singular}",
+                        "target_reference": target_reference,
+                        "field_mutations": {"status": value},
+                        "example": f"update {singular} {target_reference} status {value}",
+                    }
     rename_match = re.match(r"^\s*rename\s+(?P<target>\S+)\s+to\s+(?P<value>.+?)\s*$", normalized_source, flags=re.IGNORECASE)
     if rename_match:
         target_reference = str(rename_match.group("target") or "").strip()
         value = str(rename_match.group("value") or "").strip()
-        candidates: List[Tuple[str, Dict[str, Any]]] = []
-        for entity_key, contract in entities.items():
-            if not _entity_operation_declared(contract, "update"):
-                continue
+        update_candidates = [
+            (entity_key, contract)
+            for entity_key, contract in entities.items()
+            if _entity_operation_declared(contract, "update")
+            and (_entity_title_field(contract) or "name") in set(_entity_allowed_update_fields(contract))
+        ]
+        if len(update_candidates) <= 1:
+            return None
+        for entity_key, contract in update_candidates:
             title_field = _entity_title_field(contract) or "name"
-            if title_field not in set(_entity_allowed_update_fields(contract)):
-                continue
             resolution = _resolve_generated_entity_reference(
                 contract=contract,
                 target_reference=target_reference,
                 runtime_base_url=runtime_base_url,
                 workspace=workspace,
             )
-            if resolution.get("status") in {"resolved", "ambiguous"}:
-                candidates.append((entity_key, contract))
-        if len(candidates) == 1:
-            entity_key, contract = candidates[0]
-            singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip()
-            title_field = _entity_title_field(contract) or "name"
-            return {
-                "operation": "update",
-                "entity_key": entity_key,
-                "contract": contract,
-                "command_key": f"update {singular}",
-                "target_reference": target_reference,
-                "field_mutations": {title_field: value},
-                "example": f"rename {singular} old-name to new-name",
-            }
+            if resolution.get("status") == "resolved":
+                singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip()
+                return {
+                    "operation": "update",
+                    "entity_key": entity_key,
+                    "contract": contract,
+                    "command_key": f"update {singular}",
+                    "target_reference": target_reference,
+                    "field_mutations": {title_field: value},
+                    "example": f"rename {singular} old-name to new-name",
+                }
     bare_delete_match = re.match(r"^\s*(delete|remove)\s+(?P<target>.+?)\s*$", normalized_source, flags=re.IGNORECASE)
     if bare_delete_match:
         target_reference = str(bare_delete_match.group("target") or "").strip()
-        candidates = []
-        for entity_key, contract in entities.items():
-            if not _entity_operation_declared(contract, "delete"):
-                continue
+        delete_candidates = [
+            (entity_key, contract)
+            for entity_key, contract in entities.items()
+            if _entity_operation_declared(contract, "delete")
+        ]
+        if len(delete_candidates) <= 1:
+            return None
+        for entity_key, contract in delete_candidates:
             resolution = _resolve_generated_entity_reference(
                 contract=contract,
                 target_reference=target_reference,
                 runtime_base_url=runtime_base_url,
                 workspace=workspace,
             )
-            if resolution.get("status") in {"resolved", "ambiguous"}:
-                candidates.append((entity_key, contract))
-        if len(candidates) == 1:
-            entity_key, contract = candidates[0]
-            singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip()
-            return {
-                "operation": "delete",
-                "entity_key": entity_key,
-                "contract": contract,
-                "command_key": f"delete {singular}",
-                "target_reference": target_reference,
-            }
+            if resolution.get("status") == "resolved":
+                singular = str(contract.get("singular_label") or entity_key.rstrip("s")).strip()
+                return {
+                    "operation": "delete",
+                    "entity_key": entity_key,
+                    "contract": contract,
+                    "command_key": f"delete {singular}",
+                    "target_reference": target_reference,
+                }
     return None
 
 
@@ -18180,6 +18666,8 @@ def _normalized_generated_operation(structured: Dict[str, Any]) -> Dict[str, Any
         payload["fields"] = structured.get("fields")
     if isinstance(structured.get("field_mutations"), dict) and structured.get("field_mutations"):
         payload["field_mutations"] = structured.get("field_mutations")
+    if structured.get("direct_target_reference"):
+        payload["direct_target_reference"] = True
     return payload
 
 
@@ -18404,7 +18892,12 @@ def _generated_entity_result(
     singular = str(contract.get("singular_label") or contract.get("key") or "record").strip() or "record"
     plural = str(contract.get("plural_label") or singular + "s").strip() or (singular + "s")
     if operation == "list":
-        items = payload.get("items") if isinstance(payload, dict) and isinstance(payload.get("items"), list) else []
+        if isinstance(payload, list):
+            items = [row for row in payload if isinstance(row, dict)]
+        elif isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            items = [row for row in payload.get("items") if isinstance(row, dict)]
+        else:
+            items = []
         return {
             "kind": "table",
             "columns": _entity_table_columns(contract, detail=False),
@@ -18447,7 +18940,7 @@ def _execute_generated_entity_operation(
     target_reference = str(structured.get("target_reference") or "").strip()
     active_trace = trace if isinstance(trace, list) else []
     resolved_target_reference = target_reference
-    if operation in {"get", "update", "delete"}:
+    if operation in {"get", "update", "delete"} and not bool(structured.get("direct_target_reference")):
         resolution = _resolve_generated_entity_reference(
             contract=contract,
             target_reference=target_reference,
@@ -18904,7 +19397,6 @@ def _generated_app_palette_execution_response(
             source="palette",
         )
         existing_meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
-        context_meta = _seed_context_pack_meta(str(workspace.slug or ""))
         result["meta"] = {
             "base_url": str(runtime_target.get("runtime_base_url") or ""),
             "public_app_url": str(runtime_target.get("public_app_url") or ""),
@@ -18913,7 +19405,6 @@ def _generated_app_palette_execution_response(
             "compose_project": str(runtime_target.get("compose_project") or ""),
             "command_key": str(structured.get("command_key") or _normalize_palette_prompt(prompt)),
             **existing_meta,
-            **context_meta,
         }
         _log_prompt_activity(
             request_id=request_id,
@@ -18966,7 +19457,6 @@ def _generated_app_palette_execution_response(
         workspace=workspace,
     )
     existing_meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
-    context_meta = _seed_context_pack_meta(str(workspace.slug or ""))
     meta = {
         "base_url": str(runtime_target.get("runtime_base_url") or ""),
         "public_app_url": str(runtime_target.get("public_app_url") or ""),
@@ -18975,7 +19465,6 @@ def _generated_app_palette_execution_response(
         "compose_project": str(runtime_target.get("compose_project") or ""),
         "command_key": _normalize_palette_prompt(prompt),
         **existing_meta,
-        **context_meta,
     }
     result["meta"] = meta
     _log_prompt_activity(
@@ -20012,6 +20501,45 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         return JsonResponse(response_payload)
 
     operator_workspace = _resolve_workspace_for_identity(identity, context_workspace_id)
+    generated_workspace = operator_workspace if isinstance(operator_workspace, Workspace) else None
+    generated_runtime_target = _workspace_runtime_target(generated_workspace, "net-inventory") if generated_workspace else None
+    generated_artifact_issue = _workspace_generated_artifact_issue(generated_workspace, "net-inventory") if generated_workspace else None
+    if (
+        generated_workspace
+        and generated_runtime_target
+        and generated_artifact_issue
+        and _looks_like_generated_crud_prompt(message)
+        and not _match_generated_app_evolution_command(message, generated_workspace)
+    ):
+        response_payload = {
+            "status": "ValidationError",
+            "action_type": "CreateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": "Generated app contract is unavailable for the installed artifact.",
+            "validation_errors": ["Generated app contract is unavailable for this installed artifact. Rebuild or reinstall the app."],
+            "audit": {
+                "request_id": request_id,
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        if not preview_mode:
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="failed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=str(operator_workspace.id),
+                summary=response_payload["summary"],
+                error=str(generated_artifact_issue.get("reason") or "invalid_generated_artifact_contract"),
+                trace=[
+                    _generated_trace_step("user_command", source="agent", prompt=message),
+                    _generated_trace_step("invalid_generated_artifact_contract", **generated_artifact_issue),
+                ],
+                thread_id=context_thread_id,
+            )
+        return JsonResponse(response_payload, status=409)
     core_surface_request = _match_core_surface_command(message)
     if core_surface_request:
         panel_key, params = core_surface_request
@@ -20169,6 +20697,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
         ),
     )
     epic_d_payload = epic_d_intent.model_dump(mode="json")
+    generated_app_evolution = _match_generated_app_evolution_command(message, generated_workspace) if generated_workspace else None
     prompt_interpretation = _prompt_interpretation_from_intent(
         message=message,
         intent_payload=epic_d_payload,
@@ -20185,7 +20714,10 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     # Epic D is authoritative only for the supported v1 families:
     # development_work, app_operation, and run_supervision. Everything below this
     # branch that does not return here is preserved legacy routing.
-    if epic_d_intent.needs_clarification or str(epic_d_intent.intent_type or "") != "unsupported_intent":
+    if (
+        (epic_d_intent.needs_clarification and not generated_app_evolution)
+        or str(epic_d_intent.intent_type or "") != "unsupported_intent"
+    ):
         if str(epic_d_intent.intent_family or "") == "app_operation" and str(epic_d_intent.intent_type or "") in {
             "create_record",
             "update_record",
@@ -20270,7 +20802,76 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                     thread_id=context_thread_id,
                 )
             return JsonResponse(response_payload)
-        if conversation_action:
+        reuse_existing_work_item = (
+            str(epic_d_intent.intent_family or "") == "development_work"
+            and str(epic_d_intent.intent_type or "") == "create_and_dispatch_run"
+            and not bool(str(context_thread_id or "").strip())
+            and bool(
+                str(
+                    (
+                        (epic_d_payload.get("resolved_subject") or {})
+                        if isinstance(epic_d_payload.get("resolved_subject"), dict)
+                        else {}
+                    ).get("work_item_id")
+                    or ""
+                ).strip()
+            )
+            and not bool(
+                str(
+                    (
+                        (epic_d_payload.get("resolved_subject") or {})
+                        if isinstance(epic_d_payload.get("resolved_subject"), dict)
+                        else {}
+                    ).get("id")
+                    or ""
+                ).strip()
+            )
+        )
+        if conversation_action and not reuse_existing_work_item:
+            direct_panel_target = _direct_panel_target_for_conversation_action(
+                action_type=str(conversation_action.get("action_type") or "").strip(),
+                workspace_id=str(operator_workspace.id) if operator_workspace else context_workspace_id,
+                action_payload=((conversation_action.get("payload") or {}) if isinstance(conversation_action.get("payload"), dict) else {}).get("action_payload"),
+                target=(conversation_action.get("target_object") if isinstance(conversation_action.get("target_object"), dict) else {}),
+            )
+            if direct_panel_target:
+                panel_key, params = direct_panel_target
+                response_payload = {
+                    "status": "IntentResolved",
+                    "action_type": "ValidateDraft",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": str((epic_d_intent.resolution_notes or ["Intent resolved."])[0] or "Intent resolved."),
+                    "intent": epic_d_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": conversation_action,
+                    "next_actions": [{"label": "Open panel", "action": "OpenPanel", "panel_key": panel_key, "params": params}],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+                if not preview_mode:
+                    _audit_intent_event(
+                        message="intent.resolve",
+                        identity=identity,
+                        request_id=request_id,
+                        artifact_id=None,
+                        proposal={"epic_d_intent": epic_d_payload, "prompt": message},
+                        resolution=response_payload,
+                    )
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="completed",
+                        prompt=message,
+                        request_type="intent.resolve",
+                        workspace_id=str(operator_workspace.id) if operator_workspace else context_workspace_id,
+                        summary=response_payload["summary"],
+                        trace=epic_d_trace,
+                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                        prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
+                        thread_id=context_thread_id,
+                    )
+                return JsonResponse(response_payload)
             response_payload = {
                 "status": "DraftReady",
                 "action_type": "CreateDraft",
@@ -20362,10 +20963,14 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
 
     # Preserved legacy generated-app and draft-routing behavior below this point.
     # These flows intentionally remain outside Epic D until they are migrated.
-    generated_runtime_target = _workspace_runtime_target(operator_workspace, "net-inventory") if operator_workspace else None
-    generated_artifact_issue = _workspace_generated_artifact_issue(operator_workspace, "net-inventory") if operator_workspace else None
-    generated_capability_manifest = _workspace_installed_capability_manifest(operator_workspace, "net-inventory") if operator_workspace else None
-    if operator_workspace and generated_runtime_target and generated_artifact_issue and _looks_like_generated_crud_prompt(message):
+    generated_capability_manifest = _workspace_installed_capability_manifest(generated_workspace, "net-inventory") if generated_workspace else None
+    if (
+        generated_workspace
+        and generated_runtime_target
+        and generated_artifact_issue
+        and _looks_like_generated_crud_prompt(message)
+        and not _match_generated_app_evolution_command(message, generated_workspace)
+    ):
         response_payload = {
             "status": "ValidationError",
             "action_type": "CreateDraft",
@@ -20399,13 +21004,13 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             prompt=message,
             capability_manifest=generated_capability_manifest,
             runtime_base_url=str(generated_runtime_target.get("runtime_base_url") or ""),
-            workspace=operator_workspace,
+            workspace=generated_workspace,
         )
-        if operator_workspace and generated_runtime_target and generated_capability_manifest
+        if generated_workspace and generated_runtime_target and generated_capability_manifest
         else None
     )
-    if operator_workspace and generated_runtime_target and generated_capability_manifest and generated_structured:
-        generated_artifact = _installed_generated_artifact(operator_workspace, "net-inventory")
+    if generated_workspace and generated_runtime_target and generated_capability_manifest and generated_structured:
+        generated_artifact = _installed_generated_artifact(generated_workspace, "net-inventory")
         normalized = _normalized_generated_operation(generated_structured)
         contract = generated_structured.get("contract") if isinstance(generated_structured.get("contract"), dict) else {}
         trace = [
@@ -20431,7 +21036,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             "summary": f'Will execute generated app {normalized.get("operation") or "operation"} for {normalized.get("entity_key") or "entity"}.',
             "draft_payload": {
                 "__operation": "execute_generated_app_crud",
-                "workspace_id": str(operator_workspace.id),
+                "workspace_id": str(generated_workspace.id),
                 "raw_prompt": message,
                 "structured_operation": normalized,
             },
@@ -20456,14 +21061,13 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 status="completed",
                 prompt=message,
                 request_type="intent.resolve",
-                workspace_id=str(operator_workspace.id),
+                workspace_id=str(generated_workspace.id),
                 summary=response_payload["summary"],
                 trace=trace,
                 structured_operation=normalized,
             )
         return JsonResponse(response_payload)
 
-    generated_app_evolution = _match_generated_app_evolution_command(message, operator_workspace) if operator_workspace else None
     if generated_app_evolution:
         response_payload = {
             "status": "DraftReady",
@@ -20473,7 +21077,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             "summary": "Will create and submit a revision draft for the installed generated app.",
             "draft_payload": {
                 "__operation": "evolve_app_intent_draft",
-                "workspace_id": str(operator_workspace.id),
+                "workspace_id": str(generated_workspace.id),
                 "title": str(generated_app_evolution.get("title") or "Generated App"),
                 "raw_prompt": str(generated_app_evolution.get("raw_prompt") or message),
                 "initial_intent": generated_app_evolution.get("initial_intent") if isinstance(generated_app_evolution.get("initial_intent"), dict) else {},
@@ -20509,7 +21113,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 status="completed",
                 prompt=message,
                 request_type="intent.resolve",
-                workspace_id=str(operator_workspace.id),
+                workspace_id=str(generated_workspace.id),
                 summary=response_payload["summary"],
                 thread_id=context_thread_id,
             )
@@ -20989,119 +21593,12 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                 generated_artifact_issue = _workspace_generated_artifact_issue(workspace, "net-inventory")
                 capability_manifest = _workspace_installed_capability_manifest(workspace, "net-inventory")
                 raw_prompt = str(body_payload.get("raw_prompt") or payload.get("message") or "").strip()
-                epic_d_intent = _intent_engine(identity=identity, workspace=workspace).resolve_intent(
-                    user_message=raw_prompt,
-                    context=ResolutionContext(
-                        artifact=None,
-                        workspace_id=str(workspace.id),
-                        user_identity_id=str(identity.id),
-                        conversation_context=_conversation_execution_context(identity, str(workspace.id), thread_id),
-                    ),
-                )
-                epic_d_payload = epic_d_intent.model_dump(mode="json")
-                prompt_interpretation = _prompt_interpretation_from_intent(
-                    message=raw_prompt,
-                    intent_payload=epic_d_payload,
-                    resolution_status=(
-                        "UnsupportedIntent"
-                        if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity"
-                        else "IntentClarificationRequired"
-                        if epic_d_intent.needs_clarification
-                        else "IntentResolved"
-                    ),
-                    summary=str((epic_d_intent.resolution_notes or [""])[0] or ""),
-                )
-                conversation_action = _conversation_action_from_intent(
-                    source_message_id=request_id,
-                    intent_payload=epic_d_payload,
-                    prompt_interpretation=prompt_interpretation,
-                    thread_id=thread_id,
-                )
-                if epic_d_intent.needs_clarification:
-                    result_payload = {
-                        "status": "IntentClarificationRequired",
-                        "artifact_type": "Workspace",
-                        "artifact_id": None,
-                        "summary": str((epic_d_intent.resolution_notes or ["clarification required"])[0]),
-                        "intent": epic_d_payload,
-                        "prompt_interpretation": prompt_interpretation,
-                        "conversation_action": conversation_action,
-                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
-                    }
-                    _log_prompt_activity(
-                        request_id=request_id,
-                        identity=identity,
-                        status="failed",
-                        prompt=raw_prompt,
-                        request_type="intent.apply",
-                        workspace_id=str(workspace.id),
-                        summary=result_payload["summary"],
-                        error=str(epic_d_intent.clarification_reason or "clarification required"),
-                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
-                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
-                        prompt_interpretation=prompt_interpretation,
-                        conversation_action=conversation_action,
-                        thread_id=thread_id,
-                    )
-                    return JsonResponse(result_payload, status=409)
-                if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity":
-                    result_payload = {
-                        "status": "UnsupportedIntent",
-                        "artifact_type": "Workspace",
-                        "artifact_id": None,
-                        "summary": str((epic_d_intent.resolution_notes or ["Requested entity is not declared in the installed capability manifest."])[0]),
-                        "intent": epic_d_payload,
-                        "prompt_interpretation": prompt_interpretation,
-                        "conversation_action": conversation_action,
-                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
-                    }
-                    _log_prompt_activity(
-                        request_id=request_id,
-                        identity=identity,
-                        status="failed",
-                        prompt=raw_prompt,
-                        request_type="intent.apply",
-                        workspace_id=str(workspace.id),
-                        summary=result_payload["summary"],
-                        error="unsupported declared entity",
-                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
-                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
-                        prompt_interpretation=prompt_interpretation,
-                        conversation_action=conversation_action,
-                        thread_id=thread_id,
-                    )
-                    return JsonResponse(result_payload, status=409)
                 if (
-                    str(epic_d_intent.intent_family or "") != "app_operation"
-                    or str(epic_d_intent.intent_type or "") not in {"create_record", "update_record", "delete_record", "list_records", "get_record"}
+                    runtime_target_record
+                    and generated_artifact_issue
+                    and _looks_like_generated_crud_prompt(raw_prompt)
+                    and not _match_generated_app_evolution_command(raw_prompt, workspace)
                 ):
-                    result_payload = {
-                        "status": "UnsupportedIntent",
-                        "artifact_type": "Workspace",
-                        "artifact_id": None,
-                        "summary": "Prompt is not executable as a generated app operation.",
-                        "intent": epic_d_payload,
-                        "prompt_interpretation": prompt_interpretation,
-                        "conversation_action": conversation_action,
-                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
-                    }
-                    _log_prompt_activity(
-                        request_id=request_id,
-                        identity=identity,
-                        status="failed",
-                        prompt=raw_prompt,
-                        request_type="intent.apply",
-                        workspace_id=str(workspace.id),
-                        summary=result_payload["summary"],
-                        error="unsupported generated app operation",
-                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
-                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
-                        prompt_interpretation=prompt_interpretation,
-                        conversation_action=conversation_action,
-                        thread_id=thread_id,
-                    )
-                    return JsonResponse(result_payload, status=400)
-                if runtime_target_record and generated_artifact_issue:
                     _log_prompt_activity(
                         request_id=request_id,
                         identity=identity,
@@ -21131,12 +21628,145 @@ def xyn_intent_apply(request: HttpRequest) -> JsonResponse:
                     )
                 if not runtime_target_record or not capability_manifest:
                     return JsonResponse({"error": "generated app runtime is not available"}, status=404)
-                structured = _resolve_generated_entity_operation_with_runtime(
-                    prompt=raw_prompt,
-                    capability_manifest=capability_manifest,
-                    runtime_base_url=str(runtime_target_record.get("runtime_base_url") or ""),
-                    workspace=workspace,
+                structured_payload = body_payload.get("structured_operation") if isinstance(body_payload.get("structured_operation"), dict) else {}
+                structured: Optional[Dict[str, Any]] = None
+                if structured_payload:
+                    contract = _manifest_entity_contracts(capability_manifest).get(str(structured_payload.get("entity_key") or "").strip())
+                    operation_name = str(structured_payload.get("operation") or "").strip()
+                    if contract and operation_name:
+                        structured = {
+                            "operation": operation_name,
+                            "entity_key": str(structured_payload.get("entity_key") or "").strip(),
+                            "contract": contract,
+                            "command_key": str(structured_payload.get("command_key") or "").strip(),
+                            "target_reference": str(structured_payload.get("target_reference") or "").strip(),
+                            "fields": structured_payload.get("fields") if isinstance(structured_payload.get("fields"), dict) else {},
+                            "field_mutations": (
+                                structured_payload.get("field_mutations")
+                                if isinstance(structured_payload.get("field_mutations"), dict)
+                                else {}
+                            ),
+                            "direct_target_reference": bool(structured_payload.get("direct_target_reference")),
+                        }
+                epic_d_intent = _intent_engine(identity=identity, workspace=workspace).resolve_intent(
+                    user_message=raw_prompt,
+                    context=ResolutionContext(
+                        artifact=None,
+                        workspace_id=str(workspace.id),
+                        user_identity_id=str(identity.id),
+                        conversation_context=_conversation_execution_context(identity, str(workspace.id), thread_id),
+                    ),
                 )
+                epic_d_payload = epic_d_intent.model_dump(mode="json")
+                prompt_interpretation = _prompt_interpretation_from_intent(
+                    message=raw_prompt,
+                    intent_payload=epic_d_payload,
+                    resolution_status=(
+                        "UnsupportedIntent"
+                        if str(epic_d_intent.intent_type or "") == "unsupported_declared_entity"
+                        else "IntentClarificationRequired"
+                        if epic_d_intent.needs_clarification
+                        else "IntentResolved"
+                    ),
+                    summary=str((epic_d_intent.resolution_notes or [""])[0] or ""),
+                )
+                conversation_action = _conversation_action_from_intent(
+                    source_message_id=request_id,
+                    intent_payload=epic_d_payload,
+                    prompt_interpretation=prompt_interpretation,
+                    thread_id=thread_id,
+                )
+                if structured is None and epic_d_intent.needs_clarification:
+                    result_payload = {
+                        "status": "IntentClarificationRequired",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": str((epic_d_intent.resolution_notes or ["clarification required"])[0]),
+                        "intent": epic_d_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": conversation_action,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=result_payload["summary"],
+                        error=str(epic_d_intent.clarification_reason or "clarification required"),
+                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
+                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                        prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
+                        thread_id=thread_id,
+                    )
+                    return JsonResponse(result_payload, status=409)
+                if structured is None and str(epic_d_intent.intent_type or "") == "unsupported_declared_entity":
+                    result_payload = {
+                        "status": "UnsupportedIntent",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": str((epic_d_intent.resolution_notes or ["Requested entity is not declared in the installed capability manifest."])[0]),
+                        "intent": epic_d_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": conversation_action,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=result_payload["summary"],
+                        error="unsupported declared entity",
+                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
+                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                        prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
+                        thread_id=thread_id,
+                    )
+                    return JsonResponse(result_payload, status=409)
+                if structured is None and (
+                    str(epic_d_intent.intent_family or "") != "app_operation"
+                    or str(epic_d_intent.intent_type or "") not in {"create_record", "update_record", "delete_record", "list_records", "get_record"}
+                ):
+                    result_payload = {
+                        "status": "UnsupportedIntent",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": "Prompt is not executable as a generated app operation.",
+                        "intent": epic_d_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": conversation_action,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    }
+                    _log_prompt_activity(
+                        request_id=request_id,
+                        identity=identity,
+                        status="failed",
+                        prompt=raw_prompt,
+                        request_type="intent.apply",
+                        workspace_id=str(workspace.id),
+                        summary=result_payload["summary"],
+                        error="unsupported generated app operation",
+                        trace=[{"step": "intent_resolved", "intent": epic_d_payload}],
+                        structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
+                        prompt_interpretation=prompt_interpretation,
+                        conversation_action=conversation_action,
+                        thread_id=thread_id,
+                    )
+                    return JsonResponse(result_payload, status=400)
+                if structured is None:
+                    structured = _resolve_generated_entity_operation_with_runtime(
+                        prompt=raw_prompt,
+                        capability_manifest=capability_manifest,
+                        runtime_base_url=str(runtime_target_record.get("runtime_base_url") or ""),
+                        workspace=workspace,
+                    )
                 if not structured:
                     result_payload = {
                         "status": "ValidationError",
@@ -24103,9 +24733,6 @@ def release_plans_collection(request: HttpRequest) -> JsonResponse:
     if staff_error := _require_staff(request):
         return staff_error
     if request.method == "POST":
-        identity = _require_authenticated(request)
-        if not identity:
-            return JsonResponse({"error": "not authenticated"}, status=401)
         payload = _parse_json(request)
         name = payload.get("name")
         target_kind = payload.get("target_kind")
@@ -24116,6 +24743,9 @@ def release_plans_collection(request: HttpRequest) -> JsonResponse:
         if not payload.get("environment_id"):
             return JsonResponse({"error": "environment_id required"}, status=400)
         target_fqn = str(payload.get("target_fqn") or "")
+        identity = _require_authenticated(request) if target_fqn in _control_plane_app_ids() else None
+        if target_fqn in _control_plane_app_ids() and not identity:
+            return JsonResponse({"error": "not authenticated"}, status=401)
         if target_fqn in _control_plane_app_ids() and not _is_platform_architect(identity):
             return JsonResponse({"error": "platform_architect role required for control plane plans"}, status=403)
         plan = ReleasePlan.objects.create(
@@ -24163,11 +24793,11 @@ def release_plan_detail(request: HttpRequest, plan_id: str) -> JsonResponse:
         return staff_error
     plan = get_object_or_404(ReleasePlan, id=plan_id)
     if request.method == "PATCH":
-        identity = _require_authenticated(request)
-        if not identity:
-            return JsonResponse({"error": "not authenticated"}, status=401)
         payload = _parse_json(request)
         target_fqn = str(payload.get("target_fqn") or plan.target_fqn or "")
+        identity = _require_authenticated(request) if target_fqn in _control_plane_app_ids() else None
+        if target_fqn in _control_plane_app_ids() and not identity:
+            return JsonResponse({"error": "not authenticated"}, status=401)
         if target_fqn in _control_plane_app_ids() and not _is_platform_architect(identity):
             return JsonResponse({"error": "platform_architect role required for control plane plans"}, status=403)
         if "environment_id" in payload and not payload.get("environment_id"):
@@ -24242,6 +24872,12 @@ def release_plan_reconcile(request: HttpRequest) -> JsonResponse:
     plans = list(qs)
     changed: List[Dict[str, Any]] = []
     for plan in plans:
+        if _is_control_plane_plan(plan):
+            identity = _require_authenticated(request)
+            if not identity:
+                return JsonResponse({"error": "not authenticated"}, status=401)
+            if not _is_platform_architect(identity):
+                return JsonResponse({"error": "platform_architect role required for control plane plans"}, status=403)
         release, did_change = _reconcile_release_plan_alignment(
             plan,
             updated_by=request.user,
@@ -24396,9 +25032,21 @@ def _reconcile_release_plan_alignment(
     allow_state_fallback: bool = True,
     apply_changes: bool = True,
 ) -> Tuple[Optional[Release], bool]:
+    state_preferred = _preferred_release_for_plan_from_environment_state(plan) if allow_state_fallback else None
     preferred = _preferred_release_for_plan(plan, explicit_release_id=explicit_release_id)
-    if not preferred and allow_state_fallback:
-        preferred = _preferred_release_for_plan_from_environment_state(plan)
+    if state_preferred and (
+        explicit_release_id is None
+        and (
+            preferred is None
+            or (
+                plan.blueprint_id
+                and state_preferred.blueprint_id
+                and str(state_preferred.blueprint_id) == str(plan.blueprint_id)
+                and str(state_preferred.version or "") != str(plan.to_version or "")
+            )
+        )
+    ):
+        preferred = state_preferred
     selected_release_id = str(preferred.id) if preferred else (str(explicit_release_id) if explicit_release_id else None)
     to_version_changed = bool(preferred and plan.to_version != preferred.version)
     if preferred:
@@ -24467,9 +25115,12 @@ def _resolved_release_plan_for_release(
     release: Release,
     *,
     plan_index: Optional[Dict[tuple[str, str], ReleasePlan]] = None,
+    allow_stale_direct_link: bool = False,
 ) -> Optional[ReleasePlan]:
     if release.release_plan_id and release.release_plan:
         linked = release.release_plan
+        if allow_stale_direct_link:
+            return linked
         if (
             linked.to_version == release.version
             and (not linked.blueprint_id or not release.blueprint_id or str(linked.blueprint_id) == str(release.blueprint_id))
@@ -24572,7 +25223,7 @@ def releases_bulk_delete(request: HttpRequest) -> JsonResponse:
         if not release:
             skipped.append({"id": rid, "reason": "not_found"})
             continue
-        resolved_plan = _resolved_release_plan_for_release(release)
+        resolved_plan = _resolved_release_plan_for_release(release, allow_stale_direct_link=True)
         if release.status == "published" and resolved_plan:
             skipped.append({"id": rid, "reason": "published_with_release_plan"})
             continue
@@ -24639,7 +25290,7 @@ def release_detail(request: HttpRequest, release_id: str) -> JsonResponse:
                 release.save(update_fields=["build_state", "updated_at"])
         return JsonResponse({"id": str(release.id), "build_run_id": build_run_id})
     if request.method == "DELETE":
-        if release.status == "published" and _resolved_release_plan_for_release(release):
+        if release.status == "published" and _resolved_release_plan_for_release(release, allow_stale_direct_link=True):
             return JsonResponse(
                 {"error": "published releases linked to a release plan cannot be deleted"},
                 status=400,
@@ -25226,9 +25877,43 @@ def _runtime_repo_candidates_from_target(target: Dict[str, Any]) -> List[str]:
     return candidates
 
 
+def _fallback_dev_task_runtime_source(task: DevTask) -> Dict[str, Any]:
+    work_item_id = str(task.work_item_id or "").strip()
+    if not work_item_id:
+        raise ValueError("dev task is missing work_item_id")
+    handoff = resolve_execution_brief(task)
+    brief = handoff.brief if isinstance(handoff.brief, dict) else {}
+    target = handoff.target
+    target_repo = str(target.repository_slug or task.target_repo or "").strip()
+    target_branch = str(target.branch or task.target_branch or "").strip()
+    if not target_repo:
+        raise ValueError("dev task is missing runtime target context required for runtime submission")
+    validation = brief.get("validation") if isinstance(brief.get("validation"), dict) else {}
+    acceptance = validation.get("acceptance_criteria") if isinstance(validation.get("acceptance_criteria"), list) else []
+    commands = validation.get("commands") if isinstance(validation.get("commands"), list) else []
+    work_item: Dict[str, Any] = {
+        "id": work_item_id,
+        "title": str(brief.get("summary") or task.title or work_item_id).strip() or work_item_id,
+        "summary": str(brief.get("summary") or task.title or work_item_id).strip() or work_item_id,
+        "description": str(brief.get("implementation_intent") or brief.get("objective") or task.description or "").strip(),
+        "execution_brief": brief,
+        "acceptance_criteria": [str(item).strip() for item in acceptance if str(item).strip()],
+        "verify": [{"command": str(command).strip()} for command in commands if str(command).strip()],
+    }
+    repo_target = repo_target_payload_for_resolution(target, branch=target_branch)
+    if repo_target:
+        work_item["repo_targets"] = [repo_target]
+    return {
+        "plan_json": {"work_items": [work_item], "source": "execution_brief_fallback"},
+        "work_item": work_item,
+        "target_repo": target_repo,
+        "target_branch": target_branch,
+    }
+
+
 def _load_dev_task_runtime_source(task: DevTask) -> Dict[str, Any]:
     if not task.source_run_id or not task.input_artifact_key:
-        raise ValueError("dev task is missing source run context required for runtime submission")
+        return _fallback_dev_task_runtime_source(task)
     plan_json = _download_artifact_json(str(task.source_run_id), task.input_artifact_key)
     if not plan_json:
         raise ValueError(f"{task.input_artifact_key} not found for dev task source run")
@@ -25242,22 +25927,26 @@ def _load_dev_task_runtime_source(task: DevTask) -> Dict[str, Any]:
             break
     if not isinstance(work_item, dict):
         raise ValueError(f"work_item_id not found in source plan: {work_item_id}")
-    repo_targets = work_item.get("repo_targets") if isinstance(work_item.get("repo_targets"), list) else []
-    repo_candidates: List[Tuple[str, str]] = []
-    for target in repo_targets:
-        if not isinstance(target, dict):
-            continue
-        branch = str(target.get("ref") or "").strip() or "develop"
-        for candidate in _runtime_repo_candidates_from_target(target):
-            repo_candidates.append((candidate, branch))
-    unique_candidates = {(repo, branch) for repo, branch in repo_candidates}
-    if not unique_candidates:
-        raise ValueError("unable to resolve a canonical runtime target repo from work item repo_targets")
-    repo_names = {repo for repo, _branch in unique_candidates}
-    if len(repo_names) > 1:
-        raise ValueError(f"multiple runtime target repos found for work item: {sorted(repo_names)}")
-    repo_name = next(iter(repo_names))
-    branch = next(branch for repo, branch in unique_candidates if repo == repo_name)
+    target = resolve_development_target(task=task, work_item=work_item)
+    repo_name = str(target.repository_slug or "").strip()
+    branch = str(target.branch or "").strip()
+    if not repo_name:
+        repo_targets = work_item.get("repo_targets") if isinstance(work_item.get("repo_targets"), list) else []
+        repo_candidates: List[Tuple[str, str]] = []
+        for row in repo_targets:
+            if not isinstance(row, dict):
+                continue
+            row_branch = str(row.get("ref") or "").strip() or "develop"
+            for candidate in _runtime_repo_candidates_from_target(row):
+                repo_candidates.append((candidate, row_branch))
+        unique_candidates = {(repo, row_branch) for repo, row_branch in repo_candidates}
+        if not unique_candidates:
+            raise ValueError("unable to resolve a canonical runtime target repo from work item repo_targets")
+        repo_names = {repo for repo, _branch in unique_candidates}
+        if len(repo_names) > 1:
+            raise ValueError(f"multiple runtime target repos found for work item: {sorted(repo_names)}")
+        repo_name = next(iter(repo_names))
+        branch = next(row_branch for repo, row_branch in unique_candidates if repo == repo_name)
     return {
         "plan_json": plan_json,
         "work_item": work_item,
@@ -25267,23 +25956,43 @@ def _load_dev_task_runtime_source(task: DevTask) -> Dict[str, Any]:
 
 
 def _build_dev_task_runtime_prompt(task: DevTask, work_item: Dict[str, Any]) -> Dict[str, str]:
-    title = str(task.title or work_item.get("title") or task.work_item_id or f"Dev task {task.id}").strip()
+    handoff = resolve_execution_brief(task, work_item=work_item)
+    brief = handoff.brief if isinstance(handoff.brief, dict) else {}
+    title = str(brief.get("summary") or task.title or work_item.get("title") or task.work_item_id or f"Dev task {task.id}").strip()
     body_lines: List[str] = []
-    description = str(work_item.get("description") or work_item.get("summary") or "").strip()
-    if description:
-        body_lines.append(description)
-    acceptance = work_item.get("acceptance_criteria") if isinstance(work_item.get("acceptance_criteria"), list) else []
+    objective = str(brief.get("objective") or work_item.get("description") or work_item.get("summary") or "").strip()
+    implementation_intent = str(brief.get("implementation_intent") or "").strip()
+    if objective:
+        body_lines.append(objective)
+    if implementation_intent and implementation_intent != objective:
+        body_lines.append(f"Requested change: {implementation_intent}")
+    brief_target = brief.get("target") if isinstance(brief.get("target"), dict) else {}
+    repo_slug = str(brief_target.get("repository_slug") or "").strip()
+    repo_branch = str(brief_target.get("branch") or "").strip()
+    if repo_slug:
+        body_lines.append(f"Target repository: {repo_slug}{' @ ' + repo_branch if repo_branch else ''}")
+    scope = brief.get("scope") if isinstance(brief.get("scope"), dict) else {}
+    allowed_areas = scope.get("allowed_areas") if isinstance(scope.get("allowed_areas"), list) else []
+    allowed_files = scope.get("allowed_files") if isinstance(scope.get("allowed_files"), list) else []
+    if allowed_areas:
+        body_lines.append("Allowed areas:")
+        body_lines.extend(f"- {str(item).strip()}" for item in allowed_areas if str(item).strip())
+    if allowed_files:
+        body_lines.append("Allowed files:")
+        body_lines.extend(f"- {str(item).strip()}" for item in allowed_files if str(item).strip())
+    validation = brief.get("validation") if isinstance(brief.get("validation"), dict) else {}
+    acceptance = validation.get("acceptance_criteria") if isinstance(validation.get("acceptance_criteria"), list) else []
     if acceptance:
         body_lines.append("Acceptance criteria:")
         body_lines.extend(f"- {str(item).strip()}" for item in acceptance if str(item).strip())
-    verify_rows = work_item.get("verify") if isinstance(work_item.get("verify"), list) else []
-    if verify_rows:
+    validation_commands = validation.get("commands") if isinstance(validation.get("commands"), list) else []
+    if validation_commands:
         body_lines.append("Validation commands:")
-        body_lines.extend(
-            f"- {str(row.get('command') or '').strip()}"
-            for row in verify_rows
-            if isinstance(row, dict) and str(row.get("command") or "").strip()
-        )
+        body_lines.extend(f"- {str(command).strip()}" for command in validation_commands if str(command).strip())
+    boundaries = brief.get("boundaries") if isinstance(brief.get("boundaries"), list) else []
+    if boundaries:
+        body_lines.append("Boundaries:")
+        body_lines.extend(f"- {str(item).strip()}" for item in boundaries if str(item).strip())
     if not body_lines:
         body_lines.append(title)
     return {"title": title, "body": "\n".join(body_lines).strip()}
@@ -25292,6 +26001,7 @@ def _build_dev_task_runtime_prompt(task: DevTask, work_item: Dict[str, Any]) -> 
 def _build_dev_task_runtime_payload(task: DevTask, workspace: Workspace) -> Dict[str, Any]:
     source = _load_dev_task_runtime_source(task)
     work_item = source["work_item"]
+    handoff = resolve_execution_brief(task, work_item=work_item)
     prompt = _build_dev_task_runtime_prompt(task, work_item)
     requested_outputs = ["patch", "log", "summary"]
     verify_rows = work_item.get("verify") if isinstance(work_item.get("verify"), list) else []
@@ -25331,6 +26041,8 @@ def _build_dev_task_runtime_payload(task: DevTask, workspace: Workspace) -> Dict
                 "task_type": str(task.task_type or ""),
                 "source_entity_type": str(task.source_entity_type or ""),
                 "source_entity_id": str(task.source_entity_id or ""),
+                "execution_brief": handoff.brief,
+                "execution_brief_source": handoff.source_kind,
             },
         },
         "policy": {
@@ -25487,9 +26199,188 @@ def _serialize_runtime_artifacts_for_thread(detail: Dict[str, Any], *, work_item
     return artifacts
 
 
-def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _normalize_execution_run_state(
+    *,
+    run_status: Any,
+    task_status: str,
+    has_runtime_run: bool,
+) -> str:
+    token = str(run_status or "").strip().lower()
+    if token in {"queued", "pending"}:
+        return "queued"
+    if token in {"running", "in_progress"}:
+        return "running"
+    if token in {"completed", "succeeded"}:
+        return "completed"
+    if token in {"failed", "error"}:
+        return "failed"
+    if token in {"blocked", "awaiting_review", "paused"}:
+        return "awaiting_review"
+    canonical = _canonical_work_item_status(task_status)
+    if canonical in {"running", "completed", "awaiting_review"}:
+        return canonical
+    if has_runtime_run:
+        return "queued"
+    return "not_started"
+
+
+def _validation_status_for_execution_run(
+    *,
+    execution_state: str,
+    commands_payload: List[Dict[str, Any]],
+    failure_reason: str,
+    escalation_reason: str,
+) -> str:
+    command_statuses = {
+        str(item.get("status") or "").strip().lower()
+        for item in commands_payload
+        if isinstance(item, dict)
+    }
+    if escalation_reason or execution_state == "awaiting_review":
+        return "needs_review"
+    if "failed" in command_statuses or failure_reason or execution_state == "failed":
+        return "failed"
+    if execution_state == "completed":
+        return "passed"
+    if execution_state in {"queued", "running"}:
+        return "pending"
+    return "not_run"
+
+
+def _execution_run_message(
+    *,
+    execution_state: str,
+    summary: str,
+    error: str,
+) -> str:
+    if summary:
+        return summary
+    if error:
+        return error
+    if execution_state == "queued":
+        return "Task has been dispatched and is waiting to start."
+    if execution_state == "running":
+        return "Execution is in progress."
+    if execution_state == "completed":
+        return "Execution completed successfully."
+    if execution_state == "failed":
+        return "Execution failed."
+    if execution_state == "awaiting_review":
+        return "Execution completed and requires review."
+    return "No execution run has been dispatched yet."
+
+
+def _resolve_dev_task_execution_payload(
+    task: DevTask,
+    *,
+    runtime_detail: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     detail = runtime_detail or _project_runtime_status_to_task(task)
+    run_payload: Optional[Dict[str, Any]] = None
+    artifacts_payload: List[Dict[str, Any]] = []
+    commands_payload: List[Dict[str, Any]] = []
+    source: Optional[str] = None
+    if detail:
+        run_payload = _serialize_runtime_run_for_dev_task(detail)
+        artifacts_payload = _serialize_runtime_artifacts_for_dev_task(detail)
+        source = "runtime"
+    elif task.result_run_id and task.result_run is not None:
+        result_run = task.result_run
+        run_payload = {
+            "id": str(result_run.id),
+            "status": result_run.status,
+            "summary": result_run.summary,
+            "error": result_run.error,
+            "log_text": result_run.log_text,
+            "started_at": result_run.started_at,
+            "finished_at": result_run.finished_at,
+            "failure_reason": "",
+            "escalation_reason": "",
+        }
+        artifacts_payload = [
+            {
+                "id": str(artifact.id),
+                "name": artifact.name,
+                "kind": artifact.kind,
+                "url": artifact.url,
+                "metadata": artifact.metadata_json,
+                "created_at": artifact.created_at,
+            }
+            for artifact in result_run.artifacts.all().order_by("created_at")
+        ]
+        commands_payload = [
+            {
+                "id": str(cmd.id),
+                "step_name": cmd.step_name,
+                "command_index": cmd.command_index,
+                "shell": cmd.shell,
+                "status": cmd.status,
+                "exit_code": cmd.exit_code,
+                "started_at": cmd.started_at,
+                "finished_at": cmd.finished_at,
+                "ssm_command_id": cmd.ssm_command_id,
+                "stdout": cmd.stdout,
+                "stderr": cmd.stderr,
+            }
+            for cmd in result_run.command_executions.all().order_by("created_at")
+        ]
+        source = "result"
+
+    run_summary = str((run_payload or {}).get("summary") or "").strip()
+    failure_reason = str((run_payload or {}).get("failure_reason") or "").strip()
+    escalation_reason = str((run_payload or {}).get("escalation_reason") or "").strip()
+    error = str((run_payload or {}).get("error") or escalation_reason or failure_reason or "").strip()
+    execution_state = _normalize_execution_run_state(
+        run_status=(run_payload or {}).get("status"),
+        task_status=str(task.status or ""),
+        has_runtime_run=bool(task.runtime_run_id),
+    )
+    execution_summary = {
+        "has_run": bool(run_payload),
+        "run_id": str((run_payload or {}).get("id") or "") or None,
+        "source": source,
+        "state": execution_state,
+        "raw_status": str((run_payload or {}).get("status") or "").strip() or None,
+        "validation_status": _validation_status_for_execution_run(
+            execution_state=execution_state,
+            commands_payload=commands_payload,
+            failure_reason=failure_reason,
+            escalation_reason=escalation_reason,
+        ),
+        "summary": run_summary or None,
+        "error": error or None,
+        "started_at": (run_payload or {}).get("started_at"),
+        "finished_at": (run_payload or {}).get("finished_at"),
+        "artifact_count": len(artifacts_payload),
+        "artifact_labels": [
+            str(item.get("name") or item.get("kind") or "artifact")
+            for item in artifacts_payload[:3]
+            if isinstance(item, dict)
+        ],
+        "message": _execution_run_message(
+            execution_state=execution_state,
+            summary=run_summary,
+            error=error,
+        ),
+    }
+    return {
+        "runtime_detail": detail,
+        "run_payload": run_payload,
+        "artifacts_payload": artifacts_payload,
+        "commands_payload": commands_payload,
+        "execution_summary": execution_summary,
+    }
+
+
+def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    execution_payload = _resolve_dev_task_execution_payload(task, runtime_detail=runtime_detail)
+    detail = execution_payload["runtime_detail"]
     status = _canonical_work_item_status(str((detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
+    brief_review = serialize_execution_brief_review(task)
+    queue_state = serialize_dev_task_queue_state(task, normalized_status=status)
+    recovery_state = serialize_dev_task_recovery_state(task, execution_summary=execution_payload["execution_summary"])
+    change_set = serialize_dev_task_change_summary(task, execution_payload=execution_payload)
+    publish_state = serialize_dev_task_publish_state(task, change_set=change_set)
     return {
         "id": str(task.id),
         "work_item_id": task.work_item_id or str(task.id),
@@ -25501,6 +26392,19 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
         "target_repo": task.target_repo or None,
         "target_branch": task.target_branch or None,
         "execution_policy": task.execution_policy or {},
+        "has_execution_brief": isinstance(task.execution_brief, dict) and bool(task.execution_brief),
+        "execution_brief_revision": int(((task.execution_brief or {}) if isinstance(task.execution_brief, dict) else {}).get("revision") or 0),
+        "execution_brief_history_count": len(task.execution_brief_history if isinstance(task.execution_brief_history, list) else []),
+        "execution_brief_review_state": normalize_execution_brief_review_state(task.execution_brief_review_state),
+        "execution_brief_review_notes": task.execution_brief_review_notes or "",
+        "execution_brief_reviewed_at": task.execution_brief_reviewed_at,
+        "execution_brief_reviewed_by": str(task.execution_brief_reviewed_by_id) if task.execution_brief_reviewed_by_id else None,
+        "execution_brief_review": brief_review,
+        "execution_queue": queue_state,
+        "execution_run": execution_payload["execution_summary"],
+        "execution_recovery": recovery_state,
+        "change_set": change_set,
+        "publish_state": publish_state,
         "thread_id": str(task.coordination_thread_id) if task.coordination_thread_id else None,
         "thread_title": str(task.coordination_thread.title) if task.coordination_thread_id else None,
         "goal_id": str(task.goal_id) if task.goal_id else None,
@@ -25529,6 +26433,56 @@ def _serialize_work_item_summary(task: DevTask, *, runtime_detail: Optional[Dict
 
 def _serialize_dev_task_summary(task: DevTask, *, runtime_detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return _serialize_work_item_summary(task, runtime_detail=runtime_detail)
+
+
+def _serialize_selected_work_item_queue_state(task: DevTask, *, normalized_status: str) -> Dict[str, Any]:
+    queue_state = serialize_dev_task_queue_state(task, normalized_status=normalized_status)
+    enriched_state: Dict[str, Any] = {
+        **queue_state,
+        "selected_for_dispatch": queue_state.get("dispatchable", False),
+        "next_dispatchable_task_id": None,
+        "next_dispatchable_work_item_id": None,
+        "next_dispatchable_title": None,
+        "next_dispatchable_thread_id": None,
+        "next_dispatchable_thread_title": None,
+    }
+    if not task.coordination_thread_id:
+        return enriched_state
+
+    workspace = task.coordination_thread.workspace
+    workspace_id = str(workspace.id)
+    threads = _active_coordination_threads_for_workspace(workspace).select_related("workspace", "goal")
+    task_lookup = _coordination_task_lookup_factory(workspace_id)
+    queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
+    for thread in threads:
+        _update_thread_status_from_tasks(thread)
+    queue = derive_work_queue(threads=threads, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
+    selected = find_dispatchable_queue_entry(
+        queue,
+        task_id=str(task.id),
+        task_lookup=queue_task_lookup,
+        status_lookup=_xco_status_lookup,
+    )
+    if selected:
+        return enriched_state
+
+    next_selected = select_next_dispatchable_queue_entry(queue, task_lookup=queue_task_lookup, status_lookup=_xco_status_lookup)
+    if not next_selected:
+        return enriched_state
+
+    next_entry, next_task, _ = next_selected
+    enriched_state["selected_for_dispatch"] = False
+    enriched_state["next_dispatchable_task_id"] = str(next_task.id)
+    enriched_state["next_dispatchable_work_item_id"] = str(next_task.work_item_id or next_task.id)
+    enriched_state["next_dispatchable_title"] = next_task.title
+    enriched_state["next_dispatchable_thread_id"] = next_entry.thread_id
+    enriched_state["next_dispatchable_thread_title"] = next_entry.thread_title
+    if queue_state.get("dispatchable"):
+        enriched_state["message"] = (
+            f"{task.title} is approved, but {next_task.title} is next in the execution queue "
+            f"for {next_entry.thread_title}."
+        )
+    return enriched_state
 
 
 def _serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
@@ -25563,6 +26517,7 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
     progress = compute_goal_progress(goal)
     metrics = compute_goal_execution_metrics(goal, runtime_detail_lookup=_project_runtime_status_to_task)
     health = compute_goal_health_indicators(goal, runtime_detail_lookup=_project_runtime_status_to_task)
+    portfolio_row = build_goal_portfolio_row(goal, runtime_detail_lookup=_project_runtime_status_to_task)
     recommendation = recommend_next_slice(goal)
     development_loop_summary = compute_goal_development_loop_summary(goal, recommendation=recommendation)
     development_insights = serialize_development_insights(
@@ -25605,6 +26560,12 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             "active_threads": health.active_threads,
             "blocked_threads": health.blocked_threads,
             "recent_artifacts": health.recent_artifacts,
+        },
+        "coordination_priority": {
+            "value": portfolio_row.coordination_priority.value,
+            "reasons": portfolio_row.coordination_priority.reasons,
+            "recent_execution_count": portfolio_row.recent_execution_count,
+            "health_status": portfolio_row.health_status,
         },
         "development_insights": development_insights,
         "goal_diagnostic": goal_diagnostic,
@@ -25682,6 +26643,382 @@ def _serialize_goal_detail(goal: Goal) -> Dict[str, Any]:
             "reasoning_summary": recommendation.reasoning_summary,
             "summary": recommendation.summary,
         },
+    }
+
+
+def _serialize_application_factory_summary(definition: ApplicationFactoryDefinition) -> Dict[str, Any]:
+    return {
+        "key": definition.key,
+        "name": definition.name,
+        "description": definition.description,
+        "intended_use_case": definition.intended_use_case,
+        "generated_goal_families": list(definition.generated_goal_families),
+        "assumptions": list(definition.assumptions),
+    }
+
+
+def _serialize_application_plan_generated_goal(goal: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "title": str(goal.get("title") or ""),
+        "description": str(goal.get("description") or ""),
+        "priority": str(goal.get("priority") or "normal"),
+        "goal_type": str(goal.get("goal_type") or "build_system"),
+        "planning_summary": str(goal.get("planning_summary") or ""),
+        "resolution_notes": goal.get("resolution_notes") if isinstance(goal.get("resolution_notes"), list) else [],
+        "threads": goal.get("threads") if isinstance(goal.get("threads"), list) else [],
+        "work_items": goal.get("work_items") if isinstance(goal.get("work_items"), list) else [],
+    }
+
+
+def _serialize_application_plan_summary(plan: ApplicationPlan) -> Dict[str, Any]:
+    payload = plan.plan_json if isinstance(plan.plan_json, dict) else {}
+    generated_goals = payload.get("generated_goals") if isinstance(payload.get("generated_goals"), list) else []
+    return {
+        "id": str(plan.id),
+        "workspace_id": str(plan.workspace_id),
+        "application_id": str(plan.application_id) if plan.application_id else None,
+        "name": plan.name,
+        "summary": plan.summary or "",
+        "source_factory_key": plan.source_factory_key,
+        "source_conversation_id": plan.source_conversation_id or None,
+        "requested_by": str(plan.requested_by_id) if plan.requested_by_id else None,
+        "target_repository_id": str(plan.target_repository_id) if plan.target_repository_id else None,
+        "target_repository_slug": str(getattr(plan.target_repository, "slug", "") or "") or None,
+        "status": plan.status,
+        "request_objective": plan.request_objective or "",
+        "plan_fingerprint": plan.plan_fingerprint,
+        "generated_goal_count": len(generated_goals),
+        "created_at": plan.created_at,
+        "updated_at": plan.updated_at,
+    }
+
+
+def _serialize_application_plan_detail(plan: ApplicationPlan) -> Dict[str, Any]:
+    payload = plan.plan_json if isinstance(plan.plan_json, dict) else {}
+    factory_definition = get_application_factory(plan.source_factory_key)
+    generated_plan = {
+        "application_name": str(payload.get("application_name") or plan.name),
+        "application_summary": str(payload.get("application_summary") or plan.summary or ""),
+        "source_factory_key": str(payload.get("source_factory_key") or plan.source_factory_key),
+        "request_objective": str(payload.get("request_objective") or plan.request_objective or ""),
+        "ordering_hints": payload.get("ordering_hints") if isinstance(payload.get("ordering_hints"), list) else [],
+        "dependency_hints": payload.get("dependency_hints") if isinstance(payload.get("dependency_hints"), list) else [],
+        "resolution_notes": payload.get("resolution_notes") if isinstance(payload.get("resolution_notes"), list) else [],
+        "generated_goals": [
+            _serialize_application_plan_generated_goal(goal)
+            for goal in (payload.get("generated_goals") if isinstance(payload.get("generated_goals"), list) else [])
+            if isinstance(goal, dict)
+        ],
+    }
+    return {
+        **_serialize_application_plan_summary(plan),
+        "factory": _serialize_application_factory_summary(factory_definition) if factory_definition else None,
+        "application_name": generated_plan["application_name"],
+        "application_summary": generated_plan["application_summary"],
+        "ordering_hints": generated_plan["ordering_hints"],
+        "dependency_hints": generated_plan["dependency_hints"],
+        "resolution_notes": generated_plan["resolution_notes"],
+        "generated_goals": generated_plan["generated_goals"],
+        "generated_plan": generated_plan,
+    }
+
+
+def _serialize_application_summary(application: Application) -> Dict[str, Any]:
+    goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
+    portfolio = _build_goal_portfolio_payload(goals)
+    return {
+        "id": str(application.id),
+        "workspace_id": str(application.workspace_id),
+        "name": application.name,
+        "summary": application.summary or "",
+        "source_factory_key": application.source_factory_key,
+        "source_conversation_id": application.source_conversation_id or None,
+        "requested_by": str(application.requested_by_id) if application.requested_by_id else None,
+        "target_repository_id": str(application.target_repository_id) if application.target_repository_id else None,
+        "target_repository_slug": str(getattr(application.target_repository, "slug", "") or "") or None,
+        "status": application.status,
+        "request_objective": application.request_objective or "",
+        "goal_count": len(goals),
+        "portfolio_state": portfolio,
+        "created_at": application.created_at,
+        "updated_at": application.updated_at,
+    }
+
+
+def _serialize_application_detail(application: Application) -> Dict[str, Any]:
+    goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
+    factory_definition = get_application_factory(application.source_factory_key)
+    return {
+        **_serialize_application_summary(application),
+        "factory": _serialize_application_factory_summary(factory_definition) if factory_definition else None,
+        "goals": [_serialize_goal_summary(goal) for goal in goals],
+        "metadata": application.metadata_json if isinstance(application.metadata_json, dict) else {},
+    }
+
+
+def _composer_stage_for_context(
+    *,
+    application_plan: Optional[ApplicationPlan],
+    application: Optional[Application],
+    goal: Optional[Goal],
+    thread: Optional[CoordinationThread],
+) -> str:
+    if thread is not None:
+        return "thread_focus"
+    if goal is not None:
+        return "goal_focus"
+    if application is not None and application_plan is not None:
+        return "plan_applied"
+    if application is not None:
+        return "application_overview"
+    if application_plan is not None:
+        return "plan_review"
+    return "factory_discovery"
+
+
+def _serialize_composer_action(
+    *,
+    action_type: str,
+    label: str,
+    enabled: bool = True,
+    target_kind: str = "",
+    target_id: Optional[str] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "type": action_type,
+        "label": label,
+        "enabled": enabled,
+    }
+    if target_kind:
+        payload["target_kind"] = target_kind
+    if target_id is not None:
+        payload["target_id"] = target_id
+    if params:
+        payload["params"] = params
+    return payload
+
+
+def _composer_breadcrumbs(
+    *,
+    selected_factory: Optional[ApplicationFactoryDefinition],
+    application_plan: Optional[ApplicationPlan],
+    application: Optional[Application],
+    goal: Optional[Goal],
+    thread: Optional[CoordinationThread],
+) -> List[Dict[str, Any]]:
+    breadcrumbs: List[Dict[str, Any]] = [{"kind": "composer", "label": "Composer"}]
+    if selected_factory is not None:
+        breadcrumbs.append({"kind": "factory", "label": selected_factory.name, "id": selected_factory.key})
+    if application_plan is not None:
+        breadcrumbs.append({"kind": "application_plan", "label": application_plan.name, "id": str(application_plan.id)})
+    if application is not None:
+        breadcrumbs.append({"kind": "application", "label": application.name, "id": str(application.id)})
+    if goal is not None:
+        breadcrumbs.append({"kind": "goal", "label": goal.title, "id": str(goal.id)})
+    if thread is not None:
+        breadcrumbs.append({"kind": "thread", "label": thread.title, "id": str(thread.id)})
+    return breadcrumbs
+
+
+def _serialize_composer_state(
+    *,
+    workspace: Workspace,
+    factory_key: str = "",
+    application_plan: Optional[ApplicationPlan] = None,
+    application: Optional[Application] = None,
+    goal: Optional[Goal] = None,
+    thread: Optional[CoordinationThread] = None,
+) -> Dict[str, Any]:
+    if thread is not None and goal is None and thread.goal_id:
+        goal = thread.goal
+    if goal is not None and application is None and goal.application_id:
+        application = goal.application
+    if application_plan is not None and application is None and application_plan.application_id:
+        application = application_plan.application
+    selected_factory = get_application_factory(factory_key) if factory_key else None
+    stage = _composer_stage_for_context(
+        application_plan=application_plan,
+        application=application,
+        goal=goal,
+        thread=thread,
+    )
+    factory_catalog = [_serialize_application_factory_summary(definition) for definition in list_application_factories()]
+    recent_plans = list(
+        ApplicationPlan.objects.filter(workspace=workspace)
+        .select_related("application", "requested_by")
+        .order_by("-updated_at", "-created_at")[:10]
+    )
+    recent_applications = list(
+        Application.objects.filter(workspace=workspace)
+        .select_related("requested_by")
+        .prefetch_related("goals")
+        .order_by("-updated_at", "-created_at")[:10]
+    )
+    related_goals: List[Dict[str, Any]] = []
+    related_threads: List[Dict[str, Any]] = []
+    portfolio_context: Optional[Dict[str, Any]] = None
+    if application is not None:
+        application_detail = _serialize_application_detail(application)
+        related_goals = application_detail.get("goals") if isinstance(application_detail.get("goals"), list) else []
+        goal_objects = list(
+            CoordinationThread.objects.filter(goal__application=application)
+            .select_related("goal", "owner")
+            .order_by("-updated_at", "-created_at")[:50]
+        )
+        related_threads = [_coordination_thread_summary(item) for item in goal_objects]
+        portfolio_context = application_detail.get("portfolio_state") if isinstance(application_detail.get("portfolio_state"), dict) else None
+    elif goal is not None:
+        goal_detail = _serialize_goal_detail(goal)
+        related_goals = [_serialize_goal_summary(goal)]
+        related_threads = goal_detail.get("threads") if isinstance(goal_detail.get("threads"), list) else []
+        portfolio_context = _build_goal_portfolio_payload([goal])
+    elif thread is not None:
+        related_threads = [_coordination_thread_summary(thread)]
+        if goal is not None:
+            related_goals = [_serialize_goal_summary(goal)]
+            portfolio_context = _build_goal_portfolio_payload([goal])
+    else:
+        goal_objects = list(_active_goals_for_workspace(workspace).order_by("-updated_at", "-created_at")[:20])
+        related_goals = [_serialize_goal_summary(item) for item in goal_objects]
+        portfolio_context = _build_goal_portfolio_payload(goal_objects)
+        if goal_objects:
+            related_threads = [
+                _coordination_thread_summary(item)
+                for item in CoordinationThread.objects.filter(goal__in=goal_objects)
+                .select_related("goal", "owner")
+                .order_by("-updated_at", "-created_at")[:20]
+            ]
+    available_actions: List[Dict[str, Any]] = []
+    if selected_factory is not None and application_plan is None and application is None:
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="generate_plan",
+                label="Generate Plan",
+                target_kind="factory",
+                target_id=selected_factory.key,
+            )
+        )
+    if application_plan is not None and stage in {"plan_review", "plan_applied"}:
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="apply_plan",
+                label="Apply Plan",
+                enabled=application is None,
+                target_kind="application_plan",
+                target_id=str(application_plan.id),
+            )
+        )
+    if application is not None:
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="open_application",
+                label="Open Application",
+                target_kind="application",
+                target_id=str(application.id),
+            )
+        )
+    if goal is not None and isinstance((_serialize_goal_detail(goal).get("recommendation") or {}), dict):
+        goal_detail = _serialize_goal_detail(goal)
+        recommendation = goal_detail.get("recommendation") if isinstance(goal_detail.get("recommendation"), dict) else {}
+        recommendation_id = str(recommendation.get("recommendation_id") or "").strip() or None
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="approve_next_slice",
+                label="Approve Next Slice",
+                enabled=bool(recommendation),
+                target_kind="goal",
+                target_id=str(goal.id),
+                params={"recommendation_id": recommendation_id} if recommendation_id else None,
+            )
+        )
+    if thread is not None:
+        available_actions.extend(
+            [
+                _serialize_composer_action(action_type="review_thread", label="Review Thread", target_kind="thread", target_id=str(thread.id)),
+                _serialize_composer_action(action_type="resume_thread", label="Resume Thread", target_kind="thread", target_id=str(thread.id)),
+                _serialize_composer_action(action_type="queue_next_slice", label="Queue Next Slice", target_kind="thread", target_id=str(thread.id)),
+                _serialize_composer_action(action_type="mark_thread_completed", label="Mark Thread Completed", target_kind="thread", target_id=str(thread.id)),
+            ]
+        )
+    return {
+        "workspace_id": str(workspace.id),
+        "stage": stage,
+        "context": {
+            "factory_key": selected_factory.key if selected_factory else None,
+            "application_plan_id": str(application_plan.id) if application_plan else None,
+            "application_id": str(application.id) if application else None,
+            "goal_id": str(goal.id) if goal else None,
+            "thread_id": str(thread.id) if thread else None,
+        },
+        "factory_catalog": factory_catalog,
+        "selected_factory": _serialize_application_factory_summary(selected_factory) if selected_factory else None,
+        "application_plans": [_serialize_application_plan_summary(plan) for plan in recent_plans],
+        "applications": [_serialize_application_summary(app) for app in recent_applications],
+        "application_plan": _serialize_application_plan_detail(application_plan) if application_plan else None,
+        "application": _serialize_application_detail(application) if application else None,
+        "goal": _serialize_goal_detail(goal) if goal else None,
+        "thread": _coordination_thread_detail(thread) if thread else None,
+        "related_goals": related_goals,
+        "related_threads": related_threads,
+        "portfolio_context": portfolio_context,
+        "breadcrumbs": _composer_breadcrumbs(
+            selected_factory=selected_factory,
+            application_plan=application_plan,
+            application=application,
+            goal=goal,
+            thread=thread,
+        ),
+        "available_actions": available_actions,
+    }
+
+
+def _build_goal_portfolio_payload(goals: List[Goal]) -> Dict[str, Any]:
+    portfolio_rows = build_goal_portfolio_state(goals, runtime_detail_lookup=_project_runtime_status_to_task)
+    portfolio_insights = compute_portfolio_insights(goals, runtime_detail_lookup=_project_runtime_status_to_task)
+    portfolio_recommendation = recommend_portfolio_goal(goals, runtime_detail_lookup=_project_runtime_status_to_task)
+    return {
+        "goals": [
+            {
+                "goal_id": row.goal_id,
+                "title": row.title,
+                "planning_status": row.planning_status,
+                "goal_progress_status": row.goal_progress_status,
+                "progress_percent": row.progress_percent,
+                "health_status": row.health_status,
+                "active_threads": row.active_threads,
+                "blocked_threads": row.blocked_threads,
+                "recent_execution_count": row.recent_execution_count,
+                "coordination_priority": {
+                    "value": row.coordination_priority.value,
+                    "reasons": row.coordination_priority.reasons,
+                },
+            }
+            for row in portfolio_rows
+        ],
+        "insights": [
+            {
+                "key": insight.key,
+                "summary": insight.summary,
+                "evidence": insight.evidence,
+                "goal_ids": insight.goal_ids,
+            }
+            for insight in portfolio_insights
+        ],
+        "recommended_goal": (
+            {
+                "goal_id": portfolio_recommendation.goal_id,
+                "title": portfolio_recommendation.title,
+                "coordination_priority": portfolio_recommendation.coordination_priority,
+                "summary": portfolio_recommendation.summary,
+                "reasoning": portfolio_recommendation.reasoning,
+                "thread_id": portfolio_recommendation.thread_id,
+                "work_item_id": portfolio_recommendation.work_item_id,
+                "queue_action_type": portfolio_recommendation.queue_action_type,
+            }
+            if portfolio_recommendation
+            else None
+        ),
     }
 
 
@@ -25833,54 +27170,16 @@ def _runtime_run_artifact_detail_for_conversation(
 
 
 def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
-    result_run = task.result_run
-    run_payload = None
-    artifacts_payload = []
-    commands_payload = []
-    runtime_detail = _project_runtime_status_to_task(task)
-    if runtime_detail:
-        run_payload = _serialize_runtime_run_for_dev_task(runtime_detail)
-        artifacts_payload = _serialize_runtime_artifacts_for_dev_task(runtime_detail)
-        commands_payload = []
-    elif result_run:
-        run_payload = {
-            "id": str(result_run.id),
-            "status": result_run.status,
-            "summary": result_run.summary,
-            "error": result_run.error,
-            "log_text": result_run.log_text,
-            "started_at": result_run.started_at,
-            "finished_at": result_run.finished_at,
-        }
-        artifacts_payload = [
-            {
-                "id": str(artifact.id),
-                "name": artifact.name,
-                "kind": artifact.kind,
-                "url": artifact.url,
-                "metadata": artifact.metadata_json,
-                "created_at": artifact.created_at,
-            }
-            for artifact in result_run.artifacts.all().order_by("created_at")
-        ]
-        commands_payload = [
-            {
-                "id": str(cmd.id),
-                "step_name": cmd.step_name,
-                "command_index": cmd.command_index,
-                "shell": cmd.shell,
-                "status": cmd.status,
-                "exit_code": cmd.exit_code,
-                "started_at": cmd.started_at,
-                "finished_at": cmd.finished_at,
-                "ssm_command_id": cmd.ssm_command_id,
-                "stdout": cmd.stdout,
-                "stderr": cmd.stderr,
-            }
-            for cmd in result_run.command_executions.all().order_by("created_at")
-        ]
+    execution_payload = _resolve_dev_task_execution_payload(task)
+    runtime_detail = execution_payload["runtime_detail"]
+    run_payload = execution_payload["run_payload"]
+    artifacts_payload = execution_payload["artifacts_payload"]
+    commands_payload = execution_payload["commands_payload"]
+    change_set = resolve_dev_task_change_set(task, execution_payload=execution_payload, include_diff=True)
+    normalized_status = _canonical_work_item_status(str((runtime_detail or {}).get("status") or task.status), execution_policy=task.execution_policy)
     return {
         **_serialize_work_item_summary(task, runtime_detail=runtime_detail),
+        "execution_queue": _serialize_selected_work_item_queue_state(task, normalized_status=normalized_status),
         "input_artifact_key": task.input_artifact_key,
         "last_error": str((runtime_detail or {}).get("failure_reason") or (runtime_detail or {}).get("escalation_reason") or task.last_error or ""),
         "context_packs": [
@@ -25895,10 +27194,36 @@ def _serialize_work_item_detail(task: DevTask) -> Dict[str, Any]:
         ],
         "thread_detail": _coordination_thread_summary(task.coordination_thread) if task.coordination_thread_id else None,
         "goal_detail": _serialize_goal_summary(task.goal) if task.goal_id else None,
+        "execution_brief": task.execution_brief if isinstance(task.execution_brief, dict) else None,
+        "execution_brief_history": task.execution_brief_history if isinstance(task.execution_brief_history, list) else [],
+        "change_set": change_set,
         "result_run_detail": run_payload,
         "result_run_artifacts": artifacts_payload,
         "result_run_commands": commands_payload,
     }
+
+
+def _requeue_dev_task(
+    task: DevTask,
+    *,
+    user,
+    execution_summary: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    recovery = evaluate_dev_task_recovery_state(task, execution_summary=execution_summary)
+    if not recovery.requeueable:
+        raise ValueError(recovery.message)
+    record_execution_failure_snapshot(
+        task,
+        execution_summary=execution_summary,
+        action="requeue",
+        recorded_at=timezone.now().isoformat(),
+    )
+    task.runtime_run_id = None
+    task.result_run = None
+    task.status = "queued"
+    task.updated_by = user
+    task.save(update_fields=["execution_policy", "runtime_run_id", "result_run", "status", "updated_by", "updated_at"])
+    return {"status": "queued"}
 
 
 def _execute_conversation_action(
@@ -26070,29 +27395,28 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"thread": _coordination_thread_summary(thread)},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "thread_id": str(thread.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
             )
         if action_type == ConversationActionType.LIST_THREADS.value:
-            rows = [_coordination_thread_summary(item) for item in CoordinationThread.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100]]
-            return JsonResponse(
-                {
-                    "status": "DraftReady",
-                    "artifact_type": "Workspace",
-                    "artifact_id": None,
-                    "summary": f"Found {len(rows)} XCO thread(s).",
+            rows = [
+                _coordination_thread_summary(item)
+                for item in _active_coordination_threads_for_workspace(workspace).order_by("-updated_at", "-created_at")[:100]
+            ]
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=f"Found {len(rows)} XCO thread(s).",
+                panel_key="thread_list",
+                params={"workspace_id": str(workspace.id)},
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
                     "intent": intent_payload,
-                    "prompt_interpretation": prompt_interpretation,
                     "conversation_action": action,
                     "operation_result": True,
                     "result": {"threads": rows},
-                    "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "thread_list", "label": "Open Threads", "params": {"workspace_id": str(workspace.id)}}
-                    ],
-                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
-                }
+                },
             )
         if thread is None:
             return JsonResponse(
@@ -26142,7 +27466,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"thread": detail},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "thread_id": str(thread.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26170,6 +27494,34 @@ def _execute_conversation_action(
             if summary_mode == "thread_progress_summary"
             else f"Showing XCO thread {thread.title}."
         )
+        direct_thread_target = _direct_panel_target_for_conversation_action(
+            action_type=action_type,
+            workspace_id=str(workspace.id),
+            action_payload=action_payload,
+            target={"id": str(thread.id)},
+        )
+        if direct_thread_target:
+            panel_key, params = direct_thread_target
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=summary,
+                panel_key=panel_key,
+                params=params,
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
+                    "summary_type": (
+                        "thread_diagnostic_summary"
+                        if summary_mode == "thread_diagnostic_summary"
+                        else "thread_progress_summary"
+                        if summary_mode == "thread_progress_summary"
+                        else None
+                    ),
+                    "intent": intent_payload,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"thread": detail},
+                },
+            )
         return JsonResponse(
             {
                 "status": "DraftReady",
@@ -26189,7 +27541,7 @@ def _execute_conversation_action(
                 "operation_result": True,
                 "result": {"thread": detail},
                 "next_actions": [
-                    {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(thread.id)}}
+                    {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "thread_id": str(thread.id)}}
                 ],
                 "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
             }
@@ -26202,6 +27554,11 @@ def _execute_conversation_action(
         ConversationActionType.QUEUE_FIRST_SLICE.value,
         ConversationActionType.LIST_GOALS.value,
         ConversationActionType.SHOW_GOAL.value,
+        ConversationActionType.LIST_APPLICATION_FACTORIES.value,
+        ConversationActionType.OPEN_COMPOSER.value,
+        ConversationActionType.GENERATE_APPLICATION_PLAN.value,
+        ConversationActionType.APPLY_APPLICATION_PLAN.value,
+        ConversationActionType.SHOW_APPLICATION.value,
         ConversationActionType.APPROVE_PLAN.value,
         ConversationActionType.APPROVE_RECOMMENDATION.value,
         ConversationActionType.DEFER_EXECUTION.value,
@@ -26212,25 +27569,269 @@ def _execute_conversation_action(
         action_payload = ((action.get("payload") or {}) if isinstance(action.get("payload"), dict) else {}).get("action_payload")
         action_payload = action_payload if isinstance(action_payload, dict) else {}
         summary_mode = str(action_payload.get("summary_mode") or "").strip()
-        goal_id = str(target.get("id") or "").strip()
+        target_kind = str(target.get("kind") or "").strip()
+        target_id = str(target.get("id") or "").strip()
+        application_id = target_id if target_kind == "application" else ""
+        application_plan_id = target_id if target_kind == "application_plan" else ""
+        goal_id = target_id if target_kind == "goal" else ""
         goal: Optional[Goal] = None
         if goal_id:
             goal = Goal.objects.filter(id=goal_id, workspace=workspace).first()
-        if action_type == ConversationActionType.LIST_GOALS.value:
-            goals = [_serialize_goal_summary(item) for item in Goal.objects.filter(workspace=workspace).order_by("-updated_at", "-created_at")[:100]]
+        application: Optional[Application] = None
+        if application_id:
+            application = Application.objects.filter(id=application_id, workspace=workspace).first()
+        application_plan: Optional[ApplicationPlan] = None
+        if application_plan_id:
+            application_plan = ApplicationPlan.objects.filter(id=application_plan_id, workspace=workspace).first()
+        if action_type == ConversationActionType.LIST_APPLICATION_FACTORIES.value:
+            rows = [_serialize_application_factory_summary(definition) for definition in list_application_factories()]
+            summary = f"Found {len(rows)} application factor{'ies' if len(rows) != 1 else 'y'}."
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=summary,
+                panel_key="composer_detail",
+                params={"workspace_id": str(workspace.id)},
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
+                    "intent": intent_payload,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"factories": rows},
+                },
+            )
+        if action_type == ConversationActionType.OPEN_COMPOSER.value:
+            params = {
+                "workspace_id": str(workspace.id),
+            }
+            if action_payload.get("factory_key"):
+                params["factory_key"] = str(action_payload.get("factory_key"))
+            if action_payload.get("application_plan_id"):
+                params["application_plan_id"] = str(action_payload.get("application_plan_id"))
+            if action_payload.get("application_id"):
+                params["application_id"] = str(action_payload.get("application_id"))
+            if action_payload.get("goal_id"):
+                params["goal_id"] = str(action_payload.get("goal_id"))
+            if action_payload.get("thread_id"):
+                params["thread_id"] = str(action_payload.get("thread_id"))
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary="Opening the unified composer.",
+                panel_key="composer_detail",
+                params=params,
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
+                    "intent": intent_payload,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"workspace_id": str(workspace.id)},
+                },
+            )
+        if action_type == ConversationActionType.GENERATE_APPLICATION_PLAN.value:
+            objective = str(action_payload.get("objective") or action_payload.get("reference") or prompt).strip()
+            plan, factory_definition, generated_plan, created = create_or_get_application_plan(
+                workspace=workspace,
+                objective=objective,
+                requested_by=identity,
+                source_conversation_id=str(action.get("thread_id") or "").strip(),
+                factory_key=str(action_payload.get("factory_key") or "").strip(),
+                application_name=str(action_payload.get("application_name") or "").strip(),
+            )
+            detail = _serialize_application_plan_detail(plan)
+            action = {
+                **action,
+                "target_object": {
+                    **target,
+                    "id": str(plan.id),
+                    "label": plan.name,
+                    "workspace_id": str(workspace.id),
+                },
+            }
             return JsonResponse(
                 {
                     "status": "DraftReady",
                     "artifact_type": "Workspace",
                     "artifact_id": None,
-                    "summary": f"Found {len(goals)} goal(s).",
+                    "summary": f"Generated a reviewable application plan for {plan.name}.",
                     "intent": intent_payload,
                     "prompt_interpretation": prompt_interpretation,
                     "conversation_action": action,
                     "operation_result": True,
-                    "result": {"goals": goals},
+                    "result": {
+                        "application_plan": detail,
+                        "factory": _serialize_application_factory_summary(factory_definition),
+                        "generated_plan": generated_plan.model_dump(mode="json"),
+                        "created": created,
+                    },
+                    "application_plan_id": str(plan.id),
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_list", "label": "Open Goals", "params": {"workspace_id": str(workspace.id)}}
+                        {
+                            "action": "OpenPanel",
+                            "panel_key": "composer_detail",
+                            "label": "Open Composer",
+                            "params": {
+                                "workspace_id": str(workspace.id),
+                                "factory_key": str(plan.source_factory_key or action_payload.get("factory_key") or ""),
+                                "application_plan_id": str(plan.id),
+                            },
+                        }
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.APPLY_APPLICATION_PLAN.value:
+            if application_plan is None and context.active_application_plan_id:
+                application_plan = ApplicationPlan.objects.filter(id=context.active_application_plan_id, workspace=workspace).first()
+            if application_plan is None:
+                return JsonResponse(
+                    {
+                        "status": "IntentClarificationRequired",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": "No application plan could be resolved from the conversation context.",
+                        "intent": intent_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": action,
+                        "operation_result": False,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    },
+                    status=409,
+                )
+            application, created = apply_application_plan(application_plan=application_plan, user=user)
+            application.refresh_from_db()
+            application_plan.refresh_from_db()
+            action = {
+                **action,
+                "target_object": {
+                    "kind": "application",
+                    "id": str(application.id),
+                    "label": application.name,
+                    "workspace_id": str(workspace.id),
+                },
+            }
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": (
+                        f"Applied application plan for {application.name} into durable goals, threads, and work items."
+                        if created
+                        else f"Application plan for {application.name} was already applied."
+                    ),
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {
+                        "application": _serialize_application_detail(application),
+                        "application_plan": _serialize_application_plan_detail(application_plan),
+                    },
+                    "application_id": str(application.id),
+                    "application_plan_id": str(application_plan.id),
+                    "next_actions": [
+                        {
+                            "action": "OpenPanel",
+                            "panel_key": "composer_detail",
+                            "label": "Open Composer",
+                            "params": {
+                                "workspace_id": str(workspace.id),
+                                "application_id": str(application.id),
+                                "application_plan_id": str(application_plan.id),
+                            },
+                        }
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.SHOW_APPLICATION.value:
+            if application is None and context.active_application_id:
+                application = Application.objects.filter(id=context.active_application_id, workspace=workspace).first()
+            if application is None:
+                return JsonResponse(
+                    {
+                        "status": "IntentClarificationRequired",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": "No application could be resolved from the conversation context.",
+                        "intent": intent_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": action,
+                        "operation_result": False,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    },
+                    status=409,
+                )
+            detail = _serialize_application_detail(application)
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=f"Showing application {application.name}.",
+                panel_key="composer_detail",
+                params={"workspace_id": str(workspace.id), "application_id": str(application.id)},
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
+                    "intent": intent_payload,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"application": detail},
+                    "application_id": str(application.id),
+                },
+            )
+        if action_type == ConversationActionType.LIST_GOALS.value:
+            goal_objects = list(_active_goals_for_workspace(workspace).order_by("-updated_at", "-created_at")[:100])
+            goals = [_serialize_goal_summary(item) for item in goal_objects]
+            portfolio_state = _build_goal_portfolio_payload(goal_objects)
+            recommended_goal = portfolio_state.get("recommended_goal") if isinstance(portfolio_state, dict) else None
+            portfolio_insights = portfolio_state.get("insights") if isinstance(portfolio_state, dict) else []
+            if summary_mode == "portfolio_health_summary":
+                active_goals = sum(1 for item in (portfolio_state.get("goals") or []) if item.get("health_status") == "active")
+                blocked_goals = sum(1 for item in (portfolio_state.get("goals") or []) if item.get("health_status") == "blocked")
+                summary = (
+                    f"Portfolio health: {active_goals} active goal(s), {blocked_goals} blocked goal(s), "
+                    f"and {len(goals)} total goal(s)."
+                )
+            elif summary_mode == "portfolio_recommendation_summary":
+                if isinstance(recommended_goal, dict) and recommended_goal.get("title"):
+                    summary = (
+                        f"{recommended_goal['title']} is the strongest current portfolio candidate. "
+                        f"{recommended_goal.get('summary') or recommended_goal.get('reasoning') or ''}"
+                    ).strip()
+                else:
+                    summary = "No portfolio-level goal recommendation is currently actionable."
+            elif summary_mode == "portfolio_insight_summary":
+                first_insight = portfolio_insights[0] if portfolio_insights else None
+                if isinstance(first_insight, dict) and first_insight.get("summary"):
+                    summary = str(first_insight["summary"])
+                else:
+                    summary = f"Found {len(goals)} goal(s) with no dominant portfolio issue right now."
+            else:
+                summary = f"Found {len(goals)} goal(s)."
+            if not summary_mode:
+                return _direct_panel_intent_response(
+                    request_id=request_id,
+                    summary=summary,
+                    panel_key="composer_detail",
+                    params={"workspace_id": str(workspace.id)},
+                    prompt_interpretation=prompt_interpretation,
+                    extra_payload={
+                        "intent": intent_payload,
+                        "conversation_action": action,
+                        "operation_result": True,
+                        "result": {"goals": goals, "portfolio_state": portfolio_state},
+                    },
+                )
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": summary,
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"goals": goals, "portfolio_state": portfolio_state},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26273,7 +27874,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"goal": detail},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26349,7 +27950,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"goal": detail, "queue_seed": approval.get("queue_seed")},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26378,8 +27979,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"goal": detail, "queue_seed": seeded},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}},
-                        {"action": "OpenPanel", "panel_key": "thread_detail", "label": "Open Thread", "params": {"thread_id": str(seeded.get("thread_id") or "")}},
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id), "thread_id": str(seeded.get("thread_id") or "")}},
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26428,7 +28028,7 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"goal": detail, "recommendation": recommendation_payload},
                     "next_actions": [
-                        {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                        {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id)}}
                     ],
                     "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
                 }
@@ -26446,6 +28046,36 @@ def _execute_conversation_action(
                 else str(((loop_summary.get("recommended_next_slice") or {}) if isinstance(loop_summary, dict) else {}).get("summary") or "").strip() or f"Showing goal {goal.title}."
             )
         detail = locals().get("detail") if isinstance(locals().get("detail"), dict) else _serialize_goal_detail(goal)
+        direct_goal_target = _direct_panel_target_for_conversation_action(
+            action_type=action_type,
+            workspace_id=str(workspace.id),
+            action_payload=action_payload,
+            target={"id": str(goal.id)},
+        )
+        if direct_goal_target:
+            panel_key, params = direct_goal_target
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=summary,
+                panel_key=panel_key,
+                params=params,
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
+                    "summary_type": (
+                        "goal_progress_summary"
+                        if summary_mode == "goal_progress_summary"
+                        else "goal_diagnostic_summary"
+                        if summary_mode == "goal_diagnostic_summary"
+                        else "goal_insight_summary"
+                        if summary_mode == "goal_insight_summary"
+                        else None
+                    ),
+                    "intent": intent_payload,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"goal": detail},
+                },
+            )
         return JsonResponse(
             {
                 "status": "DraftReady",
@@ -26467,7 +28097,7 @@ def _execute_conversation_action(
                 "operation_result": True,
                 "result": {"goal": detail},
                 "next_actions": [
-                    {"action": "OpenPanel", "panel_key": "goal_detail", "label": "Open Goal", "params": {"goal_id": str(goal.id)}}
+                    {"action": "OpenPanel", "panel_key": "composer_detail", "label": "Open Composer", "params": {"workspace_id": str(workspace.id), "goal_id": str(goal.id)}}
                 ],
                 "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
             }
@@ -26707,6 +28337,8 @@ def _execute_conversation_action(
 
 
 def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -> Dict[str, Any]:
+    source = _load_dev_task_runtime_source(task)
+    ensure_execution_brief_ready(task, work_item=source["work_item"])
     payload = _build_dev_task_runtime_payload(task, workspace)
     response = _seed_api_request(method="POST", path="/api/v1/runtime/runs", payload=payload, timeout=30)
     content_type = str(response.headers.get("content-type") or "").lower()
@@ -26723,7 +28355,9 @@ def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -
     task.last_error = ""
     task.target_repo = str(((payload.get("target") or {}) if isinstance(payload.get("target"), dict) else {}).get("repo") or task.target_repo or "")
     task.target_branch = str(((payload.get("target") or {}) if isinstance(payload.get("target"), dict) else {}).get("branch") or task.target_branch or "")
-    task.execution_policy = (payload.get("policy") if isinstance(payload.get("policy"), dict) else {}) or task.execution_policy or {}
+    next_policy = (payload.get("policy") if isinstance(payload.get("policy"), dict) else {}) or {}
+    current_policy = task.execution_policy if isinstance(task.execution_policy, dict) else {}
+    task.execution_policy = {**current_policy, **next_policy} if current_policy else (next_policy or {})
     task.locked_by = ""
     task.locked_at = None
     task.updated_by = user
@@ -26807,6 +28441,9 @@ def _ensure_conversation_dev_task(*, workspace: Workspace, action: Dict[str, Any
             coordination_thread = candidates[0]
     reference = str(target.get("reference") or action_payload.get("reference") or prompt).strip()
     title = str(target.get("label") or reference or prompt).strip() or "Conversation work item"
+    target_resolution = resolve_development_target(goal=coordination_thread.goal if coordination_thread and coordination_thread.goal_id else None)
+    resolved_repo = str(target_resolution.repository_slug or "").strip()
+    resolved_branch = str(target_resolution.branch or "").strip()
     return DevTask.objects.create(
         title=title[:240],
         description=str(prompt or "").strip(),
@@ -26817,8 +28454,8 @@ def _ensure_conversation_dev_task(*, workspace: Workspace, action: Dict[str, Any
         source_entity_id=uuid.uuid4(),
         source_conversation_id=conversation_thread_id,
         intent_type=str(action.get("intent_type") or "").strip(),
-        target_repo=str(action_payload.get("target_repo") or _conversation_default_repo(prompt)).strip(),
-        target_branch=str(action_payload.get("target_branch") or _conversation_default_branch()).strip(),
+        target_repo=str(action_payload.get("target_repo") or resolved_repo or _conversation_default_repo(prompt)).strip(),
+        target_branch=str(action_payload.get("target_branch") or resolved_branch or _conversation_default_branch()).strip(),
         execution_policy=policy or {},
         coordination_thread=coordination_thread,
         work_item_id=_conversation_work_item_id(reference),
@@ -26936,6 +28573,7 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
         coordination_thread = None
         if payload.get("thread_id"):
             coordination_thread = get_object_or_404(CoordinationThread, id=payload["thread_id"])
+        target_resolution = resolve_development_target(goal=coordination_thread.goal if coordination_thread and coordination_thread.goal_id else None)
         dev_task = DevTask.objects.create(
             title=title,
             description=payload.get("description", ""),
@@ -26947,8 +28585,16 @@ def dev_tasks_collection(request: HttpRequest) -> JsonResponse:
             source_entity_id=payload.get("source_entity_id") or uuid.uuid4(),
             source_conversation_id=payload.get("source_conversation_id", ""),
             intent_type=payload.get("intent_type", ""),
-            target_repo=payload.get("target_repo", ""),
-            target_branch=payload.get("target_branch", ""),
+            target_repo=payload.get("target_repo") or target_resolution.repository_slug or "",
+            target_branch=payload.get("target_branch") or target_resolution.branch or "",
+            execution_brief=payload.get("execution_brief") if isinstance(payload.get("execution_brief"), dict) else None,
+            execution_brief_history=[],
+            execution_brief_review_state=(
+                normalize_execution_brief_review_state(payload.get("execution_brief_review_state"))
+                if isinstance(payload.get("execution_brief"), dict)
+                else "draft"
+            ),
+            execution_brief_review_notes=str(payload.get("execution_brief_review_notes") or ""),
             execution_policy=payload.get("execution_policy") if isinstance(payload.get("execution_policy"), dict) else None,
             coordination_thread=coordination_thread,
             dependency_work_item_ids=payload.get("dependency_work_item_ids") if isinstance(payload.get("dependency_work_item_ids"), list) else [],
@@ -27011,14 +28657,32 @@ def _coordination_thread_queryset(identity: UserIdentity, workspace_id: str):
     workspace = _resolve_workspace_for_identity(identity, workspace_id)
     if not workspace:
         raise PermissionDenied("workspace not accessible")
-    return workspace, CoordinationThread.objects.filter(workspace=workspace).select_related("owner").prefetch_related("work_items", "events")
+    return workspace, _active_coordination_threads_for_workspace(workspace)
 
 
 def _goal_queryset(identity: UserIdentity, workspace_id: str):
     workspace = _resolve_workspace_for_identity(identity, workspace_id)
     if not workspace:
         raise PermissionDenied("workspace not accessible")
-    return workspace, Goal.objects.filter(workspace=workspace).select_related("requested_by").prefetch_related("threads__work_items", "work_items")
+    return workspace, _active_goals_for_workspace(workspace)
+
+
+def _active_goals_for_workspace(workspace: Workspace):
+    return (
+        Goal.objects.filter(workspace=workspace)
+        .filter(Q(application__isnull=True) | ~Q(application__status="archived"))
+        .select_related("requested_by")
+        .prefetch_related("threads__work_items", "work_items")
+    )
+
+
+def _active_coordination_threads_for_workspace(workspace: Workspace):
+    return (
+        CoordinationThread.objects.filter(workspace=workspace)
+        .filter(Q(goal__application__isnull=True) | ~Q(goal__application__status="archived"))
+        .select_related("owner")
+        .prefetch_related("work_items", "events")
+    )
 
 
 def _activate_goal_first_slice(goal: Goal) -> Dict[str, Optional[str]]:
@@ -27170,6 +28834,7 @@ def _approve_goal_recommendation(
             "queue_seed": None,
         }
     task_lookup = {str(item.work_item_id or item.id): item for item in goal.work_items.all()}
+    activated_from_queue = False
     if thread.status == "queued" and action_type == "queue_first_slice":
         transition_thread_status(
             thread,
@@ -27178,6 +28843,7 @@ def _approve_goal_recommendation(
             payload={"reason": "goal_queue_first_slice", "goal_id": str(goal.id)},
         )
         thread.refresh_from_db()
+        activated_from_queue = True
     task_status = _thread_status_for_task(task)
     dependency_ids = task.dependency_work_item_ids if isinstance(task.dependency_work_item_ids, list) else []
     blocked_by_dependency = False
@@ -27198,7 +28864,7 @@ def _approve_goal_recommendation(
         status_lookup=lambda candidate: _thread_status_for_task(candidate),
         task_lookup=lambda work_item_id: task_lookup.get(str(work_item_id)),
     )
-    if queue and str(queue[0].task_id) == str(task.id) and thread.status == "active":
+    if queue and str(queue[0].task_id) == str(task.id) and thread.status == "active" and not activated_from_queue:
         return {
             "status": "already_queued",
             "summary": f"{task.title} is already the next eligible XCO queue item.",
@@ -27256,11 +28922,20 @@ def _coordination_task_lookup_factory(workspace_id: str):
         if not key:
             return None
         if key not in cache:
-            cache[key] = (
-                DevTask.objects.filter(runtime_workspace_id=workspace_id).filter(
-                    Q(id=key) | Q(work_item_id=key)
-                ).order_by("-updated_at", "-created_at").first()
+            try:
+                key_uuid = uuid.UUID(key)
+            except (TypeError, ValueError, AttributeError):
+                key_uuid = None
+            query = DevTask.objects.filter(
+                Q(runtime_workspace_id=workspace_id)
+                | Q(coordination_thread__workspace_id=workspace_id)
+                | Q(goal__workspace_id=workspace_id)
             )
+            if key_uuid is not None:
+                query = query.filter(Q(id=key_uuid) | Q(work_item_id=key))
+            else:
+                query = query.filter(work_item_id=key)
+            cache[key] = query.order_by("-updated_at", "-created_at").first()
         return cache[key]
 
     return _lookup
@@ -27326,8 +29001,33 @@ def goals_collection(request: HttpRequest) -> JsonResponse:
     goal_type = str(request.GET.get("goal_type") or "").strip().lower()
     if goal_type:
         qs = qs.filter(goal_type=goal_type)
-    rows = [_serialize_goal_summary(goal) for goal in qs.order_by("-updated_at", "-created_at")]
-    return _paginate(request, rows, "goals")
+    ordered_goals = list(qs.order_by("-updated_at", "-created_at"))
+    portfolio_rows = build_goal_portfolio_state(ordered_goals, runtime_detail_lookup=_project_runtime_status_to_task)
+    portfolio_by_goal_id = {row.goal_id: row for row in portfolio_rows}
+    rows: List[Dict[str, Any]] = []
+    for goal in ordered_goals:
+        payload = _serialize_goal_summary(goal)
+        portfolio_row = portfolio_by_goal_id.get(str(goal.id))
+        if portfolio_row:
+            payload["goal_progress"] = {
+                "goal_progress_status": portfolio_row.goal_progress_status,
+                "progress_percent": portfolio_row.progress_percent,
+            }
+            payload["coordination_priority"] = {
+                "value": portfolio_row.coordination_priority.value,
+                "reasons": portfolio_row.coordination_priority.reasons,
+                "recent_execution_count": portfolio_row.recent_execution_count,
+                "health_status": portfolio_row.health_status,
+                "active_threads": portfolio_row.active_threads,
+                "blocked_threads": portfolio_row.blocked_threads,
+            }
+        rows.append(payload)
+    response = _paginate(request, rows, "goals")
+    if not isinstance(response, JsonResponse):
+        return response
+    payload = json.loads(response.content)
+    payload["portfolio_state"] = _build_goal_portfolio_payload(ordered_goals)
+    return JsonResponse(payload, status=response.status_code)
 
 
 @csrf_exempt
@@ -27441,6 +29141,580 @@ def goal_review(request: HttpRequest, goal_id: str) -> JsonResponse:
     return JsonResponse(result)
 
 
+@login_required
+def application_factories_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    rows = [_serialize_application_factory_summary(definition) for definition in list_application_factories()]
+    return JsonResponse({"factories": rows})
+
+
+@csrf_exempt
+@login_required
+def application_plans_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "GET":
+        workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace, _ = _goal_queryset(identity, workspace_id)
+        plans = list(
+            ApplicationPlan.objects.filter(workspace=workspace)
+            .select_related("application", "requested_by", "target_repository")
+            .order_by("-updated_at", "-created_at")
+        )
+        return JsonResponse({"application_plans": [_serialize_application_plan_summary(plan) for plan in plans]})
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    objective = str(payload.get("objective") or payload.get("request_objective") or "").strip()
+    if not workspace_id or not objective:
+        return JsonResponse({"error": "workspace_id and objective are required"}, status=400)
+    workspace, _ = _goal_queryset(identity, workspace_id)
+    target_repository_slug = str(payload.get("target_repository_slug") or payload.get("target_repo") or "").strip()
+    target_repository = None
+    if target_repository_slug:
+        target_repository = ManagedRepository.objects.filter(slug=slugify(target_repository_slug), is_active=True).first()
+        if target_repository is None:
+            return JsonResponse({"error": "target_repository_slug is not a registered repository"}, status=400)
+    plan, factory_definition, generated_plan, created = create_or_get_application_plan(
+        workspace=workspace,
+        objective=objective,
+        requested_by=identity,
+        source_conversation_id=str(payload.get("source_conversation_id") or "").strip(),
+        factory_key=str(payload.get("factory_key") or "").strip(),
+        application_name=str(payload.get("application_name") or "").strip(),
+        target_repository=target_repository,
+    )
+    response_payload = _serialize_application_plan_detail(plan)
+    response_payload["factory"] = _serialize_application_factory_summary(factory_definition)
+    response_payload["generated_plan"] = generated_plan.model_dump(mode="json")
+    response_payload["created"] = created
+    return JsonResponse(response_payload, status=201 if created else 200)
+
+
+@csrf_exempt
+@login_required
+def application_plan_detail(request: HttpRequest, plan_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    plan = get_object_or_404(ApplicationPlan.objects.select_related("workspace", "requested_by", "application", "target_repository"), id=plan_id)
+    if not _workspace_membership(identity, str(plan.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "PATCH":
+        payload = _parse_json(request)
+        status_value = str(payload.get("status") or "").strip().lower()
+        allowed_statuses = {choice for choice, _label in ApplicationPlan.STATUS_CHOICES}
+        if status_value not in allowed_statuses:
+            return JsonResponse({"error": "status must be one of review, applied, or canceled"}, status=400)
+        plan.status = status_value
+        plan.save(update_fields=["status", "updated_at"])
+        plan.refresh_from_db()
+        return JsonResponse(_serialize_application_plan_detail(plan))
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(_serialize_application_plan_detail(plan))
+
+
+@csrf_exempt
+@login_required
+def application_plan_apply(request: HttpRequest, plan_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    plan = get_object_or_404(ApplicationPlan.objects.select_related("workspace", "requested_by", "application", "target_repository"), id=plan_id)
+    if not _workspace_membership(identity, str(plan.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    application, created = apply_application_plan(application_plan=plan, user=request.user)
+    application.refresh_from_db()
+    plan.refresh_from_db()
+    return JsonResponse(
+        {
+            "status": "applied" if created else "already_applied",
+            "application": _serialize_application_detail(application),
+            "application_plan": _serialize_application_plan_detail(plan),
+        }
+    )
+
+
+@login_required
+def applications_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, _ = _goal_queryset(identity, workspace_id)
+    applications = list(
+        Application.objects.filter(workspace=workspace)
+        .select_related("requested_by", "target_repository")
+        .prefetch_related("goals")
+        .order_by("-updated_at", "-created_at")
+    )
+    return JsonResponse({"applications": [_serialize_application_summary(app) for app in applications]})
+
+
+@csrf_exempt
+@login_required
+def application_detail(request: HttpRequest, application_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace", "requested_by", "target_repository").prefetch_related("goals__threads__work_items", "goals__work_items"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "PATCH":
+        payload = _parse_json(request)
+        status_value = str(payload.get("status") or "").strip().lower()
+        allowed_statuses = {choice for choice, _label in Application.STATUS_CHOICES}
+        if status_value not in allowed_statuses:
+            return JsonResponse({"error": "status must be one of active, completed, or archived"}, status=400)
+        application.status = status_value
+        application.save(update_fields=["status", "updated_at"])
+        application.refresh_from_db()
+        return JsonResponse(_serialize_application_detail(application))
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(_serialize_application_detail(application))
+
+
+@login_required
+def composer_state(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, _ = _goal_queryset(identity, workspace_id)
+    factory_key = str(request.GET.get("factory_key") or "").strip()
+    application_plan_id = str(request.GET.get("application_plan_id") or "").strip()
+    application_id = str(request.GET.get("application_id") or "").strip()
+    goal_id = str(request.GET.get("goal_id") or "").strip()
+    thread_id = str(request.GET.get("thread_id") or "").strip()
+    application_plan: Optional[ApplicationPlan] = None
+    application: Optional[Application] = None
+    goal: Optional[Goal] = None
+    thread: Optional[CoordinationThread] = None
+    if application_plan_id:
+        application_plan = (
+            ApplicationPlan.objects.filter(id=application_plan_id, workspace=workspace)
+            .select_related("application", "requested_by")
+            .first()
+        )
+    if application_id:
+        application = (
+            Application.objects.filter(id=application_id, workspace=workspace)
+            .select_related("requested_by")
+            .prefetch_related("goals")
+            .first()
+        )
+    if goal_id:
+        goal = (
+            Goal.objects.filter(id=goal_id, workspace=workspace)
+            .select_related("application", "requested_by")
+            .prefetch_related("threads__work_items", "work_items")
+            .first()
+        )
+    if thread_id:
+        thread = (
+            CoordinationThread.objects.filter(id=thread_id, workspace=workspace)
+            .select_related("goal", "goal__application", "owner")
+            .prefetch_related("work_items")
+            .first()
+        )
+    return JsonResponse(
+        _serialize_composer_state(
+            workspace=workspace,
+            factory_key=factory_key,
+            application_plan=application_plan,
+            application=application,
+            goal=goal,
+            thread=thread,
+        )
+    )
+
+
+@login_required
+def contextual_capabilities(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(
+        get_contextual_capabilities(
+            context=str(request.GET.get("context") or "").strip() or None,
+            artifact_id=str(request.GET.get("artifact_id") or "").strip() or None,
+            application_id=str(request.GET.get("application_id") or "").strip() or None,
+        )
+    )
+
+
+def _capability_state_has_application(related_jobs: Iterable[Dict[str, Any]]) -> bool:
+    for job in related_jobs:
+        if not isinstance(job, dict):
+            continue
+        for payload in (job.get("output_json"), job.get("input_json")):
+            if not isinstance(payload, dict):
+                continue
+            app_spec = payload.get("app_spec")
+            if isinstance(app_spec, dict) and str(app_spec.get("app_slug") or "").strip():
+                return True
+            generated_artifact = payload.get("generated_artifact")
+            if isinstance(generated_artifact, dict) and (
+                str(generated_artifact.get("artifact_slug") or "").strip() or str(generated_artifact.get("artifact_id") or "").strip()
+            ):
+                return True
+            sibling = payload.get("sibling_xyn")
+            installed_artifact = sibling.get("installed_artifact") if isinstance(sibling, dict) else None
+            if not isinstance(installed_artifact, dict):
+                installed_artifact = payload.get("installed_artifact")
+            if isinstance(installed_artifact, dict) and (
+                str(installed_artifact.get("artifact_slug") or "").strip() or str(installed_artifact.get("artifact_id") or "").strip()
+            ):
+                return True
+    return False
+
+
+def _normalize_capability_artifact_type(*, kind: str = "", slug: str = "") -> Optional[str]:
+    normalized_kind = str(kind or "").strip().lower()
+    normalized_slug = str(slug or "").strip().lower()
+    if normalized_kind == ARTICLE_ARTIFACT_TYPE_SLUG:
+        return "article"
+    if normalized_kind == WORKFLOW_ARTIFACT_TYPE_SLUG and normalized_slug.startswith("app."):
+        return "application"
+    if normalized_kind in {"video", "video_render", "explainer"}:
+        return "explainer_video"
+    return normalized_kind or None
+
+
+def _normalize_capability_execution_state(workflow_state: Any) -> Optional[str]:
+    token = str(workflow_state or "").strip().lower()
+    if token in {"submitted", "queued", "executing", "completed", "failed"}:
+        return token
+    return None
+
+
+def _normalize_artifact_execution_state(status: Any, artifact_type: Optional[str]) -> Optional[str]:
+    if artifact_type != "application":
+        return None
+    token = str(status or "").strip().lower()
+    if token in {"queued", "pending"}:
+        return "queued"
+    if token in {"running", "building", "executing", "deploying"}:
+        return "executing"
+    if token in {"completed", "succeeded", "ready", "active", "published"}:
+        return "completed"
+    if token in {"failed", "error"}:
+        return "failed"
+    return "completed"
+
+
+def _resolve_artifact_for_capability_context(entity_id: str, workspace_id: str = "") -> Optional[Artifact]:
+    token = str(entity_id or "").strip()
+    if not token:
+        return None
+    artifact = None
+    try:
+        parsed_id = uuid.UUID(token)
+    except (TypeError, ValueError, AttributeError):
+        parsed_id = None
+    if parsed_id is not None:
+        artifact = Artifact.objects.select_related("type", "workspace").filter(id=parsed_id).first()
+    if artifact is None:
+        artifact = _resolve_artifact_by_slug(token)
+    if artifact is None:
+        return None
+    normalized_workspace_id = str(workspace_id or "").strip()
+    if normalized_workspace_id and str(artifact.workspace_id or "") != normalized_workspace_id:
+        return None
+    return artifact
+
+
+def _resolve_capability_entity_state(
+    *,
+    identity: UserIdentity,
+    context: str | None = None,
+    entity_id: str | None = None,
+    workspace_id: str | None = None,
+) -> Dict[str, Any]:
+    resolved_context = normalize_context_id(context)
+    normalized_entity_id = str(entity_id or "").strip() or None
+    normalized_workspace_id = str(workspace_id or "").strip() or None
+    state: Dict[str, Any] = {
+        "artifact_type": None,
+        "draft_state": None,
+        "execution_state": None,
+        "application_exists": False,
+        "workspace_available": False,
+        "workspace_initialized": False,
+        "entity_exists": False,
+    }
+
+    if resolved_context == "application_workspace":
+        state["application_exists"] = bool(normalized_entity_id)
+        state["workspace_available"] = bool(normalized_entity_id or normalized_workspace_id)
+        state["workspace_initialized"] = bool(normalized_entity_id or normalized_workspace_id)
+        state["entity_exists"] = bool(normalized_entity_id)
+        state["artifact_type"] = "application" if normalized_entity_id else None
+        return state
+
+    workspace = _resolve_workspace_for_identity(identity, normalized_workspace_id or "")
+    if workspace is None and resolved_context != "artifact_detail":
+        return state
+    state["workspace_available"] = workspace is not None
+
+    if resolved_context == "artifact_detail" and normalized_entity_id:
+        artifact = _resolve_artifact_for_capability_context(normalized_entity_id, normalized_workspace_id)
+        if artifact is not None:
+            state["entity_exists"] = True
+            state["artifact_type"] = _normalize_capability_artifact_type(
+                kind=artifact.type.slug if artifact.type_id else "",
+                slug=_artifact_slug(artifact),
+            )
+            state["application_exists"] = state["artifact_type"] == "application"
+            state["execution_state"] = _normalize_artifact_execution_state(artifact.status, state["artifact_type"])
+            state["workspace_initialized"] = bool(artifact.workspace_id)
+        return state
+
+    if resolved_context != "app_intent_draft" or not normalized_entity_id or workspace is None:
+        return state
+
+    try:
+        draft_response = _seed_api_request(
+            method="GET",
+            path=f"/api/v1/drafts/{normalized_entity_id}",
+            workspace_slug=str(workspace.slug or ""),
+            timeout=20,
+        )
+        jobs_response = _seed_api_request(
+            method="GET",
+            path="/api/v1/jobs",
+            workspace_slug=str(workspace.slug or ""),
+            timeout=20,
+        )
+    except requests.RequestException:
+        return state
+
+    if draft_response.status_code >= 300 or jobs_response.status_code >= 300:
+        return state
+
+    draft_payload = draft_response.json() if draft_response.content else {}
+    jobs_payload = jobs_response.json() if jobs_response.content else []
+    if not isinstance(draft_payload, dict):
+        return state
+    if not isinstance(jobs_payload, list):
+        jobs_payload = []
+
+    workflow = get_draft_workflow(workspace=workspace, draft=draft_payload, jobs=jobs_payload)
+    related_jobs = find_related_draft_jobs(normalized_entity_id, jobs_payload)
+    workflow_state = str(workflow.get("state") or "").strip().lower() or None
+    state["entity_exists"] = True
+    state["draft_state"] = workflow_state
+    state["execution_state"] = _normalize_capability_execution_state(workflow_state)
+    state["application_exists"] = _capability_state_has_application(related_jobs)
+    state["artifact_type"] = "application"
+    return state
+
+
+@login_required
+def capabilities_context(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    context = str(request.GET.get("context") or "").strip() or None
+    entity_id = str(request.GET.get("entityId") or "").strip() or None
+    workspace_id = str(request.GET.get("workspaceId") or "").strip() or None
+    include_unavailable = str(request.GET.get("include_unavailable") or "").strip().lower() in {"1", "true", "yes"}
+    return JsonResponse(
+        get_capability_graph_context(
+            context=context,
+            entity_id=entity_id,
+            workspace_id=workspace_id,
+            entity_state=_resolve_capability_entity_state(
+                identity=identity,
+                context=context,
+                entity_id=entity_id,
+                workspace_id=workspace_id,
+            ),
+            include_unavailable=include_unavailable,
+        )
+    )
+
+
+@login_required
+def capabilities_graph(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    return JsonResponse(get_capability_graph_introspection())
+
+
+@csrf_exempt
+@login_required
+def capability_events(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    event = CapabilityEvent(
+        type=str(payload.get("event_type") or "").strip(),
+        entity_id=str(payload.get("entity_id") or "").strip() or None,
+        workspace_id=str(payload.get("workspace_id") or "").strip() or None,
+    )
+    if not event.type:
+        return JsonResponse({"error": "event_type is required"}, status=400)
+
+    contexts = []
+    for context in contexts_for_event(event):
+        entity_state = _resolve_capability_entity_state(
+            identity=identity,
+            context=context,
+            entity_id=event.entity_id,
+            workspace_id=event.workspace_id,
+        )
+        contexts.append(
+            {
+                **get_capability_graph_context(
+                    context=context,
+                    entity_id=event.entity_id,
+                    workspace_id=event.workspace_id,
+                    entity_state=entity_state,
+                    include_unavailable=True,
+                ),
+                "paths": get_capability_paths_for_context(
+                    context=context,
+                    entity_id=event.entity_id,
+                    workspace_id=event.workspace_id,
+                    entity_state=entity_state,
+                ).get("paths", []),
+            }
+        )
+
+    return JsonResponse(
+        {
+            "event_type": event.type,
+            "entityId": event.entity_id,
+            "workspaceId": event.workspace_id,
+            "contexts": contexts,
+        }
+    )
+
+
+@login_required
+def capability_paths_context(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    context = str(request.GET.get("context") or "").strip() or None
+    entity_id = str(request.GET.get("entityId") or "").strip() or None
+    workspace_id = str(request.GET.get("workspaceId") or "").strip() or None
+    entity_state = _resolve_capability_entity_state(
+        identity=identity,
+        context=context,
+        entity_id=entity_id,
+        workspace_id=workspace_id,
+    )
+    return JsonResponse(
+        get_capability_paths_for_context(
+            context=context,
+            entity_id=entity_id,
+            workspace_id=workspace_id,
+            entity_state=entity_state,
+        )
+    )
+
+
+@login_required
+def capability_plan(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    capability_id = str(request.GET.get("capability_id") or "").strip()
+    if not capability_id:
+        return JsonResponse({"error": "capability_id is required"}, status=400)
+    try:
+        payload = get_plan_for_capability(capability_id)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=404)
+    return JsonResponse(payload)
+
+
+@login_required
+def draft_workflow(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    draft_id = str(request.GET.get("draft_id") or "").strip()
+    if not draft_id:
+        return JsonResponse({"error": "draft_id is required"}, status=400)
+
+    workspace = _resolve_workspace_for_identity(identity, str(request.GET.get("workspace_id") or ""))
+    if workspace is None:
+        return JsonResponse({"error": "workspace context is required"}, status=400)
+
+    try:
+        draft_response = _seed_api_request(
+            method="GET",
+            path=f"/api/v1/drafts/{draft_id}",
+            workspace_slug=str(workspace.slug or ""),
+            timeout=20,
+        )
+        jobs_response = _seed_api_request(
+            method="GET",
+            path="/api/v1/jobs",
+            workspace_slug=str(workspace.slug or ""),
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return JsonResponse({"error": "failed to load draft workflow", "details": exc.__class__.__name__}, status=502)
+
+    if draft_response.status_code >= 300:
+        return JsonResponse({"error": "failed to load draft", "status_code": draft_response.status_code}, status=502)
+    if jobs_response.status_code >= 300:
+        return JsonResponse({"error": "failed to load draft jobs", "status_code": jobs_response.status_code}, status=502)
+
+    draft_payload = draft_response.json() if draft_response.content else {}
+    jobs_payload = jobs_response.json() if jobs_response.content else []
+    if not isinstance(draft_payload, dict):
+        return JsonResponse({"error": "draft payload is invalid"}, status=502)
+    if not isinstance(jobs_payload, list):
+        jobs_payload = []
+
+    return JsonResponse(get_draft_workflow(workspace=workspace, draft=draft_payload, jobs=jobs_payload))
+
+
 def _review_coordination_thread(
     *,
     thread: CoordinationThread,
@@ -27452,6 +29726,23 @@ def _review_coordination_thread(
 
     if review_action == "resume_thread":
         if thread.status == "active":
+            blocked_brief_reviews = sum(
+                1
+                for task in thread.work_items.all()
+                if evaluate_dev_task_queue_state(task, normalized_status=str(task.status or "")).reason == "brief_not_ready"
+            )
+            if blocked_brief_reviews:
+                return (
+                    {
+                        "status": "already_active",
+                        "thread": _coordination_thread_detail(thread),
+                        "summary": (
+                            f"{thread.title} is already active, but {blocked_brief_reviews} work item(s) still require "
+                            "execution brief review before coding can be dispatched."
+                        ),
+                    },
+                    200,
+                )
             return ({"status": "already_active", "thread": _coordination_thread_detail(thread), "summary": f"{thread.title} is already active."}, 200)
         if not valid_thread_transition(thread.status, "active"):
             return (
@@ -27514,6 +29805,23 @@ def _review_coordination_thread(
     )
     entry = next((candidate for candidate in queue if candidate.thread_id == str(thread.id)), None)
     if not entry:
+        blocked_brief_reviews = sum(
+            1
+            for task in thread.work_items.all()
+            if evaluate_dev_task_queue_state(task, normalized_status=str(task.status or "")).reason == "brief_not_ready"
+        )
+        if blocked_brief_reviews:
+            return (
+                {
+                    "status": "brief_review_required",
+                    "thread": _coordination_thread_detail(thread),
+                    "summary": (
+                        f"No queueable work is ready for {thread.title} because {blocked_brief_reviews} work item(s) "
+                        "still require execution brief review."
+                    ),
+                },
+                409,
+            )
         return (
             {
                 "status": "no_queueable_work",
@@ -27523,6 +29831,31 @@ def _review_coordination_thread(
             409,
         )
     task = thread.work_items.filter(id=entry.task_id).first()
+    task_state = (
+        evaluate_dev_task_queue_state(task, normalized_status=str(task.status or ""))
+        if task is not None
+        else None
+    )
+    if task is None or task_state is None or not task_state.dispatchable:
+        if task_state is not None and task_state.reason == "brief_not_ready":
+            return (
+                {
+                    "status": "brief_review_required",
+                    "thread": _coordination_thread_detail(thread),
+                    "summary": (
+                        f"The next slice for {thread.title} still requires execution brief review before coding can be dispatched."
+                    ),
+                },
+                409,
+            )
+        return (
+            {
+                "status": "no_queueable_work",
+                "thread": _coordination_thread_detail(thread),
+                "summary": f"No queueable work is ready for {thread.title}.",
+            },
+            409,
+        )
     record_thread_event(
         thread=thread,
         event_type="approval_queue_next_slice",
@@ -27679,38 +30012,56 @@ def xco_queue_collection(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "workspace_id is required"}, status=400)
     workspace, qs = _coordination_thread_queryset(identity, workspace_id)
     task_lookup = _coordination_task_lookup_factory(str(workspace.id))
+    queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
     for thread in qs:
         _update_thread_status_from_tasks(thread)
     entries = derive_work_queue(threads=qs, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
-    items = [
-        {
-            "thread_id": entry.thread_id,
-            "work_item_id": entry.work_item_id,
-            "task_id": entry.task_id,
-            "thread_priority": entry.thread_priority,
-            "thread_title": entry.thread_title,
-        }
-        for entry in entries
-    ]
+    items = []
+    for entry in entries:
+        task = queue_task_lookup(entry.task_id)
+        if task is None:
+            continue
+        normalized_status = _xco_status_lookup(task)
+        queue_state = evaluate_dev_task_queue_state(task, normalized_status=normalized_status)
+        if not queue_state.dispatchable:
+            continue
+        items.append(
+            {
+                "thread_id": entry.thread_id,
+                "work_item_id": entry.work_item_id,
+                "task_id": entry.task_id,
+                "thread_priority": entry.thread_priority,
+                "thread_title": entry.thread_title,
+                "queue_state": serialize_dev_task_queue_state(task, normalized_status=normalized_status),
+            }
+        )
     return JsonResponse({"workspace_id": str(workspace.id), "items": items})
 
 
 def _dispatch_next_queue_item(*, workspace: Workspace, user, identity: UserIdentity) -> Dict[str, Any]:
     _, qs = _coordination_thread_queryset(identity, str(workspace.id))
     task_lookup = _coordination_task_lookup_factory(str(workspace.id))
+    queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
     for thread in qs:
         _update_thread_status_from_tasks(thread)
     queue = derive_work_queue(threads=qs, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
-    if not queue:
-        raise RuntimeError("no eligible work items in the XCO queue")
-    next_entry = queue[0]
-    task = get_object_or_404(DevTask, id=next_entry.task_id)
+    selected = select_next_dispatchable_queue_entry(queue, task_lookup=queue_task_lookup, status_lookup=_xco_status_lookup)
+    if not selected:
+        raise RuntimeError("no approved work items are ready for dispatch")
+    next_entry, task, _ = selected
     thread = task.coordination_thread
     if thread and thread.status == "queued":
         transition_thread_status(thread, "active", work_item=task, payload={"reason": "dispatch"})
     if thread:
         record_thread_event(thread=thread, event_type="work_item_promoted", work_item=task, payload={"work_item_id": task.work_item_id or str(task.id)})
-    result = _submit_dev_task_runtime_run(task, workspace=workspace, user=user)
+    try:
+        result = _submit_dev_task_runtime_run(task, workspace=workspace, user=user)
+    except ValueError as exc:
+        task.status = "awaiting_review"
+        task.last_error = str(exc)
+        task.updated_by = user
+        task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+        raise RuntimeError(str(exc))
     task.refresh_from_db()
     if thread:
         record_thread_event(
@@ -27724,6 +30075,58 @@ def _dispatch_next_queue_item(*, workspace: Workspace, user, identity: UserIdent
         "thread_id": next_entry.thread_id,
         "work_item_id": next_entry.work_item_id,
         "task_id": next_entry.task_id,
+        "run_id": result.get("run_id"),
+    }
+
+
+def _dispatch_selected_queue_item(*, workspace: Workspace, task: DevTask, user, identity: UserIdentity) -> Dict[str, Any]:
+    _, qs = _coordination_thread_queryset(identity, str(workspace.id))
+    task_lookup = _coordination_task_lookup_factory(str(workspace.id))
+    queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
+    for thread in qs:
+        _update_thread_status_from_tasks(thread)
+    queue = derive_work_queue(threads=qs, status_lookup=_xco_status_lookup, task_lookup=task_lookup)
+    selected = find_dispatchable_queue_entry(
+        queue,
+        task_id=str(task.id),
+        task_lookup=queue_task_lookup,
+        status_lookup=_xco_status_lookup,
+    )
+    if not selected:
+        raise RuntimeError("selected work item is not ready for queue dispatch")
+    entry, selected_task, _ = selected
+    thread = selected_task.coordination_thread
+    if thread and thread.status == "queued":
+        transition_thread_status(thread, "active", work_item=selected_task, payload={"reason": "dispatch"})
+    if thread:
+        record_thread_event(thread=thread, event_type="work_item_promoted", work_item=selected_task, payload={"work_item_id": selected_task.work_item_id or str(selected_task.id)})
+    try:
+        result = _submit_dev_task_runtime_run(selected_task, workspace=workspace, user=user)
+    except ValueError as exc:
+        selected_task.status = "awaiting_review"
+        selected_task.last_error = str(exc)
+        selected_task.updated_by = user
+        selected_task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+        raise RuntimeError(str(exc))
+    except RuntimeError as exc:
+        selected_task.status = "failed"
+        selected_task.last_error = str(exc)
+        selected_task.updated_by = user
+        selected_task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+        raise
+    selected_task.refresh_from_db()
+    if thread:
+        record_thread_event(
+            thread=thread,
+            event_type="run_dispatched_from_queue",
+            work_item=selected_task,
+            run_id=str(selected_task.runtime_run_id or ""),
+            payload={"run_id": str(selected_task.runtime_run_id or ""), "work_item_id": selected_task.work_item_id or str(selected_task.id)},
+        )
+    return {
+        "thread_id": entry.thread_id,
+        "work_item_id": entry.work_item_id,
+        "task_id": entry.task_id,
         "run_id": result.get("run_id"),
     }
 
@@ -27748,14 +30151,118 @@ def xco_dispatch_next(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"status": "dispatched", "queue_item": {"thread_id": result["thread_id"], "work_item_id": result["work_item_id"], "task_id": result["task_id"]}, "run_id": result.get("run_id")})
 
 
+@csrf_exempt
+@login_required
+def dev_task_dispatch(request: HttpRequest, task_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, _ = _coordination_thread_queryset(identity, workspace_id)
+    task = get_object_or_404(DevTask, id=task_id)
+    if not task.coordination_thread_id or str(task.coordination_thread.workspace_id) != str(workspace.id):
+        return JsonResponse({"error": "work item is not part of the selected workspace queue"}, status=404)
+    try:
+        result = _dispatch_selected_queue_item(workspace=workspace, task=task, user=request.user, identity=identity)
+    except RuntimeError as exc:
+        task.refresh_from_db()
+        detail_payload = _serialize_work_item_detail(task)
+        error_text = str(exc) or "runtime submission failed"
+        if error_text == "selected work item is not ready for queue dispatch":
+            queue_state = detail_payload.get("execution_queue") if isinstance(detail_payload.get("execution_queue"), dict) else {}
+            error_text = str(queue_state.get("message") or error_text)
+        status_code = 502 if "runtime" in error_text.lower() or "xyn-core" in error_text.lower() else 409
+        return JsonResponse({"error": error_text, "work_item": detail_payload}, status=status_code)
+    task.refresh_from_db()
+    return JsonResponse(
+        {
+            "status": "dispatched",
+            "queue_item": {"thread_id": result["thread_id"], "work_item_id": result["work_item_id"], "task_id": result["task_id"]},
+            "run_id": result.get("run_id"),
+            "work_item": _serialize_work_item_detail(task),
+        }
+    )
+
+
+@csrf_exempt
 @login_required
 def dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse:
     if staff_error := _require_staff(request):
         return staff_error
     task = get_object_or_404(DevTask, id=task_id)
+    if request.method == "PATCH":
+        payload = _parse_json(request)
+        action = str(payload.get("execution_brief_action") or "").strip().lower()
+        action_state_map = {
+            "mark_ready": "ready",
+            "approve": "approved",
+            "reject": "rejected",
+        }
+        if action in action_state_map and "execution_brief_review_state" not in payload:
+            payload["execution_brief_review_state"] = action_state_map[action]
+        update_fields: List[str] = []
+        if action in {"replace", "regenerate"}:
+            if action == "replace":
+                if not isinstance(payload.get("execution_brief"), dict):
+                    return JsonResponse({"error": "execution_brief object is required for replace"}, status=400)
+                replace_execution_brief(
+                    task,
+                    brief=payload.get("execution_brief") or {},
+                    replaced_by=request.user,
+                    replacement_reason=str(payload.get("execution_brief_revision_reason") or "replaced"),
+                    review_notes=str(payload.get("execution_brief_review_notes") or ""),
+                )
+            else:
+                source_work_item = None
+                try:
+                    source_work_item = _load_dev_task_runtime_source(task).get("work_item")
+                except ValueError:
+                    source_work_item = None
+                regenerate_execution_brief(
+                    task,
+                    work_item=source_work_item if isinstance(source_work_item, dict) else None,
+                    regenerated_by=request.user,
+                    regeneration_reason=str(payload.get("execution_brief_revision_reason") or "regenerated"),
+                    review_notes=str(payload.get("execution_brief_review_notes") or ""),
+                )
+            return JsonResponse(_serialize_work_item_detail(task))
+        if "execution_brief_review_state" in payload:
+            if not isinstance(task.execution_brief, dict) or not task.execution_brief:
+                return JsonResponse({"error": "execution brief is required before review state can be updated"}, status=409)
+            current_state = normalize_execution_brief_review_state(task.execution_brief_review_state)
+            next_state = normalize_execution_brief_review_state(payload.get("execution_brief_review_state"))
+            if not valid_execution_brief_review_transition(current_state, next_state):
+                return JsonResponse({"error": f"invalid execution brief review transition: {current_state} -> {next_state}"}, status=409)
+            if current_state != next_state:
+                task.execution_brief_review_state = next_state
+                task.execution_brief_reviewed_at = timezone.now()
+                task.execution_brief_reviewed_by = request.user
+                update_fields.extend(["execution_brief_review_state", "execution_brief_reviewed_at", "execution_brief_reviewed_by"])
+        if "execution_brief_review_notes" in payload:
+            task.execution_brief_review_notes = str(payload.get("execution_brief_review_notes") or "")
+            update_fields.append("execution_brief_review_notes")
+            if "execution_brief_review_state" not in payload:
+                task.execution_brief_reviewed_at = timezone.now()
+                task.execution_brief_reviewed_by = request.user
+                update_fields.extend(["execution_brief_reviewed_at", "execution_brief_reviewed_by"])
+        if update_fields:
+            task.updated_by = request.user
+            update_fields.extend(["updated_by", "updated_at"])
+            task.save(update_fields=list(dict.fromkeys(update_fields)))
+        return JsonResponse(_serialize_work_item_detail(task))
+    if request.method != "GET":
+        return JsonResponse({"error": "GET or PATCH required"}, status=405)
     return JsonResponse(_serialize_work_item_detail(task))
 
 
+@csrf_exempt
 @login_required
 def work_item_detail(request: HttpRequest, task_id: str) -> JsonResponse:
     return dev_task_detail(request, task_id)
@@ -27782,6 +30289,10 @@ def dev_task_run(request: HttpRequest, task_id: str) -> JsonResponse:
         try:
             result = _submit_dev_task_runtime_run(task, workspace=workspace, user=request.user)
         except ValueError as exc:
+            task.status = "awaiting_review"
+            task.last_error = str(exc)
+            task.updated_by = request.user
+            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
             return JsonResponse({"error": str(exc)}, status=409)
         except RuntimeError as exc:
             task.status = "failed"
@@ -27833,30 +30344,45 @@ def dev_task_retry(request: HttpRequest, task_id: str) -> JsonResponse:
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     task = get_object_or_404(DevTask, id=task_id)
+    execution_payload = _resolve_dev_task_execution_payload(task)
+    recovery = evaluate_dev_task_recovery_state(task, execution_summary=execution_payload["execution_summary"])
+    if not recovery.retryable:
+        return JsonResponse({"error": recovery.message}, status=409)
     if _dev_task_uses_epic_c_runtime(task):
-        runtime_detail = _project_runtime_status_to_task(task)
-        current_status = str((runtime_detail or {}).get("status") or task.status).strip().lower()
-        if current_status not in {"failed", "blocked", "canceled", "completed"}:
-            return JsonResponse({"error": "Task not retryable"}, status=409)
         workspace = _dev_task_runtime_workspace(identity, task, request=request)
         if not workspace:
             return JsonResponse({"error": "workspace context is required for Epic C runtime submission"}, status=400)
         try:
+            record_execution_failure_snapshot(
+                task,
+                execution_summary=execution_payload["execution_summary"],
+                action="retry",
+                recorded_at=timezone.now().isoformat(),
+            )
             result = _submit_dev_task_runtime_run(task, workspace=workspace, user=request.user)
         except ValueError as exc:
+            task.status = "awaiting_review"
+            task.last_error = str(exc)
+            task.updated_by = request.user
+            task.save(update_fields=["execution_policy", "status", "last_error", "updated_by", "updated_at"])
             return JsonResponse({"error": str(exc)}, status=409)
         except RuntimeError as exc:
             task.status = "failed"
             task.last_error = str(exc)
             task.updated_by = request.user
-            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+            task.save(update_fields=["execution_policy", "status", "last_error", "updated_by", "updated_at"])
             return JsonResponse({"error": str(exc)}, status=502)
-        return JsonResponse(result)
-    if task.status not in {"failed", "canceled"}:
-        return JsonResponse({"error": "Task not retryable"}, status=409)
+        task.refresh_from_db()
+        return JsonResponse({"status": "queued", "run_id": result.get("run_id"), "work_item": _serialize_work_item_detail(task)})
+    record_execution_failure_snapshot(
+        task,
+        execution_summary=execution_payload["execution_summary"],
+        action="retry",
+        recorded_at=timezone.now().isoformat(),
+    )
     task.status = "queued"
     task.updated_by = request.user
-    task.save(update_fields=["status", "updated_by", "updated_at"])
+    task.save(update_fields=["execution_policy", "status", "updated_by", "updated_at"])
     run = Run.objects.create(
         entity_type="dev_task",
         entity_id=task.id,
@@ -27875,8 +30401,51 @@ def dev_task_retry(request: HttpRequest, task_id: str) -> JsonResponse:
     mode = _async_mode()
     if mode == "redis":
         _enqueue_job("xyn_orchestrator.worker_tasks.run_dev_task", str(task.id), "worker")
-        return JsonResponse({"run_id": str(run.id), "status": "queued"})
-    return JsonResponse({"run_id": str(run.id), "status": "pending"})
+        task.refresh_from_db()
+        return JsonResponse({"run_id": str(run.id), "status": "queued", "work_item": _serialize_work_item_detail(task)})
+    task.refresh_from_db()
+    return JsonResponse({"run_id": str(run.id), "status": "pending", "work_item": _serialize_work_item_detail(task)})
+
+
+@csrf_exempt
+@login_required
+def dev_task_requeue(request: HttpRequest, task_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    task = get_object_or_404(DevTask, id=task_id)
+    execution_payload = _resolve_dev_task_execution_payload(task)
+    try:
+        result = _requeue_dev_task(task, user=request.user, execution_summary=execution_payload["execution_summary"])
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=409)
+    task.refresh_from_db()
+    return JsonResponse({"status": result["status"], "work_item": _serialize_work_item_detail(task)})
+
+
+@csrf_exempt
+@login_required
+def dev_task_publish(request: HttpRequest, task_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    task = get_object_or_404(DevTask, id=task_id)
+    payload = _parse_json(request)
+    push = str(request.GET.get("push") or payload.get("push") or "").strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        result = publish_dev_task(task, user=request.user, push=push)
+    except ExecutionPublishError as exc:
+        return JsonResponse({"error": str(exc), "work_item": _serialize_work_item_detail(task)}, status=409)
+    task.refresh_from_db()
+    return JsonResponse({"status": result.get("status"), "push": push, "work_item": _serialize_work_item_detail(task)})
 
 
 @csrf_exempt
@@ -28115,10 +30684,18 @@ def _resolve_manifest_surface_path(manifest: Dict[str, Any], surface_path: str, 
     normalized = _normalize_surface_path(surface_path)
     if not normalized:
         return ""
+    if normalized.startswith("/app/"):
+        return normalized
+    if normalized.startswith("/apps/"):
+        if _manifest_ui_mount_scope(manifest) == "global":
+            return normalized
+        if workspace_id:
+            return f"{_workspace_prefix(workspace_id)}{normalized}"
+        return normalized
     if _manifest_ui_mount_scope(manifest) == "global":
         return normalized
     if workspace_id:
-        return to_workspace_path(workspace_id, normalized)
+        return f"{_workspace_prefix(workspace_id)}{normalized}"
     return normalized
 
 
@@ -28332,8 +30909,37 @@ def _resolved_capability_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
     return resolved
 
 
-def _resolved_manifest_suggestions(artifact: Artifact, resolved: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _manifest_payload(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    content = manifest.get("content") if isinstance(manifest.get("content"), dict) else {}
+    return content or manifest
+
+
+def _resolved_manifest_suggestions(artifact: Artifact, resolved: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     artifact_slug = _artifact_slug(artifact) or str(artifact.id)
+    payload_rows = payload.get("suggestions") if isinstance(payload, dict) and isinstance(payload.get("suggestions"), list) else []
+    latent_keys = _manifest_latent_command_keys(resolved)
+    if payload_rows:
+        rows: List[Dict[str, Any]] = []
+        for suggestion in payload_rows:
+            if not isinstance(suggestion, dict):
+                continue
+            prompt = str(suggestion.get("prompt") or "").strip()
+            if not prompt:
+                continue
+            normalized_prompt = _normalize_palette_prompt(prompt)
+            if normalized_prompt in latent_keys:
+                continue
+            row = copy.deepcopy(suggestion)
+            row["prompt"] = normalized_prompt
+            rows.append(row)
+        rows.sort(
+            key=lambda row: (
+                int(row.get("order") or 1000),
+                str(row.get("group") or "").lower(),
+                str(row.get("name") or row.get("prompt") or "").lower(),
+            )
+        )
+        return rows
     rows: List[Dict[str, Any]] = []
     for command in resolved.get("commands") if isinstance(resolved.get("commands"), list) else []:
         if not isinstance(command, dict):
@@ -28535,9 +31141,13 @@ def _article_docs_surface_path(artifact: Artifact, workspace_id: Optional[str]) 
 
 def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[str] = None) -> Dict[str, Any]:
     manifest = _load_artifact_manifest(artifact)
+    payload = _manifest_payload(manifest)
+    suggestion_payload = payload
+    if not isinstance(suggestion_payload.get("suggestions"), list) and isinstance(manifest.get("suggestions"), list):
+        suggestion_payload = manifest
     resolved = _resolved_capability_manifest(manifest)
     contract_issue = _manifest_contract_issue_summary(artifact, resolved)
-    roles_raw = manifest.get("roles") if isinstance(manifest.get("roles"), list) else []
+    roles_raw = payload.get("roles") if isinstance(payload.get("roles"), list) else []
     roles: List[str] = []
     for role in roles_raw:
         if not isinstance(role, dict):
@@ -28547,20 +31157,20 @@ def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[st
             roles.append(role_name)
     unique_roles = sorted(set(roles))
     surfaces = {
-        "nav": _manifest_surface_entries(manifest, "nav", workspace_id=workspace_id),
-        "manage": _manifest_surface_entries(manifest, "manage", workspace_id=workspace_id),
-        "docs": _manifest_surface_entries(manifest, "docs", workspace_id=workspace_id),
+        "nav": _manifest_surface_entries(payload, "nav", workspace_id=workspace_id),
+        "manage": _manifest_surface_entries(payload, "manage", workspace_id=workspace_id),
+        "docs": _manifest_surface_entries(payload, "docs", workspace_id=workspace_id),
     }
-    suggestions = _manifest_suggestions(manifest, workspace_id=workspace_id)
+    suggestions = _manifest_suggestions(payload, workspace_id=workspace_id)
     if str(resolved.get("schema_version") or "").strip() == "xyn.capability_manifest.v1":
-        suggestions = _resolved_manifest_suggestions(artifact, resolved)
+        suggestions = _resolved_manifest_suggestions(artifact, resolved, suggestion_payload)
         surfaces = _resolved_manifest_surfaces(resolved, workspace_id=workspace_id)
-    if contract_issue:
+    if contract_issue and str(contract_issue.get("reason") or "") == "missing_entity_contracts":
         suggestions = []
     summary = {
         "roles": unique_roles,
-        "ui_mount_scope": _manifest_ui_mount_scope(manifest),
-        "capability": _manifest_capability(manifest),
+        "ui_mount_scope": _manifest_ui_mount_scope(payload),
+        "capability": _manifest_capability(payload),
         "suggestions": suggestions,
         "entities": [] if contract_issue else _resolved_manifest_entities(resolved),
         "surfaces": surfaces,

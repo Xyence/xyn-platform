@@ -34,15 +34,7 @@ export default function AccessControlPage() {
   const [assignOpen, setAssignOpen] = useState(false);
   const [explorerRefreshToken, setExplorerRefreshToken] = useState(0);
 
-  const activeTab = parseAccessTab(searchParams.get("tab"));
-
-  useEffect(() => {
-    const rawTab = searchParams.get("tab");
-    if (rawTab && parseAccessTab(rawTab) === rawTab) return;
-    const params = new URLSearchParams(searchParams);
-    params.set("tab", "users");
-    setSearchParams(params, { replace: true });
-  }, [searchParams, setSearchParams]);
+  const activeTab = useMemo(() => parseAccessTab(searchParams.get("tab")), [searchParams]);
 
   const selectedIdentity = useMemo(
     () => identities.find((identity) => identity.id === selectedIdentityId) || null,
@@ -50,6 +42,7 @@ export default function AccessControlPage() {
   );
 
   const updateTab = (next: AccessTab) => {
+    if (next === activeTab) return;
     const params = new URLSearchParams(searchParams);
     params.set("tab", next);
     setSearchParams(params, { replace: true });

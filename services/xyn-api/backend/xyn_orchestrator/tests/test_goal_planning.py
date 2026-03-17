@@ -8,24 +8,58 @@ from django.test import RequestFactory, TestCase
 from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
 from xyn_orchestrator.development_intelligence import compute_goal_development_insights, compute_goal_diagnostic
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
-from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, Goal, UserIdentity, Workspace, WorkspaceMembership
-from xyn_orchestrator.xyn_api import goal_decompose, goal_detail, goal_review, goals_collection
+from xyn_orchestrator.application_factories import apply_application_plan, create_or_get_application_plan
+from xyn_orchestrator.portfolio_intelligence import (
+    build_goal_portfolio_row,
+    build_goal_portfolio_state,
+    compute_portfolio_insights,
+    recommend_portfolio_goal,
+)
+from xyn_orchestrator.models import (
+    Application,
+    ApplicationPlan,
+    CoordinationEvent,
+    CoordinationThread,
+    DevTask,
+    Goal,
+    ManagedRepository,
+    UserIdentity,
+    Workspace,
+    WorkspaceMembership,
+)
+from xyn_orchestrator.xyn_api import (
+    application_detail,
+    application_factories_collection,
+    application_plan_apply,
+    application_plan_detail,
+    application_plans_collection,
+    composer_state,
+    goal_decompose,
+    goal_detail,
+    goal_review,
+    goals_collection,
+)
 
 
 class GoalPlanningTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
+        suffix = uuid.uuid4().hex[:8]
         user_model = get_user_model()
-        self.user = user_model.objects.create_user(username="planner", email="planner@example.com", password="password")
+        self.user = user_model.objects.create_user(
+            username=f"planner-{suffix}",
+            email=f"planner-{suffix}@example.com",
+            password="password",
+        )
         self.user.is_staff = True
         self.user.save(update_fields=["is_staff"])
         self.identity = UserIdentity.objects.create(
             provider="oidc",
             issuer="https://issuer.example.com",
-            subject="planner-user",
-            email="planner@example.com",
+            subject=f"planner-user-{suffix}",
+            email=f"planner-{suffix}@example.com",
         )
-        self.workspace = Workspace.objects.create(name="Planning Workspace", slug="planning-workspace")
+        self.workspace = Workspace.objects.create(name="Planning Workspace", slug=f"planning-workspace-{suffix}")
         WorkspaceMembership.objects.create(
             workspace=self.workspace,
             user_identity=self.identity,
@@ -71,6 +105,8 @@ class GoalPlanningTests(TestCase):
         listing = json.loads(list_response.content)
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(len(listing["goals"]), 1)
+        self.assertIn("portfolio_state", listing)
+        self.assertEqual(len(listing["portfolio_state"]["goals"]), 1)
 
         goal = Goal.objects.get(id=payload["id"])
         patch_request = self._request(
@@ -114,6 +150,24 @@ class GoalPlanningTests(TestCase):
         self.assertIn("smallest vertical slice", plan_a.planning_summary.lower())
         self.assertEqual(plan_a.work_items[0].title, "Identify the first listing source and capture the ingestion contract")
 
+    def test_generic_goal_decomposition_starts_with_durable_xyn_records(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Generic MVP Goal",
+            description="Build a useful application with one MVP slice.",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+
+        plan = decompose_goal(goal)
+
+        self.assertEqual(plan.work_items[0].title, "Define the minimum durable model for the first working slice")
+        self.assertEqual(plan.work_items[0].description, "Model the first end-to-end slice as durable Xyn records.")
+        self.assertEqual(plan.work_items[0].priority, "high")
+        self.assertEqual(plan.work_items[0].sequence, 1)
+
     def test_persist_goal_plan_creates_threads_and_work_items(self):
         goal = Goal.objects.create(
             workspace=self.workspace,
@@ -136,6 +190,64 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(all(thread.goal_id == goal.id for thread in goal.threads.all()))
         self.assertTrue(all(task.goal_id == goal.id for task in goal.work_items.all()))
         self.assertTrue(goal.work_items.filter(coordination_thread__title="Property Model and CRUD").exists())
+        first_task = goal.work_items.order_by("priority", "created_at", "id").first()
+        self.assertIsNotNone(first_task)
+        self.assertEqual((first_task.execution_brief or {}).get("schema_version"), "v1")
+        self.assertEqual((first_task.execution_brief or {}).get("summary"), first_task.title)
+        self.assertEqual(first_task.execution_brief_review_state, "draft")
+        self.assertEqual(first_task.execution_policy, {"require_brief_approval": True})
+        self.assertEqual(
+            ((first_task.execution_brief or {}).get("source_context") or {}).get("planning_source"),
+            "goal_plan",
+        )
+        self.assertEqual(
+            (((first_task.execution_brief or {}).get("target") or {}).get("goal_id")),
+            str(goal.id),
+        )
+
+    def test_generic_application_plan_carries_request_entities_into_first_slice(self):
+        objective = (
+            "Build a simple internal web app called Team Lunch Poll. "
+            "Core entities: 1. Poll - title - poll_date - status 2. Lunch Option - poll - name 3. Vote - poll - lunch option - voter_name. "
+            "Views / usability: - List all polls - View a poll with its options and vote counts. "
+            "Behavior: - Users can create a poll, add lunch options, and cast votes."
+        )
+        plan, _definition, generated, created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            application_name="Team Lunch Poll",
+        )
+        self.assertTrue(created)
+        self.assertEqual(plan.status, "review")
+        self.assertIn("Poll", generated.generated_goals[0].description)
+        self.assertIn("Lunch Option", generated.generated_goals[0].description)
+        self.assertEqual(generated.generated_goals[0].work_items[0].title, "Define the Poll, Lunch Option, and Vote entity model")
+        self.assertIn("vote counts", generated.generated_goals[0].work_items[2].description.lower())
+
+    def test_apply_application_plan_uses_work_item_description_as_execution_objective(self):
+        objective = (
+            "Build a simple internal web app called Team Lunch Poll. "
+            "Core entities: 1. Poll - title - poll_date - status 2. Lunch Option - poll - name 3. Vote - poll - lunch option - voter_name. "
+            "Views / usability: - List all polls - View a poll with its options and vote counts. "
+            "Behavior: - Users can create a poll, add lunch options, and cast votes."
+        )
+        plan, _definition, _generated, _created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            application_name="Team Lunch Poll",
+        )
+        application, created = apply_application_plan(application_plan=plan, user=self.user)
+        self.assertTrue(created)
+        first_goal = application.goals.order_by("created_at").first()
+        self.assertIsNotNone(first_goal)
+        first_task = first_goal.work_items.order_by("priority", "created_at", "id").first()
+        self.assertIsNotNone(first_task)
+        self.assertEqual(
+            (first_task.execution_brief or {}).get("objective"),
+            "Model Poll, Lunch Option, and Vote as durable Xyn records with the relationships and statuses needed for the first slice.",
+        )
 
     def test_goal_decompose_endpoint_persists_plan(self):
         goal = Goal.objects.create(
@@ -284,6 +396,494 @@ class GoalPlanningTests(TestCase):
             CoordinationEvent.objects.filter(thread_id=thread_id, event_type="approval_recommendation").count(),
             1,
         )
+
+    def test_application_factory_catalog_lists_builtins(self):
+        request = self._request("/xyn/api/application-factories")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_factories_collection(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        factory_keys = [row["key"] for row in payload["factories"]]
+        self.assertIn("ai_real_estate_deal_finder", factory_keys)
+        self.assertIn("telecom_support_operations_console", factory_keys)
+        self.assertIn("reseller_portal", factory_keys)
+
+    def test_application_plan_generation_is_reviewable_and_non_executing(self):
+        applications_before = Application.objects.count()
+        goals_before = Goal.objects.count()
+        threads_before = CoordinationThread.objects.count()
+        work_items_before = DevTask.objects.count()
+        request = self._request(
+            "/xyn/api/application-plans",
+            method="post",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "objective": "Build an AI real estate deal finder",
+                    "source_conversation_id": "thread-1",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._dispatch_next_queue_item"
+        ) as mock_dispatch:
+            response = application_plans_collection(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(payload["status"], "review")
+        self.assertEqual(payload["source_factory_key"], "ai_real_estate_deal_finder")
+        self.assertGreaterEqual(len(payload["generated_goals"]), 1)
+        self.assertEqual(Application.objects.count(), applications_before)
+        self.assertEqual(Goal.objects.count(), goals_before)
+        self.assertEqual(CoordinationThread.objects.count(), threads_before)
+        self.assertEqual(DevTask.objects.count(), work_items_before)
+        mock_dispatch.assert_not_called()
+
+    def test_application_plan_apply_creates_durable_objects_and_is_idempotent(self):
+        generate_request = self._request(
+            "/xyn/api/application-plans",
+            method="post",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "objective": "Build an AI real estate deal finder",
+                    "source_conversation_id": "thread-1",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            generate_response = application_plans_collection(generate_request)
+        plan_payload = json.loads(generate_response.content)
+        plan = ApplicationPlan.objects.get(id=plan_payload["id"])
+
+        apply_request = self._request(f"/xyn/api/application-plans/{plan.id}/apply", method="post", data=json.dumps({}))
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._dispatch_next_queue_item"
+        ) as mock_dispatch:
+            apply_response = application_plan_apply(apply_request, str(plan.id))
+        applied = json.loads(apply_response.content)
+        self.assertEqual(apply_response.status_code, 200)
+        self.assertEqual(applied["status"], "applied")
+        application = Application.objects.get(id=applied["application"]["id"])
+        plan.refresh_from_db()
+        self.assertEqual(plan.status, "applied")
+        self.assertEqual(plan.application_id, application.id)
+        self.assertGreater(application.goals.count(), 0)
+        self.assertGreater(CoordinationThread.objects.filter(goal__application=application).count(), 0)
+        self.assertGreater(DevTask.objects.filter(goal__application=application).count(), 0)
+        mock_dispatch.assert_not_called()
+
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            second_response = application_plan_apply(apply_request, str(plan.id))
+        second_payload = json.loads(second_response.content)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(second_payload["status"], "already_applied")
+        self.assertEqual(Application.objects.filter(id=application.id).count(), 1)
+
+    def test_application_plan_target_repository_propagates_to_application_and_generated_tasks(self):
+        repository = ManagedRepository.objects.create(
+            slug="shine-app",
+            display_name="Shine App",
+            remote_url="https://example.com/shine-app.git",
+            default_branch="main",
+            is_active=True,
+            auth_mode="local",
+        )
+        generate_request = self._request(
+            "/xyn/api/application-plans",
+            method="post",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "objective": "Build an AI real estate deal finder",
+                    "source_conversation_id": "thread-1",
+                    "target_repository_slug": "shine-app",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            generate_response = application_plans_collection(generate_request)
+        self.assertEqual(generate_response.status_code, 201)
+        generated = json.loads(generate_response.content)
+        self.assertEqual(generated["target_repository_slug"], "shine-app")
+
+        plan = ApplicationPlan.objects.get(id=generated["id"])
+        self.assertEqual(plan.target_repository_id, repository.id)
+        apply_request = self._request(f"/xyn/api/application-plans/{plan.id}/apply", method="post", data=json.dumps({}))
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            apply_response = application_plan_apply(apply_request, str(plan.id))
+        self.assertEqual(apply_response.status_code, 200)
+        application = Application.objects.get(id=json.loads(apply_response.content)["application"]["id"])
+        self.assertEqual(application.target_repository_id, repository.id)
+        self.assertTrue(DevTask.objects.filter(goal__application=application, target_repo="shine-app", target_branch="main").exists())
+        task = DevTask.objects.filter(goal__application=application, target_repo="shine-app", target_branch="main").order_by("created_at").first()
+        self.assertIsNotNone(task)
+        self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("repository_slug"), "shine-app")
+        self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("branch"), "main")
+
+    def test_apply_application_plan_without_target_repository_leaves_generated_tasks_unresolved(self):
+        objective = (
+            "Build a simple internal web app called Team Lunch Poll. "
+            "Core entities: 1. Poll - title - poll_date - status 2. Lunch Option - poll - name 3. Vote - poll - lunch option - voter_name."
+        )
+        plan, _definition, _generated, _created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            application_name="Team Lunch Poll",
+        )
+
+        application, created = apply_application_plan(application_plan=plan, user=self.user)
+
+        self.assertTrue(created)
+        task = DevTask.objects.filter(goal__application=application).order_by("created_at").first()
+        self.assertIsNotNone(task)
+        self.assertEqual(task.target_repo, "")
+        self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("repository_slug"), None)
+        self.assertEqual(((task.execution_brief or {}).get("target") or {}).get("source_kind"), "unresolved")
+
+    def test_application_detail_groups_goals_and_reuses_portfolio_state(self):
+        plan = ApplicationPlan.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Reviewable plan",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="review",
+            request_objective="Build an AI real estate deal finder",
+            plan_fingerprint=f"plan-{uuid.uuid4().hex}",
+            plan_json={},
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=plan.plan_fingerprint,
+            request_objective=plan.request_objective,
+        )
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Listing and Property Foundation",
+            description="Initial MVP slice",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+            planning_status="decomposed",
+        )
+        CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Listing Data Ingestion",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        request = self._request(f"/xyn/api/applications/{application.id}")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_detail(request, str(application.id))
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["id"], str(application.id))
+        self.assertEqual(len(payload["goals"]), 1)
+        self.assertEqual(payload["goals"][0]["application_id"], str(application.id))
+        self.assertIn("portfolio_state", payload)
+        self.assertEqual(len(payload["portfolio_state"]["goals"]), 1)
+
+    def test_application_detail_patch_updates_application_status(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}",
+            method="patch",
+            data=json.dumps({"status": "archived"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_detail(request, str(application.id))
+        payload = json.loads(response.content)
+        application.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(application.status, "archived")
+        self.assertEqual(payload["status"], "archived")
+
+    def test_application_plan_detail_patch_updates_plan_status(self):
+        plan = ApplicationPlan.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Reviewable plan",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="review",
+            request_objective="Build an AI real estate deal finder",
+            plan_fingerprint=f"plan-{uuid.uuid4().hex}",
+            plan_json={"application_name": "Deal Finder"},
+        )
+        request = self._request(
+            f"/xyn/api/application-plans/{plan.id}",
+            method="patch",
+            data=json.dumps({"status": "canceled"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_plan_detail(request, str(plan.id))
+        payload = json.loads(response.content)
+        plan.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(plan.status, "canceled")
+        self.assertEqual(payload["status"], "canceled")
+
+    def test_create_or_get_application_plan_creates_fresh_plan_after_archived_application(self):
+        objective = "Build Team Lunch Poll"
+        plan, _definition, _generated, _created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            source_conversation_id="thread-1",
+        )
+        application, created = apply_application_plan(application_plan=plan, user=self.user)
+        self.assertTrue(created)
+        application.status = "archived"
+        application.save(update_fields=["status", "updated_at"])
+
+        next_plan, _definition2, _generated2, created_again = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            source_conversation_id="thread-2",
+        )
+
+        plan.refresh_from_db()
+        self.assertTrue(created_again)
+        self.assertNotEqual(next_plan.id, plan.id)
+        self.assertEqual(next_plan.status, "review")
+        self.assertIsNone(next_plan.application_id)
+        self.assertNotEqual(plan.plan_fingerprint, next_plan.plan_fingerprint)
+        self.assertEqual(ApplicationPlan.objects.filter(workspace=self.workspace).count(), 2)
+
+    def test_apply_application_plan_creates_fresh_application_when_archived_one_matches_fingerprint(self):
+        objective = "Build Team Lunch Poll"
+        plan, _definition, _generated, _created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+            source_conversation_id="thread-1",
+        )
+        application, created = apply_application_plan(application_plan=plan, user=self.user)
+        self.assertTrue(created)
+        original_application_id = application.id
+        original_plan_fingerprint = application.plan_fingerprint
+        application.status = "archived"
+        application.save(update_fields=["status", "updated_at"])
+        plan.application = None
+        plan.status = "review"
+        plan.save(update_fields=["application", "status", "updated_at"])
+
+        next_application, created_again = apply_application_plan(application_plan=plan, user=self.user)
+
+        application.refresh_from_db()
+        plan.refresh_from_db()
+        self.assertTrue(created_again)
+        self.assertNotEqual(next_application.id, original_application_id)
+        self.assertEqual(next_application.status, "active")
+        self.assertEqual(plan.application_id, next_application.id)
+        self.assertNotEqual(application.plan_fingerprint, original_plan_fingerprint)
+
+    def test_composer_state_defaults_to_factory_discovery(self):
+        request = self._request("/xyn/api/composer/state", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = composer_state(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["stage"], "factory_discovery")
+        self.assertGreaterEqual(len(payload["factory_catalog"]), 1)
+        self.assertIsNone(payload["context"]["application_plan_id"])
+
+    def test_composer_state_returns_plan_review_for_application_plan_context(self):
+        plan = ApplicationPlan.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Reviewable plan",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="review",
+            request_objective="Build an AI real estate deal finder",
+            plan_fingerprint=f"plan-{uuid.uuid4().hex}",
+            plan_json={"application_name": "Deal Finder"},
+        )
+        request = self._request(
+            "/xyn/api/composer/state",
+            data={"workspace_id": str(self.workspace.id), "application_plan_id": str(plan.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = composer_state(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["stage"], "plan_review")
+        self.assertEqual((payload["application_plan"] or {}).get("id"), str(plan.id))
+
+    def test_composer_state_returns_application_goal_and_thread_focus(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="ai_real_estate_deal_finder",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Listing and Property Foundation",
+            description="Initial MVP slice",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+            planning_status="decomposed",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Listing Data Ingestion",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+
+        application_request = self._request(
+            "/xyn/api/composer/state",
+            data={"workspace_id": str(self.workspace.id), "application_id": str(application.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            application_response = composer_state(application_request)
+        application_payload = json.loads(application_response.content)
+        self.assertEqual(application_response.status_code, 200)
+        self.assertEqual(application_payload["stage"], "application_overview")
+        self.assertEqual((application_payload["application"] or {}).get("id"), str(application.id))
+
+        goal_request = self._request(
+            "/xyn/api/composer/state",
+            data={"workspace_id": str(self.workspace.id), "goal_id": str(goal.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            goal_response = composer_state(goal_request)
+        goal_payload = json.loads(goal_response.content)
+        self.assertEqual(goal_response.status_code, 200)
+        self.assertEqual(goal_payload["stage"], "goal_focus")
+        self.assertEqual((goal_payload["goal"] or {}).get("id"), str(goal.id))
+
+        thread_request = self._request(
+            "/xyn/api/composer/state",
+            data={"workspace_id": str(self.workspace.id), "thread_id": str(thread.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            thread_response = composer_state(thread_request)
+        thread_payload = json.loads(thread_response.content)
+        self.assertEqual(thread_response.status_code, 200)
+        self.assertEqual(thread_payload["stage"], "thread_focus")
+        self.assertEqual((thread_payload["thread"] or {}).get("id"), str(thread.id))
+
+    def test_composer_state_default_workspace_view_excludes_archived_application_work(self):
+        archived_application = Application.objects.create(
+            workspace=self.workspace,
+            name="Archived effort",
+            summary="Historical effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-archived",
+            requested_by=self.identity,
+            status="archived",
+            plan_fingerprint=f"archived-{uuid.uuid4().hex}",
+            request_objective="Historical application effort",
+        )
+        archived_goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=archived_application,
+            title="Archived goal",
+            description="Should not appear in the default composer queue view.",
+            source_conversation_id="thread-archived",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=archived_goal,
+            title="Archived thread",
+            owner=self.identity,
+            priority="normal",
+            status="queued",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-archived",
+        )
+
+        active_application = Application.objects.create(
+            workspace=self.workspace,
+            name="Active effort",
+            summary="Current effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-active",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"active-{uuid.uuid4().hex}",
+            request_objective="Current application effort",
+        )
+        active_goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=active_application,
+            title="Active goal",
+            description="Should appear in the default composer queue view.",
+            source_conversation_id="thread-active",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        active_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=active_goal,
+            title="Active thread",
+            owner=self.identity,
+            priority="normal",
+            status="queued",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-active",
+        )
+
+        request = self._request("/xyn/api/composer/state", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = composer_state(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([(goal or {}).get("id") for goal in payload["related_goals"]], [str(active_goal.id)])
+        self.assertEqual([(thread or {}).get("id") for thread in payload["related_threads"]], [str(active_thread.id)])
 
     def test_recommend_next_slice_includes_stable_recommendation_id_for_unchanged_state(self):
         goal = Goal.objects.create(
@@ -846,6 +1446,204 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(health.blocked_threads, 1)
         self.assertEqual(health.recent_artifacts, 1)
 
+    def test_goal_execution_metrics_handle_goal_with_no_threads(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="No Threads Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        metrics = compute_goal_execution_metrics(goal, runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(metrics.active_threads, 0)
+        self.assertEqual(metrics.blocked_threads, 0)
+        self.assertEqual(metrics.total_completed_work_items, 0)
+        self.assertEqual(metrics.artifact_production_count, 0)
+
+    def test_goal_health_indicators_handle_goal_with_no_threads(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Empty Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        health = compute_goal_health_indicators(goal, runtime_detail_lookup=lambda _task: None)
+        progress = compute_goal_progress(goal)
+        self.assertEqual(progress.goal_progress_status, "not_started")
+        self.assertEqual(health.progress_percent, 0)
+        self.assertEqual(health.active_threads, 0)
+        self.assertEqual(health.blocked_threads, 0)
+        self.assertEqual(health.recent_artifacts, 0)
+
+    def test_goal_health_indicators_handle_blocked_threads_only(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked Only Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="high",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-1",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        health = compute_goal_health_indicators(goal, runtime_detail_lookup=lambda _task: None)
+        progress = compute_goal_progress(goal)
+        self.assertEqual(progress.goal_progress_status, "stalled")
+        self.assertEqual(health.progress_percent, 0)
+        self.assertEqual(health.active_threads, 0)
+        self.assertEqual(health.blocked_threads, 1)
+        self.assertEqual(health.recent_artifacts, 0)
+
+    def test_goal_health_indicators_handle_artifact_activity_with_low_completion(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Artifact Heavy Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        active_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Active Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        finished = DevTask.objects.create(
+            title="Finished",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=active_thread,
+            work_item_id="done-1",
+            runtime_run_id=uuid.uuid4(),
+        )
+        DevTask.objects.create(
+            title="Queued",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=2,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=active_thread,
+            work_item_id="queued-1",
+        )
+        health = compute_goal_health_indicators(
+            goal,
+            runtime_detail_lookup=lambda task: {"artifacts": [{"id": "artifact-1"}, {"id": "artifact-2"}, {"id": "artifact-3"}]}
+            if task.id == finished.id
+            else None,
+        )
+        self.assertEqual(health.progress_percent, 50)
+        self.assertEqual(health.active_threads, 1)
+        self.assertEqual(health.blocked_threads, 0)
+        self.assertEqual(health.recent_artifacts, 3)
+
+    def test_goal_health_indicators_completed_goal_ignores_historical_runtime_activity_for_progress(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Completed Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Done Thread",
+            owner=self.identity,
+            priority="high",
+            status="completed",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        finished = DevTask.objects.create(
+            title="Finished",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="done-1",
+            runtime_run_id=uuid.uuid4(),
+        )
+        health = compute_goal_health_indicators(
+            goal,
+            runtime_detail_lookup=lambda task: {"artifacts": [{"id": "artifact-1"}]} if task.id == finished.id else None,
+        )
+        progress = compute_goal_progress(goal)
+        self.assertEqual(progress.goal_progress_status, "completed")
+        self.assertEqual(health.progress_percent, 100)
+        self.assertEqual(health.active_threads, 0)
+        self.assertEqual(health.blocked_threads, 0)
+        self.assertEqual(health.recent_artifacts, 1)
+
     def test_recommend_next_slice_prefers_ready_unblocked_work_over_blocked_work(self):
         goal = Goal.objects.create(
             workspace=self.workspace,
@@ -917,6 +1715,566 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(recommendation.thread_title, "Ready Thread")
         self.assertEqual(recommendation.recommended_work_items[0].title, "Ready work")
         self.assertEqual(recommendation.queue_suggestion.action_type, "queue_first_slice")
+
+    def test_goal_portfolio_priority_marks_blocked_goal_high(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="high",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-work",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        row = build_goal_portfolio_row(goal, runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(row.health_status, "blocked")
+        self.assertEqual(row.coordination_priority.value, "high")
+        self.assertIn("Blocked threads", " ".join(row.coordination_priority.reasons))
+
+    def test_goal_portfolio_priority_marks_active_goal_medium(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Active Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        active_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Active Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Ready task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=active_thread,
+            work_item_id="ready-task",
+        )
+        row = build_goal_portfolio_row(goal, runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(row.health_status, "active")
+        self.assertEqual(row.coordination_priority.value, "medium")
+
+    def test_goal_portfolio_priority_marks_completed_goal_low(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Completed Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            planning_status="completed",
+            priority="normal",
+        )
+        row = build_goal_portfolio_row(goal, runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(row.coordination_priority.value, "low")
+
+    def test_build_goal_portfolio_state_is_deterministic(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Portfolio Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="task-1",
+        )
+        first = build_goal_portfolio_state([goal], runtime_detail_lookup=lambda _task: None)
+        second = build_goal_portfolio_state([goal], runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(first, second)
+
+    def test_goal_listing_includes_portfolio_recommendation(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Portfolio Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Listing Data Ingestion",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Implement adapter",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=thread,
+            work_item_id="task-1",
+        )
+
+        list_request = self._request("/xyn/api/goals", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_workspace_for_identity", return_value=self.workspace
+        ):
+            list_response = goals_collection(list_request)
+        listing = json.loads(list_response.content)
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(listing["portfolio_state"]["recommended_goal"]["goal_id"], str(goal.id))
+        self.assertEqual(listing["portfolio_state"]["recommended_goal"]["queue_action_type"], "queue_first_slice")
+
+    def test_recommend_portfolio_goal_prefers_high_priority_actionable_goal(self):
+        dominant_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        dominant_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=dominant_goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="high",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Resume-worthy task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=dominant_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=dominant_goal,
+            coordination_thread=dominant_thread,
+            work_item_id="resume-task",
+        )
+        secondary_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Secondary Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        secondary_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=secondary_goal,
+            title="Secondary Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Secondary queued task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=secondary_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=secondary_goal,
+            coordination_thread=secondary_thread,
+            work_item_id="secondary-task",
+        )
+
+        recommendation = recommend_portfolio_goal([secondary_goal, dominant_goal], runtime_detail_lookup=lambda _task: None)
+
+        self.assertIsNotNone(recommendation)
+        self.assertEqual(recommendation.goal_id, str(dominant_goal.id))
+        self.assertEqual(recommendation.queue_action_type, "resume_thread")
+
+    def test_recommend_portfolio_goal_preserves_input_order_when_priority_ties(self):
+        first_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="First Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        first_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=first_goal,
+            title="First Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="First queued task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=first_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=first_goal,
+            coordination_thread=first_thread,
+            work_item_id="first-task",
+        )
+        second_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Second Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        second_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=second_goal,
+            title="Second Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Second queued task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=second_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=second_goal,
+            coordination_thread=second_thread,
+            work_item_id="second-task",
+        )
+
+        recommendation = recommend_portfolio_goal([first_goal, second_goal], runtime_detail_lookup=lambda _task: None)
+
+        self.assertIsNotNone(recommendation)
+        self.assertEqual(recommendation.goal_id, str(first_goal.id))
+
+    def test_compute_portfolio_insights_detects_blocked_goal(self):
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Blocked Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        blocked_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=goal,
+            title="Blocked Thread",
+            owner=self.identity,
+            priority="high",
+            status="paused",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Blocked task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=goal,
+            coordination_thread=blocked_thread,
+            work_item_id="blocked-1",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        insights = compute_portfolio_insights([goal], runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(insights[0].key, "blocked_goals")
+        self.assertIn("blocked", insights[0].summary.lower())
+
+    def test_compute_portfolio_insights_detects_dominant_goal(self):
+        dominant_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Dominant Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        quiet_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Quiet Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        dominant_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=dominant_goal,
+            title="Dominant Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        quiet_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=quiet_goal,
+            title="Quiet Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        for index in range(3):
+            DevTask.objects.create(
+                title=f"Dominant task {index}",
+                description="",
+                task_type="codegen",
+                status="completed",
+                priority=index + 1,
+                source_entity_type="goal",
+                source_entity_id=dominant_goal.id,
+                source_conversation_id="thread-1",
+                intent_type="goal_planning",
+                target_repo="xyn-platform",
+                target_branch="develop",
+                execution_policy={},
+                goal=dominant_goal,
+                coordination_thread=dominant_thread,
+                work_item_id=f"dominant-{index}",
+                runtime_run_id=uuid.uuid4(),
+            )
+        DevTask.objects.create(
+            title="Quiet task",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=quiet_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=quiet_goal,
+            coordination_thread=quiet_thread,
+            work_item_id="quiet-1",
+        )
+        insights = compute_portfolio_insights([dominant_goal, quiet_goal], runtime_detail_lookup=lambda _task: None)
+        dominant = next((item for item in insights if item.key == "dominant_goal"), None)
+        self.assertIsNotNone(dominant)
+        self.assertIn("dominates", dominant.summary.lower())
+
+    def test_compute_portfolio_insights_detects_starved_goal(self):
+        active_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Active Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="high",
+        )
+        starved_goal = Goal.objects.create(
+            workspace=self.workspace,
+            title="Starved Goal",
+            description="",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+        )
+        active_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=active_goal,
+            title="Active Thread",
+            owner=self.identity,
+            priority="high",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        starved_thread = CoordinationThread.objects.create(
+            workspace=self.workspace,
+            goal=starved_goal,
+            title="Starved Thread",
+            owner=self.identity,
+            priority="normal",
+            status="active",
+            work_in_progress_limit=1,
+            execution_policy={},
+            source_conversation_id="thread-1",
+        )
+        DevTask.objects.create(
+            title="Done",
+            description="",
+            task_type="codegen",
+            status="completed",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=active_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=active_goal,
+            coordination_thread=active_thread,
+            work_item_id="done-1",
+            runtime_run_id=uuid.uuid4(),
+        )
+        DevTask.objects.create(
+            title="Ready but idle",
+            description="",
+            task_type="codegen",
+            status="queued",
+            priority=1,
+            source_entity_type="goal",
+            source_entity_id=starved_goal.id,
+            source_conversation_id="thread-1",
+            intent_type="goal_planning",
+            target_repo="xyn-platform",
+            target_branch="develop",
+            execution_policy={},
+            goal=starved_goal,
+            coordination_thread=starved_thread,
+            work_item_id="idle-1",
+        )
+        insights = compute_portfolio_insights([active_goal, starved_goal], runtime_detail_lookup=lambda _task: None)
+        starved = next((item for item in insights if item.key == "starved_goals"), None)
+        self.assertIsNotNone(starved)
+        self.assertIn("idle", starved.summary.lower())
 
     def test_recommend_next_slice_prefers_earlier_thread_when_candidates_are_equally_valid(self):
         goal = Goal.objects.create(
@@ -1766,5 +3124,7 @@ class GoalPlanningTests(TestCase):
             }
 
         diagnostic = compute_goal_diagnostic(goal, runtime_detail_lookup=runtime_detail_lookup)
-        self.assertTrue(any("not fully attributable" in item for item in diagnostic.evidence))
+        self.assertEqual(diagnostic.status, "low_signal")
+        self.assertTrue(any("sparse" in item.lower() or "insufficient" in item.lower() for item in diagnostic.evidence))
+        self.assertIn("not enough execution evidence", compute_goal_development_insights(goal, runtime_detail_lookup=runtime_detail_lookup)[0].summary.lower())
         self.assertFalse(any("queued through the supervised loop" in item.lower() for item in diagnostic.evidence))

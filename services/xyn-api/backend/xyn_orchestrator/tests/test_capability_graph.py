@@ -1,0 +1,410 @@
+from unittest import mock
+
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+
+from xyn_orchestrator.capabilities.events import CapabilityEvent, contexts_for_event
+from xyn_orchestrator.capabilities.graph.capability_graph import get_capability_ids_for_context
+from xyn_orchestrator.capabilities.graph.graph_service import get_capabilities_for_context, get_capability_graph_introspection
+from xyn_orchestrator.capabilities.graph.path_service import get_capability_paths_for_context
+from xyn_orchestrator.models import RoleBinding, UserIdentity, Workspace
+
+
+class CapabilityGraphTests(TestCase):
+    def setUp(self):
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(username="graph-admin", password="pass", is_staff=True)
+        self.identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer",
+            subject="graph-admin",
+            email="graph-admin@example.com",
+        )
+        self.workspace = Workspace.objects.create(name="Capability Graph", slug="capability-graph")
+        RoleBinding.objects.create(user_identity=self.identity, scope_kind="platform", role="platform_admin")
+        self.client.force_login(self.user)
+        session = self.client.session
+        session["user_identity_id"] = str(self.identity.id)
+        session.save()
+
+    def test_graph_resolves_landing_capabilities(self):
+        self.assertEqual(
+            get_capability_ids_for_context("landing"),
+            ["build_application", "write_article", "create_explainer_video", "explore_artifacts"],
+        )
+
+    def test_graph_introspection_includes_contexts_capabilities_and_paths(self):
+        payload = get_capability_graph_introspection()
+        self.assertIn(
+            {"id": "landing", "name": "Landing", "description": "Top-level workspace landing guidance."},
+            payload["contexts"],
+        )
+        build_application = next(entry for entry in payload["capabilities"] if entry["id"] == "build_application")
+        self.assertEqual(build_application["action_type"], "prompt")
+        self.assertEqual(build_application["contexts"], ["landing"])
+        build_path = next(entry for entry in payload["paths"] if entry["id"] == "build_application")
+        self.assertEqual(
+            build_path["steps"],
+            ["build_application", "continue_application_draft", "view_execution_status", "open_application_workspace"],
+        )
+
+    def test_capability_event_maps_execution_completed_to_refresh_contexts(self):
+        self.assertEqual(
+            contexts_for_event(CapabilityEvent(type="execution_completed", entity_id="draft-1", workspace_id="ws-1")),
+            ["app_intent_draft", "artifact_detail", "application_workspace", "console"],
+        )
+
+    def test_graph_service_returns_app_draft_capabilities_when_state_is_valid(self):
+        payload = get_capabilities_for_context(
+            context="app_intent_draft",
+            entity_id="draft-1",
+            workspace_id="ws-1",
+            entity_state={"draft_state": "plan_ready", "execution_state": None, "application_exists": False},
+        )
+        self.assertEqual(payload["context"], "app_intent_draft")
+        self.assertEqual(payload["entityId"], "draft-1")
+        self.assertEqual(payload["workspaceId"], "ws-1")
+        self.assertEqual([entry["id"] for entry in payload["capabilities"]], ["continue_application_draft"])
+        self.assertTrue(payload["capabilities"][0]["available"])
+
+    def test_graph_service_filters_invalid_capabilities_for_completed_draft(self):
+        payload = get_capabilities_for_context(
+            context="app_intent_draft",
+            entity_id="draft-1",
+            workspace_id="ws-1",
+            entity_state={"draft_state": "completed", "execution_state": "completed", "application_exists": True},
+        )
+        self.assertEqual([entry["id"] for entry in payload["capabilities"]], ["open_application_workspace", "view_execution_status"])
+
+    def test_graph_service_can_include_unavailable_capabilities_with_explanations(self):
+        payload = get_capabilities_for_context(
+            context="app_intent_draft",
+            entity_id="draft-1",
+            workspace_id="ws-1",
+            entity_state={"draft_state": "completed", "execution_state": None, "application_exists": False},
+            include_unavailable=True,
+        )
+        self.assertEqual(
+            [
+                (
+                    entry["id"],
+                    entry["available"],
+                    entry["failure_code"],
+                    entry["failure_message"],
+                )
+                for entry in payload["capabilities"]
+            ],
+            [
+                (
+                    "continue_application_draft",
+                    False,
+                    "draft_not_editable",
+                    "This draft is no longer in an editable state.",
+                ),
+                (
+                    "open_application_workspace",
+                    False,
+                    "application_missing",
+                    "The application has not been generated yet.",
+                ),
+                (
+                    "view_execution_status",
+                    False,
+                    "execution_missing",
+                    "No execution is available for this item yet.",
+                ),
+            ],
+        )
+
+    def test_graph_service_normalizes_legacy_artifact_draft_context(self):
+        payload = get_capabilities_for_context(context="artifact_draft")
+        self.assertEqual(payload["context"], "artifact_detail")
+        self.assertEqual(payload["attributes"]["workspace_state"], "empty")
+        self.assertEqual(payload["capabilities"][0]["id"], "view_artifact_details")
+        self.assertEqual(payload["capabilities"][0]["action_type"], "open_descriptor")
+        self.assertEqual(payload["capabilities"][0]["action_target"], "fromArtifactDetail")
+
+    def test_graph_service_filters_console_workspace_open_without_application_state(self):
+        payload = get_capabilities_for_context(context="console", workspace_id="ws-1", entity_state={})
+        self.assertEqual([entry["id"] for entry in payload["capabilities"]], ["build_application", "explore_artifacts"])
+
+    def test_graph_service_enriches_application_artifact_detail_attributes(self):
+        payload = get_capabilities_for_context(
+            context="artifact_detail",
+            entity_id="artifact-1",
+            workspace_id="ws-1",
+            entity_state={
+                "artifact_type": "application",
+                "execution_state": "completed",
+                "application_exists": True,
+                "entity_exists": True,
+                "workspace_initialized": True,
+            },
+        )
+        self.assertEqual(
+            payload["attributes"],
+            {
+                "artifact_type": "application",
+                "draft_state": None,
+                "execution_state": "completed",
+                "workspace_state": "initialized",
+                "entity_exists": True,
+            },
+        )
+        self.assertEqual(
+            [entry["id"] for entry in payload["capabilities"]],
+            ["view_artifact_details", "open_application_workspace", "view_execution_status", "explore_artifacts"],
+        )
+
+    def test_graph_service_hides_application_specific_actions_for_article_artifact(self):
+        payload = get_capabilities_for_context(
+            context="artifact_detail",
+            entity_id="artifact-2",
+            workspace_id="ws-1",
+            entity_state={"artifact_type": "article", "entity_exists": True},
+        )
+        self.assertEqual([entry["id"] for entry in payload["capabilities"]], ["view_artifact_details", "explore_artifacts"])
+
+    def test_endpoint_returns_context_capabilities(self):
+        response = self.client.get("/xyn/api/capabilities/context", {"context": "artifact_registry", "workspaceId": "ws-1"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["context"], "artifact_registry")
+        self.assertEqual(payload["workspaceId"], "ws-1")
+        self.assertGreaterEqual(len(payload["capabilities"]), 1)
+        self.assertEqual(payload["capabilities"][0]["id"], "explore_artifacts")
+        self.assertEqual(payload["capabilities"][0]["action_type"], "prompt")
+        self.assertTrue(payload["capabilities"][0]["available"])
+
+    def test_graph_endpoint_returns_static_introspection_payload(self):
+        response = self.client.get("/xyn/api/capabilities/graph")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("contexts", payload)
+        self.assertIn("capabilities", payload)
+        self.assertIn("paths", payload)
+        self.assertTrue(any(entry["id"] == "open_application_workspace" for entry in payload["capabilities"]))
+        self.assertTrue(any(entry["id"] == "workspace_exploration" for entry in payload["paths"]))
+
+    def test_endpoint_filters_app_draft_capabilities_from_runtime_state(self):
+        draft_response = mock.Mock(
+            status_code=200,
+            content=b"{}",
+            json=mock.Mock(
+                return_value={
+                    "id": "draft-1",
+                    "status": "submitted",
+                    "content_json": {"initial_intent": {"requested_entities": ["poll"]}},
+                }
+            ),
+        )
+        jobs_response = mock.Mock(
+            status_code=200,
+            content=b"[]",
+            json=mock.Mock(
+                return_value=[
+                    {
+                        "id": "job-1",
+                        "status": "running",
+                        "input_json": {"draft_id": "draft-1"},
+                        "output_json": {
+                            "app_spec": {"app_slug": "team-lunch-poll"},
+                            "generated_artifact": {"artifact_slug": "app.team-lunch-poll"},
+                        },
+                    }
+                ]
+            ),
+        )
+
+        with (
+            mock.patch("xyn_orchestrator.xyn_api._resolve_workspace_for_identity", return_value=self.workspace),
+            mock.patch("xyn_orchestrator.xyn_api._seed_api_request", side_effect=[draft_response, jobs_response]),
+        ):
+            response = self.client.get(
+                "/xyn/api/capabilities/context",
+                {"context": "app_intent_draft", "entityId": "draft-1", "workspaceId": str(self.workspace.id)},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            [entry["id"] for entry in payload["capabilities"]],
+            ["open_application_workspace", "view_execution_status"],
+        )
+        self.assertEqual(
+            payload["attributes"],
+            {
+                "artifact_type": "application",
+                "draft_state": "executing",
+                "execution_state": "executing",
+                "workspace_state": "initialized",
+                "entity_exists": True,
+            },
+        )
+
+    def test_endpoint_enriches_artifact_detail_context_attributes(self):
+        artifact = mock.Mock(type_id=1, status="active", workspace_id=self.workspace.id)
+        artifact.type = mock.Mock(slug="workflow")
+
+        with (
+            mock.patch("xyn_orchestrator.xyn_api._resolve_artifact_for_capability_context", return_value=artifact),
+            mock.patch("xyn_orchestrator.xyn_api._artifact_slug", return_value="app.team-lunch-poll"),
+        ):
+            response = self.client.get(
+                "/xyn/api/capabilities/context",
+                {"context": "artifact_detail", "entityId": "artifact-1", "workspaceId": str(self.workspace.id)},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["context"], "artifact_detail")
+        self.assertEqual(payload["attributes"]["artifact_type"], "application")
+        self.assertEqual(payload["attributes"]["execution_state"], "completed")
+        self.assertEqual(
+            [entry["id"] for entry in payload["capabilities"]],
+            ["view_artifact_details", "open_application_workspace", "view_execution_status", "explore_artifacts"],
+        )
+
+    def test_endpoint_includes_unavailable_capabilities_only_when_requested(self):
+        response = self.client.get(
+            "/xyn/api/capabilities/context",
+            {
+                "context": "artifact_detail",
+                "entityId": "artifact-2",
+                "workspaceId": "ws-1",
+                "include_unavailable": "true",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(
+            [
+                (entry["id"], entry["available"], entry.get("failure_code"))
+                for entry in payload["capabilities"]
+            ],
+            [
+                ("view_artifact_details", True, None),
+                ("open_application_workspace", False, "application_missing"),
+                ("view_execution_status", False, "execution_missing"),
+                ("explore_artifacts", True, None),
+            ],
+        )
+
+    def test_path_service_returns_build_application_path(self):
+        payload = get_capability_paths_for_context(context="landing", workspace_id="ws-1")
+        self.assertEqual(payload["context"], "landing")
+        self.assertEqual(payload["paths"][0]["id"], "build_application")
+        self.assertEqual(
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [
+                ("build_application", "current"),
+                ("continue_application_draft", "pending"),
+                ("view_execution_status", "pending"),
+                ("open_application_workspace", "pending"),
+            ],
+        )
+
+    def test_path_service_adapts_completed_app_draft_to_workspace_open(self):
+        payload = get_capability_paths_for_context(
+            context="app_intent_draft",
+            entity_id="draft-1",
+            workspace_id="ws-1",
+            entity_state={"draft_state": "completed", "execution_state": "completed", "application_exists": True},
+        )
+        self.assertEqual(payload["paths"][0]["id"], "build_application")
+        self.assertEqual(
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [("build_application", "completed"), ("open_application_workspace", "current")],
+        )
+
+    def test_path_service_keeps_execution_status_while_app_draft_is_running(self):
+        payload = get_capability_paths_for_context(
+            context="app_intent_draft",
+            entity_id="draft-1",
+            workspace_id="ws-1",
+            entity_state={"draft_state": "submitted", "execution_state": "executing", "application_exists": True},
+        )
+        self.assertEqual(
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [
+                ("build_application", "completed"),
+                ("continue_application_draft", "completed"),
+                ("view_execution_status", "current"),
+                ("open_application_workspace", "pending"),
+            ],
+        )
+
+    def test_path_endpoint_returns_artifact_review_path(self):
+        response = self.client.get(
+            "/xyn/api/capability-paths/context",
+            {"context": "artifact_detail", "entityId": "artifact-1", "workspaceId": "ws-1"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["context"], "artifact_detail")
+        self.assertEqual(payload["paths"][0]["id"], "artifact_review")
+        self.assertEqual(payload["paths"][0]["steps"][0]["capability_id"], "view_artifact_details")
+
+    def test_event_endpoint_returns_refreshed_capabilities_and_paths(self):
+        with mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_capability_entity_state",
+            return_value={
+                "draft_state": "completed",
+                "execution_state": "completed",
+                "application_exists": True,
+                "workspace_initialized": True,
+                "entity_exists": True,
+                "artifact_type": "application",
+            },
+        ):
+            response = self.client.post(
+                "/xyn/api/capabilities/events",
+                data='{"event_type":"execution_completed","entity_id":"draft-1","workspace_id":"ws-1"}',
+                content_type="application/json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["event_type"], "execution_completed")
+        self.assertEqual(
+            [entry["context"] for entry in payload["contexts"]],
+            ["app_intent_draft", "artifact_detail", "application_workspace", "console"],
+        )
+        app_draft_context = payload["contexts"][0]
+        self.assertEqual(
+            [entry["id"] for entry in app_draft_context["capabilities"]],
+            ["continue_application_draft", "open_application_workspace", "view_execution_status"],
+        )
+        self.assertFalse(app_draft_context["capabilities"][0]["available"])
+        self.assertEqual(app_draft_context["capabilities"][0]["failure_code"], "draft_not_editable")
+        self.assertEqual(app_draft_context["paths"][0]["id"], "build_application")
+
+    def test_path_service_filters_invalid_app_draft_steps(self):
+        payload = get_capability_paths_for_context(
+            context="app_intent_draft",
+            entity_id="draft-1",
+            workspace_id="ws-1",
+            entity_state={"draft_state": "draft", "execution_state": None, "application_exists": False},
+        )
+        self.assertEqual(
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [
+                ("build_application", "completed"),
+                ("continue_application_draft", "current"),
+                ("view_execution_status", "pending"),
+                ("open_application_workspace", "pending"),
+            ],
+        )
+
+    def test_workspace_exploration_path_truncates_when_workspace_is_initialized(self):
+        payload = get_capability_paths_for_context(
+            context="application_workspace",
+            entity_id="app-1",
+            workspace_id="ws-1",
+            entity_state={"application_exists": True, "workspace_available": True, "workspace_initialized": True},
+        )
+        self.assertEqual(payload["paths"][0]["id"], "workspace_exploration")
+        self.assertEqual(
+            [(step["capability_id"], step["status"]) for step in payload["paths"][0]["steps"]],
+            [("open_application_workspace", "completed")],
+        )

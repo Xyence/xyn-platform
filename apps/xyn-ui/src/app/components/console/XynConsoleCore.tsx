@@ -8,10 +8,13 @@ import { getMe } from "../../../api/xyn";
 import { executeAppPalettePrompt } from "../../../api/xyn";
 import type { PromptInterpretationClarificationOption, RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
+import { openViewDescriptor } from "../../navigation/openViewDescriptor";
+import { resolveCapabilityGraphContext } from "../../navigation/capabilityContext";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import { emitEntityChange, inferEntityChangeFromPrompt } from "../../utils/entityChangeEvents";
+import { fromArtifactDetail, fromRecentArtifactItem } from "../../navigation/viewDescriptorBuilders";
 import type { ConsolePanelKey } from "./WorkbenchPanelHost";
 import RecentArtifactsMiniTable from "./RecentArtifactsMiniTable";
 import ConsolePromptCard from "./ConsolePromptCard";
@@ -36,6 +39,7 @@ type ArtifactStructuredQuery = {
 };
 
 type ResolvedPanelCommand =
+  | { panelKey: "composer_detail"; params: Record<string, never> }
   | { panelKey: "artifact_list"; params: { namespace?: string; query?: ArtifactStructuredQuery; query_error?: string } }
   | { panelKey: "workspaces"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "runs"; params: { query?: Record<string, unknown>; query_error?: string } }
@@ -195,6 +199,13 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
         },
       },
     };
+  }
+  if (
+    /^(open|show|go to|list)\s+composer$/.test(normalized)
+    || /^(open|show|go to)\s+application\s+workbench$/.test(normalized)
+    || /^(open|show|go to)\s+workbench$/.test(normalized)
+  ) {
+    return { panelKey: "composer_detail", params: {} };
   }
   if (/^(show|list|open)\s+drafts$/.test(normalized)) {
     return { panelKey: "drafts_list", params: {} };
@@ -395,6 +406,18 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
   return null;
 }
 
+export function resolveDirectPanelOpenParams(
+  directPanel: ResolvedPanelCommand,
+  workspaceId?: string | null,
+): Record<string, unknown> {
+  if (directPanel.panelKey !== "composer_detail") {
+    return directPanel.params;
+  }
+  return {
+    workspace_id: workspaceId || undefined,
+  };
+}
+
 function stringifyValue(value: unknown): string {
   if (value == null) return "";
   if (typeof value === "string") return value;
@@ -413,8 +436,10 @@ function shortArtifactId(id: string): string {
 function getImmediateNavigationAction(
   resolution: XynIntentResolutionResult | null | undefined,
 ): { kind: "panel"; panelKey: string; params: Record<string, unknown> } | { kind: "path"; path: string } | null {
-  if (!resolution || resolution.status !== "IntentResolved") return null;
+  if (!resolution) return null;
+  if (resolution.draft_payload) return null;
   const nextActions = Array.isArray(resolution.next_actions) ? resolution.next_actions : [];
+  if (nextActions.some((item) => item.action === "CreateDraft")) return null;
   const panelAction = nextActions.find(
     (item) => item.action === "OpenPanel" && typeof item.panel_key === "string" && item.panel_key.trim().length > 0,
   );
@@ -1052,6 +1077,13 @@ function ResolutionCard({
   const panelLinks = (resolution.next_actions || []).filter(
     (item) => item.action === "OpenPanel" && typeof item.panel_key === "string" && item.panel_key.length > 0
   );
+  const artifactDescriptor = canOpen
+    ? fromArtifactDetail({
+        artifactId: String(resolution.artifact_id || ""),
+        workspaceId,
+        title: resolution.artifact_type || undefined,
+      })
+    : null;
   const createActionLabel =
     (resolution.next_actions || []).find((item) => item.action === "CreateDraft" && String(item.label || "").trim())?.label ||
     "Create draft";
@@ -1080,11 +1112,9 @@ function ResolutionCard({
           <button
             type="button"
             className="ghost sm"
-            onClick={() =>
-              navigate(workspaceId ? toWorkspacePath(workspaceId, `build/artifacts/${resolution.artifact_id}`) : "/")
-            }
+            onClick={() => artifactDescriptor && openViewDescriptor(artifactDescriptor, navigate)}
           >
-            Open in editor
+            View Details
           </button>
         ) : null}
         {showRevise ? (
@@ -1145,6 +1175,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     openPanel,
     updateActivePanelParams,
     activePanelId,
+    activePanel,
     setActivePanelId,
     closePanel,
     navigateBack,
@@ -1164,14 +1195,40 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
 
   const isOverlay = mode === "overlay";
   const isSurfaceVisible = isOverlay ? open : true;
+  const isOnWorkbench = /\/w\/[^/]+\/workbench\/?$/.test(location.pathname);
   const isWorkbenchPath =
-    /\/(?:w\/[^/]+\/)?workbench\/?$/.test(location.pathname) || /^\/app\/platform(?:\/|$)/.test(location.pathname);
+    isOnWorkbench || /^\/app\/platform(?:\/|$)/.test(location.pathname);
   const hasContextArtifact = Boolean(context.artifact_id && context.artifact_type);
   const isGlobalContext = !hasContextArtifact;
+  const contextualApplicationId = String(activePanel?.params?.application_id || "").trim() || null;
   const workspaceIdFromPath = useMemo(() => {
     const match = String(location.pathname || "").match(/^\/w\/([^/]+)(?:\/|$)/);
     return match?.[1] ? decodeURIComponent(match[1]) : "";
   }, [location.pathname]);
+  const contextualEntityId = useMemo(() => {
+    const draftId = String(activePanel?.params?.draft_id || "").trim();
+    if (draftId) return draftId;
+    if (context.artifact_id) return String(context.artifact_id);
+    if (contextualApplicationId) return contextualApplicationId;
+    return null;
+  }, [activePanel?.params?.draft_id, context.artifact_id, contextualApplicationId]);
+  const contextualCapabilityContext = useMemo(
+    () =>
+      resolveCapabilityGraphContext({
+        pathname: location.pathname,
+        search: location.search,
+        panelKey: String(activePanel?.key || ""),
+        artifactId: context.artifact_id || null,
+        applicationId: contextualApplicationId,
+        applicationPlanId: String(activePanel?.params?.application_plan_id || ""),
+      }),
+    [activePanel?.key, activePanel?.params?.application_plan_id, context.artifact_id, contextualApplicationId, location.pathname, location.search],
+  );
+  const ensureWorkbench = () => {
+    if (!isOnWorkbench && workspaceIdFromPath) {
+      navigate(`/w/${encodeURIComponent(workspaceIdFromPath)}/workbench`);
+    }
+  };
 
   useEffect(() => {
     if (!isSurfaceVisible) return;
@@ -1387,9 +1444,11 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
     }
     // Resolve canonical core prompt surfaces without relying on surface API fetches.
     // This keeps global actions (like Platform Settings) deterministic even when nav APIs fail.
+    // Pass platform_admin so all core surfaces are reachable in the fast path; the real
+    // access gate happens server-side when the page loads.
     const coreTarget = resolvePromptSurfaceTarget(prompt, {
       workspaceId: workspaceIdFromPath,
-      user: { roles: [], permissions: [] },
+      user: { roles: ["platform_admin"], permissions: [] },
     });
     if (coreTarget?.source === "core_surface" && coreTarget.route) {
       if (coreTarget.key === "platform_settings" && onOpenPanel) {
@@ -1454,6 +1513,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
           params: { query },
           open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "current_panel",
         });
+        ensureWorkbench();
         clearSessionResolution();
         if (isOverlay) setOpen(false);
         return;
@@ -1472,12 +1532,13 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
         if (String(action.params.entity_type || "") === "run") {
           const runId = String(action.params.entity_id || "").trim();
           if (runId) {
-          openPanel({
-            key: "run_detail",
-            params: { run_id: runId },
-            open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
-            return_to_panel_id: returnTarget,
-          });
+            openPanel({
+              key: "run_detail",
+              params: { run_id: runId },
+              open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
+              return_to_panel_id: returnTarget,
+            });
+            ensureWorkbench();
             clearSessionResolution();
             if (isOverlay) setOpen(false);
             return;
@@ -1492,6 +1553,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
               open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
               return_to_panel_id: returnTarget,
             });
+            ensureWorkbench();
             clearSessionResolution();
             if (isOverlay) setOpen(false);
             return;
@@ -1509,6 +1571,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
             open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
             return_to_panel_id: returnTarget,
           });
+          ensureWorkbench();
           clearSessionResolution();
           if (isOverlay) setOpen(false);
           return;
@@ -1526,6 +1589,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
               open_in: (action.params.open_in as "current_panel" | "new_panel" | "side_by_side" | undefined) || "new_panel",
               return_to_panel_id: returnTarget,
             });
+            ensureWorkbench();
             clearSessionResolution();
             if (isOverlay) setOpen(false);
             return;
@@ -1617,7 +1681,7 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       return;
     }
     if (directPanel && onOpenPanel) {
-      onOpenPanel(directPanel.panelKey, directPanel.params);
+      onOpenPanel(directPanel.panelKey, resolveDirectPanelOpenParams(directPanel, workspaceIdFromPath));
       setInputText("");
       clearSessionResolution();
       if (isOverlay) setOpen(false);
@@ -1777,15 +1841,16 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
       }}
       onToggleShowDeprecatedArticles={setShowDeprecatedArticles}
       onOpen={(item) => {
+        const descriptor = fromRecentArtifactItem(item, workspaceIdFromPath || undefined);
         setLastArtifactHint({
           artifact_id: item.artifact_id,
           artifact_type: item.artifact_type,
           artifact_state: item.artifact_state || null,
           title: item.title,
-          route: item.route,
+          route: descriptor.route,
           updated_at: item.updated_at,
         });
-        navigate(item.route);
+        openViewDescriptor(descriptor, navigate);
         if (isOverlay) {
           if (onRequestClose) onRequestClose();
           else setOpen(false);
@@ -1812,7 +1877,13 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
             {promptCard}
             {hasResolutionContent ? <ConsoleResultPanel>{resolutionStack}</ConsoleResultPanel> : null}
           </div>
-          <ConsoleGuidancePanel onInsertSuggestion={injectSuggestion} dimmed={Boolean(inputText.trim())} />
+          <ConsoleGuidancePanel
+            onInsertSuggestion={injectSuggestion}
+            dimmed={Boolean(inputText.trim())}
+            context={contextualCapabilityContext}
+            entityId={contextualEntityId}
+            workspaceId={workspaceIdFromPath || null}
+          />
         </div>
         {recentSection}
       </div>

@@ -593,7 +593,20 @@ class PlatformAdminTests(TestCase):
 
 class AdminBridgeTests(TestCase):
     def _make_env(self):
-        return Environment.objects.create(name="Dev", slug="dev")
+        return Environment.objects.create(
+            name="Dev",
+            slug="dev",
+            metadata_json={
+                "oidc": {
+                    "issuer_url": "https://issuer.example.com",
+                    "client_id": "client-123",
+                    "client_secret_ref": {"ref": "ssm:/oidc/secret"},
+                    "redirect_uri": "https://xyence.io/auth/callback",
+                    "scopes": "openid profile email",
+                    "allowed_email_domains": ["xyence.io"],
+                }
+            },
+        )
 
     def _set_admin_session(self):
         identity = UserIdentity.objects.create(
@@ -617,7 +630,7 @@ class AdminBridgeTests(TestCase):
 
     def _mock_oidc(self, claims, roles):
         identity, _ = UserIdentity.objects.get_or_create(
-            issuer="https://accounts.google.com",
+            issuer="https://issuer.example.com",
             subject=claims["sub"],
             defaults={"provider": "oidc", "email": claims.get("email")},
         )

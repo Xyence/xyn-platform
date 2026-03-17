@@ -10,12 +10,22 @@ import psycopg2
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from psycopg2.extras import RealDictCursor
+from psycopg2 import sql
 
-from entity_ops import EntityOperationError, GenericEntityOperationsService, PostgresEntityStorageAdapter, RecordContext, load_entity_contracts
+from entity_ops import (
+    EntityOperationError,
+    GenericEntityOperationsService,
+    PostgresEntityStorageAdapter,
+    RecordContext,
+    load_entity_contracts,
+    load_policy_bundle,
+)
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://xyn:xyn_dev_password@localhost:5432/net_inventory")
 PORT = int(os.getenv("PORT", "8080"))
+SERVICE_NAME = str(os.getenv("SERVICE_NAME", "generated-app-api") or "generated-app-api").strip() or "generated-app-api"
+APP_TITLE = str(os.getenv("APP_TITLE", "Generated Application API") or "Generated Application API").strip() or "Generated Application API"
 
 
 def utc_now() -> str:
@@ -26,71 +36,70 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
-def init_schema_with_retry() -> None:
+def _postgres_type(field_type: str) -> str:
+    normalized = str(field_type or "string").strip().lower()
+    if "uuid" in normalized:
+        return "UUID"
+    if normalized.startswith("datetime"):
+        return "TIMESTAMPTZ"
+    if normalized.startswith("json"):
+        return "JSONB"
+    if normalized.startswith("bool"):
+        return "BOOLEAN"
+    return "TEXT"
+
+
+def _ensure_contract_schema(cur, contract: dict[str, Any]) -> None:
+    table_name = str(contract.get("key") or "").strip()
+    if not table_name:
+        return
+    table = sql.Identifier(table_name)
+    cur.execute(sql.SQL("CREATE TABLE IF NOT EXISTS {table} (id UUID PRIMARY KEY)").format(table=table))
+    fields = contract.get("fields") if isinstance(contract.get("fields"), list) else []
+    seen: set[str] = set()
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        field_name = str(field.get("name") or "").strip()
+        if not field_name or field_name == "id" or field_name in seen:
+            continue
+        seen.add(field_name)
+        default_clause = sql.SQL(" DEFAULT NOW()") if field_name in {"created_at", "updated_at"} and _postgres_type(str(field.get("type") or "")) == "TIMESTAMPTZ" else sql.SQL("")
+        cur.execute(
+            sql.SQL("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}{default_clause}").format(
+                table=table,
+                column=sql.Identifier(field_name),
+                column_type=sql.SQL(_postgres_type(str(field.get("type") or ""))),
+                default_clause=default_clause,
+            )
+        )
+    index_workspace = sql.Identifier(f"ix_{table_name}_workspace_id")
+    cur.execute(
+        sql.SQL("CREATE INDEX IF NOT EXISTS {index_name} ON {table} (workspace_id)").format(
+            index_name=index_workspace,
+            table=table,
+        )
+    )
+    field_names = {str(field.get("name") or "").strip() for field in fields if isinstance(field, dict)}
+    if "status" in field_names:
+        index_status = sql.Identifier(f"ix_{table_name}_workspace_status")
+        cur.execute(
+            sql.SQL("CREATE INDEX IF NOT EXISTS {index_name} ON {table} (workspace_id, status)").format(
+                index_name=index_status,
+                table=table,
+            )
+        )
+
+
+def init_schema_with_retry(*, entity_contracts: list[dict[str, Any]]) -> None:
     last_error: Optional[Exception] = None
     for _ in range(30):
         try:
             with get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS devices (
-                          id UUID PRIMARY KEY,
-                          workspace_id UUID NOT NULL,
-                          name TEXT NOT NULL,
-                          kind TEXT NOT NULL DEFAULT 'device',
-                          status TEXT NOT NULL DEFAULT 'unknown',
-                          location_id UUID NULL,
-                          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
-                    cur.execute("CREATE INDEX IF NOT EXISTS ix_devices_workspace_id ON devices(workspace_id)")
-                    cur.execute("CREATE INDEX IF NOT EXISTS ix_devices_workspace_status ON devices(workspace_id, status)")
-                    cur.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS locations (
-                          id UUID PRIMARY KEY,
-                          workspace_id UUID NOT NULL,
-                          name TEXT NOT NULL,
-                          kind TEXT NOT NULL DEFAULT 'site',
-                          parent_location_id UUID NULL,
-                          address_line1 TEXT NULL,
-                          address_line2 TEXT NULL,
-                          city TEXT NULL,
-                          region TEXT NULL,
-                          postal_code TEXT NULL,
-                          country TEXT NULL,
-                          notes TEXT NULL,
-                          tags_json JSONB NULL,
-                          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
-                    cur.execute("CREATE INDEX IF NOT EXISTS ix_locations_workspace_id ON locations(workspace_id)")
-                    cur.execute("ALTER TABLE locations ADD COLUMN IF NOT EXISTS parent_location_id UUID NULL")
-                    cur.execute("ALTER TABLE locations ADD COLUMN IF NOT EXISTS address_line1 TEXT NULL")
-                    cur.execute("ALTER TABLE locations ADD COLUMN IF NOT EXISTS address_line2 TEXT NULL")
-                    cur.execute("ALTER TABLE locations ADD COLUMN IF NOT EXISTS postal_code TEXT NULL")
-                    cur.execute("ALTER TABLE locations ADD COLUMN IF NOT EXISTS notes TEXT NULL")
-                    cur.execute("ALTER TABLE locations ADD COLUMN IF NOT EXISTS tags_json JSONB NULL")
-                    cur.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS interfaces (
-                          id UUID PRIMARY KEY,
-                          workspace_id UUID NOT NULL,
-                          device_id UUID NOT NULL,
-                          name TEXT NOT NULL,
-                          status TEXT NOT NULL DEFAULT 'unknown',
-                          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                        )
-                        """
-                    )
-                    cur.execute("CREATE INDEX IF NOT EXISTS ix_interfaces_workspace_id ON interfaces(workspace_id)")
-                    cur.execute("CREATE INDEX IF NOT EXISTS ix_interfaces_workspace_status ON interfaces(workspace_id, status)")
+                    for contract in entity_contracts:
+                        if isinstance(contract, dict):
+                            _ensure_contract_schema(cur, contract)
                 conn.commit()
             return
         except Exception as exc:
@@ -111,6 +120,7 @@ def _http_error(exc: EntityOperationError) -> HTTPException:
 def _build_entity_service() -> GenericEntityOperationsService:
     return GenericEntityOperationsService(
         entity_contracts=load_entity_contracts(),
+        policy_bundle=load_policy_bundle(),
         storage_adapter=PostgresEntityStorageAdapter(get_conn=get_conn),
     )
 
@@ -172,17 +182,17 @@ def _register_entity_routes(app: FastAPI, service: GenericEntityOperationsServic
 
 
 def create_app(*, entity_service: Optional[GenericEntityOperationsService] = None, initialize_schema: bool = True) -> FastAPI:
-    app = FastAPI(title="net-inventory-api", version="0.2.0")
+    app = FastAPI(title=SERVICE_NAME, version="0.2.0")
     service = entity_service or _build_entity_service()
 
     if initialize_schema:
         @app.on_event("startup")
         def on_startup() -> None:
-            init_schema_with_retry()
+            init_schema_with_retry(entity_contracts=list(service.contracts.values()))
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "service": "net-inventory-api", "time": utc_now()}
+        return {"status": "ok", "service": SERVICE_NAME, "time": utc_now()}
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -206,25 +216,18 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
           <body>
             <main>
               <section class="card">
-                <h1>Net Inventory API</h1>
-                <p>This deployment is running and ready to serve workspace-scoped inventory data through generic entity CRUD endpoints.</p>
+                <h1>__APP_TITLE__</h1>
+                <p>This deployment is running and ready to serve workspace-scoped generated application data through contract-driven CRUD endpoints.</p>
                 <ul>
                   <li><a href="/health">/health</a> for service health</li>
-                  <li><code>GET /devices?workspace_id=&lt;uuid&gt;</code> to list devices</li>
-                  <li><code>POST /devices</code> to create a device</li>
-                  <li><code>PATCH /devices/{id}</code> to update a device</li>
-                  <li><code>DELETE /devices/{id}</code> to delete a device</li>
-                  <li><code>GET /locations?workspace_id=&lt;uuid&gt;</code> to list locations</li>
-                  <li><code>POST /locations</code> to create a location</li>
-                  <li><code>GET /reports/devices-by-status?workspace_id=&lt;uuid&gt;</code> for the chart dataset</li>
-                  <li><code>GET /reports/interfaces-by-status?workspace_id=&lt;uuid&gt;</code> for the interface chart dataset</li>
+                  <li>Entity collection routes are derived from the generated application contract.</li>
                   <li><a href="/docs">/docs</a> for interactive API docs</li>
                 </ul>
               </section>
             </main>
           </body>
         </html>
-        """
+        """.replace("__APP_TITLE__", APP_TITLE)
 
     _register_entity_routes(app, service)
 

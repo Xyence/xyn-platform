@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -15,15 +16,16 @@ import boto3
 import requests
 from botocore.exceptions import BotoCoreError, ClientError
 from jsonschema import Draft202012Validator, RefResolver
+from .development_targets import DevelopmentTargetResolution, repo_target_payload_for_resolution
+from .managed_repositories import ManagedRepositoryError, materialize_repository_workspace, resolve_managed_repository
+from .managed_storage import codegen_task_workspace, store_local_artifact, resolve_local_artifact_path
 from .video_explainer import render_video, sanitize_payload
 
 
 INTERNAL_BASE_URL = os.environ.get("XYENCE_INTERNAL_BASE_URL", "http://backend:8000").rstrip("/")
 INTERNAL_TOKEN = os.environ.get("XYENCE_INTERNAL_TOKEN", "").strip()
 CONTRACTS_ROOT = os.environ.get("XYNSEED_CONTRACTS_ROOT", "/xyn-contracts")
-MEDIA_ROOT = os.environ.get("XYENCE_MEDIA_ROOT", "/app/media")
 SCHEMA_ROOT = os.environ.get("XYENCE_SCHEMA_ROOT", "/app/schemas")
-CODEGEN_WORKDIR = os.environ.get("XYENCE_CODEGEN_WORKDIR", "/tmp/xyn-codegen")
 CODEGEN_GIT_NAME = os.environ.get("XYN_CODEGEN_GIT_NAME", "xyn-codegen")
 CODEGEN_GIT_EMAIL = os.environ.get("XYN_CODEGEN_GIT_EMAIL", "codegen@xyn.local")
 CODEGEN_GIT_TOKEN = os.environ.get("XYENCE_CODEGEN_GIT_TOKEN", "").strip()
@@ -60,7 +62,9 @@ def _post_json(path: str, payload: Dict[str, Any], timeout_seconds: int = 60) ->
 
 def _download_file(path: str) -> bytes:
     if path.startswith("/media/"):
-        file_path = os.path.join(MEDIA_ROOT, path.replace("/media/", ""))
+        file_path = resolve_local_artifact_path(url=path)
+        if not file_path:
+            raise FileNotFoundError(path)
         with open(file_path, "rb") as handle:
             return handle.read()
     response = requests.get(f"{INTERNAL_BASE_URL}{path}", headers=_headers(), timeout=60)
@@ -69,12 +73,8 @@ def _download_file(path: str) -> bytes:
 
 
 def _write_artifact(run_id: str, filename: str, content: str) -> str:
-    target_dir = os.path.join(MEDIA_ROOT, "run_artifacts", run_id)
-    os.makedirs(target_dir, exist_ok=True)
-    file_path = os.path.join(target_dir, filename)
-    with open(file_path, "w", encoding="utf-8") as handle:
-        handle.write(content)
-    return f"/media/run_artifacts/{run_id}/{filename}"
+    stored = store_local_artifact("run_artifacts", run_id, filename, content)
+    return stored.url
 
 
 def _get_run_artifacts(run_id: str) -> List[Dict[str, Any]]:
@@ -197,22 +197,62 @@ def _validate_schema(payload: Dict[str, Any], filename: str) -> List[str]:
     return errors
 
 
-def _ensure_repo_workspace(repo: Dict[str, Any], workspace_root: str) -> str:
+def _clone_repo_workspace_direct(repo: Dict[str, Any], workspace_root: str) -> str:
     os.makedirs(workspace_root, exist_ok=True)
-    repo_name = repo["name"]
+    repo_name = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(repo["name"] or "").strip()).strip(".-") or "repo"
     repo_dir = os.path.join(workspace_root, repo_name)
     if os.path.exists(repo_dir) and os.path.isdir(os.path.join(repo_dir, ".git")):
         return repo_dir
     url = repo["url"]
     if repo.get("auth") == "https_token" and CODEGEN_GIT_TOKEN and url.startswith("https://"):
         url = url.replace("https://", f"https://{CODEGEN_GIT_TOKEN}@")
-    os.system(f"rm -rf {repo_dir}")
-    os.system(f"git clone --depth 1 --branch {repo.get('ref', 'main')} {url} {repo_dir}")
+    shutil.rmtree(repo_dir, ignore_errors=True)
+    proc = subprocess.run(
+        ["git", "clone", "--depth", "1", "--branch", str(repo.get("ref", "main") or "main"), url, repo_dir],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr or proc.stdout or "git clone failed")
     return repo_dir
+
+
+def _ensure_repo_workspace(repo: Dict[str, Any], workspace_root: str) -> str:
+    try:
+        return str(materialize_repository_workspace(repo, workspace_root=workspace_root, refresh=True, reset=False))
+    except ManagedRepositoryError:
+        return _clone_repo_workspace_direct(repo, workspace_root)
 
 
 def _git_cmd(repo_dir: str, cmd: str) -> int:
     return os.system(f"cd {repo_dir} && {cmd}")
+
+
+def _effective_codegen_repo_targets(task: Dict[str, Any], work_item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    explicit_repo = str(task.get("target_repo") or "").strip()
+    explicit_branch = str(task.get("target_branch") or "").strip()
+    if explicit_repo:
+        try:
+            repository = resolve_managed_repository(explicit_repo)
+        except ManagedRepositoryError:
+            repository = None
+        target = repo_target_payload_for_resolution(
+            DevelopmentTargetResolution(
+                repository=repository,
+                repository_slug=explicit_repo,
+                branch=explicit_branch or (repository.default_branch if repository else None),
+                source_kind="task_explicit",
+                application_id=None,
+                application_plan_id=None,
+                goal_id=None,
+            ),
+            branch=explicit_branch,
+        )
+        if target:
+            return [target]
+    repo_targets = work_item.get("repo_targets") if isinstance(work_item.get("repo_targets"), list) else []
+    return [row for row in repo_targets if isinstance(row, dict)]
 
 
 def _stage_all(repo_dir: str) -> int:
@@ -500,6 +540,8 @@ def _validate_blueprint(spec: Dict[str, Any], kind: str) -> List[str]:
             path = ".".join(str(p) for p in error.path) if error.path else "root"
             errors.append(f"{path}: {error.message}")
         return errors
+    except FileNotFoundError:
+        return []
     except Exception as exc:
         return [f"Schema validation unavailable: {exc}"]
 
@@ -3363,9 +3405,7 @@ def run_dev_task(task_id: str, worker_id: str) -> None:
                 dns_zone_name = release_dns.get("zone_name") or dns_zone_name
                 release_env = release_target.get("env") or {}
                 release_secret_refs = release_target.get("secret_refs") or []
-            workspace_root = os.path.join(CODEGEN_WORKDIR, task_id)
-            os.system(f"rm -rf {workspace_root}")
-            os.makedirs(workspace_root, exist_ok=True)
+            workspace_root = str(codegen_task_workspace(task_id, reset=True))
             repo_results = []
             repo_result_index = {}
             repo_states = []
@@ -3377,7 +3417,7 @@ def run_dev_task(task_id: str, worker_id: str) -> None:
             blueprint_id = plan_json.get("blueprint_id")
             blueprint_name = plan_json.get("blueprint_name") or plan_json.get("blueprint")
             caps = _work_item_capabilities(work_item, work_item_id)
-            for repo in work_item.get("repo_targets", []):
+            for repo in _effective_codegen_repo_targets(task, work_item):
                 repo_dir = _ensure_repo_workspace(repo, workspace_root)
                 _apply_scaffold_for_work_item(work_item, repo_dir)
                 diff = _collect_git_diff(repo_dir)
@@ -3554,7 +3594,7 @@ def run_dev_task(task_id: str, worker_id: str) -> None:
                     if not images:
                         raise RuntimeError("No images configured for build.")
                     repo_sources: Dict[str, Dict[str, str]] = {}
-                    for repo in (work_item.get("repo_targets") or []):
+                    for repo in _effective_codegen_repo_targets(task, work_item):
                         if not isinstance(repo, dict):
                             continue
                         repo_name = str(repo.get("name") or "").strip()

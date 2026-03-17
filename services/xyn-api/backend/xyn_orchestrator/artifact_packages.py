@@ -34,6 +34,7 @@ ALLOWED_ARTIFACT_TYPES = {
     "application",
     "article",
     "workflow",
+    "policy_bundle",
     "app_shell",
     "auth_login",
     "data_model",
@@ -552,6 +553,9 @@ def _run_install_hook(*, artifact_type: str, slug: str, content: Dict[str, Any],
     if artifact_type == "workflow":
         _upsert_platform_config("workflow_registry", slug, content, user=user)
         return {"registered": True, "section": "workflow_registry"}
+    if artifact_type == "policy_bundle":
+        _upsert_platform_config("policy_bundle_registry", slug, content, user=user)
+        return {"registered": True, "section": "policy_bundle_registry"}
     return {"registered": False}
 
 
@@ -561,13 +565,14 @@ def validate_package_install(
     binding_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     manifest, _files = _load_package(package)
-    errors = _dependency_errors(manifest)
+    dependency_errors = _dependency_errors(manifest)
+    errors = list(dependency_errors)
     bindings = _collect_bindings(manifest)
     resolved_bindings, binding_errors = resolve_bindings(bindings, overrides=binding_overrides)
     errors.extend(binding_errors)
 
     ordered: List[Dict[str, Any]] = []
-    if not errors:
+    if not dependency_errors:
         ordered = _topological_sort(manifest)
 
     planned_changes: List[Dict[str, Any]] = []
@@ -778,6 +783,7 @@ def install_package(
                     )
                     artifact = existing
                 else:
+                    package_source_ref = f"{package.id}:{artifact_json_path}"
                     artifact = Artifact.objects.create(
                         workspace=workspace,
                         type=type_row,
@@ -797,7 +803,7 @@ def install_package(
                         artifact_state="canonical",
                         content_hash=item_hash,
                         source_ref_type="ArtifactPackage",
-                        source_ref_id=str(package.id),
+                        source_ref_id=package_source_ref,
                         visibility="private",
                         scope_json=imported_scope,
                     )

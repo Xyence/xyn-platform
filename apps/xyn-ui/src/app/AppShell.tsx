@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Bot } from "lucide-react";
 import { getAuthMode, getMe, getMyProfile, getTenantBranding, listArtifactNavSurfaces, listWorkspaces } from "../api/xyn";
@@ -7,42 +7,43 @@ import type { ArtifactSurface } from "../api/types";
 import { CREATE_ACTIONS, NAV_GROUPS, NAV_MOVE_TOAST_STORAGE_KEY, NavGroup, NavItem, NavUserContext } from "./nav/nav.config";
 import { getBreadcrumbs, visibleNav } from "./nav/nav.utils";
 import Sidebar from "./components/nav/Sidebar";
-import BlueprintsPage from "./pages/BlueprintsPage";
-import InstancesPage from "./pages/InstancesPage";
-import SecretConfigurationPage from "./pages/SecretConfigurationPage";
-import AIConfigPage from "./pages/AIConfigPage";
-import IdentityConfigurationPage from "./pages/IdentityConfigurationPage";
-import AccessControlPage from "./pages/AccessControlPage";
-import RunsPage from "./pages/RunsPage";
-import JobsListPage from "./pages/JobsListPage";
-import JobDetailPage from "./pages/JobDetailPage";
-import ActivityPage from "./pages/ActivityPage";
-import DevTasksPage from "./pages/DevTasksPage";
-import PlatformBrandingPage from "./pages/PlatformBrandingPage";
-import ControlPlanePage from "./pages/ControlPlanePage";
-import GuidesPage from "./pages/GuidesPage";
-import ToursPage from "./pages/ToursPage";
-import TourDetailPage from "./pages/TourDetailPage";
-import XynMapPage from "./pages/XynMapPage";
-import PlatformSettingsPage from "./pages/PlatformSettingsPage";
-import PlatformSettingsHubPage from "./pages/PlatformSettingsHubPage";
-import PlatformDeploySettingsPage from "./pages/PlatformDeploySettingsPage";
-import PlatformRenderingSettingsPage from "./pages/PlatformRenderingSettingsPage";
-import VideoAdapterConfigPage from "./pages/VideoAdapterConfigPage";
-import SeedPacksPage from "./pages/SeedPacksPage";
-import ArtifactsRegistryPage from "./pages/ArtifactsRegistryPage";
-import ArtifactsLibraryPage from "./pages/ArtifactsLibraryPage";
-import ArtifactDetailPage from "./pages/ArtifactDetailPage";
-import ArtifactSurfaceRoutePage from "./pages/ArtifactSurfaceRoutePage";
-import ArticleSurfaceEditorRedirectPage from "./pages/ArticleSurfaceEditorRedirectPage";
-import ArticleSurfaceDocsPage from "./pages/ArticleSurfaceDocsPage";
-import WorkbenchPage from "./pages/WorkbenchPage";
-import WorkspaceSettingsPage from "./pages/WorkspaceSettingsPage";
-import DraftsListPage from "./pages/DraftsListPage";
-import DraftCreatePage from "./pages/DraftCreatePage";
-import DraftDetailPage from "./pages/DraftDetailPage";
-import WorkspacesPage from "./pages/WorkspacesPage";
-import PlatformInitializationPage from "./pages/PlatformInitializationPage";
+const BlueprintsPage = lazy(() => import("./pages/BlueprintsPage"));
+const InstancesPage = lazy(() => import("./pages/InstancesPage"));
+const SecretConfigurationPage = lazy(() => import("./pages/SecretConfigurationPage"));
+const AIConfigPage = lazy(() => import("./pages/AIConfigPage"));
+const IdentityConfigurationPage = lazy(() => import("./pages/IdentityConfigurationPage"));
+const AccessControlPage = lazy(() => import("./pages/AccessControlPage"));
+const RunsPage = lazy(() => import("./pages/RunsPage"));
+const JobsListPage = lazy(() => import("./pages/JobsListPage"));
+const JobDetailPage = lazy(() => import("./pages/JobDetailPage"));
+const ActivityPage = lazy(() => import("./pages/ActivityPage"));
+const DevTasksPage = lazy(() => import("./pages/DevTasksPage"));
+const PlatformBrandingPage = lazy(() => import("./pages/PlatformBrandingPage"));
+const ControlPlanePage = lazy(() => import("./pages/ControlPlanePage"));
+const GuidesPage = lazy(() => import("./pages/GuidesPage"));
+const ToursPage = lazy(() => import("./pages/ToursPage"));
+const TourDetailPage = lazy(() => import("./pages/TourDetailPage"));
+const XynMapPage = lazy(() => import("./pages/XynMapPage"));
+const CapabilityExplorerPage = lazy(() => import("./pages/CapabilityExplorerPage"));
+const PlatformSettingsPage = lazy(() => import("./pages/PlatformSettingsPage"));
+const PlatformSettingsHubPage = lazy(() => import("./pages/PlatformSettingsHubPage"));
+const PlatformDeploySettingsPage = lazy(() => import("./pages/PlatformDeploySettingsPage"));
+const PlatformRenderingSettingsPage = lazy(() => import("./pages/PlatformRenderingSettingsPage"));
+const VideoAdapterConfigPage = lazy(() => import("./pages/VideoAdapterConfigPage"));
+const SeedPacksPage = lazy(() => import("./pages/SeedPacksPage"));
+const ArtifactsRegistryPage = lazy(() => import("./pages/ArtifactsRegistryPage"));
+const ArtifactsLibraryPage = lazy(() => import("./pages/ArtifactsLibraryPage"));
+const ArtifactDetailPage = lazy(() => import("./pages/ArtifactDetailPage"));
+const ArtifactSurfaceRoutePage = lazy(() => import("./pages/ArtifactSurfaceRoutePage"));
+const ArticleSurfaceEditorRedirectPage = lazy(() => import("./pages/ArticleSurfaceEditorRedirectPage"));
+const ArticleSurfaceDocsPage = lazy(() => import("./pages/ArticleSurfaceDocsPage"));
+const WorkbenchPage = lazy(() => import("./pages/WorkbenchPage"));
+const WorkspaceSettingsPage = lazy(() => import("./pages/WorkspaceSettingsPage"));
+const DraftsListPage = lazy(() => import("./pages/DraftsListPage"));
+const DraftCreatePage = lazy(() => import("./pages/DraftCreatePage"));
+const DraftDetailPage = lazy(() => import("./pages/DraftDetailPage"));
+const WorkspacesPage = lazy(() => import("./pages/WorkspacesPage"));
+const PlatformInitializationPage = lazy(() => import("./pages/PlatformInitializationPage"));
 import { useGlobalHotkeys } from "./hooks/useGlobalHotkeys";
 import ReportOverlay from "./components/ReportOverlay";
 import UserMenu from "./components/common/UserMenu";
@@ -71,6 +72,7 @@ import {
 } from "./routing/workspaceRouting";
 import { requiresPlatformInitialization, resolveDefaultWorkspaceForUser, resolvePostLoginDestination } from "./routing/bootstrapResolver";
 import { canonicalLegacyRouteForPlatformSettings } from "./routing/promptSurfaceResolver";
+import { emitCapabilityEvent } from "./events/emitCapabilityEvent";
 
 function readFlag(value: unknown): boolean {
   return String(value || "").trim().toLowerCase() === "true";
@@ -227,6 +229,218 @@ function PlatformSettingsLegacyRoute({ workspaceId }: { workspaceId: string }) {
     return <PlatformSettingsPage />;
   }
   return <Navigate to={nextTarget} replace />;
+}
+
+function RouteLoadingFallback() {
+  return (
+    <section className="card">
+      <p className="muted">Loading view…</p>
+    </section>
+  );
+}
+
+type PlatformSettingsSurface =
+  | "hub"
+  | "access_control"
+  | "identity_configuration"
+  | "secrets"
+  | "activity"
+  | "ai_agents"
+  | "rendering_settings"
+  | "deploy_settings"
+  | "workspaces"
+  | "branding";
+
+type PlatformSettingsTab = {
+  id: string;
+  surface: PlatformSettingsSurface;
+  label: string;
+};
+
+const DEFAULT_PLATFORM_SETTINGS_TAB: PlatformSettingsTab = {
+  id: "platform-settings-hub",
+  surface: "hub",
+  label: "Platform Settings",
+};
+
+function platformSettingsSurfaceLabel(surface: PlatformSettingsSurface): string {
+  switch (surface) {
+    case "access_control":
+      return "Access Control";
+    case "identity_configuration":
+      return "Identity Configuration";
+    case "secrets":
+      return "Secrets";
+    case "activity":
+      return "Activity";
+    case "ai_agents":
+      return "AI Agents";
+    case "rendering_settings":
+      return "Rendering Settings";
+    case "deploy_settings":
+      return "Deploy";
+    case "workspaces":
+      return "Workspaces";
+    case "branding":
+      return "Branding";
+    default:
+      return "Platform Settings";
+  }
+}
+
+function platformSettingsSurfacePath(surface: PlatformSettingsSurface): string {
+  switch (surface) {
+    case "access_control":
+      return "/app/platform/access-control";
+    case "identity_configuration":
+      return "/app/platform/identity-configuration";
+    case "secrets":
+      return "/app/platform/secrets";
+    case "activity":
+      return "/app/platform/activity";
+    case "ai_agents":
+      return "/app/platform/ai-agents";
+    case "rendering_settings":
+      return "/app/platform/rendering-settings";
+    case "deploy_settings":
+      return "/app/platform/deploy";
+    case "workspaces":
+      return "/app/platform/workspaces";
+    case "branding":
+      return "/app/platform/branding";
+    default:
+      return "/app/platform/hub";
+  }
+}
+
+function mapPlatformSettingsRouteToSurface(route: string): PlatformSettingsSurface | null {
+  const path = String(route || "").split("?", 1)[0].trim().toLowerCase();
+  if (path.endsWith("/platform/access-control")) return "access_control";
+  if (path.endsWith("/platform/identity-configuration")) return "identity_configuration";
+  if (path.endsWith("/platform/secrets")) return "secrets";
+  if (path.endsWith("/platform/activity")) return "activity";
+  if (path.endsWith("/platform/ai-agents")) return "ai_agents";
+  if (path.endsWith("/platform/rendering-settings")) return "rendering_settings";
+  if (path.endsWith("/platform/deploy")) return "deploy_settings";
+  if (path.endsWith("/platform/workspaces")) return "workspaces";
+  if (path.endsWith("/platform/branding")) return "branding";
+  if (path.endsWith("/platform/hub")) return "hub";
+  return null;
+}
+
+function GlobalPlatformSettingsRoute({
+  initialSurface,
+  sectionOverride,
+  activeWorkspaceId,
+  activeWorkspaceName,
+  canWorkspaceAdmin,
+  canManageWorkspaces,
+}: {
+  initialSurface: PlatformSettingsSurface;
+  sectionOverride?: "general" | "security" | "integrations" | "deploy" | "workspaces";
+  activeWorkspaceId: string;
+  activeWorkspaceName: string;
+  canWorkspaceAdmin: boolean;
+  canManageWorkspaces: boolean;
+}) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [tabs, setTabs] = useState<PlatformSettingsTab[]>(() =>
+    initialSurface === "hub"
+      ? [DEFAULT_PLATFORM_SETTINGS_TAB]
+      : [DEFAULT_PLATFORM_SETTINGS_TAB, { id: `platform-settings-${initialSurface}`, surface: initialSurface, label: platformSettingsSurfaceLabel(initialSurface) }]
+  );
+  const [activeTabId, setActiveTabId] = useState<string>(
+    initialSurface === "hub" ? DEFAULT_PLATFORM_SETTINGS_TAB.id : `platform-settings-${initialSurface}`
+  );
+
+  useEffect(() => {
+    const routeSurface = mapPlatformSettingsRouteToSurface(location.pathname) || initialSurface;
+    const tabId = routeSurface === "hub" ? DEFAULT_PLATFORM_SETTINGS_TAB.id : `platform-settings-${routeSurface}`;
+    setTabs((current) => {
+      if (routeSurface === "hub") return current;
+      if (current.some((item) => item.id === tabId)) return current;
+      return [...current, { id: tabId, surface: routeSurface, label: platformSettingsSurfaceLabel(routeSurface) }];
+    });
+    setActiveTabId(tabId);
+  }, [initialSurface, location.pathname]);
+
+  const activeSurface =
+    tabs.find((item) => item.id === activeTabId)?.surface ||
+    tabs[tabs.length - 1]?.surface ||
+    DEFAULT_PLATFORM_SETTINGS_TAB.surface;
+
+  const closeSurfaceTab = (tabId: string) => {
+    if (tabId === DEFAULT_PLATFORM_SETTINGS_TAB.id) return;
+    const closingActive = activeTabId === tabId;
+    setTabs((current) => {
+      const next = current.filter((item) => item.id !== tabId);
+      return next.length ? next : [DEFAULT_PLATFORM_SETTINGS_TAB];
+    });
+    if (closingActive) {
+      setActiveTabId(DEFAULT_PLATFORM_SETTINGS_TAB.id);
+      navigate("/app/platform/hub", { replace: true });
+    }
+  };
+
+  const navigateToSurface = (surface: PlatformSettingsSurface) => {
+    navigate(platformSettingsSurfacePath(surface));
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div className="page-tabs" aria-label="Platform settings tabs">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {tabs.map((tab) => (
+            <div key={tab.id} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <button
+                type="button"
+                className={activeTabId === tab.id ? "ghost active" : "ghost"}
+                onClick={() => navigateToSurface(tab.surface)}
+                aria-current={activeTabId === tab.id ? "page" : undefined}
+              >
+                {tab.label}
+              </button>
+              {tab.id !== DEFAULT_PLATFORM_SETTINGS_TAB.id ? (
+                <button type="button" className="ghost sm" onClick={() => closeSurfaceTab(tab.id)} aria-label={`Close ${tab.label}`}>
+                  x
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+      {activeSurface === "hub" ? (
+        <PlatformSettingsHubPage
+          sectionOverride={sectionOverride}
+          onOpenRoute={(route) => {
+            const mapped = mapPlatformSettingsRouteToSurface(route);
+            if (!mapped) {
+              navigate(route);
+              return;
+            }
+            navigateToSurface(mapped);
+          }}
+        />
+      ) : null}
+      {activeSurface === "access_control" ? <AccessControlPage /> : null}
+      {activeSurface === "identity_configuration" ? <IdentityConfigurationPage /> : null}
+      {activeSurface === "secrets" ? <SecretConfigurationPage /> : null}
+      {activeSurface === "activity" ? <ActivityPage workspaceId="" /> : null}
+      {activeSurface === "ai_agents" ? <AIConfigPage /> : null}
+      {activeSurface === "rendering_settings" ? <PlatformRenderingSettingsPage /> : null}
+      {activeSurface === "deploy_settings" ? <PlatformDeploySettingsPage /> : null}
+      {activeSurface === "workspaces" ? (
+        <WorkspacesPage
+          activeWorkspaceId={activeWorkspaceId}
+          activeWorkspaceName={activeWorkspaceName}
+          canWorkspaceAdmin={canWorkspaceAdmin}
+          canManageWorkspaces={canManageWorkspaces}
+        />
+      ) : null}
+      {activeSurface === "branding" ? <PlatformBrandingPage /> : null}
+    </div>
+  );
 }
 
 export default function AppShell() {
@@ -415,10 +629,17 @@ export default function AppShell() {
   }, [authed, activeWorkspaceId, inWorkspaceScope, navRefreshToken, push]);
 
   useEffect(() => {
-    const onWorkspaceArtifactsChanged = () => setNavRefreshToken((value) => value + 1);
+    const onWorkspaceArtifactsChanged = () => {
+      const workspaceId = activeWorkspaceId || workspaceIdFromRoute || "";
+      setNavRefreshToken((value) => value + 1);
+      void emitCapabilityEvent({
+        eventType: "artifact_created",
+        workspaceId,
+      });
+    };
     window.addEventListener("xyn:workspace-artifacts-changed", onWorkspaceArtifactsChanged);
     return () => window.removeEventListener("xyn:workspace-artifacts-changed", onWorkspaceArtifactsChanged);
-  }, []);
+  }, [activeWorkspaceId, workspaceIdFromRoute]);
 
   useEffect(() => {
     if (activeWorkspaceId) {
@@ -819,9 +1040,11 @@ export default function AppShell() {
               actionTo="/app/platform/hub"
             />
           ) : (
+          <Suspense fallback={<RouteLoadingFallback />}>
           <Routes>
             <Route path="/" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "/"} replace />} />
             <Route path="workbench" element={<WorkbenchPage workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />} />
+            <Route path="capabilities" element={<CapabilityExplorerPage />} />
             <Route path="console" element={<Navigate to={workspaceScopedTarget(DEFAULT_WORKSPACE_SUBPATH)} replace />} />
             <Route path="apps/articles/edit" element={<ArticleSurfaceEditorRedirectPage />} />
             <Route path="apps/articles/docs" element={<ArticleSurfaceDocsPage />} />
@@ -1062,21 +1285,71 @@ export default function AppShell() {
             <Route
               path="platform/hub"
               element={
-                activeWorkspace?.id ? (
-                  <Navigate to={`${workspaceScopedTarget("workbench")}?panel=platform_settings`} replace />
-                ) : (
-                  <PlatformSettingsHubPage />
-                )
+                <GlobalPlatformSettingsRoute
+                  initialSurface="hub"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
               }
             />
-            <Route path="platform/settings/general" element={<PlatformSettingsHubPage sectionOverride="general" />} />
-            <Route path="platform/settings/security" element={<PlatformSettingsHubPage sectionOverride="security" />} />
-            <Route path="platform/settings/integrations" element={<PlatformSettingsHubPage sectionOverride="integrations" />} />
-            <Route path="platform/settings/deploy" element={<PlatformDeploySettingsPage />} />
+            <Route
+              path="platform/settings/general"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="hub"
+                  sectionOverride="general"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
+            <Route
+              path="platform/settings/security"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="hub"
+                  sectionOverride="security"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
+            <Route
+              path="platform/settings/integrations"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="hub"
+                  sectionOverride="integrations"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
+            <Route
+              path="platform/settings/deploy"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="deploy_settings"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
             <Route
               path="platform/settings/workspaces"
               element={
-                <WorkspacesPage
+                <GlobalPlatformSettingsRoute
+                  initialSurface="workspaces"
                   activeWorkspaceId={activeWorkspace?.id || ""}
                   activeWorkspaceName={activeWorkspace?.name || "Workspace"}
                   canWorkspaceAdmin={canWorkspaceAdmin}
@@ -1084,20 +1357,26 @@ export default function AppShell() {
                 />
               }
             />
-            <Route path="platform/access-control" element={<AccessControlPage />} />
+            <Route
+              path="platform/access-control"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="access_control"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
             <Route path="platform/access-explorer" element={<RedirectLegacyAccessControlRoute tab="explorer" />} />
             <Route path="platform/users" element={<RedirectLegacyAccessControlRoute tab="users" />} />
             <Route path="platform/roles" element={<RedirectLegacyAccessControlRoute tab="roles" />} />
-            <Route path="platform/branding" element={<PlatformBrandingPage />} />
-            <Route path="platform/settings" element={<PlatformSettingsLegacyRoute workspaceId={activeWorkspace?.id || ""} />} />
-            <Route path="platform/settings/legacy" element={<PlatformSettingsPage />} />
-            <Route path="platform/video-adapter-configs/:artifactId" element={<VideoAdapterConfigPage />} />
-            <Route path="platform/rendering-settings" element={<PlatformRenderingSettingsPage />} />
-            <Route path="platform/deploy" element={<PlatformDeploySettingsPage />} />
             <Route
-              path="platform/workspaces"
+              path="platform/branding"
               element={
-                <WorkspacesPage
+                <GlobalPlatformSettingsRoute
+                  initialSurface="branding"
                   activeWorkspaceId={activeWorkspace?.id || ""}
                   activeWorkspaceName={activeWorkspace?.name || "Workspace"}
                   canWorkspaceAdmin={canWorkspaceAdmin}
@@ -1105,17 +1384,100 @@ export default function AppShell() {
                 />
               }
             />
-            <Route path="platform/activity" element={<ActivityPage workspaceId="" />} />
+            <Route path="platform/settings" element={<PlatformSettingsLegacyRoute workspaceId={activeWorkspace?.id || ""} />} />
+            <Route path="platform/settings/legacy" element={<PlatformSettingsPage />} />
+            <Route path="platform/video-adapter-configs/:artifactId" element={<VideoAdapterConfigPage />} />
+            <Route
+              path="platform/rendering-settings"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="rendering_settings"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
+            <Route
+              path="platform/deploy"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="deploy_settings"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
+            <Route
+              path="platform/workspaces"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="workspaces"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
+            <Route
+              path="platform/activity"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="activity"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
             <Route path="platform/seeds" element={<SeedPacksPage />} />
-            <Route path="platform/identity-configuration" element={<IdentityConfigurationPage />} />
+            <Route
+              path="platform/identity-configuration"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="identity_configuration"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
             <Route path="platform/identity-providers" element={<RedirectLegacyIdentityRoute tab="identity-providers" />} />
             <Route path="platform/oidc-app-clients" element={<RedirectLegacyIdentityRoute tab="oidc-app-clients" />} />
-            <Route path="platform/secrets" element={<SecretConfigurationPage />} />
+            <Route
+              path="platform/secrets"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="secrets"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
             <Route path="platform/secret-stores" element={<RedirectLegacySecretsRoute tab="stores" />} />
             <Route path="platform/secret-refs" element={<RedirectLegacySecretsRoute tab="refs" />} />
             <Route path="platform/ai-config" element={<Navigate to={workspaceScopedTarget("platform/ai-agents")} replace />} />
             <Route path="platform/ai-configuration" element={<Navigate to={workspaceScopedTarget("platform/ai-agents")} replace />} />
-            <Route path="platform/ai-agents" element={<AIConfigPage />} />
+            <Route
+              path="platform/ai-agents"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="ai_agents"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
             <Route path="platform/ai/credentials" element={<RedirectLegacyAiRoute tab="credentials" />} />
             <Route path="platform/ai/model-configs" element={<RedirectLegacyAiRoute tab="model-configs" />} />
             <Route path="platform/ai/agents" element={<RedirectLegacyAiRoute tab="agents" />} />
@@ -1123,6 +1485,7 @@ export default function AppShell() {
             <Route path="settings" element={<WorkspaceSettingsPage workspaceName={activeWorkspace?.name || "Workspace"} />} />
             <Route path="*" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "workspaces"} replace />} />
           </Routes>
+          </Suspense>
           )}
         </main>
       </div>

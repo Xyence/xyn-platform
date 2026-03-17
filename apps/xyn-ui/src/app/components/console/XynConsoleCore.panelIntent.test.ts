@@ -1,5 +1,35 @@
-import { describe, expect, it } from "vitest";
-import { resolvePanelCommand } from "./XynConsoleCore";
+import { beforeEach, describe, expect, it } from "vitest";
+import { resolveDirectPanelOpenParams, resolvePanelCommand } from "./XynConsoleCore";
+
+describe("resolveDirectPanelOpenParams", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("keeps non-composer panel params unchanged", () => {
+    expect(
+      resolveDirectPanelOpenParams(
+        { panelKey: "artifact_detail", params: { slug: "core.authn-jwt" } },
+        "ws-1",
+      )
+    ).toEqual({ slug: "core.authn-jwt" });
+  });
+
+  it("opens generic composer in neutral workspace context", () => {
+    window.localStorage.setItem(
+      "xyn:composer:selected-effort:ws-1",
+      JSON.stringify({ application_id: "app-knowledgebase" }),
+    );
+    expect(
+      resolveDirectPanelOpenParams(
+        { panelKey: "composer_detail", params: {} },
+        "ws-1",
+      )
+    ).toEqual({
+      workspace_id: "ws-1",
+    });
+  });
+});
 
 describe("resolvePanelCommand", () => {
   it("parses list namespace artifacts", () => {
@@ -57,6 +87,14 @@ describe("resolvePanelCommand", () => {
     });
     expect(resolvePanelCommand("show drafts")).toEqual({
       panelKey: "drafts_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("open composer")).toEqual({
+      panelKey: "composer_detail",
+      params: {},
+    });
+    expect(resolvePanelCommand("open workbench")).toEqual({
+      panelKey: "composer_detail",
       params: {},
     });
     expect(resolvePanelCommand("open jobs")).toEqual({

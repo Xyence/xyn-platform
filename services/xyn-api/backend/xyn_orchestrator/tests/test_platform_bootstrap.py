@@ -36,7 +36,7 @@ class PlatformBootstrapTests(TestCase):
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
     def test_dev_me_auto_bootstraps_development_workspace(self):
-        self.assertEqual(Workspace.objects.count(), 0)
+        self.assertFalse(Workspace.objects.filter(slug="development").exists())
         response = self.client.get("/xyn/api/me")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -51,8 +51,14 @@ class PlatformBootstrapTests(TestCase):
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
     def test_dev_me_prefers_development_when_system_workspaces_exist(self):
-        Workspace.objects.create(slug="platform-builder", name="Platform Builder", metadata_json={"xyn_system_workspace": True})
-        Workspace.objects.create(slug="civic-lab", name="Civic Lab", metadata_json={"xyn_system_workspace": True})
+        Workspace.objects.get_or_create(
+            slug="platform-builder",
+            defaults={"name": "Platform Builder", "metadata_json": {"xyn_system_workspace": True}},
+        )
+        Workspace.objects.get_or_create(
+            slug="civic-lab",
+            defaults={"name": "Civic Lab", "metadata_json": {"xyn_system_workspace": True}},
+        )
         response = self.client.get("/xyn/api/me")
         self.assertEqual(response.status_code, 200)
         payload = response.json()

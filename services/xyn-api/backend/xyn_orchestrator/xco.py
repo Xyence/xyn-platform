@@ -138,8 +138,6 @@ def eligible_threads(
         policy = effective_thread_policy(thread)
         if thread.status not in {"active", "queued"}:
             continue
-        if thread.status == "queued" and not policy.get("auto_resume"):
-            continue
         if active_run_count(thread, status_lookup=status_lookup) >= policy["max_concurrent_runs"]:
             continue
         if policy.get("review_required") and has_review_block(thread, status_lookup=status_lookup):
@@ -158,7 +156,7 @@ def work_item_is_blocked(
     if status != "queued":
         return True
     thread = task.coordination_thread
-    if thread is None or thread.status != "active":
+    if thread is None or thread.status not in {"active", "queued"}:
         return True
     if effective_thread_policy(thread).get("review_required"):
         return True

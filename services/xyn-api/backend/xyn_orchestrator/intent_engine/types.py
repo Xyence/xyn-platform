@@ -98,6 +98,11 @@ class IntentType(str, Enum):
     QUEUE_FIRST_SLICE = "queue_first_slice"
     LIST_GOALS = "list_goals"
     SHOW_GOAL = "show_goal"
+    LIST_APPLICATION_FACTORIES = "list_application_factories"
+    OPEN_COMPOSER = "open_composer"
+    GENERATE_APPLICATION_PLAN = "generate_application_plan"
+    APPLY_APPLICATION_PLAN = "apply_application_plan"
+    SHOW_APPLICATION = "show_application"
     APPROVE_PLAN = "approve_plan"
     APPROVE_RECOMMENDATION = "approve_recommendation"
     DEFER_EXECUTION = "defer_execution"
@@ -191,6 +196,8 @@ class PromptInterpretationSpan(BaseModel):
 class PromptInterpretation(BaseModel):
     intent_family: str
     intent_type: str
+    target_application: Optional[PromptInterpretationTarget] = None
+    target_application_plan: Optional[PromptInterpretationTarget] = None
     target_goal: Optional[PromptInterpretationTarget] = None
     target_entity: Optional[PromptInterpretationTarget] = None
     target_record: Optional[PromptInterpretationTarget] = None
@@ -237,6 +244,11 @@ class ConversationActionType(str, Enum):
     QUEUE_FIRST_SLICE = "queue_first_slice"
     LIST_GOALS = "list_goals"
     SHOW_GOAL = "show_goal"
+    LIST_APPLICATION_FACTORIES = "list_application_factories"
+    OPEN_COMPOSER = "open_composer"
+    GENERATE_APPLICATION_PLAN = "generate_application_plan"
+    APPLY_APPLICATION_PLAN = "apply_application_plan"
+    SHOW_APPLICATION = "show_application"
     APPROVE_PLAN = "approve_plan"
     APPROVE_RECOMMENDATION = "approve_recommendation"
     DEFER_EXECUTION = "defer_execution"
@@ -279,6 +291,8 @@ class ConversationContextArtifact(BaseModel):
 
 class ConversationExecutionContext(BaseModel):
     thread_id: Optional[str] = None
+    active_application_id: Optional[str] = None
+    active_application_plan_id: Optional[str] = None
     active_goal_id: Optional[str] = None
     active_coordination_thread_id: Optional[str] = None
     current_work_item_id: Optional[str] = None

@@ -1891,6 +1891,149 @@ export type AiBootstrapStatusResponse = {
   default_agent: AiBootstrapStatus;
 };
 
+export type SystemReadinessCheck = {
+  component: string;
+  status: "ok" | "missing" | "error";
+  message: string;
+  details?: Record<string, unknown>;
+};
+
+export type SystemReadinessResponse = {
+  ready: boolean;
+  summary: string;
+  checks: SystemReadinessCheck[];
+  paths?: {
+    workspace_root?: string;
+    artifact_root?: string;
+  };
+  env?: {
+    workspace_root_env?: string | null;
+    artifact_root_env?: string | null;
+  };
+};
+
+export type ContextualCapability = {
+  id: string;
+  name: string;
+  description: string;
+  prompt_template?: string;
+  visibility: string;
+  priority?: number;
+  action_type?: "prompt" | "open_descriptor" | "route" | string;
+  action_target?: string | null;
+  available?: boolean;
+  failure_code?: string | null;
+  failure_message?: string | null;
+};
+
+export type CapabilityContextAttributes = {
+  artifact_type?: string | null;
+  draft_state?: string | null;
+  execution_state?: string | null;
+  workspace_state?: string | null;
+  entity_exists?: boolean;
+};
+
+export type ContextualCapabilityResponse = {
+  context: string;
+  attributes?: CapabilityContextAttributes;
+  capabilities: ContextualCapability[];
+};
+
+export type CapabilityEventType =
+  | "execution_started"
+  | "execution_completed"
+  | "draft_state_changed"
+  | "artifact_created"
+  | "workspace_initialized";
+
+export type CapabilityEventContextRefresh = {
+  context: string;
+  attributes?: CapabilityContextAttributes;
+  entityId?: string | null;
+  workspaceId?: string | null;
+  capabilities: ContextualCapability[];
+  paths: CapabilityPath[];
+};
+
+export type CapabilityEventResponse = {
+  event_type: string;
+  entityId?: string | null;
+  workspaceId?: string | null;
+  contexts: CapabilityEventContextRefresh[];
+};
+
+export type CapabilityGraphContext = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+export type CapabilityGraphCapability = {
+  id: string;
+  name: string;
+  description: string;
+  contexts: string[];
+  action_type: string;
+  preconditions?: Array<{
+    guard_type: string;
+    guard_target?: string | null;
+    failure_code?: string | null;
+    failure_message?: string | null;
+  }>;
+};
+
+export type CapabilityGraphPath = {
+  id: string;
+  name: string;
+  description: string;
+  contexts: string[];
+  steps: string[];
+};
+
+export type CapabilityGraphResponse = {
+  contexts: CapabilityGraphContext[];
+  capabilities: CapabilityGraphCapability[];
+  paths: CapabilityGraphPath[];
+};
+
+export type CapabilityPathStep = {
+  capability_id: string;
+  name: string;
+  description: string;
+  prompt_template?: string;
+  visibility: string;
+  priority?: number;
+  action_type?: "prompt" | "open_descriptor" | "route" | string;
+  action_target?: string | null;
+  available?: boolean;
+  status?: "completed" | "current" | "pending";
+};
+
+export type CapabilityPath = {
+  id: string;
+  name: string;
+  description: string;
+  steps: CapabilityPathStep[];
+};
+
+export type CapabilityPathResponse = {
+  context: string;
+  entityId?: string | null;
+  workspaceId?: string | null;
+  paths: CapabilityPath[];
+};
+
+export type ExecutionPlan = {
+  capability_id: string;
+  architecture: Record<string, unknown>;
+  defaults: Record<string, unknown>;
+  dependencies: string[];
+  components: string[];
+  generated_commands: string[];
+  artifacts: string[];
+};
+
 export type LocalProvisionJobResult = {
   status: string;
   job_artifact_id?: string | null;
@@ -2221,6 +2364,112 @@ export type DevTaskSummary = {
   target_repo?: string | null;
   target_branch?: string | null;
   execution_policy?: Record<string, unknown>;
+  has_execution_brief?: boolean;
+  execution_brief_revision?: number;
+  execution_brief_history_count?: number;
+  execution_brief_review_state?: string;
+  execution_brief_review_notes?: string;
+  execution_brief_reviewed_at?: string | null;
+  execution_brief_reviewed_by?: string | null;
+  execution_brief_review?: {
+    has_brief: boolean;
+    review_state: string;
+    revision: number;
+    history_count: number;
+    summary?: string | null;
+    objective?: string | null;
+    target_repository_slug?: string | null;
+    target_branch?: string | null;
+    gated: boolean;
+    ready: boolean;
+    blocked: boolean;
+    blocked_reason?: string | null;
+    blocked_message?: string | null;
+    review_notes?: string | null;
+    available_actions: string[];
+  };
+  execution_queue?: {
+    queue_ready: boolean;
+    dispatchable: boolean;
+    dispatched: boolean;
+    blocked: boolean;
+    status: string;
+    reason?: string | null;
+    message: string;
+    selected_for_dispatch?: boolean;
+    next_dispatchable_task_id?: string | null;
+    next_dispatchable_work_item_id?: string | null;
+    next_dispatchable_title?: string | null;
+    next_dispatchable_thread_id?: string | null;
+    next_dispatchable_thread_title?: string | null;
+  };
+  execution_run?: {
+    has_run: boolean;
+    run_id?: string | null;
+    source?: "runtime" | "result" | null;
+    state: string;
+    raw_status?: string | null;
+    validation_status?: string | null;
+    summary?: string | null;
+    error?: string | null;
+    started_at?: string | null;
+    finished_at?: string | null;
+    artifact_count: number;
+    artifact_labels: string[];
+    message: string;
+  };
+  execution_recovery?: {
+    retryable: boolean;
+    requeueable: boolean;
+    in_flight: boolean;
+    failed: boolean;
+    blocked: boolean;
+    status: string;
+    reason?: string | null;
+    message: string;
+    available_actions: string[];
+    last_failure?: {
+      run_id?: string | null;
+      source?: string | null;
+      state?: string | null;
+      summary?: string | null;
+      error?: string | null;
+      finished_at?: string | null;
+      recorded_at?: string | null;
+      action?: string | null;
+    } | null;
+  };
+  change_set?: {
+    available: boolean;
+    status: string;
+    has_changes: boolean;
+    source?: "workspace" | "artifact" | null;
+    repository_slug?: string | null;
+    changed_file_count: number;
+    files: Array<{
+      path: string;
+      change_type: string;
+      status_code?: string | null;
+      previous_path?: string | null;
+      patch_available: boolean;
+    }>;
+    patch_available: boolean;
+    patch_artifact_name?: string | null;
+    patch_artifact_url?: string | null;
+    message: string;
+  };
+  publish_state?: {
+    status: string;
+    repository_slug?: string | null;
+    branch?: string | null;
+    commit?: string | null;
+    push_status?: string | null;
+    published_at?: string | null;
+    pushed_at?: string | null;
+    last_error?: string | null;
+    message: string;
+    available_actions: string[];
+  };
   thread_id?: string | null;
   thread_title?: string | null;
   goal_id?: string | null;
@@ -2249,6 +2498,12 @@ export type DevTaskSummary = {
 export type DevTaskDetail = DevTaskSummary & {
   input_artifact_key?: string;
   last_error?: string;
+  execution_brief?: Record<string, unknown> | null;
+  execution_brief_history?: Array<Record<string, unknown>>;
+  change_set?: DevTaskSummary["change_set"] & {
+    workspace_path?: string | null;
+    diff_text?: string | null;
+  };
   context_packs?: Array<{
     id: string;
     name: string;
@@ -2369,6 +2624,7 @@ export type CoordinationThreadListResponse = PaginatedResponse<CoordinationThrea
 export type GoalSummary = {
   id: string;
   workspace_id: string;
+  application_id?: string | null;
   title: string;
   description: string;
   source_conversation_id?: string | null;
@@ -2380,6 +2636,19 @@ export type GoalSummary = {
   resolution_notes: string[];
   thread_count: number;
   work_item_count: number;
+  goal_progress?: {
+    goal_progress_status: string;
+    progress_percent: number;
+  };
+  goal_progress_status?: string;
+  coordination_priority?: {
+    value: string;
+    reasons: string[];
+    recent_execution_count?: number;
+    health_status?: string;
+    active_threads?: number;
+    blocked_threads?: number;
+  };
   created_at: string;
   updated_at: string;
 };
@@ -2415,6 +2684,147 @@ export type GoalRecommendation = {
   summary: string;
 };
 
+export type ApplicationFactorySummary = {
+  key: string;
+  name: string;
+  description: string;
+  intended_use_case: string;
+  generated_goal_families: string[];
+  assumptions: string[];
+};
+
+export type GeneratedApplicationPlanGoal = {
+  title: string;
+  description: string;
+  priority: string;
+  goal_type: string;
+  planning_summary: string;
+  resolution_notes: string[];
+  threads: Array<{
+    title: string;
+    description: string;
+    priority: string;
+    domain: string;
+    sequence: number;
+  }>;
+  work_items: Array<{
+    thread_title: string;
+    title: string;
+    description: string;
+    priority: string;
+    sequence: number;
+    dependency_work_item_refs?: string[];
+  }>;
+};
+
+export type ApplicationPlanGeneratedPlan = {
+  application_name: string;
+  application_summary: string;
+  source_factory_key: string;
+  request_objective: string;
+  generated_goals: GeneratedApplicationPlanGoal[];
+  ordering_hints: string[];
+  dependency_hints: string[];
+  resolution_notes: string[];
+};
+
+export type ApplicationPlanSummary = {
+  id: string;
+  application_id?: string | null;
+  workspace_id: string;
+  name: string;
+  summary: string;
+  source_factory_key: string;
+  source_conversation_id?: string | null;
+  requested_by?: string | null;
+  status: "review" | "applied" | "canceled" | string;
+  request_objective: string;
+  plan_fingerprint?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ApplicationPlanDetail = ApplicationPlanSummary & {
+  generated_plan: ApplicationPlanGeneratedPlan;
+  application_name?: string;
+  application_summary?: string;
+  ordering_hints?: string[];
+  dependency_hints?: string[];
+  resolution_notes?: string[];
+  generated_goals?: GeneratedApplicationPlanGoal[];
+  factory?: ApplicationFactorySummary;
+  created?: boolean;
+};
+
+export type ApplicationSummary = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  summary: string;
+  source_factory_key: string;
+  source_conversation_id?: string | null;
+  requested_by?: string | null;
+  status: "active" | "completed" | "archived" | string;
+  request_objective: string;
+  goal_count: number;
+  created_at: string;
+  updated_at: string;
+  portfolio_state?: GoalPortfolioState;
+};
+
+export type ApplicationDetail = ApplicationSummary & {
+  goals: GoalSummary[];
+  portfolio_state?: GoalPortfolioState;
+};
+
+export type ComposerAction = {
+  type: string;
+  label: string;
+  enabled?: boolean;
+  target_kind?: string;
+  target_id?: string | null;
+  params?: Record<string, unknown>;
+};
+
+export type ComposerBreadcrumb = {
+  kind: string;
+  label: string;
+  id?: string | null;
+};
+
+export type ComposerStage =
+  | "factory_discovery"
+  | "plan_review"
+  | "plan_applied"
+  | "application_overview"
+  | "goal_focus"
+  | "thread_focus";
+
+export type ComposerState = {
+  workspace_id: string;
+  stage: ComposerStage;
+  context: {
+    factory_key?: string | null;
+    application_plan_id?: string | null;
+    application_id?: string | null;
+    goal_id?: string | null;
+    thread_id?: string | null;
+  };
+  factory_catalog: ApplicationFactorySummary[];
+  selected_factory?: ApplicationFactorySummary | null;
+  application_plans: ApplicationPlanSummary[];
+  applications: ApplicationSummary[];
+  application_plan?: ApplicationPlanDetail | null;
+  application?: ApplicationDetail | null;
+  goal?: GoalDetail | null;
+  thread?: CoordinationThreadDetail | null;
+  related_goals: GoalSummary[];
+  related_threads: CoordinationThreadSummary[];
+  portfolio_context?: GoalPortfolioState | null;
+  breadcrumbs: ComposerBreadcrumb[];
+  available_actions: ComposerAction[];
+};
+
 export type GoalDetail = GoalSummary & {
   threads: CoordinationThreadSummary[];
   work_items: WorkItemSummary[];
@@ -2438,6 +2848,12 @@ export type GoalDetail = GoalSummary & {
     active_threads: number;
     blocked_threads: number;
     recent_artifacts: number;
+  };
+  coordination_priority?: {
+    value: string;
+    reasons: string[];
+    recent_execution_count: number;
+    health_status: string;
   };
   goal_diagnostic?: {
     status: string;
@@ -2478,7 +2894,45 @@ export type GoalDetail = GoalSummary & {
   recommendation?: GoalRecommendation | null;
 };
 
-export type GoalListResponse = PaginatedResponse<GoalSummary, "goals">;
+export type GoalListResponse = PaginatedResponse<GoalSummary, "goals"> & {
+  portfolio_state?: GoalPortfolioState;
+};
+export type GoalPortfolioState = {
+  goals: Array<{
+    goal_id: string;
+    title: string;
+    planning_status: string;
+    goal_progress_status: string;
+    progress_percent: number;
+    health_status: string;
+    active_threads: number;
+    blocked_threads: number;
+    active_work_items?: number;
+    blocked_work_items?: number;
+    artifact_production_count?: number;
+    recent_execution_count: number;
+    coordination_priority: {
+      value: string;
+      reasons: string[];
+    };
+  }>;
+  insights?: Array<{
+    key: string;
+    summary: string;
+    evidence: string[];
+    goal_ids: string[];
+  }>;
+  recommended_goal?: {
+    goal_id: string;
+    title: string;
+    coordination_priority: string;
+    summary: string;
+    reasoning: string;
+    thread_id?: string | null;
+    work_item_id?: string | null;
+    queue_action_type?: string | null;
+  } | null;
+};
 
 export type WorkQueueItem = {
   thread_id: string;
@@ -2486,6 +2940,15 @@ export type WorkQueueItem = {
   task_id: string;
   thread_priority: string;
   thread_title: string;
+  queue_state?: {
+    queue_ready: boolean;
+    dispatchable: boolean;
+    dispatched: boolean;
+    blocked: boolean;
+    status: string;
+    reason?: string | null;
+    message: string;
+  } | null;
 };
 
 export type WorkQueueResponse = {
@@ -2805,6 +3268,26 @@ export type PlatformConfig = {
 export type PlatformConfigResponse = {
   version: number;
   config: PlatformConfig;
+  storage_status?: {
+    configured_provider: {
+      name: string;
+      type: "s3" | "local" | string;
+      complete: boolean;
+      summary: string;
+    };
+    effective_platform_storage: {
+      provider: "s3" | "local" | string;
+      mode: "object_storage" | "filesystem" | string;
+      configured: boolean;
+    };
+    effective_runtime_artifact_storage: {
+      provider: "s3" | "local" | string;
+      mode: "object_storage" | "filesystem" | string;
+      path?: string;
+    };
+    remote_durability_active: boolean;
+    warnings: string[];
+  };
 };
 
 export type VideoAdapterDefinition = {
@@ -3003,6 +3486,8 @@ export type PromptInterpretationClarificationOption = {
 export type PromptInterpretation = {
   intent_family: string;
   intent_type: string;
+  target_application?: PromptInterpretationTarget | null;
+  target_application_plan?: PromptInterpretationTarget | null;
   target_entity?: PromptInterpretationTarget | null;
   target_record?: PromptInterpretationTarget | null;
   target_thread?: PromptInterpretationTarget | null;
@@ -3321,6 +3806,15 @@ export type AppDraftSubmitResponse = {
   draft: AppIntentDraft;
   job_id: string;
   job_status: "queued" | "running" | "succeeded" | "failed" | string;
+};
+
+export type DraftWorkflow = {
+  draft_id: string;
+  state: string;
+  plan_available: boolean;
+  thread_id?: string | null;
+  active_run_id?: string | null;
+  last_run_status?: string | null;
 };
 
 export type AppJob = {

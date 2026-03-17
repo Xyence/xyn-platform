@@ -1,7 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  applyApplicationPlan,
   executeAppPalettePrompt,
+  getApplication,
+  getApplicationPlan,
+  getComposerState,
   getGoal,
   getArtifactConsoleDetailBySlug,
   getArtifactConsoleFilesBySlug,
@@ -11,36 +15,52 @@ import {
   getEmsStatusRollupCanvasTable,
   getRuntimeRunArtifactContent,
   getRuntimeRunCanvasApi,
+  getSystemReadiness,
   getWorkItem,
   getWorkQueue,
+  dispatchNextWorkQueueItem,
+  dispatchWorkItem,
+  generateApplicationPlan,
   listGoals,
   listCoordinationThreads,
   listWorkItems,
   listAppBuilderArtifacts,
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
+  publishDevTask,
   queryArtifactCanvasTable,
   queryEmsDevicesCanvasTable,
   queryEmsRegistrationsCanvasTable,
+  requeueDevTask,
   reviewCoordinationThread,
   reviewGoal,
+  retryDevTask,
+  updateApplication,
+  updateApplicationPlan,
+  updateWorkItem,
 } from "../../../api/xyn";
 import type {
-  AppPaletteResult,
   AppBuilderArtifact,
+  ApplicationDetail,
+  ApplicationFactorySummary,
+  ApplicationPlanDetail,
+  AppPaletteResult,
   ArtifactCanvasTableResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFileRow,
   ArtifactStructuredQuery,
   CanvasTableResponse,
+  ComposerState,
   CoordinationThreadDetail,
   CoordinationThreadSummary,
   GoalDetail,
+  GoalListResponse,
   GoalSummary,
   LocalProvisionResponse,
   RuntimeRunDetail,
   RuntimeRunArtifactContent,
   RuntimeRunSummary,
+  SystemReadinessResponse,
   WorkQueueResponse,
   WorkItemDetail,
   WorkItemSummary,
@@ -51,17 +71,39 @@ import InlineMessage from "../../../components/InlineMessage";
 import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityRegistry";
 import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail } from "../../utils/entityChangeEvents";
 import { applyRuntimeEventToRunDetail, applyRuntimeEventToRuns, refreshRuntimeRunDetail, refreshRuntimeRunSummary, subscribeRuntimeEventStream } from "../../utils/runtimeEventStream";
+import {
+  deriveComposerStageSummary,
+  deriveComposerViewModel,
+  formatComposerCountLabel,
+  formatComposerGoalProgressStatus,
+  formatComposerPlanningStatus,
+  formatComposerThreadStatus,
+  latestTimestamp,
+} from "./composerViewModel";
+import type { ComposerContainerFilter, ComposerWorkContainer } from "./composerViewModel";
+import { clearComposerStoredSelection, readComposerStoredSelection, resolveComposerInitialSelection, writeComposerStoredSelection } from "./composerSelection";
 import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
 import JobDetailPage from "../../pages/JobDetailPage";
 import JobsListPage from "../../pages/JobsListPage";
-import PlatformSettingsHubPage from "../../pages/PlatformSettingsHubPage";
+import PlatformSettingsHubPage, { type HubSection } from "../../pages/PlatformSettingsHubPage";
+import AccessControlPage from "../../pages/AccessControlPage";
+import IdentityConfigurationPage from "../../pages/IdentityConfigurationPage";
+import SecretConfigurationPage from "../../pages/SecretConfigurationPage";
+import ActivityPage from "../../pages/ActivityPage";
+import AIConfigPage from "../../pages/AIConfigPage";
+import PlatformRenderingSettingsPage from "../../pages/PlatformRenderingSettingsPage";
+import PlatformDeploySettingsPage from "../../pages/PlatformDeploySettingsPage";
+import PlatformBrandingPage from "../../pages/PlatformBrandingPage";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 
 export type ConsolePanelKey =
   | "platform_settings"
+  | "composer_detail"
   | "goal_list"
   | "goal_detail"
+  | "application_plan_detail"
+  | "application_detail"
   | "workspaces"
   | "thread_list"
   | "thread_detail"
@@ -105,6 +147,141 @@ export type ConsolePanelSpec = {
 type PanelProps = {
   onOpenPanel: (panelKey: ConsolePanelKey, params?: Record<string, unknown>) => void;
 };
+
+function titleCaseLabel(value: string): string {
+  return String(value || "")
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatPanelTimestamp(value?: string | null): string {
+  const parsed = new Date(String(value || ""));
+  if (Number.isNaN(parsed.getTime())) return "—";
+  return parsed.toLocaleString();
+}
+
+function briefReviewLabel(item: Pick<WorkItemSummary, "execution_brief_review" | "execution_queue">): string {
+  const review = item.execution_brief_review;
+  const queue = item.execution_queue;
+  if (!review?.has_brief) return "No brief";
+  const state = titleCaseLabel(review.review_state || "draft");
+  if (queue?.dispatched) return `${state} · dispatched`;
+  if (queue?.queue_ready) return `${state} · ready for dispatch`;
+  return review.blocked || queue?.blocked ? `${state} · blocked` : state;
+}
+
+function BriefReviewSummary({ item }: { item: Pick<WorkItemSummary, "execution_brief_review" | "execution_queue"> }) {
+  const review = item.execution_brief_review;
+  const queue = item.execution_queue;
+  if (!review?.has_brief) {
+    if (queue?.queue_ready) return <span>Ready for dispatch</span>;
+    if (queue?.dispatched) return <span>Dispatched</span>;
+    return <span className="muted">No brief</span>;
+  }
+  return (
+    <div>
+      <div>{briefReviewLabel(item)}</div>
+      <div className="muted small">{queue?.message || review.blocked_message || "—"}</div>
+    </div>
+  );
+}
+
+function executionRunLabel(item: Pick<WorkItemSummary, "execution_run">): string {
+  const execution = item.execution_run;
+  if (!execution?.has_run) return "Not run";
+  return titleCaseLabel(execution.state || execution.raw_status || "unknown");
+}
+
+function ExecutionRunSummary({ item }: { item: Pick<WorkItemSummary, "execution_run" | "execution_recovery"> }) {
+  const execution = item.execution_run;
+  if (!execution?.has_run) {
+    if (item.execution_recovery?.last_failure) {
+      return (
+        <div>
+          <div>Not run</div>
+          <div className="muted small">{item.execution_recovery.message}</div>
+        </div>
+      );
+    }
+    return <span className="muted">Not run</span>;
+  }
+  const detailParts = [
+    execution.validation_status ? titleCaseLabel(execution.validation_status) : "",
+    execution.artifact_count ? `${execution.artifact_count} artifact${execution.artifact_count === 1 ? "" : "s"}` : "",
+    item.execution_recovery?.retryable ? "Retryable" : "",
+  ].filter(Boolean);
+  return (
+    <div>
+      <div>{executionRunLabel(item)}</div>
+      <div className="muted small">{detailParts.length ? detailParts.join(" · ") : execution.message}</div>
+    </div>
+  );
+}
+
+function ChangeSetSummary({ item }: { item: Pick<WorkItemSummary, "change_set"> }) {
+  const changeSet = item.change_set;
+  if (!changeSet?.available) return <span className="muted">Unavailable</span>;
+  if (!changeSet.has_changes) return <span className="muted">No changes</span>;
+  const fileCount = changeSet.changed_file_count || changeSet.files.length || 0;
+  const filePreview = changeSet.files
+    .slice(0, 2)
+    .map((file) => file.path)
+    .filter(Boolean)
+    .join(", ");
+  return (
+    <div>
+      <div>{fileCount} file{fileCount === 1 ? "" : "s"} changed</div>
+      <div className="muted small">{filePreview || changeSet.message}</div>
+    </div>
+  );
+}
+
+function PublishSummary({ item }: { item: Pick<WorkItemSummary, "publish_state"> }) {
+  const publish = item.publish_state;
+  if (!publish?.branch && !publish?.commit) return <span className="muted">Not published</span>;
+  const label = publish.push_status === "pushed" ? "Pushed" : publish.commit ? "Committed" : titleCaseLabel(publish.status || "idle");
+  return (
+    <div>
+      <div>{label}</div>
+      <div className="muted small">{publish.branch || publish.message}</div>
+    </div>
+  );
+}
+
+function readinessTone(readiness: SystemReadinessResponse | null): "ok" | "warning" | "error" {
+  if (!readiness) return "warning";
+  if (readiness.ready) return "ok";
+  return readiness.checks.some((check) => check.status === "error") ? "error" : "warning";
+}
+
+function SystemReadinessBanner({ readiness }: { readiness: SystemReadinessResponse | null }) {
+  if (!readiness) return null;
+  const tone = readinessTone(readiness);
+  const title = readiness.summary || (readiness.ready ? "System ready" : "Configuration required");
+  return (
+    <section className="card system-readiness-banner" style={{ borderColor: tone === "error" ? "#d14343" : tone === "warning" ? "#c18401" : "#2d7a46" }}>
+      <div className="card-header">
+        <h3>System Readiness</h3>
+      </div>
+      <p style={{ marginTop: 0 }}>{title}</p>
+      <details>
+        <summary>Diagnostic checks</summary>
+        <div className="detail-grid" style={{ marginTop: 12 }}>
+          {readiness.checks.map((check) => (
+            <div key={check.component}>
+              <div className="field-label">{titleCaseToken(check.component)}</div>
+              <div className="field-value">
+                {titleCaseToken(check.status)}: {check.message}
+              </div>
+            </div>
+          ))}
+        </div>
+      </details>
+    </section>
+  );
+}
 
 type CanvasQuery = {
   entity: string;
@@ -740,7 +917,7 @@ function GoalListPanel({
   workspaceId: string;
   onTitleChange?: (title: string) => void;
 } & PanelProps) {
-  const [goals, setGoals] = useState<GoalSummary[]>([]);
+  const [payload, setPayload] = useState<GoalListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -752,7 +929,7 @@ function GoalListPanel({
         setError(null);
         const next = await listGoals(workspaceId);
         if (!active) return;
-        setGoals(next.goals || []);
+        setPayload(next);
       } catch (err) {
         if (!active) return;
         setError(err instanceof Error ? err.message : "Failed to load goals");
@@ -771,44 +948,77 @@ function GoalListPanel({
 
   if (loading) return <p className="muted">Loading goals…</p>;
   if (error) return <p className="danger-text">{error}</p>;
+  const goals = payload?.goals || [];
+  const portfolioState = payload?.portfolio_state;
+  const recommendedGoal = portfolioState?.recommended_goal;
+  const portfolioInsights = portfolioState?.insights || [];
   return (
-    <section className="card">
-      <div className="canvas-table-wrap">
-        <table className="canvas-table">
-          <thead>
-            <tr>
-              <th>Title</th>
-              <th>Status</th>
-              <th>Priority</th>
-              <th>Threads</th>
-              <th>Work Items</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {goals.map((goal) => (
-              <tr key={goal.id}>
-                <td>{goal.title}</td>
-                <td>{goal.planning_status}</td>
-                <td>{goal.priority}</td>
-                <td>{goal.thread_count}</td>
-                <td>{goal.work_item_count}</td>
-                <td>
-                  <button type="button" className="ghost sm" onClick={() => onOpenPanel("goal_detail", { goal_id: goal.id })}>
-                    Open
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {!goals.length ? (
+    <div className="panel-section-stack">
+      {portfolioState ? (
+        <section className="card">
+          <div className="detail-grid">
+            <div><div className="field-label">Total Goals</div><div className="field-value">{portfolioState.goals.length}</div></div>
+            <div><div className="field-label">Active Goals</div><div className="field-value">{portfolioState.goals.filter((goal) => goal.health_status === "active").length}</div></div>
+            <div><div className="field-label">Blocked Goals</div><div className="field-value">{portfolioState.goals.filter((goal) => goal.health_status === "blocked").length}</div></div>
+            <div><div className="field-label">Recent Execution</div><div className="field-value">{portfolioState.goals.reduce((sum, goal) => sum + (goal.recent_execution_count || 0), 0)}</div></div>
+          </div>
+          {recommendedGoal ? (
+            <InlineMessage
+              tone="info"
+              title={`Recommended Goal: ${recommendedGoal.title}`}
+              body={`${recommendedGoal.summary}${recommendedGoal.reasoning ? ` ${recommendedGoal.reasoning}` : ""}`}
+            />
+          ) : null}
+          {portfolioInsights.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Portfolio Insights</div>
+              <ul className="bulleted-list">
+                {portfolioInsights.slice(0, 3).map((insight) => (
+                  <li key={insight.key}>{insight.summary}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+      <section className="card">
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
               <tr>
-                <td colSpan={6} className="muted">No goals found.</td>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Coordination</th>
+                <th>Threads</th>
+                <th>Work Items</th>
+                <th>Actions</th>
               </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
-    </section>
+            </thead>
+            <tbody>
+              {goals.map((goal) => (
+                <tr key={goal.id}>
+                  <td>{goal.title}</td>
+                  <td>{goal.planning_status}</td>
+                  <td>{goal.coordination_priority?.value || goal.priority}</td>
+                  <td>{goal.thread_count}</td>
+                  <td>{goal.work_item_count}</td>
+                  <td>
+                    <button type="button" className="ghost sm" onClick={() => onOpenPanel("goal_detail", { goal_id: goal.id })}>
+                      Open
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!goals.length ? (
+                <tr>
+                  <td colSpan={6} className="muted">No goals found.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1065,6 +1275,10 @@ function GoalDetailPanel({
                 <th>Status</th>
                 <th>Thread</th>
                 <th>Repo</th>
+                <th>Execution</th>
+                <th>Changes</th>
+                <th>Publish</th>
+                <th>Brief</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -1075,10 +1289,14 @@ function GoalDetailPanel({
                   <td>{item.status}</td>
                   <td>{item.thread_title || "—"}</td>
                   <td>{item.target_repo || "—"}</td>
+                  <td><ExecutionRunSummary item={item} /></td>
+                  <td><ChangeSetSummary item={item} /></td>
+                  <td><PublishSummary item={item} /></td>
+                  <td><BriefReviewSummary item={item} /></td>
                   <td><button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>Work Item</button></td>
                 </tr>
               ))}
-              {!payload.work_items.length ? <tr><td colSpan={5} className="muted">No work items planned yet.</td></tr> : null}
+              {!payload.work_items.length ? <tr><td colSpan={9} className="muted">No work items planned yet.</td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -1126,27 +1344,33 @@ function ThreadListPanel({
   const [queue, setQueue] = useState<WorkQueueResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionState, setActionState] = useState<{ status: "idle" | "submitting"; message: string | null }>({
+    status: "idle",
+    message: null,
+  });
+
+  async function loadThreadState(active = true) {
+    try {
+      setLoading(true);
+      setError(null);
+      const [threadRows, queueRows] = await Promise.all([
+        listCoordinationThreads(workspaceId),
+        getWorkQueue(workspaceId),
+      ]);
+      if (!active) return;
+      setThreads(threadRows.threads || []);
+      setQueue(queueRows);
+    } catch (err) {
+      if (!active) return;
+      setError(err instanceof Error ? err.message : "Failed to load threads");
+    } finally {
+      if (active) setLoading(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const [threadRows, queueRows] = await Promise.all([
-          listCoordinationThreads(workspaceId),
-          getWorkQueue(workspaceId),
-        ]);
-        if (!active) return;
-        setThreads(threadRows.threads || []);
-        setQueue(queueRows);
-      } catch (err) {
-        if (!active) return;
-        setError(err instanceof Error ? err.message : "Failed to load threads");
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
+    void loadThreadState(active);
     return () => {
       active = false;
     };
@@ -1155,6 +1379,39 @@ function ThreadListPanel({
   useEffect(() => {
     onTitleChange?.("Threads");
   }, [onTitleChange]);
+
+  async function handleDispatchNext() {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await dispatchNextWorkQueueItem(workspaceId);
+      await loadThreadState(true);
+      setActionState({
+        status: "idle",
+        message:
+          response.status === "dispatched"
+            ? `Dispatched ${String(response.queue_item?.work_item_id || response.queue_item?.task_id || "next work item")}.`
+            : response.status === "idle"
+              ? "No approved work items are ready for dispatch."
+              : response.status,
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to dispatch next work item" });
+    }
+  }
+
+  async function handleDispatchSelected(taskId: string) {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await dispatchWorkItem(taskId, workspaceId);
+      await loadThreadState(true);
+      setActionState({
+        status: "idle",
+        message: response.status === "dispatched" ? `Dispatched ${String(response.queue_item?.work_item_id || taskId)}.` : response.status,
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to dispatch selected work item" });
+    }
+  }
 
   if (loading) return <p className="muted">Loading XCO threads…</p>;
   if (error) return <p className="danger-text">{error}</p>;
@@ -1214,7 +1471,11 @@ function ThreadListPanel({
             <h3>Derived Queue</h3>
             <p className="muted">Next eligible work items in deterministic dispatch order.</p>
           </div>
+          <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={handleDispatchNext}>
+            Dispatch Next
+          </button>
         </div>
+        {actionState.message ? <p className="muted" style={{ marginBottom: 12 }}>{actionState.message}</p> : null}
         <div className="canvas-table-wrap">
           <table className="canvas-table">
             <thead>
@@ -1223,6 +1484,8 @@ function ThreadListPanel({
                 <th>Priority</th>
                 <th>Work Item</th>
                 <th>Task ID</th>
+                <th>Status</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -1232,11 +1495,22 @@ function ThreadListPanel({
                   <td>{entry.thread_priority}</td>
                   <td>{entry.work_item_id}</td>
                   <td>{entry.task_id}</td>
+                  <td>{entry.queue_state?.message || "Ready for dispatch"}</td>
+                  <td>
+                    <div className="inline-action-row">
+                      <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleDispatchSelected(entry.task_id)}>
+                        Dispatch
+                      </button>
+                      <button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: entry.task_id })}>
+                        Open
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ))}
               {!queue?.items?.length ? (
                 <tr>
-                  <td colSpan={4} className="muted">
+                  <td colSpan={6} className="muted">
                     No eligible work items are currently queued.
                   </td>
                 </tr>
@@ -1415,7 +1689,10 @@ function ThreadDetailPanel({
                 <th>Title</th>
                 <th>Status</th>
                 <th>Repo</th>
-                <th>Run</th>
+                <th>Execution</th>
+                <th>Changes</th>
+                <th>Publish</th>
+                <th>Brief</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -1425,14 +1702,17 @@ function ThreadDetailPanel({
                   <td>{item.title}</td>
                   <td>{item.status}</td>
                   <td>{item.target_repo || "—"}</td>
-                  <td>{item.runtime_run_id || "—"}</td>
+                  <td><ExecutionRunSummary item={item} /></td>
+                  <td><ChangeSetSummary item={item} /></td>
+                  <td><PublishSummary item={item} /></td>
+                  <td><BriefReviewSummary item={item} /></td>
                   <td>
                     <div className="inline-action-row">
                       <button type="button" className="ghost sm" onClick={() => onOpenPanel("work_item_detail", { work_item_id: item.id })}>
                         Work Item
                       </button>
-                      {item.runtime_run_id ? (
-                        <button type="button" className="ghost sm" onClick={() => onOpenPanel("run_detail", { run_id: item.runtime_run_id })}>
+                      {item.execution_run?.run_id ? (
+                        <button type="button" className="ghost sm" onClick={() => onOpenPanel("run_detail", { run_id: item.execution_run?.run_id })}>
                           Run
                         </button>
                       ) : null}
@@ -1442,7 +1722,7 @@ function ThreadDetailPanel({
               ))}
               {!payload.work_items.length ? (
                 <tr>
-                  <td colSpan={5} className="muted">
+                  <td colSpan={8} className="muted">
                     No work items are attached to this thread yet.
                   </td>
                 </tr>
@@ -1602,31 +1882,117 @@ function WorkItemDetailPanel({
   const [payload, setPayload] = useState<WorkItemDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionState, setActionState] = useState<{ status: "idle" | "submitting"; message: string | null }>({
+    status: "idle",
+    message: null,
+  });
+
+  async function loadWorkItem(active = true) {
+    try {
+      setLoading(true);
+      setError(null);
+      const next = await getWorkItem(workItemId);
+      if (!active) return;
+      setPayload(next);
+    } catch (err) {
+      if (!active) return;
+      setError(err instanceof Error ? err.message : "Failed to load work item");
+    } finally {
+      if (active) setLoading(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const next = await getWorkItem(workItemId);
-        if (!active) return;
-        setPayload(next);
-      } catch (err) {
-        if (!active) return;
-        setError(err instanceof Error ? err.message : "Failed to load work item");
-      } finally {
-        if (active) setLoading(false);
-      }
-    })();
+    void loadWorkItem(active);
     return () => {
       active = false;
     };
   }, [workItemId]);
 
+  async function handleBriefAction(action: "mark_ready" | "approve" | "reject" | "regenerate") {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const next = await updateWorkItem(workItemId, {
+        execution_brief_action: action,
+        execution_brief_revision_reason: action === "regenerate" ? "review_feedback" : undefined,
+      });
+      setPayload(next);
+      setActionState({ status: "idle", message: action === "regenerate" ? "Execution brief regenerated." : `Execution brief ${titleCaseLabel(action)}.` });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to update execution brief" });
+    }
+  }
+
+  async function handleDispatchTask() {
+    if (!workspaceId) return;
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await dispatchWorkItem(workItemId, workspaceId);
+      setPayload(response.work_item || (await getWorkItem(workItemId)));
+      setActionState({
+        status: "idle",
+        message: response.status === "dispatched" ? `Dispatched ${String(response.queue_item?.work_item_id || payload?.work_item_id || workItemId)}.` : response.status,
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to dispatch work item" });
+    }
+  }
+
+  async function handleRetryTask() {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await retryDevTask(workItemId);
+      setPayload(response.work_item || (await getWorkItem(workItemId)));
+      setActionState({
+        status: "idle",
+        message: response.run_id
+          ? `Retried ${String(payload?.work_item_id || workItemId)} as run ${response.run_id}.`
+          : "Retried work item.",
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to retry work item" });
+    }
+  }
+
+  async function handleRequeueTask() {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await requeueDevTask(workItemId);
+      setPayload(response.work_item || (await getWorkItem(workItemId)));
+      setActionState({
+        status: "idle",
+        message: response.status === "queued" ? `Returned ${String(payload?.work_item_id || workItemId)} to the queue.` : response.status,
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to requeue work item" });
+    }
+  }
+
+  async function handlePublishTask(push = false) {
+    try {
+      setActionState({ status: "submitting", message: null });
+      const response = await publishDevTask(workItemId, { push });
+      setPayload(response.work_item || (await getWorkItem(workItemId)));
+      setActionState({
+        status: "idle",
+        message: push ? "Published branch to the remote repository." : "Committed workspace changes to the task branch.",
+      });
+    } catch (err) {
+      setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to publish work item" });
+    }
+  }
+
   if (loading) return <p className="muted">Loading work item…</p>;
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Work item not found.</p>;
+  const review = payload.execution_brief_review;
+  const queue = payload.execution_queue;
+  const execution = payload.execution_run;
+  const recovery = payload.execution_recovery;
+  const changeSet = payload.change_set;
+  const publish = payload.publish_state;
+  const canDispatchSelectedTask = Boolean(queue?.dispatchable && !queue?.dispatched && (queue?.selected_for_dispatch ?? true));
 
   return (
     <div className="ems-panel-body">
@@ -1642,28 +2008,251 @@ function WorkItemDetailPanel({
       </div>
       {payload.description ? <p>{payload.description}</p> : null}
       {payload.last_error ? <InlineMessage tone="warn" title="Last error" body={payload.last_error} /> : null}
-      {payload.runtime_run_id ? (
-        <div className="inline-actions" style={{ marginTop: 8 }}>
-          {payload.thread_detail?.id ? (
-            <button
-              type="button"
-              className="ghost sm"
-              onClick={() => onOpenPanel("thread_detail", { thread_id: payload.thread_detail?.id })}
-            >
-              Open Thread
-            </button>
+      {queue ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Execution Queue</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Queue Status</div><div className="field-value">{titleCaseLabel(queue.status)}</div></div>
+            <div><div className="field-label">Dispatchable</div><div className="field-value">{queue.dispatchable ? "yes" : "no"}</div></div>
+            <div><div className="field-label">Blocked</div><div className="field-value">{queue.blocked ? "yes" : "no"}</div></div>
+            <div><div className="field-label">In Flight</div><div className="field-value">{queue.dispatched ? "yes" : "no"}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{queue.message}</p>
+          {queue.dispatchable && !queue.dispatched && !(queue.selected_for_dispatch ?? true) && queue.next_dispatchable_task_id ? (
+            <div className="inline-action-row" style={{ marginTop: 12 }}>
+              <button
+                type="button"
+                className="ghost sm"
+                onClick={() => onOpenPanel("work_item_detail", { work_item_id: queue.next_dispatchable_task_id })}
+              >
+                Open next ready work item
+              </button>
+            </div>
           ) : null}
-          <button
-            type="button"
-            className="ghost sm"
-            onClick={() => onOpenPanel("run_detail", { run_id: payload.runtime_run_id })}
-          >
-            Open Run
-          </button>
-          <span className="muted small">
-            Latest runtime run: {payload.runtime_run_id}{workspaceId ? ` · workspace ${workspaceId}` : ""}
-          </span>
+          {canDispatchSelectedTask ? (
+            <div className="inline-action-row" style={{ marginTop: 12 }}>
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting" || !workspaceId} onClick={handleDispatchTask}>
+                Dispatch Task
+              </button>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+      {review?.has_brief ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Execution Brief Review</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">State</div><div className="field-value">{titleCaseLabel(review.review_state)}</div></div>
+            <div><div className="field-label">Revision</div><div className="field-value">{review.revision || 0}</div></div>
+            <div><div className="field-label">History</div><div className="field-value">{review.history_count || 0}</div></div>
+            <div><div className="field-label">Target</div><div className="field-value">{review.target_repository_slug ? `${review.target_repository_slug}${review.target_branch ? ` @ ${review.target_branch}` : ""}` : "—"}</div></div>
+          </div>
+          {review.summary ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Summary</div>
+              <div className="field-value">{review.summary}</div>
+            </div>
+          ) : null}
+          {review.objective ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Objective</div>
+              <div className="field-value">{review.objective}</div>
+            </div>
+          ) : null}
+          {review.blocked_message ? (
+            <InlineMessage tone={review.blocked ? "warn" : "info"} title={review.blocked ? "Execution Blocked" : "Execution Ready"} body={review.blocked_message} />
+          ) : null}
+          {review.review_notes ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Review Notes</div>
+              <div className="field-value">{review.review_notes}</div>
+            </div>
+          ) : null}
+          {actionState.message ? <p className="muted" style={{ marginTop: 12 }}>{actionState.message}</p> : null}
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            {review.available_actions.includes("mark_ready") ? (
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleBriefAction("mark_ready")}>
+                Mark Ready
+              </button>
+            ) : null}
+            {review.available_actions.includes("approve") ? (
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleBriefAction("approve")}>
+                Approve
+              </button>
+            ) : null}
+            {review.available_actions.includes("reject") ? (
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleBriefAction("reject")}>
+                Reject
+              </button>
+            ) : null}
+            {review.available_actions.includes("regenerate") ? (
+              <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handleBriefAction("regenerate")}>
+                Regenerate
+              </button>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+      <section className="card" style={{ marginTop: 12 }}>
+        <div className="card-header"><h3>Execution Run</h3></div>
+        <div className="detail-grid">
+          <div><div className="field-label">Execution State</div><div className="field-value">{executionRunLabel(payload)}</div></div>
+          <div><div className="field-label">Validation</div><div className="field-value">{titleCaseLabel(execution?.validation_status || "not_run")}</div></div>
+          <div><div className="field-label">Run ID</div><div className="field-value">{execution?.run_id || "—"}</div></div>
+          <div><div className="field-label">Artifacts</div><div className="field-value">{execution?.artifact_count || 0}</div></div>
+          <div><div className="field-label">Started</div><div className="field-value">{execution?.started_at || "—"}</div></div>
+          <div><div className="field-label">Finished</div><div className="field-value">{execution?.finished_at || "—"}</div></div>
         </div>
+        <p className="muted" style={{ marginTop: 12 }}>{execution?.message || "No execution run has been dispatched yet."}</p>
+        {execution?.summary ? (
+          <div style={{ marginTop: 12 }}>
+            <div className="field-label">Result Summary</div>
+            <div className="field-value">{execution.summary}</div>
+          </div>
+        ) : null}
+        {execution?.error ? (
+          <InlineMessage tone={execution.state === "failed" ? "warn" : "info"} title="Execution Notes" body={execution.error} />
+        ) : null}
+        {execution?.artifact_labels?.length ? (
+          <div style={{ marginTop: 12 }}>
+            <div className="field-label">Artifact Preview</div>
+            <div className="field-value">{execution.artifact_labels.join(", ")}</div>
+          </div>
+        ) : null}
+        {execution?.has_run ? (
+          <div className="inline-actions" style={{ marginTop: 8 }}>
+            {payload.thread_detail?.id ? (
+              <button
+                type="button"
+                className="ghost sm"
+                onClick={() => onOpenPanel("thread_detail", { thread_id: payload.thread_detail?.id })}
+              >
+                Open Thread
+              </button>
+            ) : null}
+            {execution.run_id ? (
+              <button
+                type="button"
+                className="ghost sm"
+                onClick={() => onOpenPanel("run_detail", { run_id: execution.run_id })}
+              >
+                Open Run
+              </button>
+            ) : null}
+            {execution.run_id ? (
+              <span className="muted small">
+                Latest execution run: {execution.run_id}{workspaceId ? ` · workspace ${workspaceId}` : ""}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+      {changeSet ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Workspace Changes</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Change State</div><div className="field-value">{titleCaseLabel(changeSet.status || "unavailable")}</div></div>
+            <div><div className="field-label">Source</div><div className="field-value">{changeSet.source ? titleCaseLabel(changeSet.source) : "—"}</div></div>
+            <div><div className="field-label">Repository</div><div className="field-value">{changeSet.repository_slug || payload.target_repo || "—"}</div></div>
+            <div><div className="field-label">Changed Files</div><div className="field-value">{changeSet.changed_file_count || 0}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{changeSet.message}</p>
+          {changeSet.files?.length ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Changed Files</div>
+              <div className="field-value">
+                {changeSet.files.map((file) => `${titleCaseLabel(file.change_type)}: ${file.path}`).join(", ")}
+              </div>
+            </div>
+          ) : null}
+          {changeSet.patch_artifact_name ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Patch Artifact</div>
+              <div className="field-value">{changeSet.patch_artifact_name}</div>
+            </div>
+          ) : null}
+          {changeSet.diff_text ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Diff</div>
+              <pre className="field-value" style={{ whiteSpace: "pre-wrap", overflowX: "auto", maxHeight: 420 }}>{changeSet.diff_text}</pre>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+      {publish ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Publish</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Publish Status</div><div className="field-value">{titleCaseLabel(publish.status || "idle")}</div></div>
+            <div><div className="field-label">Repository</div><div className="field-value">{publish.repository_slug || payload.target_repo || "—"}</div></div>
+            <div><div className="field-label">Branch</div><div className="field-value">{publish.branch || "—"}</div></div>
+            <div><div className="field-label">Push Status</div><div className="field-value">{publish.push_status ? titleCaseLabel(publish.push_status) : "—"}</div></div>
+            <div><div className="field-label">Commit</div><div className="field-value">{publish.commit || "—"}</div></div>
+            <div><div className="field-label">Published At</div><div className="field-value">{publish.published_at || "—"}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{publish.message}</p>
+          {publish.last_error ? <InlineMessage tone="warn" title="Publish Error" body={publish.last_error} /> : null}
+          {publish.available_actions.length ? (
+            <div className="inline-action-row" style={{ marginTop: 12 }}>
+              {publish.available_actions.includes("commit") ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handlePublishTask(false)}>
+                  Commit Changes
+                </button>
+              ) : null}
+              {publish.available_actions.includes("push") ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handlePublishTask(true)}>
+                  Push Branch
+                </button>
+              ) : null}
+              {publish.available_actions.includes("commit_and_push") ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={() => handlePublishTask(true)}>
+                  Commit & Push
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+      {recovery ? (
+        <section className="card" style={{ marginTop: 12 }}>
+          <div className="card-header"><h3>Recovery</h3></div>
+          <div className="detail-grid">
+            <div><div className="field-label">Recovery Status</div><div className="field-value">{titleCaseLabel(recovery.status)}</div></div>
+            <div><div className="field-label">Retryable</div><div className="field-value">{recovery.retryable ? "yes" : "no"}</div></div>
+            <div><div className="field-label">Requeueable</div><div className="field-value">{recovery.requeueable ? "yes" : "no"}</div></div>
+            <div><div className="field-label">In Flight</div><div className="field-value">{recovery.in_flight ? "yes" : "no"}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{recovery.message}</p>
+          {actionState.message ? <p className="muted" style={{ marginTop: 12 }}>{actionState.message}</p> : null}
+          {recovery.last_failure ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="field-label">Last Failure</div>
+              <div className="field-value">
+                {recovery.last_failure.summary || recovery.last_failure.error || "Failure snapshot available."}
+              </div>
+              {recovery.last_failure.run_id ? (
+                <div className="muted small" style={{ marginTop: 6 }}>
+                  Run {recovery.last_failure.run_id}
+                  {recovery.last_failure.action ? ` · recorded before ${recovery.last_failure.action}` : ""}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {(recovery.retryable || recovery.requeueable) ? (
+            <div className="inline-action-row" style={{ marginTop: 12 }}>
+              {recovery.retryable ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={handleRetryTask}>
+                  Retry Now
+                </button>
+              ) : null}
+              {recovery.requeueable ? (
+                <button type="button" className="ghost sm" disabled={actionState.status === "submitting"} onClick={handleRequeueTask}>
+                  Requeue
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
       ) : null}
       {payload.result_run_artifacts?.length ? (
         <section className="card" style={{ marginTop: 12 }}>
@@ -2269,9 +2858,202 @@ function RunDetailPanel({
   );
 }
 
-function PlatformSettingsPanel() {
-  return <PlatformSettingsHubPage />;
+const VALID_SETTINGS_SECTIONS: HubSection[] = ["general", "security", "integrations", "deploy", "workspaces"];
+
+type PlatformSettingsSurface =
+  | "hub"
+  | "access_control"
+  | "identity_configuration"
+  | "secrets"
+  | "activity"
+  | "ai_agents"
+  | "rendering_settings"
+  | "deploy_settings"
+  | "branding";
+
+type PlatformSettingsTab = {
+  id: string;
+  surface: PlatformSettingsSurface;
+  label: string;
+};
+
+const DEFAULT_PLATFORM_SETTINGS_TAB: PlatformSettingsTab = {
+  id: "platform-settings-hub",
+  surface: "hub",
+  label: "Platform Settings",
+};
+
+function platformSettingsSurfaceLabel(surface: PlatformSettingsSurface): string {
+  switch (surface) {
+    case "access_control":
+      return "Access Control";
+    case "identity_configuration":
+      return "Identity Configuration";
+    case "secrets":
+      return "Secrets";
+    case "activity":
+      return "Activity";
+    case "ai_agents":
+      return "AI Agents";
+    case "rendering_settings":
+      return "Rendering Settings";
+    case "deploy_settings":
+      return "Deploy Settings";
+    case "branding":
+      return "Branding";
+    default:
+      return "Platform Settings";
+  }
 }
+
+function mapPlatformSettingsRouteToSurface(route: string): PlatformSettingsSurface | null {
+  const path = String(route || "").split("?", 1)[0].trim().toLowerCase();
+  if (path.endsWith("/platform/access-control")) return "access_control";
+  if (path.endsWith("/platform/identity-configuration")) return "identity_configuration";
+  if (path.endsWith("/platform/secrets")) return "secrets";
+  if (path.endsWith("/platform/activity")) return "activity";
+  if (path.endsWith("/platform/ai-agents")) return "ai_agents";
+  if (path.endsWith("/platform/rendering-settings")) return "rendering_settings";
+  if (path.endsWith("/platform/deploy")) return "deploy_settings";
+  if (path.endsWith("/platform/branding")) return "branding";
+  return null;
+}
+
+const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
+  initialSection,
+  onSectionChange,
+  initialSurface,
+  onSurfaceChange,
+}: {
+  initialSection?: string;
+  onSectionChange?: (section: HubSection) => void;
+  initialSurface?: string;
+  onSurfaceChange?: (surface: PlatformSettingsSurface) => void;
+}) {
+  const parsed = String(initialSection || "").trim().toLowerCase();
+  const init: HubSection = (VALID_SETTINGS_SECTIONS as string[]).includes(parsed) ? (parsed as HubSection) : "security";
+  const [section, setSection] = useState<HubSection>(init);
+  const parsedSurface = String(initialSurface || "").trim().toLowerCase();
+  const initialPanelSurface = ([
+    "access_control",
+    "identity_configuration",
+    "secrets",
+    "activity",
+    "ai_agents",
+    "rendering_settings",
+    "deploy_settings",
+    "branding",
+  ] as string[]).includes(parsedSurface)
+    ? (parsedSurface as PlatformSettingsSurface)
+    : "hub";
+  const [tabs, setTabs] = useState<PlatformSettingsTab[]>(() =>
+    initialPanelSurface === "hub"
+      ? [DEFAULT_PLATFORM_SETTINGS_TAB]
+      : [DEFAULT_PLATFORM_SETTINGS_TAB, { id: `platform-settings-${initialPanelSurface}`, surface: initialPanelSurface, label: platformSettingsSurfaceLabel(initialPanelSurface) }]
+  );
+  const [activeTabId, setActiveTabId] = useState<string>(
+    initialPanelSurface === "hub" ? DEFAULT_PLATFORM_SETTINGS_TAB.id : `platform-settings-${initialPanelSurface}`
+  );
+
+  useEffect(() => {
+    setSection(init);
+  }, [init]);
+
+  useEffect(() => {
+    if (initialPanelSurface === "hub") return;
+    const tabId = `platform-settings-${initialPanelSurface}`;
+    setTabs((current) => {
+      if (current.some((item) => item.id === tabId)) return current;
+      return [...current, { id: tabId, surface: initialPanelSurface, label: platformSettingsSurfaceLabel(initialPanelSurface) }];
+    });
+    setActiveTabId(tabId);
+  }, [initialPanelSurface]);
+
+  const handleChange = (next: HubSection) => {
+    if (next === section) return;
+    setSection(next);
+    onSectionChange?.(next);
+  };
+
+  const openSurfaceTab = (surface: PlatformSettingsSurface) => {
+    if (surface === "hub") {
+      setActiveTabId(DEFAULT_PLATFORM_SETTINGS_TAB.id);
+      onSurfaceChange?.("hub");
+      return;
+    }
+    const tabId = `platform-settings-${surface}`;
+    setTabs((current) => {
+      if (current.some((item) => item.id === tabId)) return current;
+      return [...current, { id: tabId, surface, label: platformSettingsSurfaceLabel(surface) }];
+    });
+    setActiveTabId(tabId);
+    onSurfaceChange?.(surface);
+  };
+
+  const closeSurfaceTab = (tabId: string) => {
+    if (tabId === DEFAULT_PLATFORM_SETTINGS_TAB.id) return;
+    setTabs((current) => {
+      const next = current.filter((item) => item.id !== tabId);
+      return next.length ? next : [DEFAULT_PLATFORM_SETTINGS_TAB];
+    });
+    setActiveTabId((current) => (current === tabId ? DEFAULT_PLATFORM_SETTINGS_TAB.id : current));
+  };
+
+  const activeSurface =
+    tabs.find((item) => item.id === activeTabId)?.surface ||
+    tabs[tabs.length - 1]?.surface ||
+    DEFAULT_PLATFORM_SETTINGS_TAB.surface;
+
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div className="page-tabs" aria-label="Platform settings panel tabs">
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {tabs.map((tab) => (
+            <div key={tab.id} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <button
+                type="button"
+                className={activeTabId === tab.id ? "ghost active" : "ghost"}
+                onClick={() => {
+                  setActiveTabId(tab.id);
+                  onSurfaceChange?.(tab.surface);
+                }}
+                aria-current={activeTabId === tab.id ? "page" : undefined}
+              >
+                {tab.label}
+              </button>
+              {tab.id !== DEFAULT_PLATFORM_SETTINGS_TAB.id ? (
+                <button type="button" className="ghost sm" onClick={() => closeSurfaceTab(tab.id)} aria-label={`Close ${tab.label}`}>
+                  x
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {activeSurface === "hub" ? (
+        <PlatformSettingsHubPage
+          sectionOverride={section}
+          onSectionChange={handleChange}
+          onOpenRoute={(route) => {
+            const mapped = mapPlatformSettingsRouteToSurface(route);
+            if (mapped) {
+              openSurfaceTab(mapped);
+            }
+          }}
+        />
+      ) : null}
+      {activeSurface === "access_control" ? <AccessControlPage /> : null}
+      {activeSurface === "identity_configuration" ? <IdentityConfigurationPage /> : null}
+      {activeSurface === "secrets" ? <SecretConfigurationPage /> : null}
+      {activeSurface === "activity" ? <ActivityPage workspaceId="" /> : null}
+      {activeSurface === "ai_agents" ? <AIConfigPage /> : null}
+      {activeSurface === "rendering_settings" ? <PlatformRenderingSettingsPage /> : null}
+      {activeSurface === "deploy_settings" ? <PlatformDeploySettingsPage /> : null}
+      {activeSurface === "branding" ? <PlatformBrandingPage /> : null}
+    </div>
+  );
+});
 
 function ArtifactListPanel({
   namespace,
@@ -2738,11 +3520,1285 @@ function LocalProvisionResultPanel({ payload }: { payload?: LocalProvisionRespon
   );
 }
 
+function ApplicationPlanDetailPanel({
+  applicationPlanId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  applicationPlanId: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [payload, setPayload] = useState<ApplicationPlanDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getApplicationPlan(applicationPlanId);
+        if (!active) return;
+        setPayload(next);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load application plan");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [applicationPlanId]);
+
+  useEffect(() => {
+    onTitleChange?.(payload?.name || "Application Plan");
+  }, [onTitleChange, payload?.name]);
+
+  async function handleApply() {
+    try {
+      const response = await applyApplicationPlan(applicationPlanId);
+      setPayload(response.application_plan);
+      setMessage(
+        response.status === "applied"
+          ? "Applied application plan into durable goals, threads, and work items."
+          : "Application plan was already applied."
+      );
+      onOpenPanel("application_detail", { application_id: response.application.id });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to apply application plan");
+    }
+  }
+
+  if (loading) return <p className="muted">Loading application plan…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Application plan not found.</p>;
+  const generatedPlan = payload.generated_plan ?? {
+    ordering_hints: payload.ordering_hints ?? [],
+    dependency_hints: payload.dependency_hints ?? [],
+    generated_goals: payload.generated_goals ?? [],
+  };
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="detail-grid">
+          <div><div className="field-label">Application</div><div className="field-value">{payload.name}</div></div>
+          <div><div className="field-label">Factory</div><div className="field-value">{payload.factory?.name || payload.source_factory_key}</div></div>
+          <div><div className="field-label">Status</div><div className="field-value">{payload.status}</div></div>
+          <div><div className="field-label">Generated Goals</div><div className="field-value">{generatedPlan.generated_goals.length}</div></div>
+        </div>
+        <p className="muted" style={{ marginTop: 12 }}>{payload.summary}</p>
+        {message ? <InlineMessage tone="info" title="Plan Apply" body={message} /> : null}
+        <div className="inline-action-row" style={{ marginTop: 12 }}>
+          <button type="button" className="ghost sm" disabled={payload.status === "applied"} onClick={handleApply}>
+            Apply Plan
+          </button>
+        </div>
+      </section>
+      <section className="card">
+        <div className="field-label">Ordering Hints</div>
+        <ul className="detail-list">
+          {generatedPlan.ordering_hints.map((item) => <li key={item}>{item}</li>)}
+          {!generatedPlan.ordering_hints.length ? <li className="muted">No ordering hints.</li> : null}
+        </ul>
+        <div className="field-label" style={{ marginTop: 12 }}>Dependency Hints</div>
+        <ul className="detail-list">
+          {generatedPlan.dependency_hints.map((item) => <li key={item}>{item}</li>)}
+          {!generatedPlan.dependency_hints.length ? <li className="muted">No dependency hints.</li> : null}
+        </ul>
+      </section>
+      {generatedPlan.generated_goals.map((goal) => (
+        <section className="card" key={goal.title}>
+          <div className="card-header"><div><p className="muted">{goal.title}</p></div></div>
+          <p className="muted">{goal.planning_summary}</p>
+          <div className="canvas-table-wrap" style={{ marginTop: 12 }}>
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Thread</th>
+                  <th>Priority</th>
+                  <th>Initial Work</th>
+                </tr>
+              </thead>
+              <tbody>
+                {goal.threads.map((thread) => (
+                  <tr key={thread.title}>
+                    <td>{thread.title}</td>
+                    <td>{thread.priority}</td>
+                    <td>{goal.work_items.filter((item) => item.thread_title === thread.title).length}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function ApplicationDetailPanel({
+  applicationId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  applicationId: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [payload, setPayload] = useState<ApplicationDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getApplication(applicationId);
+        if (!active) return;
+        setPayload(next);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load application");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [applicationId]);
+
+  useEffect(() => {
+    onTitleChange?.(payload?.name || "Application");
+  }, [onTitleChange, payload?.name]);
+
+  if (loading) return <p className="muted">Loading application…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Application not found.</p>;
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="detail-grid">
+          <div><div className="field-label">Application</div><div className="field-value">{payload.name}</div></div>
+          <div><div className="field-label">Factory</div><div className="field-value">{payload.source_factory_key}</div></div>
+          <div><div className="field-label">Status</div><div className="field-value">{payload.status}</div></div>
+          <div><div className="field-label">Goals</div><div className="field-value">{payload.goal_count}</div></div>
+        </div>
+        <p className="muted" style={{ marginTop: 12 }}>{payload.summary}</p>
+      </section>
+      {payload.portfolio_state ? (
+        <section className="card">
+          <div className="detail-grid">
+            <div><div className="field-label">Active Goals</div><div className="field-value">{payload.portfolio_state.goals.filter((goal) => goal.health_status === "active").length}</div></div>
+            <div><div className="field-label">Blocked Goals</div><div className="field-value">{payload.portfolio_state.goals.filter((goal) => goal.health_status === "blocked").length}</div></div>
+            <div><div className="field-label">Recent Execution</div><div className="field-value">{payload.portfolio_state.goals.reduce((sum, goal) => sum + (goal.recent_execution_count || 0), 0)}</div></div>
+          </div>
+          {payload.portfolio_state.recommended_goal ? (
+            <InlineMessage tone="info" title={`Recommended Goal: ${payload.portfolio_state.recommended_goal.title}`} body={payload.portfolio_state.recommended_goal.summary} />
+          ) : null}
+        </section>
+      ) : null}
+      <section className="card">
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Goal</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Threads</th>
+                <th>Work Items</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {payload.goals.map((goal) => (
+                <tr key={goal.id}>
+                  <td>{goal.title}</td>
+                  <td>{goal.planning_status}</td>
+                  <td>{goal.goal_progress_status || "—"}</td>
+                  <td>{goal.thread_count}</td>
+                  <td>{goal.work_item_count}</td>
+                  <td><button type="button" className="ghost sm" onClick={() => onOpenPanel("goal_detail", { goal_id: goal.id })}>Open Goal</button></td>
+                </tr>
+              ))}
+              {!payload.goals.length ? <tr><td colSpan={6} className="muted">No goals found for this application.</td></tr> : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ComposerDetailPanel({
+  workspaceId,
+  factoryKey,
+  applicationPlanId,
+  applicationId,
+  goalId,
+  threadId,
+  onOpenPanel,
+  onTitleChange,
+}: {
+  workspaceId: string;
+  factoryKey?: string;
+  applicationPlanId?: string;
+  applicationId?: string;
+  goalId?: string;
+  threadId?: string;
+  onTitleChange?: (title: string) => void;
+} & PanelProps) {
+  const [payload, setPayload] = useState<ComposerState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [objective, setObjective] = useState("");
+  const [effortFilter, setEffortFilter] = useState<ComposerContainerFilter>("active");
+  const [hiddenEffortIds, setHiddenEffortIds] = useState<Record<string, true>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const raw = window.localStorage.getItem(`xyn:composer:hidden-efforts:${workspaceId}`);
+      return raw ? JSON.parse(raw) as Record<string, true> : {};
+    } catch {
+      return {};
+    }
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(`xyn:composer:hidden-efforts:${workspaceId}`, JSON.stringify(hiddenEffortIds));
+  }, [hiddenEffortIds, workspaceId]);
+
+  useEffect(() => {
+    writeComposerStoredSelection(workspaceId, {
+      application_id: applicationId,
+      application_plan_id: applicationPlanId,
+    });
+  }, [applicationId, applicationPlanId, workspaceId]);
+
+  async function reloadComposerState() {
+    const next = await getComposerState({
+      workspace_id: workspaceId,
+      factory_key: factoryKey,
+      application_plan_id: applicationPlanId,
+      application_id: applicationId,
+      goal_id: goalId,
+      thread_id: threadId,
+    });
+    setPayload(next);
+    return next;
+  }
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getComposerState({
+          workspace_id: workspaceId,
+          factory_key: factoryKey,
+          application_plan_id: applicationPlanId,
+          application_id: applicationId,
+          goal_id: goalId,
+          thread_id: threadId,
+        });
+        if (!active) return;
+        setPayload(next);
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load composer state");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [applicationId, applicationPlanId, factoryKey, goalId, threadId, workspaceId]);
+
+  useEffect(() => {
+    onTitleChange?.("Composer");
+  }, [onTitleChange]);
+
+  const openComposer = (params?: Record<string, unknown>) => {
+    const nextParams = {
+      workspace_id: workspaceId,
+      ...(params || {}),
+    };
+    writeComposerStoredSelection(workspaceId, nextParams);
+    onOpenPanel("composer_detail", nextParams);
+  };
+
+  async function handleGeneratePlan(targetFactoryKey?: string) {
+    const objectiveText = objective.trim();
+    if (!objectiveText) {
+      setMessage("Enter an application objective before generating a plan.");
+      return;
+    }
+    try {
+      const response = await generateApplicationPlan({
+        workspace_id: workspaceId,
+        objective: objectiveText,
+        factory_key: targetFactoryKey || factoryKey || undefined,
+        application_name: payload?.selected_factory?.name ? objectiveText : undefined,
+      });
+      setMessage(`Generated reviewable plan for ${response.name}.`);
+      openComposer({
+        application_plan_id: response.id,
+        factory_key: response.source_factory_key || targetFactoryKey || factoryKey || undefined,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to generate application plan");
+    }
+  }
+
+  async function handleApplyPlan(id: string) {
+    try {
+      const response = await applyApplicationPlan(id);
+      setMessage(
+        response.status === "applied"
+          ? `Applied ${response.application.name} into durable goals, threads, and work items.`
+          : `${response.application.name} was already applied.`
+      );
+      // After plan apply, Composer should move into the live application effort.
+      // Keeping both plan and application ids in focus leaves the user in a mixed
+      // review/execution state and obscures the next actionable step.
+      openComposer({
+        application_id: response.application.id,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to apply application plan");
+    }
+  }
+
+  async function handleArchiveApplication(application: ComposerWorkContainer | ApplicationDetail) {
+    try {
+      const result = await updateApplication(application.id, { status: "archived" });
+      setMessage(`Archived ${result.name}. It is now hidden from the default active view.`);
+      await reloadComposerState();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to archive the application effort");
+    }
+  }
+
+  async function handleCancelPlan(plan: ComposerWorkContainer | ApplicationPlanDetail) {
+    try {
+      const result = await updateApplicationPlan(plan.id, { status: "canceled" });
+      setMessage(`Canceled ${result.name}. It is now treated as historical plan work.`);
+      await reloadComposerState();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to archive the application plan");
+    }
+  }
+
+  async function handleRestartEffort(container: ComposerWorkContainer) {
+    const objectiveText = String(container.requestObjective || "").trim();
+    if (!objectiveText) {
+      setMessage("This effort does not have a reusable objective, so Xyn cannot restart it automatically.");
+      return;
+    }
+    try {
+      const response = await generateApplicationPlan({
+        workspace_id: workspaceId,
+        objective: objectiveText,
+        factory_key: container.sourceFactoryKey || undefined,
+        application_name: container.title,
+      });
+      if (container.kind === "application") {
+        await updateApplication(container.id, { status: "archived" });
+      } else {
+        await updateApplicationPlan(container.id, { status: "canceled" });
+      }
+      setMessage(`Started a new plan for ${container.title} and retired the older effort from the default active view.`);
+      setEffortFilter("active");
+      openComposer({
+        application_plan_id: response.id,
+        factory_key: response.source_factory_key || container.sourceFactoryKey || undefined,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to start over from this application effort");
+    }
+  }
+
+  async function handleApproveNextSlice(goal: GoalDetail, recommendationId?: string | null) {
+    try {
+      const response = await reviewGoal(goal.id, "approve_and_queue", recommendationId);
+      const nextRecommendation =
+        response.goal?.recommendation && typeof response.goal.recommendation === "object"
+          ? response.goal.recommendation
+          : null;
+      const nextThreadId =
+        nextRecommendation?.thread_id
+        || nextRecommendation?.queue_suggestion?.thread_id
+        || nextRecommendation?.recommended_work_items?.[0]?.thread_id
+        || null;
+      const nextWorkItemId =
+        nextRecommendation?.work_item_id
+        || nextRecommendation?.queue_suggestion?.work_item_id
+        || nextRecommendation?.recommended_work_items?.[0]?.id
+        || null;
+      const nextMessage =
+        response.status === "approved"
+          ? "Approved and queued the next slice."
+          : response.status === "already_queued"
+            ? "That slice is already queued. Open the thread and dispatch the ready work item."
+            : response.status === "no_recommendation"
+              ? "No queueable next slice is available right now."
+              : response.status === "stale_recommendation"
+                ? "That recommendation is no longer current. Refresh the goal and review the latest next slice."
+                : response.status.replace(/_/g, " ");
+      setMessage(nextMessage);
+      openComposer({
+        goal_id: goal.id,
+        application_id: goal.application_id || undefined,
+        thread_id: nextThreadId || undefined,
+        work_item_id: nextWorkItemId || undefined,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to approve the next slice");
+    }
+  }
+
+  async function handleThreadReview(thread: CoordinationThreadDetail, reviewAction: "resume_thread" | "queue_next_slice" | "mark_thread_completed") {
+    try {
+      const response = await reviewCoordinationThread(thread.id, reviewAction);
+      setMessage(response.summary || response.status.replace(/_/g, " "));
+      openComposer({
+        thread_id: thread.id,
+        goal_id: thread.goal_id || goalId,
+        application_id: applicationId || payload?.goal?.application_id || undefined,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to review thread");
+    }
+  }
+
+  const selectedFactory = payload?.selected_factory ?? null;
+  const selectedGoal = payload?.goal ?? null;
+  const selectedThread = payload?.thread ?? null;
+  const selectedApplication = payload?.application ?? null;
+  const selectedPlan = payload?.application_plan ?? null;
+  const portfolioInsights = payload?.portfolio_context?.insights || [];
+  const breadcrumbRows = payload?.breadcrumbs || [];
+  const actionableBreadcrumbs = breadcrumbRows.filter(
+    (crumb) => !(crumb.kind === "composer" && breadcrumbRows.length === 1)
+  );
+  const composerView = payload ? deriveComposerViewModel(payload) : null;
+  const storedSelection = composerView ? readComposerStoredSelection(workspaceId) : null;
+  const hasExplicitComposerFocus = Boolean(
+    factoryKey
+    || applicationPlanId
+    || applicationId
+    || goalId
+    || threadId
+  );
+  const initialSelection = composerView && !hasExplicitComposerFocus
+    ? resolveComposerInitialSelection(composerView.containers, storedSelection)
+    : null;
+  useEffect(() => {
+    if (loading || !payload || !composerView || hasExplicitComposerFocus || !initialSelection) return;
+    openComposer(initialSelection);
+  }, [composerView, hasExplicitComposerFocus, initialSelection, loading, payload]);
+  const currentContainer = composerView?.containers.find((container) =>
+    (applicationId && container.kind === "application" && container.id === applicationId)
+    || (applicationPlanId && container.kind === "application_plan" && container.id === applicationPlanId)
+  ) || null;
+  const currentApplication =
+    currentContainer?.kind === "application" && selectedApplication?.id === currentContainer.id
+      ? selectedApplication
+      : null;
+  const currentPlan =
+    currentContainer?.kind === "application_plan" && selectedPlan?.id === currentContainer.id
+      ? selectedPlan
+      : null;
+  const currentPlanGoals = currentPlan?.generated_goals || currentPlan?.generated_plan?.generated_goals || [];
+  const currentGoal =
+    currentContainer?.kind === "application" && selectedGoal?.application_id === currentContainer.id
+      ? selectedGoal
+      : null;
+  const currentGoalId = currentGoal?.id || "";
+  const selectedContainerGoals = currentContainer?.kind === "application" ? currentContainer.goals : [];
+  const selectedContainerGoalIds = new Set(selectedContainerGoals.map((goal) => goal.id));
+  const selectedContainerThreads = currentContainer?.kind === "application"
+    ? currentContainer.threads
+    : [];
+  const currentThread =
+    currentContainer?.kind === "application" && selectedThread && selectedContainerThreads.some((thread) => thread.id === selectedThread.id)
+      ? selectedThread
+      : null;
+  const currentThreadId = currentThread?.id || "";
+  const currentGoalThreads = currentGoal
+    ? selectedContainerThreads.filter((thread) => thread.goal_id === currentGoal.id)
+    : [];
+  const threadDiagnosticSummary = currentThread?.thread_diagnostic
+    ? currentThread.thread_diagnostic.observations[0]
+      || currentThread.thread_diagnostic.likely_causes[0]
+      || currentThread.thread_diagnostic.provenance?.summary
+      || null
+    : null;
+  const threadNeedsBriefReview = Boolean(
+    currentThread?.thread_diagnostic && [
+      currentThread.thread_diagnostic.suggested_human_review_action,
+      ...currentThread.thread_diagnostic.observations,
+      ...currentThread.thread_diagnostic.likely_causes,
+      threadDiagnosticSummary,
+    ].some((entry) => typeof entry === "string" && /brief review/i.test(entry))
+  );
+  const threadActionGuidance = threadNeedsBriefReview
+    ? "Next step: open the thread work items and review the blocking execution brief before queueing more coding work."
+    : null;
+  const recommendation =
+    currentGoal && currentGoal.recommendation && typeof currentGoal.recommendation === "object"
+      ? currentGoal.recommendation
+      : null;
+  useEffect(() => {
+    if (!currentContainer) return;
+    writeComposerStoredSelection(workspaceId, currentContainer.selectionParams);
+  }, [currentContainer, workspaceId]);
+  useEffect(() => {
+    if (!composerView?.containers.length && !hasExplicitComposerFocus) {
+      clearComposerStoredSelection(workspaceId);
+    }
+  }, [composerView?.containers.length, hasExplicitComposerFocus, workspaceId]);
+  const currentWork = currentContainer
+    ? {
+      ...(composerView?.currentContext || { title: "Choose an application effort", statusLabel: "Awaiting selection", latestResult: "", latestActivityAt: null, container: null }),
+      title:
+        currentContainer.kind === "application"
+          ? (currentThread?.title || currentGoal?.title || currentContainer.title)
+          : currentContainer.title,
+      statusLabel:
+        currentContainer.kind === "application"
+          ? (
+            currentThread?.status
+            || (currentGoal?.goal_progress?.goal_progress_status
+              ? formatComposerGoalProgressStatus(currentGoal.goal_progress.goal_progress_status)
+              : null)
+            || currentContainer.statusLabel
+          )
+          : currentContainer.statusLabel,
+      latestResult:
+        currentContainer.kind === "application"
+          ? (
+            currentThread?.thread_diagnostic?.provenance?.summary
+            || currentThread?.thread_diagnostic?.observations?.[0]
+            || currentGoal?.recommendation?.summary
+            || currentContainer.latestResult
+          )
+          : currentContainer.latestResult,
+      latestActivityAt:
+        currentContainer.kind === "application"
+          ? latestTimestamp([
+            currentThread?.updated_at,
+            currentGoal?.updated_at,
+            currentContainer.latestActivityAt,
+          ])
+          : currentContainer.latestActivityAt,
+      container: currentContainer,
+    }
+    : (composerView?.currentContext || {
+      title: "Choose an application effort",
+      statusLabel: "Awaiting selection",
+      latestResult: "Select an application effort to view its goals, threads, and latest workflow state.",
+      latestActivityAt: null,
+      container: null,
+    });
+  const stageSummary = payload ? deriveComposerStageSummary(payload, currentWork) : null;
+
+  if (loading) return <p className="muted">Loading composer…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload || !composerView || !stageSummary) return <p className="muted">Composer state unavailable.</p>;
+  const effortVisibilityKey = (container: ComposerWorkContainer) => `${container.kind}:${container.id}`;
+  const isEffortHidden = (container: ComposerWorkContainer) => Boolean(hiddenEffortIds[effortVisibilityKey(container)]);
+  const visibleEffortCount = (filter: ComposerContainerFilter) =>
+    composerView.containers.filter((container) => {
+      const isHidden = isEffortHidden(container);
+      if (filter === "all") return true;
+      if (filter === "archived") return container.lifecycleState === "archived";
+      if (filter === "failed") return !isHidden && container.lifecycleState === "failed";
+      if (isHidden || container.lifecycleState === "archived") return false;
+      if (container.lifecycleState === "failed" && !container.isCurrent && !container.isMostRecent) return false;
+      if (container.isSuperseded && !container.isCurrent && !container.isMostRecent) return false;
+      return true;
+    }).length;
+  // Active view stays focused on current/recent work and hides locally hidden or stale failed
+  // efforts by default. Older failed/archived efforts remain available through the other tabs.
+  const filteredContainers = composerView.containers.filter((container) => {
+    const isHidden = isEffortHidden(container);
+    if (effortFilter === "all") return true;
+    if (effortFilter === "archived") return container.lifecycleState === "archived";
+    if (effortFilter === "failed") return !isHidden && container.lifecycleState === "failed";
+    if (isHidden || container.lifecycleState === "archived") return false;
+    if (container.lifecycleState === "failed" && !container.isCurrent && !container.isMostRecent) return false;
+    if (container.isSuperseded && !container.isCurrent && !container.isMostRecent) return false;
+    return true;
+  });
+  const latestQuickActionReason = currentThread
+    ? threadActionGuidance || "Review the currently focused thread and decide whether it is safe to queue more coding work."
+    : recommendation
+      ? recommendation.summary
+      : currentWork.latestResult;
+  const showPlanningTools = payload.stage === "factory_discovery" || payload.stage === "plan_review";
+
+  function renderLifecycleActions(container: ComposerWorkContainer, options?: { compact?: boolean }) {
+    const isHidden = isEffortHidden(container);
+    const canArchive = container.kind === "application" && container.rawStatus !== "archived";
+    const canCancel = container.kind === "application_plan" && container.rawStatus !== "canceled";
+    const canRestart = Boolean(String(container.requestObjective || "").trim());
+    return (
+      <div className="inline-action-row" style={{ marginTop: options?.compact ? 8 : 12, flexWrap: "wrap" }}>
+        {canRestart ? (
+          <button type="button" className="ghost sm" onClick={() => void handleRestartEffort(container)}>
+            Start Over
+          </button>
+        ) : null}
+        {canArchive ? (
+          <button type="button" className="ghost sm" onClick={() => void handleArchiveApplication(container)}>
+            Archive
+          </button>
+        ) : null}
+        {canCancel ? (
+          <button type="button" className="ghost sm" onClick={() => void handleCancelPlan(container)}>
+            Mark Obsolete
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="ghost sm"
+          disabled={container.isCurrent && !isHidden}
+          title={container.isCurrent && !isHidden ? "Select another effort before hiding this one from the default active view." : undefined}
+          onClick={() => {
+            setHiddenEffortIds((current) => {
+              const next = { ...current };
+              const key = effortVisibilityKey(container);
+              if (next[key]) delete next[key];
+              else next[key] = true;
+              return next;
+            });
+          }}
+        >
+          {isHidden ? "Show in Active View" : "Hide from Active View"}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <div className="field-label">Current application effort</div>
+            <div className="field-value">{currentWork.title}</div>
+          </div>
+        </div>
+        <div className="composer-stage-strip" role="status" aria-live="polite">
+          <div className="composer-stage-strip__header">
+            <span className="field-label">Current workflow step</span>
+            <span className="pill ghost">{stageSummary.label}</span>
+          </div>
+          <p className="composer-stage-strip__explanation">{stageSummary.explanation}</p>
+          <p className="composer-stage-strip__next-step">
+            <strong>Next:</strong> {stageSummary.nextStep}
+          </p>
+        </div>
+        <div className="detail-grid">
+          <div><div className="field-label">Overall state</div><div className="field-value">{titleCaseLabel(currentWork.statusLabel)}</div></div>
+          <div><div className="field-label">Selected item</div><div className="field-value">{currentContainer ? `${currentContainer.kind === "application" ? "Application" : "Application plan"} · ${currentContainer.title}` : "No application effort selected"}</div></div>
+          <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(currentWork.latestActivityAt)}</div></div>
+        </div>
+        <p className="muted" style={{ marginTop: 12 }}>{currentWork.latestResult}</p>
+        {actionableBreadcrumbs.length ? (
+          <div className="inline-action-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
+            {actionableBreadcrumbs.map((crumb, index) => (
+              <button
+                key={`${crumb.kind}:${crumb.id || index}`}
+                type="button"
+                className="ghost sm"
+                onClick={() => {
+                  if (crumb.kind === "factory" && crumb.id) openComposer({ factory_key: crumb.id });
+                  else if (crumb.kind === "application_plan" && crumb.id) openComposer({ application_plan_id: crumb.id });
+                  else if (crumb.kind === "application" && crumb.id) openComposer({ application_id: crumb.id });
+                  else if (crumb.kind === "goal" && crumb.id) openComposer({ goal_id: crumb.id });
+                  else if (crumb.kind === "thread" && crumb.id) openComposer({ thread_id: crumb.id });
+                }}
+              >
+                {crumb.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <div className="inline-action-row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+          {currentPlan ? (
+            <button type="button" className="ghost sm" disabled={currentPlan.status === "applied"} onClick={() => handleApplyPlan(currentPlan.id)}>
+              Apply Plan
+            </button>
+          ) : null}
+          {currentGoal ? (
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={!recommendation}
+              onClick={() => recommendation && handleApproveNextSlice(currentGoal, String(recommendation.recommendation_id || ""))}
+            >
+              Approve Next Slice
+            </button>
+          ) : null}
+          {currentThread ? (
+            <button type="button" className="ghost sm" onClick={() => onOpenPanel("thread_detail", { thread_id: currentThread.id })}>
+              Review Work Items
+            </button>
+          ) : null}
+        </div>
+        <p className="muted small" style={{ marginTop: 8 }}>{latestQuickActionReason}</p>
+        {!currentContainer ? (
+          <p className="muted small" style={{ marginTop: 8 }}>
+            Composer is not focused on a single effort yet. Choose one from the list below to see its work goals, execution threads, and next steps.
+          </p>
+        ) : null}
+        {currentContainer ? renderLifecycleActions(currentContainer, { compact: true }) : null}
+        {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
+      </section>
+
+      <section className="card">
+        <div className="card-header">
+          <div>
+            <div className="field-label">Application efforts</div>
+            <div className="field-value">Choose the application or plan you want to continue</div>
+          </div>
+        </div>
+        <p className="muted" style={{ marginBottom: 12 }}>
+          Composer groups work by application effort first so each work goal and execution thread is shown under the application or plan it belongs to.
+        </p>
+        <div className="inline-action-row" style={{ marginBottom: 12, flexWrap: "wrap" }}>
+          {(["active", "failed", "archived", "all"] as ComposerContainerFilter[]).map((filter) => (
+            <button
+              key={filter}
+              type="button"
+              className={effortFilter === filter ? "primary sm" : "ghost sm"}
+              aria-pressed={effortFilter === filter}
+              onClick={() => setEffortFilter(filter)}
+            >
+              {filter === "active" ? "Active" : filter === "failed" ? "Failed" : filter === "archived" ? "Archived" : "All"} ({visibleEffortCount(filter)})
+            </button>
+          ))}
+        </div>
+        <div className="composer-effort-grid">
+          {filteredContainers.map((container) => (
+            <article
+              key={`${container.kind}:${container.id}`}
+              className={`composer-effort-card${container.isCurrent ? " is-current" : ""}`}
+            >
+              <div className="composer-effort-header">
+                <div>
+                  <div className="field-label">{container.kind === "application" ? "Application" : "Application plan"}</div>
+                  <h3>{container.title}</h3>
+                </div>
+                <div className="composer-effort-badges">
+                  <span className="pill">{container.statusLabel}</span>
+                  <span className="pill ghost">{container.recencyLabel}</span>
+                  {container.isSuperseded ? <span className="pill ghost">Superseded</span> : null}
+                  {isEffortHidden(container) ? <span className="pill ghost">Hidden</span> : null}
+                </div>
+              </div>
+              <p className="composer-effort-summary">{container.promptSummary}</p>
+              <div className="composer-effort-meta">
+                <span><strong>Updated</strong> {formatPanelTimestamp(container.latestActivityAt)}</span>
+                <span><strong>Work goals</strong> {container.goalCount}</span>
+                <span><strong>Execution threads</strong> {container.threadCount}</span>
+              </div>
+              <p className="muted small">{container.latestResult}</p>
+              {container.kind === "application" ? (
+                <div className="composer-effort-children">
+                  <div className="field-label">Work goals for this application</div>
+                  {container.goals.length ? (
+                    <ul className="detail-list composer-effort-goal-list">
+                      {container.goals.slice(0, 4).map((goal) => (
+                        <li key={goal.id}>
+                          <div className="composer-effort-goal-copy">
+                            <strong>{goal.title}</strong> · {formatComposerGoalProgressStatus(goal.goal_progress_status || goal.planning_status || "planned")} · {formatComposerCountLabel(goal.threads.length, "execution thread")}
+                          </div>
+                          <div className="inline-action-row composer-effort-goal-actions">
+                            <button
+                              type="button"
+                              className="ghost sm"
+                              onClick={() => openComposer({ application_id: container.id, goal_id: goal.id })}
+                            >
+                              Open goal
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="muted small">
+                      {container.goalCount > 0
+                        ? "This application already has work goals, but you need to open the effort to inspect them in detail."
+                        : "No work goals are attached yet."}
+                    </p>
+                  )}
+                </div>
+              ) : null}
+              <div className="inline-action-row" style={{ marginTop: 12 }}>
+                <button
+                  type="button"
+                  className="ghost sm"
+                  disabled={container.isCurrent}
+                  title={container.isCurrent ? "This application effort is already selected." : undefined}
+                  onClick={() => openComposer(container.selectionParams)}
+                >
+                  {container.isCurrent ? "Current effort" : "Open effort"}
+                </button>
+              </div>
+              {renderLifecycleActions(container)}
+            </article>
+          ))}
+          {!filteredContainers.length ? (
+            <p className="muted">
+              {effortFilter === "active"
+                ? "No current application efforts are visible. Switch filters to inspect archived or older blocked work."
+                : effortFilter === "failed"
+                  ? "No blocked or failed efforts are currently visible."
+                  : effortFilter === "archived"
+                    ? "No archived efforts are currently visible."
+                    : "No application efforts have been created in this workspace yet."}
+            </p>
+          ) : null}
+        </div>
+      </section>
+
+      {composerView.unlinkedGoals.length || composerView.unlinkedThreads.length ? (
+        <section className="card">
+          <div className="card-header">
+            <div>
+              <div className="field-label">Unlinked work</div>
+              <div className="field-value">Older coordination items that are not attached to a current application effort</div>
+            </div>
+          </div>
+          <p className="muted" style={{ marginBottom: 12 }}>
+            These items could not be attached to a durable application effort from the current payload, so Composer keeps them separate instead of implying they belong to the selected application.
+          </p>
+          {composerView.unlinkedGoals.length ? (
+            <>
+              <div className="field-label">Work goals</div>
+              <div className="canvas-table-wrap">
+                <table className="canvas-table">
+                  <thead>
+                    <tr>
+                      <th>Goal</th>
+                      <th>Status</th>
+                      <th>Updated</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {composerView.unlinkedGoals.map((goal) => (
+                      <tr key={goal.id}>
+                        <td>{goal.title}</td>
+                        <td>{formatComposerGoalProgressStatus(goal.goal_progress_status || goal.planning_status)}</td>
+                        <td>{formatPanelTimestamp(goal.updated_at)}</td>
+                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: goal.id })}>Open goal</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+          {composerView.unlinkedThreads.length ? (
+            <>
+              <div className="field-label" style={{ marginTop: 12 }}>Execution threads</div>
+              <div className="canvas-table-wrap">
+                <table className="canvas-table">
+                  <thead>
+                    <tr>
+                      <th>Thread</th>
+                      <th>Status</th>
+                      <th>Goal</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {composerView.unlinkedThreads.map((thread) => (
+                      <tr key={thread.id}>
+                        <td>{thread.title}</td>
+                        <td>{formatComposerThreadStatus(thread.status)}</td>
+                        <td>{thread.goal_title || "—"}</td>
+                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: thread.goal_id || undefined, thread_id: thread.id })}>Open thread</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : null}
+        </section>
+      ) : null}
+
+      {showPlanningTools && (
+        <section className="card">
+          <div className="field-label">Start a new application plan</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            Describe what you want to build. Composer will turn that request into a reviewable implementation plan.
+          </p>
+          <textarea
+            className="input"
+            value={objective}
+            onChange={(event) => setObjective(event.target.value)}
+            placeholder="Describe the application you want Xyn to plan."
+            rows={4}
+          />
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            <button type="button" className="ghost sm" onClick={() => handleGeneratePlan(selectedFactory?.key)}>
+              Build plan
+            </button>
+          </div>
+        </section>
+      )}
+
+      {showPlanningTools && (
+        <section className="card">
+          <div className="field-label">Starting templates</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            Starting templates help Composer choose the right structure for a new application before detailed planning begins.
+          </p>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Template</th>
+                  <th>Description</th>
+                  <th>Best For</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {payload.factory_catalog.map((factory) => (
+                  <tr key={factory.key}>
+                    <td>{factory.name}</td>
+                    <td>{factory.description}</td>
+                    <td>{factory.intended_use_case || "—"}</td>
+                    <td>
+                      <button type="button" className="ghost sm" onClick={() => openComposer({ factory_key: factory.key })}>
+                        Use template
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      {currentPlan ? (
+        <section className="card">
+          <div className="card-header"><div><div className="field-label">Selected application plan</div></div></div>
+          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
+            This is the reviewable plan for the selected application effort. Review it, then apply it when you are ready to create durable work.
+          </p>
+          <div className="detail-grid">
+            <div><div className="field-label">Plan</div><div className="field-value">{currentPlan.name}</div></div>
+            <div><div className="field-label">Starting template</div><div className="field-value">{currentPlan.factory?.name || currentPlan.source_factory_key}</div></div>
+            <div><div className="field-label">Status</div><div className="field-value">{formatComposerPlanningStatus(currentPlan.status)}</div></div>
+            <div><div className="field-label">Planned work goals</div><div className="field-value">{currentPlanGoals.length}</div></div>
+          </div>
+          <p className="muted" style={{ marginTop: 12 }}>{currentPlan.summary}</p>
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            <button type="button" className="ghost sm" disabled={currentPlan.status === "applied"} onClick={() => handleApplyPlan(currentPlan.id)}>
+              Apply plan
+            </button>
+          </div>
+          {currentContainer?.kind === "application_plan" ? renderLifecycleActions(currentContainer) : null}
+        </section>
+      ) : null}
+
+      {currentApplication ? (
+        <section className="card">
+          <div className="card-header"><div><div className="field-label">Selected application overview</div></div></div>
+          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
+            This is the currently selected application effort and its overall coordination state.
+          </p>
+          <div className="detail-grid">
+            <div><div className="field-label">Application</div><div className="field-value">{currentApplication.name}</div></div>
+            <div><div className="field-label">Starting template</div><div className="field-value">{currentApplication.source_factory_key}</div></div>
+            <div><div className="field-label">Status</div><div className="field-value">{titleCaseLabel(currentContainer?.statusLabel || currentApplication.status)}</div></div>
+            <div><div className="field-label">Work goals</div><div className="field-value">{currentApplication.goals.length}</div></div>
+          </div>
+          {currentApplication.portfolio_state?.recommended_goal ? (
+            <InlineMessage
+              tone="info"
+              title={`Recommended work goal: ${currentApplication.portfolio_state.recommended_goal.title}`}
+              body={currentApplication.portfolio_state.recommended_goal.summary}
+            />
+          ) : null}
+          {currentApplication.portfolio_state?.recommended_goal?.goal_id ? (
+            <div className="inline-action-row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="ghost sm"
+                onClick={() =>
+                  openComposer({
+                    application_id: currentApplication.id,
+                    goal_id: currentApplication.portfolio_state?.recommended_goal?.goal_id,
+                  })}
+              >
+                Open recommended goal
+              </button>
+            </div>
+          ) : null}
+          {currentContainer?.kind === "application" ? renderLifecycleActions(currentContainer) : null}
+        </section>
+      ) : null}
+
+      {selectedContainerGoals.length ? (
+        <section className="card">
+          <div className="field-label">Work goals for this application</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            Work goals break the application effort into meaningful outcomes. Open one to review recommendations and next steps.
+          </p>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Work goal</th>
+                  <th>Planning</th>
+                  <th>Progress</th>
+                  <th>Threads</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {selectedContainerGoals.map((goal) => (
+                  <tr key={goal.id}>
+                    <td>{goal.title}</td>
+                    <td>{formatComposerPlanningStatus(goal.planning_status)}</td>
+                    <td>{goal.goal_progress_status ? formatComposerGoalProgressStatus(goal.goal_progress_status) : "Not started"}</td>
+                    <td>{goal.threads.length || goal.thread_count}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        disabled={currentGoalId === goal.id}
+                        title={currentGoalId === goal.id ? "This goal is already focused." : undefined}
+                        onClick={() => openComposer({ application_id: currentApplication?.id, goal_id: goal.id })}
+                      >
+                        {currentGoalId === goal.id ? "Current goal" : "Open goal"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {currentGoal ? (
+        <section className="card">
+          <div className="card-header"><div><div className="field-label">Selected work goal</div></div></div>
+          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
+            This section explains the current goal, how far it has progressed, and the next slice of work Composer recommends.
+          </p>
+          <div className="detail-grid">
+            <div><div className="field-label">Work goal</div><div className="field-value">{currentGoal.title}</div></div>
+            <div><div className="field-label">Planning status</div><div className="field-value">{formatComposerPlanningStatus(currentGoal.planning_status)}</div></div>
+            <div><div className="field-label">Progress</div><div className="field-value">{currentGoal.goal_progress?.goal_progress_status ? formatComposerGoalProgressStatus(currentGoal.goal_progress.goal_progress_status) : "Not started"}</div></div>
+            <div><div className="field-label">Execution threads</div><div className="field-value">{currentGoal.threads.length}</div></div>
+          </div>
+          {recommendation ? (
+            <InlineMessage
+              tone="info"
+              title={`Recommended next slice${recommendation.thread_title ? `: ${recommendation.thread_title}` : ""}`}
+              body={recommendation.reasoning_summary || recommendation.summary || ""}
+            />
+          ) : null}
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={!recommendation}
+              onClick={() => recommendation && handleApproveNextSlice(currentGoal, String(recommendation.recommendation_id || ""))}
+            >
+              Approve next slice
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {selectedContainerThreads.length ? (
+        <section className="card">
+          <div className="field-label">Execution threads for this application</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            Execution threads organize the ongoing implementation work for this application. Open one to inspect work items and dispatch status.
+          </p>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Execution thread</th>
+                  <th>Status</th>
+                  <th>Ready</th>
+                  <th>Blocked</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {selectedContainerThreads.map((thread) => (
+                  <tr key={thread.id}>
+                    <td>{thread.title}</td>
+                    <td>{formatComposerThreadStatus(thread.status)}</td>
+                    <td>{thread.queued_work_items}</td>
+                    <td>{thread.awaiting_review_work_items + thread.failed_work_items}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        disabled={currentThreadId === thread.id}
+                        title={currentThreadId === thread.id ? "This thread is already focused." : undefined}
+                        onClick={() =>
+                          openComposer({
+                            application_id: currentApplication?.id || currentGoal?.application_id || undefined,
+                            goal_id: currentGoal?.id || thread.goal_id || undefined,
+                            thread_id: thread.id,
+                          })
+                        }
+                      >
+                        {currentThreadId === thread.id ? "Current thread" : "Open thread"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {currentGoalThreads.length ? (
+        <section className="card">
+          <div className="field-label">Execution threads for this work goal</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            These are the execution threads contributing to the selected work goal.
+          </p>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Execution thread</th>
+                  <th>Status</th>
+                  <th>Ready</th>
+                  <th>Blocked</th>
+                </tr>
+              </thead>
+              <tbody>
+                {currentGoalThreads.map((thread) => (
+                  <tr key={thread.id}>
+                    <td>{thread.title}</td>
+                    <td>{formatComposerThreadStatus(thread.status)}</td>
+                    <td>{thread.queued_work_items}</td>
+                    <td>{thread.awaiting_review_work_items + thread.failed_work_items}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {currentThread ? (
+        <section className="card">
+          <div className="card-header"><div><div className="field-label">Selected execution thread</div></div></div>
+          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
+            This thread shows the current line of implementation work, whether it is moving, and what you can do next.
+          </p>
+          <div className="detail-grid">
+            <div><div className="field-label">Execution thread</div><div className="field-value">{currentThread.title}</div></div>
+            <div><div className="field-label">Status</div><div className="field-value">{formatComposerThreadStatus(currentThread.status)}</div></div>
+            <div><div className="field-label">Completed</div><div className="field-value">{currentThread.work_items_completed}</div></div>
+            <div><div className="field-label">Blocked</div><div className="field-value">{currentThread.work_items_blocked}</div></div>
+          </div>
+          {threadDiagnosticSummary ? (
+            <InlineMessage tone="info" title="Execution thread summary" body={threadDiagnosticSummary} />
+          ) : null}
+          {threadActionGuidance ? (
+            <InlineMessage tone="warn" title="Review Required Before Resuming" body={threadActionGuidance} />
+          ) : null}
+          <div className="inline-action-row" style={{ marginTop: 12 }}>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={currentThread.status === "active"}
+              title={currentThread.status === "active" ? "This thread is already active." : undefined}
+              onClick={() => handleThreadReview(currentThread, "resume_thread")}
+            >
+              Resume thread
+            </button>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={currentThread.status !== "active" || threadNeedsBriefReview}
+              title={
+                threadNeedsBriefReview
+                  ? "Review the blocking execution brief before queueing the next slice."
+                  : currentThread.status !== "active"
+                    ? "Queueing the next slice requires an active thread."
+                    : undefined
+              }
+              onClick={() => handleThreadReview(currentThread, "queue_next_slice")}
+            >
+              Queue next slice
+            </button>
+            <button
+              type="button"
+              className="ghost sm"
+              disabled={currentThread.status === "completed"}
+              title={currentThread.status === "completed" ? "This thread is already completed." : undefined}
+              onClick={() => handleThreadReview(currentThread, "mark_thread_completed")}
+            >
+              Mark thread completed
+            </button>
+            <button type="button" className="ghost sm" onClick={() => onOpenPanel("thread_detail", { thread_id: currentThread.id })}>
+              Review work items
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {payload.portfolio_context ? (
+        <section className="card">
+          <div className="field-label">Other related work</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            This section shows nearby work that may affect the selected application effort, without implying it is the current focus.
+          </p>
+          <div className="detail-grid">
+            <div><div className="field-label">Work goals</div><div className="field-value">{payload.portfolio_context.goals.length}</div></div>
+            <div><div className="field-label">Insights</div><div className="field-value">{portfolioInsights.length}</div></div>
+            <div><div className="field-label">Recommended work goal</div><div className="field-value">{payload.portfolio_context.recommended_goal?.title || "—"}</div></div>
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
 const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   platform_settings: "Platform Settings",
+  composer_detail: "Composer",
   workspaces: "Workspaces",
   goal_list: "Goals",
   goal_detail: "Goal",
+  application_plan_detail: "Application Plan",
+  application_detail: "Application",
   thread_list: "Threads",
   thread_detail: "Thread",
   runs: "Runs",
@@ -2818,12 +4874,27 @@ export default function WorkbenchPanelHost({
   onContextChange?: ContextEmitter;
 }) {
   const [resolvedTitle, setResolvedTitle] = useState("");
+  const [systemReadiness, setSystemReadiness] = useState<SystemReadinessResponse | null>(null);
   useEffect(() => {
     setResolvedTitle("");
   }, [panel?.panel_id, panel?.key]);
 
+  useEffect(() => {
+    let active = true;
+    getSystemReadiness()
+      .then((next) => {
+        if (active) setSystemReadiness(next);
+      })
+      .catch(() => {
+        if (active) setSystemReadiness(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [workspaceId]);
+
   const content = useMemo(() => {
-    if (!panel) return null;
+    if (!panel || panel.key === "platform_settings") return null;
     const openPanel = (
       panelKey: ConsolePanelKey,
       params?: Record<string, unknown>,
@@ -2836,8 +4907,20 @@ export default function WorkbenchPanelHost({
         return_to_panel_id: options?.return_to_panel_id,
       });
 
-    if (panel.key === "platform_settings") {
-      return <PlatformSettingsPanel />;
+
+    if (panel.key === "composer_detail") {
+      return (
+        <ComposerDetailPanel
+          workspaceId={workspaceId}
+          factoryKey={String(panel.params?.factory_key || "") || undefined}
+          applicationPlanId={String(panel.params?.application_plan_id || "") || undefined}
+          applicationId={String(panel.params?.application_id || "") || undefined}
+          goalId={String(panel.params?.goal_id || "") || undefined}
+          threadId={String(panel.params?.thread_id || "") || undefined}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
+        />
+      );
     }
 
     if (panel.key === "workspaces") {
@@ -2930,6 +5013,26 @@ export default function WorkbenchPanelHost({
         <GoalDetailPanel
           goalId={String(panel.params?.goal_id || "")}
           workspaceId={workspaceId}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
+        />
+      );
+    }
+
+    if (panel.key === "application_plan_detail") {
+      return (
+        <ApplicationPlanDetailPanel
+          applicationPlanId={String(panel.params?.application_plan_id || "")}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
+        />
+      );
+    }
+
+    if (panel.key === "application_detail") {
+      return (
+        <ApplicationDetailPanel
+          applicationId={String(panel.params?.application_id || "")}
           onOpenPanel={openPanel}
           onTitleChange={setResolvedTitle}
         />
@@ -3175,5 +5278,31 @@ export default function WorkbenchPanelHost({
     return null;
   }
 
-  return <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>;
+  if (panel.key === "platform_settings") {
+    return (
+      <div>
+        <div className="card ems-panel-host">
+          <PlatformSettingsPanel
+            initialSection={String(panel.params?.section || "")}
+            initialSurface={String(panel.params?.surface || "")}
+            onSectionChange={(next) => {
+              if (panel.params) panel.params.section = next;
+            }}
+            onSurfaceChange={(next) => {
+              if (!panel.params) return;
+              panel.params.surface = next;
+            }}
+          />
+        </div>
+        <SystemReadinessBanner readiness={systemReadiness} />
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>
+      <SystemReadinessBanner readiness={systemReadiness} />
+    </div>
+  );
 }

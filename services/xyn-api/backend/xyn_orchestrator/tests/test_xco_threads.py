@@ -9,25 +9,49 @@ from django.utils import timezone
 from xyn_orchestrator.development_intelligence import compute_thread_diagnostic
 from xyn_orchestrator.execution_observability import build_thread_timeline, serialize_thread_timeline
 from xyn_orchestrator.goal_progress import compute_thread_execution_metrics, compute_thread_progress
-from xyn_orchestrator.models import CoordinationEvent, CoordinationThread, DevTask, UserIdentity, Workspace, WorkspaceMembership
+from xyn_orchestrator.models import (
+    Application,
+    CoordinationEvent,
+    CoordinationThread,
+    DevTask,
+    Goal,
+    UserIdentity,
+    Workspace,
+    WorkspaceMembership,
+)
 from xyn_orchestrator.xco import derive_work_queue
-from xyn_orchestrator.xyn_api import _dispatch_next_queue_item, _update_thread_status_from_tasks, thread_detail, thread_review, threads_collection, xco_queue_collection
+from xyn_orchestrator.xyn_api import (
+    _coordination_task_lookup_factory,
+    _dispatch_next_queue_item,
+    _dispatch_selected_queue_item,
+    _update_thread_status_from_tasks,
+    dev_task_dispatch,
+    thread_detail,
+    thread_review,
+    threads_collection,
+    xco_queue_collection,
+)
 
 
 class XcoThreadTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
+        suffix = uuid.uuid4().hex[:8]
         user_model = get_user_model()
-        self.user = user_model.objects.create_user(username="xco-admin", email="xco@example.com", password="password")
+        self.user = user_model.objects.create_user(
+            username=f"xco-admin-{suffix}",
+            email=f"xco-{suffix}@example.com",
+            password="password",
+        )
         self.user.is_staff = True
         self.user.save(update_fields=["is_staff"])
         self.identity = UserIdentity.objects.create(
             provider="oidc",
             issuer="https://issuer.example.com",
-            subject="xco-admin",
-            email="xco@example.com",
+            subject=f"xco-admin-{suffix}",
+            email=f"xco-{suffix}@example.com",
         )
-        self.workspace = Workspace.objects.create(name="XCO Workspace", slug="xco-workspace")
+        self.workspace = Workspace.objects.create(name="XCO Workspace", slug=f"xco-workspace-{suffix}")
         WorkspaceMembership.objects.create(
             workspace=self.workspace,
             user_identity=self.identity,
@@ -75,6 +99,9 @@ class XcoThreadTests(TestCase):
             "created_by": self.user,
             "updated_by": self.user,
             "coordination_thread": thread,
+            "target_repo": "xyn-platform",
+            "target_branch": "develop",
+            "runtime_workspace_id": thread.workspace_id,
         }
         defaults.update(overrides)
         return DevTask.objects.create(**defaults)
@@ -209,10 +236,160 @@ class XcoThreadTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(payload["items"][0]["work_item_id"], "wi-queue")
         self.assertEqual(payload["items"][0]["thread_priority"], "critical")
+        self.assertEqual(payload["items"][0]["queue_state"]["status"], "queue_ready")
+
+    def test_xco_queue_endpoint_includes_fresh_goal_work_without_runtime_workspace_id(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Fresh effort",
+            summary="Current effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-fresh",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"fresh-{uuid.uuid4().hex}",
+            request_objective="Fresh application effort",
+        )
+        goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Fresh goal",
+            description="Queueable fresh work",
+            source_conversation_id="thread-fresh",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        thread = self._create_thread(goal=goal, priority="critical")
+        self._create_task(
+            thread,
+            work_item_id="wi-fresh",
+            runtime_workspace_id=None,
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request("/xyn/api/xco/queue", data={"workspace_id": str(self.workspace.id)})
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = xco_queue_collection(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["items"][0]["work_item_id"], "wi-fresh")
+
+    def test_xco_queue_endpoint_includes_approved_work_on_queued_thread_without_auto_resume(self):
+        thread = self._create_thread(status="queued", priority="critical", execution_policy={"auto_resume": False})
+        self._create_task(
+            thread,
+            work_item_id="wi-queued-thread",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request("/xyn/api/xco/queue", data={"workspace_id": str(self.workspace.id)})
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = xco_queue_collection(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["items"][0]["work_item_id"], "wi-queued-thread")
+
+    def test_xco_queue_endpoint_excludes_gated_unapproved_work(self):
+        thread = self._create_thread(priority="critical")
+        self._create_task(
+            thread,
+            work_item_id="wi-needs-review",
+            execution_brief={"schema_version": "v1", "summary": "Blocked handoff"},
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request("/xyn/api/xco/queue", data={"workspace_id": str(self.workspace.id)})
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = xco_queue_collection(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["items"], [])
+
+    def test_xco_queue_endpoint_excludes_work_from_archived_applications(self):
+        archived_application = Application.objects.create(
+            workspace=self.workspace,
+            name="Archived effort",
+            summary="Historical effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-archived",
+            requested_by=self.identity,
+            status="archived",
+            plan_fingerprint=f"archived-{uuid.uuid4().hex}",
+            request_objective="Historical application effort",
+        )
+        archived_goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=archived_application,
+            title="Archived goal",
+            description="Should not remain queue-eligible.",
+            source_conversation_id="thread-archived",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        archived_thread = self._create_thread(goal=archived_goal, title="Archived thread", priority="critical")
+        self._create_task(
+            archived_thread,
+            work_item_id="wi-archived",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+
+        active_application = Application.objects.create(
+            workspace=self.workspace,
+            name="Active effort",
+            summary="Current effort",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-active",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"active-{uuid.uuid4().hex}",
+            request_objective="Current application effort",
+        )
+        active_goal = Goal.objects.create(
+            workspace=self.workspace,
+            application=active_application,
+            title="Active goal",
+            description="Should remain queue-eligible.",
+            source_conversation_id="thread-active",
+            requested_by=self.identity,
+            goal_type="build_system",
+            priority="normal",
+            planning_status="decomposed",
+        )
+        active_thread = self._create_thread(goal=active_goal, title="Active thread", priority="high")
+        self._create_task(
+            active_thread,
+            work_item_id="wi-active",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+
+        request = self._request("/xyn/api/xco/queue", data={"workspace_id": str(self.workspace.id)})
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = xco_queue_collection(request)
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual([item["work_item_id"] for item in payload["items"]], ["wi-active"])
 
     def test_dispatch_next_queue_item_creates_runtime_dispatch_and_events(self):
         thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
-        task = self._create_task(thread, work_item_id="wi-dispatch")
+        task = self._create_task(
+            thread,
+            work_item_id="wi-dispatch",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+            target_repo="xyn-platform",
+            target_branch="develop",
+        )
 
         with mock.patch(
             "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
@@ -229,6 +406,180 @@ class XcoThreadTests(TestCase):
         self.assertIn("run_dispatched_from_queue", event_types)
         task.refresh_from_db()
         self.assertEqual(str(task.coordination_thread_id), str(thread.id))
+
+    def test_dispatch_selected_queue_item_dispatches_requested_ready_task(self):
+        thread = self._create_thread(status="active", priority="high", execution_policy={"auto_resume": True})
+        task = self._create_task(
+            thread,
+            work_item_id="wi-dispatch",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        with mock.patch(
+            "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
+            return_value={"run_id": "run-selected", "status": "queued", "work_item_id": "wi-dispatch"},
+        ):
+            result = _dispatch_selected_queue_item(workspace=self.workspace, task=task, user=self.user, identity=self.identity)
+        self.assertEqual(result["run_id"], "run-selected")
+        thread.refresh_from_db()
+        self.assertEqual(thread.status, "active")
+        task.refresh_from_db()
+        self.assertEqual(str(task.coordination_thread_id), str(thread.id))
+
+    def test_dispatch_selected_queue_item_tolerates_non_uuid_dependency_references(self):
+        dependency_thread = self._create_thread(title="Dependency Thread", status="completed", priority="normal")
+        dependency = self._create_task(
+            dependency_thread,
+            work_item_id="goal-nonuuid-dependency",
+            execution_brief={"schema_version": "v1", "summary": "Dependency handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        thread = self._create_thread(status="active", priority="high", execution_policy={"auto_resume": True})
+        task = self._create_task(
+            thread,
+            work_item_id="wi-dispatch",
+            dependency_work_item_ids=["goal-nonuuid-dependency"],
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        dependency.status = "completed"
+        dependency.save(update_fields=["status", "updated_at"])
+        queue = derive_work_queue(
+            threads=CoordinationThread.objects.filter(id=thread.id).prefetch_related("work_items"),
+            status_lookup=lambda row: row.status,
+            task_lookup=_coordination_task_lookup_factory(str(self.workspace.id)),
+        )
+        self.assertEqual([entry.work_item_id for entry in queue], ["wi-dispatch"])
+
+    def test_dev_task_dispatch_rejects_non_ready_selected_task(self):
+        thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
+        task = self._create_task(
+            thread,
+            work_item_id="wi-blocked",
+            execution_brief={"schema_version": "v1", "summary": "Needs review"},
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request(
+            f"/xyn/api/dev-tasks/{task.id}/dispatch",
+            method="post",
+            data=json.dumps({"workspace_id": str(self.workspace.id)}),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = dev_task_dispatch(request, str(task.id))
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertIn("Execution brief review is required", payload["error"])
+
+    def test_dev_task_dispatch_explains_when_another_queue_item_is_next(self):
+        thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
+        first = self._create_task(
+            thread,
+            title="First ready task",
+            work_item_id="wi-first",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        second = self._create_task(
+            thread,
+            title="Second ready task",
+            work_item_id="wi-second",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request(
+            f"/xyn/api/dev-tasks/{second.id}/dispatch",
+            method="post",
+            data=json.dumps({"workspace_id": str(self.workspace.id)}),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1]:
+            response = dev_task_dispatch(request, str(second.id))
+        self.assertIn(response.status_code, {409, 502})
+        payload = json.loads(response.content)
+        self.assertIn("First ready task is next in the execution queue", payload["error"])
+        queue_state = payload["work_item"]["execution_queue"]
+        self.assertFalse(queue_state["selected_for_dispatch"])
+        self.assertEqual(queue_state["next_dispatchable_task_id"], str(first.id))
+        self.assertEqual(queue_state["next_dispatchable_work_item_id"], "wi-first")
+
+    def test_dev_task_dispatch_endpoint_dispatches_selected_task(self):
+        thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
+        task = self._create_task(
+            thread,
+            work_item_id="wi-selected",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request(
+            f"/xyn/api/dev-tasks/{task.id}/dispatch",
+            method="post",
+            data=json.dumps({"workspace_id": str(self.workspace.id)}),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1], mock.patch(
+            "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
+            return_value={"run_id": "run-selected-endpoint", "status": "queued", "work_item_id": "wi-selected"},
+        ):
+            response = dev_task_dispatch(request, str(task.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["status"], "dispatched")
+        self.assertEqual(payload["queue_item"]["work_item_id"], "wi-selected")
+
+    def test_dev_task_dispatch_endpoint_dispatches_selected_task_from_queued_thread_without_auto_resume(self):
+        thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": False})
+        task = self._create_task(
+            thread,
+            work_item_id="wi-selected-queued",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request(
+            f"/xyn/api/dev-tasks/{task.id}/dispatch",
+            method="post",
+            data=json.dumps({"workspace_id": str(self.workspace.id)}),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1], mock.patch(
+            "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
+            return_value={"run_id": "run-selected-queued", "status": "queued", "work_item_id": "wi-selected-queued"},
+        ):
+            response = dev_task_dispatch(request, str(task.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["status"], "dispatched")
+        self.assertEqual(payload["queue_item"]["work_item_id"], "wi-selected-queued")
+
+    def test_dispatch_next_queue_item_skips_unapproved_work(self):
+        blocked_thread = self._create_thread(status="queued", priority="critical", execution_policy={"auto_resume": True}, title="Blocked")
+        self._create_task(
+            blocked_thread,
+            work_item_id="wi-blocked",
+            execution_brief={"schema_version": "v1", "summary": "Needs review"},
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
+        )
+        ready_thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True}, title="Ready")
+        ready_task = self._create_task(
+            ready_thread,
+            work_item_id="wi-ready",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        with mock.patch(
+            "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
+            return_value={"run_id": "run-ready", "status": "queued", "work_item_id": "wi-ready"},
+        ):
+            result = _dispatch_next_queue_item(workspace=self.workspace, user=self.user, identity=self.identity)
+        self.assertEqual(result["work_item_id"], "wi-ready")
+        ready_task.refresh_from_db()
+        self.assertEqual(str(ready_task.coordination_thread_id), str(ready_thread.id))
 
     def test_thread_progress_reports_not_started_when_no_work_exists(self):
         thread = self._create_thread(title="Empty")
@@ -281,6 +632,62 @@ class XcoThreadTests(TestCase):
         self.assertEqual(metrics.failed_work_items, 1)
         self.assertEqual(metrics.blocked_work_items, 1)
 
+    def test_thread_execution_metrics_handle_zero_runs(self):
+        thread = self._create_thread(title="No Runs Metrics", status="active")
+        self._create_task(thread, title="Queued task", status="queued", work_item_id="wi-queued")
+        metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(metrics.average_run_duration_seconds, 0)
+        self.assertEqual(metrics.total_completed_work_items, 0)
+        self.assertEqual(metrics.failed_work_items, 0)
+        self.assertEqual(metrics.blocked_work_items, 0)
+
+    def test_thread_execution_metrics_handle_failed_only_runtime_history(self):
+        thread = self._create_thread(title="Failed Runs Metrics", status="active")
+        task_a = self._create_task(thread, title="Fail A", status="failed", work_item_id="wi-fail-a")
+        task_b = self._create_task(thread, title="Fail B", status="failed", work_item_id="wi-fail-b")
+
+        def runtime_detail_lookup(task):
+            started = "2026-03-12T10:00:00Z" if task.id == task_a.id else "2026-03-12T11:00:00Z"
+            completed = "2026-03-12T10:02:00Z" if task.id == task_a.id else "2026-03-12T11:03:00Z"
+            return {"started_at": started, "completed_at": completed, "status": "failed"}
+
+        metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=runtime_detail_lookup)
+        self.assertEqual(metrics.average_run_duration_seconds, 150)
+        self.assertEqual(metrics.total_completed_work_items, 0)
+        self.assertEqual(metrics.failed_work_items, 2)
+        self.assertEqual(metrics.blocked_work_items, 0)
+
+    def test_thread_execution_metrics_handle_blocked_work_without_execution(self):
+        thread = self._create_thread(title="Blocked Without Execution", status="paused")
+        self._create_task(
+            thread,
+            title="Blocked task",
+            status="queued",
+            work_item_id="wi-blocked",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=lambda _task: None)
+        self.assertEqual(metrics.average_run_duration_seconds, 0)
+        self.assertEqual(metrics.total_completed_work_items, 0)
+        self.assertEqual(metrics.failed_work_items, 0)
+        self.assertEqual(metrics.blocked_work_items, 1)
+
+    def test_thread_execution_metrics_handle_extreme_duration_variance(self):
+        thread = self._create_thread(title="Variance Thread", status="active")
+        fast = self._create_task(thread, title="Fast", status="completed", work_item_id="wi-fast")
+        slow = self._create_task(thread, title="Slow", status="completed", work_item_id="wi-slow")
+
+        def runtime_detail_lookup(task):
+            if task.id == fast.id:
+                return {"started_at": "2026-03-12T10:00:00Z", "completed_at": "2026-03-12T10:01:00Z", "status": "completed"}
+            if task.id == slow.id:
+                return {"started_at": "2026-03-12T11:00:00Z", "completed_at": "2026-03-12T12:00:00Z", "status": "completed"}
+            return None
+
+        metrics = compute_thread_execution_metrics(thread, runtime_detail_lookup=runtime_detail_lookup)
+        self.assertEqual(metrics.average_run_duration_seconds, 1830)
+        self.assertEqual(metrics.total_completed_work_items, 2)
+
     def test_build_thread_timeline_reconstructs_ordered_lifecycle_from_durable_state(self):
         thread = self._create_thread(title="Timeline Thread")
         task = self._create_task(thread, title="Implement scheduler", status="completed", work_item_id="wi-timeline")
@@ -322,6 +729,76 @@ class XcoThreadTests(TestCase):
         blocked = [entry for entry in timeline if entry["event_type"] == "work_item_blocked"]
         self.assertEqual(len(blocked), 1)
         self.assertEqual(blocked[0]["work_item_id"], "wi-blocked")
+
+    def test_build_thread_timeline_uses_stable_order_for_identical_timestamps(self):
+        thread = self._create_thread(title="Equal Timestamp Timeline")
+        task_a = self._create_task(thread, title="Task A", status="completed", work_item_id="wi-a")
+        task_b = self._create_task(thread, title="Task B", status="completed", work_item_id="wi-b")
+        shared = timezone.now() - timezone.timedelta(minutes=5)
+        DevTask.objects.filter(id__in=[task_a.id, task_b.id]).update(created_at=shared, updated_at=shared)
+
+        def runtime_detail_lookup(task):
+            return {
+                "id": f"run-{task.work_item_id}",
+                "run_id": f"run-{task.work_item_id}",
+                "status": "completed",
+                "started_at": shared,
+                "completed_at": shared,
+                "summary": f"{task.title} completed",
+            }
+
+        first = serialize_thread_timeline(build_thread_timeline(thread, runtime_detail_lookup=runtime_detail_lookup))
+        second = serialize_thread_timeline(build_thread_timeline(thread, runtime_detail_lookup=runtime_detail_lookup))
+        self.assertEqual(
+            [(entry["event_type"], entry["work_item_id"], entry["run_id"], entry["id"]) for entry in first],
+            [(entry["event_type"], entry["work_item_id"], entry["run_id"], entry["id"]) for entry in second],
+        )
+        self.assertEqual(
+            [(entry["event_type"], entry["work_item_id"]) for entry in first],
+            [
+                ("work_item_completed", "wi-a"),
+                ("work_item_completed", "wi-b"),
+                ("work_item_queued", "wi-a"),
+                ("work_item_queued", "wi-b"),
+                ("work_item_running", "wi-a"),
+                ("work_item_running", "wi-b"),
+            ],
+        )
+
+    def test_build_thread_timeline_orders_blocked_before_completed_when_timestamp_matches(self):
+        thread = self._create_thread(title="Blocked and Completed")
+        blocked_task = self._create_task(
+            thread,
+            title="Blocked",
+            status="queued",
+            work_item_id="wi-blocked",
+            dependency_work_item_ids=["missing-dependency"],
+        )
+        completed_task = self._create_task(thread, title="Completed", status="completed", work_item_id="wi-completed")
+        shared = timezone.now() - timezone.timedelta(minutes=2)
+        DevTask.objects.filter(id__in=[blocked_task.id, completed_task.id]).update(created_at=shared, updated_at=shared)
+
+        timeline = serialize_thread_timeline(
+            build_thread_timeline(
+                thread,
+                runtime_detail_lookup=lambda task: {
+                    "id": "run-completed",
+                    "run_id": "run-completed",
+                    "status": "completed",
+                    "started_at": shared,
+                    "completed_at": shared,
+                }
+                if task.id == completed_task.id
+                else None,
+            )
+        )
+        same_timestamp_entries = [
+            entry for entry in timeline if entry["created_at"] == shared and entry["event_type"] in {"work_item_blocked", "work_item_completed"}
+        ]
+        self.assertEqual(
+            [(entry["event_type"], entry["work_item_id"]) for entry in same_timestamp_entries],
+            [("work_item_blocked", "wi-blocked"), ("work_item_completed", "wi-completed")],
+        )
 
     def test_thread_detail_returns_computed_execution_timeline(self):
         thread = self._create_thread(title="Detail Timeline")
@@ -460,6 +937,29 @@ class XcoThreadTests(TestCase):
         self.assertEqual(diagnostic.status, "blocked")
         self.assertIn("blocked work item", " ".join(diagnostic.evidence).lower())
 
+    def test_thread_diagnostic_detects_execution_brief_review_block(self):
+        thread = self._create_thread(title="Brief Review Thread", status="active")
+        self._create_task(
+            thread,
+            title="Needs brief review",
+            status="queued",
+            work_item_id="wi-brief-review",
+            execution_brief={"schema_version": "v1", "summary": "Blocked handoff"},
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
+        )
+        diagnostic = compute_thread_diagnostic(
+            thread,
+            progress=compute_thread_progress(thread),
+            metrics=compute_thread_execution_metrics(thread),
+            timeline=build_thread_timeline(thread),
+            recent_runs=[],
+            recent_artifacts=[],
+        )
+        self.assertEqual(diagnostic.status, "blocked")
+        self.assertTrue(any("execution brief review" in entry.lower() for entry in diagnostic.observations))
+        self.assertTrue(any("brief review" in entry.lower() for entry in diagnostic.evidence))
+
     def test_thread_diagnostic_detects_high_artifact_churn(self):
         thread = self._create_thread(title="Churn Thread", status="active")
         self._create_task(thread, title="Artifact work", status="completed", work_item_id="wi-artifact")
@@ -587,6 +1087,28 @@ class XcoThreadTests(TestCase):
                 event_type="approval_queue_next_slice",
             ).exists()
         )
+
+    def test_thread_review_queue_next_slice_surfaces_brief_review_block(self):
+        thread = self._create_thread(status="active", priority="high")
+        self._create_task(
+            thread,
+            work_item_id="wi-needs-brief-review",
+            status="queued",
+            execution_brief={"schema_version": "v1", "summary": "Blocked handoff"},
+            execution_brief_review_state="draft",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request(
+            f"/xyn/api/threads/{thread.id}/review",
+            method="post",
+            data=json.dumps({"review_action": "queue_next_slice"}),
+        )
+        with self._auth_patches()[0]:
+            response = thread_review(request, str(thread.id))
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["status"], "brief_review_required")
+        self.assertIn("execution brief review", payload["summary"].lower())
 
     def test_thread_review_resume_and_complete_follow_coordination_state_rules(self):
         thread = self._create_thread(status="paused")

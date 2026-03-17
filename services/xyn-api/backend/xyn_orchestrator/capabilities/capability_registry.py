@@ -1,0 +1,242 @@
+from .capability_models import Capability, CapabilityPrecondition
+
+
+CAPABILITIES = [
+    Capability(
+        id="build_application",
+        name="Build an application",
+        description="Create a new software application.",
+        contexts=["landing"],
+        prompt_template="Build an application that...",
+        visibility="primary",
+        priority=10,
+        default_assumptions={
+            "database": "PostgreSQL",
+            "interface": "Xyn language interface",
+            "deployment": "Kubernetes service",
+        },
+        default_dependencies=["FastAPI", "SQLAlchemy"],
+        default_components=["application_service", "data_models", "api_endpoints"],
+        generated_artifacts=["application"],
+    ),
+    Capability(
+        id="write_article",
+        name="Write an article",
+        description="Create a written article artifact.",
+        contexts=["landing"],
+        prompt_template="Write an article about...",
+        visibility="primary",
+        priority=9,
+        default_assumptions={
+            "format": "Markdown article draft",
+            "workflow": "editor-first revision flow",
+        },
+        default_dependencies=["Markdown renderer", "Article governance lifecycle"],
+        default_components=["article_draft", "revision_history", "publication_controls"],
+        generated_artifacts=["article"],
+    ),
+    Capability(
+        id="create_explainer_video",
+        name="Create an explainer video",
+        description="Create a narrated explainer video artifact.",
+        contexts=["landing"],
+        prompt_template="Create an explainer video explaining...",
+        visibility="primary",
+        priority=8,
+        default_assumptions={
+            "interface": "Article-to-video generation flow",
+            "delivery": "Generated video artifact",
+        },
+        default_dependencies=["Storyboard generation", "Narration generation"],
+        default_components=["script", "storyboard", "visual_prompts", "video_render"],
+        generated_artifacts=["video_render"],
+    ),
+    Capability(
+        id="explore_artifacts",
+        name="Explore artifacts",
+        description="View existing artifacts in the workspace.",
+        contexts=["landing", "application_workspace", "artifact_registry", "console"],
+        prompt_template="Show my artifacts",
+        visibility="secondary",
+        priority=7,
+        default_assumptions={"surface": "Artifact registry"},
+        default_components=["artifact_registry", "artifact_search"],
+        generated_artifacts=["artifact_list"],
+        action_type="prompt",
+    ),
+    Capability(
+        id="view_artifact_details",
+        name="View artifact details",
+        description="Inspect the current artifact and its available surfaces.",
+        contexts=["artifact_detail", "artifact_registry"],
+        prompt_template="Show details for this artifact.",
+        visibility="primary",
+        priority=9,
+        default_assumptions={"surface": "Artifact detail"},
+        default_components=["artifact_detail", "available_surfaces"],
+        generated_artifacts=["artifact_detail"],
+        action_type="open_descriptor",
+        action_target="fromArtifactDetail",
+    ),
+    Capability(
+        id="revise_draft",
+        name="Revise this draft",
+        description="Make a targeted change to the draft you are viewing.",
+        contexts=["artifact_draft"],
+        prompt_template="Revise this draft to...",
+        visibility="primary",
+        priority=10,
+        default_assumptions={"workflow": "draft revision"},
+        default_dependencies=["Draft session context", "Validation checks"],
+        default_components=["draft_editor", "revision_summary"],
+        generated_artifacts=["draft_revision"],
+        action_type="prompt",
+    ),
+    Capability(
+        id="summarize_draft",
+        name="Summarize this draft",
+        description="Summarize the current draft before revising it.",
+        contexts=["artifact_draft"],
+        prompt_template="Summarize this draft and highlight what should change.",
+        visibility="secondary",
+        priority=7,
+        default_assumptions={"workflow": "draft analysis"},
+        default_components=["draft_summary", "change_recommendations"],
+        generated_artifacts=["draft_summary"],
+        action_type="prompt",
+    ),
+    Capability(
+        id="continue_application",
+        name="Continue this application",
+        description="Advance the current application build from its current state.",
+        contexts=["application_workspace"],
+        prompt_template="Continue building this application.",
+        visibility="primary",
+        priority=10,
+        default_assumptions={
+            "execution": "threaded development workflow",
+            "review": "brief inspection before execution",
+        },
+        default_dependencies=["Planning assistant", "Coding assistant"],
+        default_components=["goal_portfolio", "coordination_threads", "dev_tasks"],
+        generated_artifacts=["application_progress"],
+        action_type="prompt",
+    ),
+    Capability(
+        id="continue_application_draft",
+        name="Continue application design",
+        description="Continue shaping the current application draft in the workbench.",
+        contexts=["app_intent_draft"],
+        prompt_template="Continue application design for this draft.",
+        visibility="primary",
+        priority=10,
+        default_assumptions={"surface": "Application draft workspace"},
+        default_components=["application_draft", "workbench_handoff"],
+        generated_artifacts=["application_draft_progress"],
+        action_type="prompt",
+        guard_type="draft_state",
+        guard_target="draft,plan_ready",
+        preconditions=[
+            CapabilityPrecondition(
+                guard_type="draft_state",
+                guard_target="draft,plan_ready",
+                failure_code="draft_not_editable",
+                failure_message="This draft is no longer in an editable state.",
+            )
+        ],
+    ),
+    Capability(
+        id="open_application_workspace",
+        name="Open application workspace",
+        description="Open the application workbench for this application context.",
+        contexts=["app_intent_draft", "application_workspace", "console", "artifact_detail"],
+        prompt_template="Open application workspace.",
+        visibility="secondary",
+        priority=8,
+        default_assumptions={"shell": "workbench"},
+        default_components=["composer", "application_panels"],
+        generated_artifacts=["application_workspace"],
+        action_type="open_descriptor",
+        action_target="fromApplicationWorkspace",
+        guard_type="application_exists",
+        guard_target="application",
+        preconditions=[
+            CapabilityPrecondition(
+                guard_type="application_exists",
+                guard_target="application",
+                failure_code="application_missing",
+                failure_message="The application has not been generated yet.",
+            )
+        ],
+    ),
+    Capability(
+        id="view_execution_status",
+        name="View execution status",
+        description="Inspect the latest execution state for this application draft.",
+        contexts=["app_intent_draft", "artifact_detail"],
+        prompt_template="Show the execution status for this draft.",
+        visibility="secondary",
+        priority=7,
+        default_assumptions={"surface": "Draft execution timeline"},
+        default_components=["workflow_status", "job_summary"],
+        generated_artifacts=["execution_status"],
+        action_type="route",
+        action_target="workspace_jobs",
+        guard_type="attribute_in",
+        guard_target="execution_state:submitted,queued,executing,completed,failed",
+        preconditions=[
+            CapabilityPrecondition(
+                guard_type="attribute_in",
+                guard_target="execution_state:submitted,queued,executing,completed,failed",
+                failure_code="execution_missing",
+                failure_message="No execution is available for this item yet.",
+            )
+        ],
+    ),
+    Capability(
+        id="inspect_application_goals",
+        name="Inspect application goals",
+        description="Review the current goals and execution slices for this application.",
+        contexts=["application_workspace"],
+        prompt_template="Show the current goals for this application.",
+        visibility="secondary",
+        priority=8,
+        default_assumptions={"surface": "Composer workspace review"},
+        default_components=["goals", "threads", "execution_summaries"],
+        generated_artifacts=["goal_review"],
+        action_type="prompt",
+    ),
+    Capability(
+        id="review_plan",
+        name="Review this plan",
+        description="Inspect the generated plan before applying it.",
+        contexts=["plan_review"],
+        prompt_template="Review this application plan and highlight the next decision.",
+        visibility="primary",
+        priority=10,
+        default_assumptions={
+            "database": "PostgreSQL",
+            "interface": "Xyn language interface",
+            "deployment": "Kubernetes service",
+        },
+        default_dependencies=["FastAPI", "SQLAlchemy"],
+        default_components=["application_service", "data_models", "api_endpoints"],
+        generated_artifacts=["application_plan"],
+        action_type="prompt",
+    ),
+]
+
+
+def get_capabilities_for_context(context: str):
+    caps = [capability for capability in CAPABILITIES if context in capability.contexts]
+    return sorted(caps, key=lambda capability: capability.priority, reverse=True)
+
+
+def get_capability_by_id(capability_id: str):
+    target = str(capability_id or "").strip()
+    if not target:
+        return None
+    for capability in CAPABILITIES:
+        if capability.id == target:
+            return capability
+    return None

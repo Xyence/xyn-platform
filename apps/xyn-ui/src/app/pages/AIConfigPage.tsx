@@ -89,15 +89,10 @@ export default function AIConfigPage() {
   const createButtonRef = useRef<HTMLButtonElement | null>(null);
   const modalFirstFieldRef = useRef<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null>(null);
 
-  const tabParam = String(searchParams.get("tab") || "").trim();
-  const activeTab: AiConfigTab = (AI_TABS.find((item) => item.value === tabParam)?.value || "agents") as AiConfigTab;
-
-  useEffect(() => {
-    if (tabParam && AI_TABS.some((item) => item.value === tabParam)) return;
-    const nextParams = new URLSearchParams(searchParams);
-    nextParams.set("tab", "agents");
-    setSearchParams(nextParams, { replace: true });
-  }, [searchParams, setSearchParams, tabParam]);
+  const activeTab = useMemo(() => {
+    const tabParam = String(searchParams.get("tab") || "").trim();
+    return (AI_TABS.find((item) => item.value === tabParam)?.value || "agents") as AiConfigTab;
+  }, [searchParams]);
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -123,6 +118,13 @@ export default function AIConfigPage() {
   const [modelConfigEdit, setModelConfigEdit] = useState<ModelConfigEditForm | null>(null);
   const [agentEdit, setAgentEdit] = useState<AgentEditForm | null>(null);
   const [purposeEdit, setPurposeEdit] = useState<AiPurpose | null>(null);
+
+  const agentsRef = useRef<AiAgent[]>([]);
+  agentsRef.current = agents;
+  const modelConfigsRef = useRef<AiModelConfig[]>([]);
+  modelConfigsRef.current = modelConfigs;
+  const purposesRef = useRef<AiPurpose[]>([]);
+  purposesRef.current = purposes;
 
   const [createCredentialForm, setCreateCredentialForm] = useState({
     provider: "openai" as "openai" | "anthropic" | "google",
@@ -183,10 +185,21 @@ export default function AIConfigPage() {
   }, [closeCreateModal, createModal, saving]);
 
   const updateTab = (next: AiConfigTab) => {
+    if (next === activeTab) return;
     const nextParams = new URLSearchParams(searchParams);
     nextParams.set("tab", next);
     setSearchParams(nextParams, { replace: true });
   };
+
+  const toggleSelection = useCallback((current: string[], nextValue: string) => {
+    return current.includes(nextValue) ? current.filter((value) => value !== nextValue) : [...current, nextValue];
+  }, []);
+
+  const toggleContextPackSelection = useCallback((current: Array<{ id: string }>, nextValue: string) => {
+    return current.some((entry) => entry.id === nextValue)
+      ? current.filter((entry) => entry.id !== nextValue)
+      : [...current, { id: nextValue }];
+  }, []);
 
   const syncSelections = useCallback(() => {
     setSelectedCredentialId((prev) => (prev && credentials.some((item) => item.id === prev) ? prev : credentials[0]?.id || null));
@@ -252,7 +265,7 @@ export default function AIConfigPage() {
   }, [syncSelections]);
 
   useEffect(() => {
-    const selected = modelConfigs.find((item) => item.id === selectedModelConfigId) || null;
+    const selected = modelConfigsRef.current.find((item) => item.id === selectedModelConfigId) || null;
     if (!selected) {
       setModelConfigEdit(null);
       return;
@@ -269,10 +282,10 @@ export default function AIConfigPage() {
       presence_penalty: String(selected.presence_penalty ?? 0),
       enabled: Boolean(selected.enabled),
     });
-  }, [modelConfigs, selectedModelConfigId]);
+  }, [selectedModelConfigId]);
 
   useEffect(() => {
-    const selected = agents.find((item) => item.id === selectedAgentId) || null;
+    const selected = agentsRef.current.find((item) => item.id === selectedAgentId) || null;
     if (!selected) {
       setAgentEdit(null);
       return;
@@ -300,12 +313,12 @@ export default function AIConfigPage() {
       enabled: selected.enabled,
       is_default: Boolean(selected.is_default),
     });
-  }, [agents, selectedAgentId]);
+  }, [selectedAgentId]);
 
   useEffect(() => {
-    const selected = purposes.find((item) => item.slug === selectedPurposeSlug) || null;
+    const selected = purposesRef.current.find((item) => item.slug === selectedPurposeSlug) || null;
     setPurposeEdit(selected);
-  }, [purposes, selectedPurposeSlug]);
+  }, [selectedPurposeSlug]);
 
   const selectedCredential = useMemo(() => credentials.find((item) => item.id === selectedCredentialId) || null, [credentials, selectedCredentialId]);
   const selectedModelConfig = useMemo(() => modelConfigs.find((item) => item.id === selectedModelConfigId) || null, [modelConfigs, selectedModelConfigId]);
@@ -620,12 +633,29 @@ export default function AIConfigPage() {
                   ))}
                 </select>
               </label>
-              <label>Purposes (multi-select)
-                <select multiple className="input" value={agentEdit.purposes} onChange={(event) => setAgentEdit({ ...agentEdit, purposes: Array.from(event.target.selectedOptions).map((option) => option.value) })}>
-                  {filteredPurposes.map((purpose) => (
-                    <option key={purpose.slug} value={purpose.slug}>{purpose.slug}</option>
-                  ))}
-                </select>
+              <label>
+                <span>Purposes</span>
+                <div className="instance-list">
+                  {filteredPurposes.map((purpose) => {
+                    const selected = agentEdit.purposes.includes(purpose.slug);
+                    return (
+                      <button
+                        key={purpose.slug}
+                        type="button"
+                        className={`instance-row ${selected ? "active" : ""}`}
+                        aria-pressed={selected}
+                        onClick={() => setAgentEdit({ ...agentEdit, purposes: toggleSelection(agentEdit.purposes, purpose.slug) })}
+                      >
+                        <div>
+                          <strong>{purpose.name || purpose.slug}</strong>
+                          <span className="muted small">{purpose.slug}</span>
+                        </div>
+                        <span className="muted small">{selected ? "Selected" : "Select"}</span>
+                      </button>
+                    );
+                  })}
+                  {!filteredPurposes.length ? <p className="muted">No active purposes available.</p> : null}
+                </div>
               </label>
               <label>Enabled
                 <select value={agentEdit.enabled ? "yes" : "no"} onChange={(event) => setAgentEdit({ ...agentEdit, enabled: event.target.value === "yes" })}>
@@ -639,24 +669,34 @@ export default function AIConfigPage() {
                   <option value="no">No</option>
                 </select>
               </label>
-              <label>Default context packs
-                <select
-                  multiple
-                  className="input"
-                  value={agentEdit.default_context_pack_refs_json.map((entry) => entry.id)}
-                  onChange={(event) =>
-                    setAgentEdit({
-                      ...agentEdit,
-                      default_context_pack_refs_json: Array.from(event.target.selectedOptions).map((option) => ({ id: option.value })),
-                    })
-                  }
-                >
-                  {contextPacks.map((pack) => (
-                    <option key={pack.id} value={pack.id}>
-                      {pack.name} · v{pack.version} · {pack.is_active ? "canonical" : "deprecated"}
-                    </option>
-                  ))}
-                </select>
+              <label>
+                <span>Default context packs</span>
+                <div className="instance-list">
+                  {contextPacks.map((pack) => {
+                    const selected = agentEdit.default_context_pack_refs_json.some((entry) => entry.id === pack.id);
+                    return (
+                      <button
+                        key={pack.id}
+                        type="button"
+                        className={`instance-row ${selected ? "active" : ""}`}
+                        aria-pressed={selected}
+                        onClick={() =>
+                          setAgentEdit({
+                            ...agentEdit,
+                            default_context_pack_refs_json: toggleContextPackSelection(agentEdit.default_context_pack_refs_json, pack.id),
+                          })
+                        }
+                      >
+                        <div>
+                          <strong>{pack.name}</strong>
+                          <span className="muted small">v{pack.version} · {pack.is_active ? "canonical" : "deprecated"}</span>
+                        </div>
+                        <span className="muted small">{selected ? "Selected" : "Select"}</span>
+                      </button>
+                    );
+                  })}
+                  {!contextPacks.length ? <p className="muted">No context packs available.</p> : null}
+                </div>
               </label>
               <label>Override prompt (advanced / not recommended)
                 <textarea className="input" rows={8} value={agentEdit.override_prompt_text} onChange={(event) => setAgentEdit({ ...agentEdit, override_prompt_text: event.target.value })} />
@@ -908,31 +948,60 @@ export default function AIConfigPage() {
                   <button type="button" className="ghost sm" onClick={() => { setReturnToCreate("agents"); setCreateModal("model-configs"); }}>
                     Add model config
                   </button>
-                  <label>Purposes (multi-select)
-                    <select multiple className="input" value={createAgentForm.purposes} onChange={(event) => setCreateAgentForm((prev) => ({ ...prev, purposes: Array.from(event.target.selectedOptions).map((option) => option.value) }))}>
-                      {filteredPurposes.map((purpose) => (
-                        <option key={purpose.slug} value={purpose.slug}>{purpose.slug}</option>
-                      ))}
-                    </select>
+                  <label>
+                    <span>Purposes</span>
+                    <div className="instance-list">
+                      {filteredPurposes.map((purpose) => {
+                        const selected = createAgentForm.purposes.includes(purpose.slug);
+                        return (
+                          <button
+                            key={purpose.slug}
+                            type="button"
+                            className={`instance-row ${selected ? "active" : ""}`}
+                            aria-pressed={selected}
+                            onClick={() =>
+                              setCreateAgentForm((prev) => ({ ...prev, purposes: toggleSelection(prev.purposes, purpose.slug) }))
+                            }
+                          >
+                            <div>
+                              <strong>{purpose.name || purpose.slug}</strong>
+                              <span className="muted small">{purpose.slug}</span>
+                            </div>
+                            <span className="muted small">{selected ? "Selected" : "Select"}</span>
+                          </button>
+                        );
+                      })}
+                      {!filteredPurposes.length ? <p className="muted">No active purposes available.</p> : null}
+                    </div>
                   </label>
-                  <label>Default context packs
-                    <select
-                      multiple
-                      className="input"
-                      value={createAgentForm.default_context_pack_refs_json.map((entry) => entry.id)}
-                      onChange={(event) =>
-                        setCreateAgentForm((prev) => ({
-                          ...prev,
-                          default_context_pack_refs_json: Array.from(event.target.selectedOptions).map((option) => ({ id: option.value })),
-                        }))
-                      }
-                    >
-                      {contextPacks.map((pack) => (
-                        <option key={pack.id} value={pack.id}>
-                          {pack.name} · v{pack.version} · {pack.is_active ? "canonical" : "deprecated"}
-                        </option>
-                      ))}
-                    </select>
+                  <label>
+                    <span>Default context packs</span>
+                    <div className="instance-list">
+                      {contextPacks.map((pack) => {
+                        const selected = createAgentForm.default_context_pack_refs_json.some((entry) => entry.id === pack.id);
+                        return (
+                          <button
+                            key={pack.id}
+                            type="button"
+                            className={`instance-row ${selected ? "active" : ""}`}
+                            aria-pressed={selected}
+                            onClick={() =>
+                              setCreateAgentForm((prev) => ({
+                                ...prev,
+                                default_context_pack_refs_json: toggleContextPackSelection(prev.default_context_pack_refs_json, pack.id),
+                              }))
+                            }
+                          >
+                            <div>
+                              <strong>{pack.name}</strong>
+                              <span className="muted small">v{pack.version} · {pack.is_active ? "canonical" : "deprecated"}</span>
+                            </div>
+                            <span className="muted small">{selected ? "Selected" : "Select"}</span>
+                          </button>
+                        );
+                      })}
+                      {!contextPacks.length ? <p className="muted">No context packs available.</p> : null}
+                    </div>
                   </label>
                   <label>Override prompt (advanced / not recommended)
                     <textarea

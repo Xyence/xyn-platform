@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import Tabs from "../components/ui/Tabs";
 
-type HubSection = "general" | "security" | "integrations" | "deploy" | "workspaces";
+export type HubSection = "general" | "security" | "integrations" | "deploy" | "workspaces";
 
 type SurfaceCard = {
   id: string;
@@ -86,7 +86,15 @@ const SURFACES: SurfaceCard[] = [
   },
 ];
 
-export default function PlatformSettingsHubPage({ sectionOverride }: { sectionOverride?: HubSection }) {
+export default function PlatformSettingsHubPage({
+  sectionOverride,
+  onSectionChange,
+  onOpenRoute,
+}: {
+  sectionOverride?: HubSection;
+  onSectionChange?: (section: HubSection) => void;
+  onOpenRoute?: (route: string) => void;
+}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedSection = sectionOverride || String(searchParams.get("section") || "security").trim().toLowerCase();
@@ -108,15 +116,20 @@ export default function PlatformSettingsHubPage({ sectionOverride }: { sectionOv
           value={activeSection}
           options={SECTIONS.map((section) => ({ value: section.value, label: section.label }))}
           onChange={(nextSection) => {
-            const next = new URLSearchParams(searchParams);
-            next.set("section", nextSection);
-            setSearchParams(next, { replace: true });
+            if (nextSection === activeSection) return;
+            if (onSectionChange) {
+              onSectionChange(nextSection as HubSection);
+            } else {
+              const next = new URLSearchParams(searchParams);
+              next.set("section", nextSection);
+              setSearchParams(next, { replace: true });
+            }
           }}
         />
       </div>
 
-      <section className="card" style={{ marginBottom: 12 }}>
-        <p className="muted">{SECTIONS.find((section) => section.value === activeSection)?.description}</p>
+      <section className="card" style={{ marginBottom: 12, padding: "12px 16px", gap: 0 }}>
+        <p className="muted" style={{ margin: 0 }}>{SECTIONS.find((section) => section.value === activeSection)?.description}</p>
       </section>
 
       <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
@@ -127,7 +140,17 @@ export default function PlatformSettingsHubPage({ sectionOverride }: { sectionOv
             </div>
             <p className="muted">{card.description}</p>
             <div className="form-actions">
-              <button type="button" className="ghost" onClick={() => navigate(card.route)}>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => {
+                  if (onOpenRoute) {
+                    onOpenRoute(card.route);
+                    return;
+                  }
+                  navigate(card.route);
+                }}
+              >
                 Open
               </button>
             </div>

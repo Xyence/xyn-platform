@@ -4,6 +4,8 @@ import InlineMessage from "../../components/InlineMessage";
 import { createAppIntentDraft } from "../../api/xyn";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
+import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
+import { openViewDescriptor } from "../navigation/openViewDescriptor";
 
 const EXAMPLE_PROMPT = "Build a network inventory app that stores devices per workspace, with search and status tracking.";
 
@@ -43,7 +45,7 @@ export default function DraftCreatePage({
           initial_intent: {},
         },
       });
-      navigate(toWorkspacePath(workspaceId, `drafts/${draft.id}`));
+      openViewDescriptor(getAppDraftViewDescriptor(draft, workspaceId), navigate);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -57,7 +59,7 @@ export default function DraftCreatePage({
       <div className="page-header">
         <div>
           <h2>New Draft</h2>
-          <p className="muted">Start from a natural-language app request.</p>
+          <p className="muted">Start from a natural-language app request and open directly into an application draft workspace.</p>
         </div>
         <div className="inline-actions">
           <button className="ghost" onClick={() => navigate(toWorkspacePath(workspaceId, "drafts"))}>

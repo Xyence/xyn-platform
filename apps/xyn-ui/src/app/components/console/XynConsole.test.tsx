@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import XynConsoleNode from "./XynConsoleNode";
+import XynConsoleCore from "./XynConsoleCore";
 import { XynConsoleProvider, useXynConsole } from "../../state/xynConsoleStore";
 
 const apiMocks = vi.hoisted(() => ({
@@ -13,6 +14,8 @@ const apiMocks = vi.hoisted(() => ({
   getXynIntentOptions: vi.fn(),
   getRecentArtifacts: vi.fn(),
   executeAppPalettePrompt: vi.fn(),
+  getContextualCapabilities: vi.fn(),
+  getExecutionPlan: vi.fn(),
 }));
 
 vi.mock("../../../api/xyn", () => ({
@@ -22,6 +25,8 @@ vi.mock("../../../api/xyn", () => ({
   getXynIntentOptions: apiMocks.getXynIntentOptions,
   getRecentArtifacts: apiMocks.getRecentArtifacts,
   executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
+  getContextualCapabilities: apiMocks.getContextualCapabilities,
+  getExecutionPlan: apiMocks.getExecutionPlan,
 }));
 
 function renderConsole() {
@@ -39,6 +44,29 @@ function renderConsoleAt(path: string) {
     <MemoryRouter initialEntries={[path]}>
       <XynConsoleProvider>
         <XynConsoleNode />
+      </XynConsoleProvider>
+    </MemoryRouter>
+  );
+}
+
+function renderConsoleCoreAt(path: string, onOpenPanel = vi.fn()) {
+  return {
+    onOpenPanel,
+    ...render(
+      <MemoryRouter initialEntries={[path]}>
+        <XynConsoleProvider>
+          <XynConsoleCore mode="overlay" onOpenPanel={onOpenPanel} />
+        </XynConsoleProvider>
+      </MemoryRouter>
+    ),
+  };
+}
+
+function renderConsolePageAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <XynConsoleProvider>
+        <XynConsoleCore mode="page" />
       </XynConsoleProvider>
     </MemoryRouter>
   );
@@ -137,6 +165,35 @@ describe("XynConsole", () => {
       rows: [],
       text: "",
     });
+    apiMocks.getContextualCapabilities.mockResolvedValue({
+      context: "landing",
+      capabilities: [
+        {
+          id: "build_application",
+          name: "Build an application",
+          description: "Create a new software application.",
+          prompt_template: "Build an application that...",
+          visibility: "primary",
+        },
+      ],
+    });
+    apiMocks.getExecutionPlan.mockResolvedValue({
+      capability_id: "build_application",
+      architecture: {
+        interface: "Xyn language interface",
+        database: "PostgreSQL",
+        deployment: "Kubernetes service",
+      },
+      defaults: {
+        interface: "Xyn language interface",
+        database: "PostgreSQL",
+        deployment: "Kubernetes service",
+      },
+      dependencies: ["FastAPI", "SQLAlchemy"],
+      components: ["application_service", "data_models", "api_endpoints"],
+      generated_commands: [],
+      artifacts: ["application"],
+    });
     apiMocks.previewXynIntent.mockResolvedValue({
       status: "UnsupportedIntent",
       action_type: "ValidateDraft",
@@ -156,6 +213,23 @@ describe("XynConsole", () => {
 
   it("opens from a pointer interaction on the floating palette button", async () => {
     renderConsole();
+    await userEvent.click(screen.getByRole("button", { name: "Xyn (⌘K / Ctrl+K)" }));
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(screen.getByRole("dialog", { name: "Xyn Console" })).toBeInTheDocument();
+  });
+
+  it("renders contextual guidance prompts in page mode and inserts the template", async () => {
+    renderConsolePageAt("/w/ws-1/workbench");
+    const capability = await screen.findByRole("button", { name: /Build an application/i });
+    await userEvent.click(capability);
+    expect(await screen.findByDisplayValue("Build an application that...")).toBeInTheDocument();
+    expect(apiMocks.getContextualCapabilities).toHaveBeenCalled();
+    expect(await screen.findByText("Application Plan")).toBeInTheDocument();
+  });
+
+  it("stays open when launched from a platform settings subpage", async () => {
+    renderConsoleAt("/app/platform/access-control");
     await userEvent.click(screen.getByRole("button", { name: "Xyn (⌘K / Ctrl+K)" }));
     const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
     await waitFor(() => expect(input).toHaveFocus());
@@ -277,6 +351,33 @@ describe("XynConsole", () => {
     await screen.findByText("Will create and submit an app intent draft.");
     expect(screen.getByRole("button", { name: "Create draft" })).toBeInTheDocument();
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+  });
+
+  it("auto-opens direct navigation results without showing the draft dialog", async () => {
+    apiMocks.resolveXynIntent.mockResolvedValue({
+      status: "DraftReady",
+      action_type: "ValidateDraft",
+      artifact_type: "Workspace",
+      artifact_id: null,
+      summary: "Opening the unified composer.",
+      next_actions: [
+        {
+          action: "OpenPanel",
+          panel_key: "composer_detail",
+          label: "Open Composer",
+          params: { workspace_id: "ws-1" },
+        },
+      ],
+    });
+
+    const { onOpenPanel } = renderConsoleCoreAt("/w/ws-1/workbench");
+    const input = await screen.findByPlaceholderText("Describe what you want to create or change...");
+    await userEvent.type(input, "open composer");
+    await userEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() => expect(onOpenPanel).toHaveBeenCalledWith("composer_detail", { workspace_id: "ws-1" }));
+    expect(screen.queryByText("Opening the unified composer.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Draft ready")).not.toBeInTheDocument();
   });
 
   it("clears the prompt input after a draft is created and submitted", async () => {

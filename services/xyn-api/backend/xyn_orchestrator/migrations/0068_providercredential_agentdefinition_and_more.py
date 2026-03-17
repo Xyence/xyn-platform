@@ -43,6 +43,7 @@ def _seed_agent_stub(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
+    atomic = False
 
     dependencies = [
         ("xyn_orchestrator", "0067_modelconfig_modelprovider_agentpurpose_and_more"),

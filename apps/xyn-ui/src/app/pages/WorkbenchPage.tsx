@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layout, Model, Actions, type IJsonModel, type TabNode } from "flexlayout-react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import WorkbenchPanelHost, { type ConsolePanelKey, type ConsolePanelSpec } from "../components/console/WorkbenchPanelHost";
-import { useCapabilitySuggestions } from "../components/console/capabilitySuggestions";
 import { useXynConsole } from "../state/xynConsoleStore";
+import { useContextualCapabilities } from "../components/console/contextualCapabilities";
+import { resolveCapabilityGraphContext } from "../navigation/capabilityContext";
+import { executeCapabilityAction } from "../navigation/executeCapabilityAction";
+import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
+import type { ContextualCapability } from "../../api/types";
 import { buildWorkspaceLayout, derivePanelGroupAssignments, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
 export default function WorkbenchPage({
@@ -23,7 +27,6 @@ export default function WorkbenchPage({
     openPanel,
     setActivePanelId,
     setCanvasContext,
-    requestSubmit,
     setLastArtifactHint,
     panels,
     restorePanels,
@@ -31,13 +34,64 @@ export default function WorkbenchPage({
   } =
     useXynConsole();
   const params = useParams();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const workspaceId = String(params.workspaceId || "").trim();
-  const { landingSuggestions } = useCapabilitySuggestions(workspaceId);
+  const showLandingShell = !activePanel;
+  const landingContext = useMemo(
+    () =>
+      resolveCapabilityGraphContext({
+        pathname: location.pathname,
+        search: location.search,
+        explicitContext: "landing",
+      }),
+    [location.pathname, location.search],
+  );
+  const { capabilities: landingCapabilities } = useContextualCapabilities({
+    enabled: showLandingShell,
+    context: showLandingShell ? landingContext : undefined,
+    workspaceId: showLandingShell ? workspaceId : undefined,
+    includeUnavailable: true,
+  });
   const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
 
   const panelById = useMemo(() => new Map(panels.map((entry) => [entry.panel_id, entry] as const)), [panels]);
-  const model = useMemo(() => Model.fromJson(syncFlexLayoutModel(layoutJson, panels, activePanel?.panel_id || null)), [layoutJson, panels, activePanel?.panel_id]);
+
+  // Stabilize the model: only recreate via Model.fromJson when the set of panel
+  // IDs or the layout JSON changes.  Active-tab selection is applied in-place via
+  // model.doAction so that flexlayout does NOT remount tab components (which
+  // would destroy local state like the settings-hub section selector and
+  // multi-select values).
+  const panelIdSignature = useMemo(() => panels.map((p) => p.panel_id).join("|"), [panels]);
+  const modelRef = useRef<Model | null>(null);
+  // Guard: when true, the next onModelChange is from a programmatic doAction
+  // and should NOT feed back into setLayoutJson (which would recreate the model).
+  const suppressModelChangeRef = useRef(false);
+
+  const model = useMemo(() => {
+    const json = syncFlexLayoutModel(layoutJson, panels, activePanel?.panel_id || null);
+    const m = Model.fromJson(json);
+    modelRef.current = m;
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- panels is
+    // intentionally excluded; panelIdSignature captures structural changes
+    // without triggering on param/title updates.
+  }, [layoutJson, panelIdSignature]);
+
+  // When only the active panel changes, update the selection in-place so the
+  // model reference stays stable and tabs are NOT remounted.
+  useEffect(() => {
+    if (!modelRef.current || !activePanel?.panel_id) return;
+    try {
+      suppressModelChangeRef.current = true;
+      modelRef.current.doAction(Actions.selectTab(activePanel.panel_id));
+    } catch {
+      // Tab may not exist yet — will be handled on next structural sync.
+    } finally {
+      suppressModelChangeRef.current = false;
+    }
+  }, [activePanel?.panel_id]);
 
   useEffect(() => {
     setContext({ artifact_id: null, artifact_type: null });
@@ -57,6 +111,14 @@ export default function WorkbenchPage({
   useEffect(() => {
     if (!activePanel) setCanvasContext(null);
   }, [activePanel, setCanvasContext]);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    void emitCapabilityEvent({
+      eventType: "workspace_initialized",
+      workspaceId,
+    });
+  }, [workspaceId]);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -104,35 +166,96 @@ export default function WorkbenchPage({
     setSearchParams(next, { replace: true });
   }, [searchParams, setContext, setInputText, setLastArtifactHint, setOpen, setSearchParams, workspaceId]);
 
+  const availableLandingCapabilities = useMemo(
+    () => landingCapabilities.filter((entry) => entry.available !== false),
+    [landingCapabilities]
+  );
+  const unavailableLandingCapabilities = useMemo(
+    () => landingCapabilities.filter((entry) => entry.available === false).slice(0, 3),
+    [landingCapabilities]
+  );
+
   const suggestions = (
-    landingSuggestions.length
-      ? landingSuggestions.slice(0, 6).map((entry) => entry.prompt)
+    landingCapabilities.length
+      ? availableLandingCapabilities.slice(0, 6).map((entry) => ({
+          id: entry.id,
+          label: entry.name,
+          description: entry.description,
+          prompt: String(entry.prompt_template || "").trim() || entry.name,
+          capability: entry,
+        }))
       : [
-          "List artifacts",
-          "Show runs",
-          "Open platform settings",
-          "Provision Xyn instance (remote)",
+          {
+            id: "build_application",
+            label: "Build an application",
+            description: "Create a new software application.",
+            prompt: "Build an application that...",
+            capability: {
+              id: "build_application",
+              name: "Build an application",
+              description: "Create a new software application.",
+              prompt_template: "Build an application that...",
+              visibility: "primary",
+              action_type: "prompt",
+            } satisfies ContextualCapability,
+          },
+          {
+            id: "write_article",
+            label: "Write an article",
+            description: "Create a written article artifact.",
+            prompt: "Write an article about...",
+            capability: {
+              id: "write_article",
+              name: "Write an article",
+              description: "Create a written article artifact.",
+              prompt_template: "Write an article about...",
+              visibility: "primary",
+              action_type: "prompt",
+            } satisfies ContextualCapability,
+          },
+          {
+            id: "create_explainer_video",
+            label: "Create an explainer video",
+            description: "Create a narrated explainer video artifact.",
+            prompt: "Create an explainer video explaining...",
+            capability: {
+              id: "create_explainer_video",
+              name: "Create an explainer video",
+              description: "Create a narrated explainer video artifact.",
+              prompt_template: "Create an explainer video explaining...",
+              visibility: "primary",
+              action_type: "prompt",
+            } satisfies ContextualCapability,
+          },
+          {
+            id: "explore_artifacts",
+            label: "Explore artifacts",
+            description: "View existing artifacts in the workspace.",
+            prompt: "Show my artifacts",
+            capability: {
+              id: "explore_artifacts",
+              name: "Explore artifacts",
+              description: "View existing artifacts in the workspace.",
+              prompt_template: "Show my artifacts",
+              visibility: "secondary",
+              action_type: "prompt",
+            } satisfies ContextualCapability,
+          },
         ]
   ).slice(0, 6);
-
-  const handleSuggestion = (prompt: string) => {
-    setInputText(prompt);
-    setOpen(true);
-    requestSubmit();
+  const handleSuggestion = (capability: ContextualCapability, prompt: string) => {
+    executeCapabilityAction({
+      capability,
+      navigate,
+      workspaceId,
+      insertPrompt: (text) => {
+        setInputText(text || prompt);
+        setOpen(true);
+      },
+    });
   };
 
-  const renderPanel = (panelState: typeof panels[number]): ConsolePanelSpec => ({
-    panel_id: panelState.panel_id,
-    panel_type: panelState.panel_type,
-    instance_key: panelState.instance_key,
-    title: panelState.title,
-    key: panelState.key as ConsolePanelKey,
-    params: panelState.params || {},
-    active_group_id: panelState.active_group_id,
-    open_in: "current_panel",
-  });
-
-  const factory = (node: TabNode) => {
+  const factory = useCallback((node: TabNode) => {
     const panelId = String(node.getId() || "");
     const panelState = panelById.get(panelId);
     if (!panelState) {
@@ -142,7 +265,16 @@ export default function WorkbenchPage({
         </section>
       );
     }
-    const panel = renderPanel(panelState);
+    const panel: ConsolePanelSpec = {
+      panel_id: panelState.panel_id,
+      panel_type: panelState.panel_type,
+      instance_key: panelState.instance_key,
+      title: panelState.title,
+      key: panelState.key as ConsolePanelKey,
+      params: panelState.params || {},
+      active_group_id: panelState.active_group_id,
+      open_in: "current_panel",
+    };
     return (
       <WorkbenchPanelHost
         panel={panel}
@@ -166,9 +298,13 @@ export default function WorkbenchPage({
         }}
       />
     );
-  };
+  }, [panelById, workspaceId, workspaceName, workspaceColor, openPanel, setCanvasContext, closePanel]);
 
   const handleModelChange = (nextModel: Model) => {
+    // Skip feedback when the change came from our own programmatic doAction
+    // (e.g. selecting the active tab).  Feeding it back would recreate the
+    // model and potentially remount tab components.
+    if (suppressModelChangeRef.current) return;
     const nextJson = nextModel.toJson();
     setLayoutJson(nextJson);
     syncPanelGroups(derivePanelGroupAssignments(nextJson as IJsonModel));
@@ -181,7 +317,7 @@ export default function WorkbenchPage({
   };
 
   return (
-    <>
+    <div className="workbench-page">
       {!activePanel ? (
         <div className="workbench-start-shell">
           <section className="card workbench-start-card">
@@ -189,18 +325,37 @@ export default function WorkbenchPage({
             {suggestions.length ? (
               <div className="workbench-suggestion-grid">
                 {suggestions.map((entry) => (
-                  <button key={entry} type="button" className="ghost workbench-suggestion-chip" onClick={() => handleSuggestion(entry)}>
-                    {entry}
+                  <button
+                    key={entry.id}
+                    type="button"
+                    className="ghost workbench-suggestion-chip"
+                    onClick={() => handleSuggestion(entry.capability, entry.prompt)}
+                  >
+                    <strong>{entry.label}</strong>
+                    <span className="muted small">{entry.description}</span>
                   </button>
                 ))}
+              </div>
+            ) : null}
+            {unavailableLandingCapabilities.length ? (
+              <div className="workbench-unavailable-capabilities">
+                <h3>Unavailable Right Now</h3>
+                <div className="workbench-unavailable-list">
+                  {unavailableLandingCapabilities.map((entry) => (
+                    <div key={entry.id} className="workbench-unavailable-item" aria-disabled="true">
+                      <strong>{entry.name}</strong>
+                      {entry.failure_message ? <span className="muted small">{entry.failure_message}</span> : null}
+                    </div>
+                  ))}
+                </div>
               </div>
             ) : null}
           </section>
         </div>
       ) : null}
 
-      <section className="workbench-canvas">
-        {panels.length ? (
+      {panels.length ? (
+        <section className="workbench-canvas">
           <Layout
             model={model}
             factory={factory}
@@ -217,8 +372,8 @@ export default function WorkbenchPage({
               return action;
             }}
           />
-        ) : null}
-      </section>
-    </>
+        </section>
+      ) : null}
+    </div>
   );
 }

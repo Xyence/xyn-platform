@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from xyn_orchestrator.models import Artifact
 
+from ..application_factories import infer_application_factory_key, infer_application_name
 from .contracts import DraftIntakeContractRegistry
 from .proposal_provider import IntentContextPackMissingError, IntentProposalProvider
 from .types import (
@@ -799,6 +800,10 @@ class IntentResolutionEngine:
         text = str(message or "").strip()
         lowered = text.lower()
         conversation_context = context.conversation_context or ConversationExecutionContext()
+        portfolio_query = re.search(
+            r"\b(show portfolio health|which goal should run next|which goal should we work on next|which goal should we queue first|what changed across goals recently)\b",
+            lowered,
+        )
         progress_query = re.search(
             r"\b(what should we build next|what should we implement next|what is the next slice|next slice|how close are we to finishing(?: this goal)?|how close is this goal|goal progress)\b",
             lowered,
@@ -807,7 +812,7 @@ class IntentResolutionEngine:
             r"\b(approve the next slice|approve the recommended work|approve recommended work|queue the recommended work|queue the next slice)\b",
             lowered,
         )
-        if not re.search(r"\b(goal|plan|project|application|system)\b", lowered) and not (
+        if not portfolio_query and not re.search(r"\b(goal|plan|project|application|system|portfolio)\b", lowered) and not (
             conversation_context.active_goal_id and (progress_query or supervised_goal_action)
         ):
             return None
@@ -828,6 +833,33 @@ class IntentResolutionEngine:
                 action_payload={"reference": reference or text},
                 confidence=0.92,
                 resolution_notes=notes or ["list goals requested"],
+            )
+        if re.search(r"\bshow portfolio health\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.LIST_GOALS,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text, "summary_mode": "portfolio_health_summary"},
+                confidence=0.9,
+                resolution_notes=notes or ["portfolio health requested"],
+            )
+        if re.search(r"\b(which goal should run next|which goal should we work on next|which goal should we queue first)\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.LIST_GOALS,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text, "summary_mode": "portfolio_recommendation_summary"},
+                confidence=0.88,
+                resolution_notes=notes or ["portfolio recommendation requested"],
+            )
+        if re.search(r"\bwhat changed across goals recently\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.LIST_GOALS,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": reference or text, "summary_mode": "portfolio_insight_summary"},
+                confidence=0.86,
+                resolution_notes=notes or ["portfolio insight requested"],
             )
         if re.search(r"\b(what should we build first|what should we build next|what should we implement next|what is the next slice|smallest next slice|which thread should we queue first)\b", lowered):
             resolved = candidates[0] if len(candidates) == 1 else ({"id": str(conversation_context.active_goal_id)} if conversation_context.active_goal_id else {})
@@ -935,6 +967,102 @@ class IntentResolutionEngine:
             resolution_notes=notes or [f"{intent_type.value} requested"],
         )
 
+    def _resolve_application_factory_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
+        text = str(message or "").strip()
+        lowered = text.lower()
+        workspace_id = str(context.workspace_id or "").strip()
+        conversation_context = context.conversation_context or ConversationExecutionContext()
+
+        if re.search(r"\b(show|list)\s+(?:available\s+)?application factories\b", lowered):
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.LIST_APPLICATION_FACTORIES,
+                target_context={"workspace_id": workspace_id},
+                action_payload={"reference": text},
+                confidence=0.95,
+                resolution_notes=["application factory catalog requested"],
+            )
+
+        if re.search(r"\b(open|show)\s+(?:the\s+)?composer\b", lowered) or re.search(r"\btake me back to the plan\b", lowered):
+            action_payload = {"reference": text}
+            if conversation_context.active_application_plan_id:
+                action_payload["application_plan_id"] = str(conversation_context.active_application_plan_id)
+            if conversation_context.active_application_id:
+                action_payload["application_id"] = str(conversation_context.active_application_id)
+            if conversation_context.active_goal_id:
+                action_payload["goal_id"] = str(conversation_context.active_goal_id)
+            if conversation_context.active_coordination_thread_id:
+                action_payload["thread_id"] = str(conversation_context.active_coordination_thread_id)
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.OPEN_COMPOSER,
+                target_context={"workspace_id": workspace_id},
+                action_payload=action_payload,
+                confidence=0.9,
+                resolution_notes=["composer navigation requested"],
+            )
+
+        generate_match = re.search(
+            r"\b(?:build|create|generate)\b.+\b(?:application plan|application|console|portal|finder)\b",
+            lowered,
+        )
+        if generate_match:
+            factory_key = infer_application_factory_key(objective=text)
+            application_name = infer_application_name(text)
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.GENERATE_APPLICATION_PLAN,
+                target_context={"workspace_id": workspace_id},
+                action_payload={
+                    "objective": text,
+                    "reference": text,
+                    "factory_key": factory_key,
+                    "application_name": application_name,
+                },
+                confidence=0.91,
+                resolution_notes=[f"application factory plan requested via {factory_key}"],
+            )
+
+        if re.search(r"\bapply(?: this)? application plan\b", lowered):
+            resolved_subject = {}
+            if conversation_context.active_application_plan_id:
+                resolved_subject = {
+                    "id": str(conversation_context.active_application_plan_id),
+                    "label": "Active Application Plan",
+                }
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.APPLY_APPLICATION_PLAN,
+                target_context={"workspace_id": workspace_id},
+                resolved_subject=resolved_subject,
+                action_payload={"reference": text},
+                confidence=0.88 if resolved_subject else 0.48,
+                needs_clarification=not bool(resolved_subject),
+                clarification_reason=ClarificationReason.MISSING_TARGET if not resolved_subject else None,
+                resolution_notes=["application plan apply requested"],
+            )
+
+        if re.search(r"\bshow (?:this )?application\b", lowered):
+            resolved_subject = {}
+            if conversation_context.active_application_id:
+                resolved_subject = {
+                    "id": str(conversation_context.active_application_id),
+                    "label": "Active Application",
+                }
+            return self._intent_envelope(
+                intent_family=IntentFamily.GOAL_PLANNING,
+                intent_type=IntentType.SHOW_APPLICATION,
+                target_context={"workspace_id": workspace_id},
+                resolved_subject=resolved_subject,
+                action_payload={"reference": text},
+                confidence=0.84 if resolved_subject else 0.42,
+                needs_clarification=not bool(resolved_subject),
+                clarification_reason=ClarificationReason.MISSING_TARGET if not resolved_subject else None,
+                resolution_notes=["application detail requested"],
+            )
+
+        return None
+
     def _resolve_app_operation_intent(self, *, message: str, context: ResolutionContext) -> Optional[IntentEnvelope]:
         workspace_id = str(context.workspace_id or "").strip()
         if not workspace_id or not callable(self.capability_manifest_lookup):
@@ -1021,12 +1149,13 @@ class IntentResolutionEngine:
                 confidence=0.0,
                 resolution_notes=[str(context.worker_mention_error or "").strip()],
             )
+        application_factory = self._resolve_application_factory_intent(message=user_message, context=context)
         goal_planning = self._resolve_goal_intent(message=user_message, context=context)
         thread_coordination = self._resolve_thread_intent(message=user_message, context=context)
         artifact_diagnostic = self._resolve_artifact_diagnostic_intent(message=user_message, context=context)
         development = self._resolve_development_intent(message=user_message, context=context)
         app_operation = self._resolve_app_operation_intent(message=user_message, context=context)
-        envelope = goal_planning or thread_coordination or artifact_diagnostic or development or app_operation or self._intent_envelope(
+        envelope = application_factory or goal_planning or thread_coordination or artifact_diagnostic or development or app_operation or self._intent_envelope(
             intent_family=IntentFamily.DEVELOPMENT_WORK,
             intent_type=IntentType.UNSUPPORTED_INTENT,
             target_context={"workspace_id": str(context.workspace_id or "").strip()},

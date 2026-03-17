@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,15 +10,30 @@ const apiMocks = vi.hoisted(() => ({
   listGoals: vi.fn(),
   getGoal: vi.fn(),
   reviewGoal: vi.fn(),
+  getApplicationPlan: vi.fn(),
+  applyApplicationPlan: vi.fn(),
+  getComposerState: vi.fn(),
+  generateApplicationPlan: vi.fn(),
+  getApplication: vi.fn(),
+  updateApplication: vi.fn(),
+  updateApplicationPlan: vi.fn(),
   reviewCoordinationThread: vi.fn(),
   listCoordinationThreads: vi.fn(),
   getCoordinationThread: vi.fn(),
   getWorkQueue: vi.fn(),
+  dispatchNextWorkQueueItem: vi.fn(),
+  dispatchWorkItem: vi.fn(),
+  publishDevTask: vi.fn(),
+  retryDevTask: vi.fn(),
+  requeueDevTask: vi.fn(),
   listRuntimeRunsCanvasApi: vi.fn(),
   getRuntimeRunCanvasApi: vi.fn(),
   listWorkItems: vi.fn(),
   getWorkItem: vi.fn(),
+  updateWorkItem: vi.fn(),
   getRuntimeRunArtifactContent: vi.fn(),
+  getSystemReadiness: vi.fn(),
+  getExecutionPlan: vi.fn(),
 }));
 
 const streamMocks = vi.hoisted(() => {
@@ -47,15 +62,30 @@ vi.mock("../../../api/xyn", async () => {
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
     reviewGoal: apiMocks.reviewGoal,
+    getApplicationPlan: apiMocks.getApplicationPlan,
+    applyApplicationPlan: apiMocks.applyApplicationPlan,
+    getComposerState: apiMocks.getComposerState,
+    generateApplicationPlan: apiMocks.generateApplicationPlan,
+    getApplication: apiMocks.getApplication,
+    updateApplication: apiMocks.updateApplication,
+    updateApplicationPlan: apiMocks.updateApplicationPlan,
     reviewCoordinationThread: apiMocks.reviewCoordinationThread,
     listCoordinationThreads: apiMocks.listCoordinationThreads,
     getCoordinationThread: apiMocks.getCoordinationThread,
     getWorkQueue: apiMocks.getWorkQueue,
+    dispatchNextWorkQueueItem: apiMocks.dispatchNextWorkQueueItem,
+    dispatchWorkItem: apiMocks.dispatchWorkItem,
+    publishDevTask: apiMocks.publishDevTask,
+    retryDevTask: apiMocks.retryDevTask,
+    requeueDevTask: apiMocks.requeueDevTask,
     listRuntimeRunsCanvasApi: apiMocks.listRuntimeRunsCanvasApi,
     getRuntimeRunCanvasApi: apiMocks.getRuntimeRunCanvasApi,
     listWorkItems: apiMocks.listWorkItems,
     getWorkItem: apiMocks.getWorkItem,
+    updateWorkItem: apiMocks.updateWorkItem,
     getRuntimeRunArtifactContent: apiMocks.getRuntimeRunArtifactContent,
+    getSystemReadiness: apiMocks.getSystemReadiness,
+    getExecutionPlan: apiMocks.getExecutionPlan,
   };
 });
 
@@ -74,6 +104,63 @@ vi.mock("../../utils/runtimeEventStream", async () => {
 describe("WorkbenchPanelHost entity refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
+    apiMocks.getSystemReadiness.mockResolvedValue({
+      ready: false,
+      summary: "Configuration required",
+      checks: [
+        {
+          component: "coding_agents",
+          status: "missing",
+          message: "No enabled coding agents are configured.",
+        },
+      ],
+      paths: {
+        workspace_root: "/app/workspaces",
+        artifact_root: "/app/media",
+      },
+    });
+    apiMocks.getExecutionPlan.mockResolvedValue({
+      capability_id: "build_application",
+      architecture: {
+        interface: "Xyn language interface",
+        database: "PostgreSQL",
+        deployment: "Kubernetes service",
+      },
+      defaults: {
+        interface: "Xyn language interface",
+        database: "PostgreSQL",
+        deployment: "Kubernetes service",
+      },
+      dependencies: ["FastAPI", "SQLAlchemy"],
+      components: ["application_service", "data_models", "api_endpoints"],
+      generated_commands: [],
+      artifacts: ["application"],
+    });
+  });
+
+  it("shows system readiness diagnostics in the workbench shell", async () => {
+    apiMocks.listWorkItems.mockResolvedValue({
+      count: 0,
+      next: null,
+      prev: null,
+      work_items: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-items", panel_type: "table", instance_key: "work-items", key: "work_items" }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getSystemReadiness).toHaveBeenCalled());
+    expect(screen.getByText("System Readiness")).toBeInTheDocument();
+    expect(screen.getByText("Configuration required")).toBeInTheDocument();
+    expect(screen.getByText(/No enabled coding agents are configured\./)).toBeInTheDocument();
   });
 
   it("loads work items from durable work item API and opens detail targets", async () => {
@@ -151,8 +238,22 @@ describe("WorkbenchPanelHost entity refresh", () => {
           task_id: "task-1",
           thread_priority: "high",
           thread_title: "Runtime Refactor",
+          queue_state: {
+            queue_ready: true,
+            dispatchable: true,
+            dispatched: false,
+            blocked: false,
+            status: "queue_ready",
+            reason: null,
+            message: "Task is approved and ready for queue dispatch.",
+          },
         },
       ],
+    });
+    apiMocks.dispatchNextWorkQueueItem.mockResolvedValue({
+      status: "dispatched",
+      queue_item: { thread_id: "thread-1", work_item_id: "wi-1", task_id: "task-1" },
+      run_id: "run-1",
     });
 
     render(
@@ -169,6 +270,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(apiMocks.getWorkQueue).toHaveBeenCalledWith("ws-1"));
     await waitFor(() => expect(screen.getAllByText("Runtime Refactor")).toHaveLength(2));
     expect(screen.getByText("wi-1")).toBeInTheDocument();
+    expect(screen.getByText("Task is approved and ready for queue dispatch.")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Dispatch Next" }).click();
+    });
+    await waitFor(() => expect(apiMocks.dispatchNextWorkQueueItem).toHaveBeenCalledWith("ws-1"));
+    expect(screen.getByText("Dispatched wi-1.")).toBeInTheDocument();
   });
 
   it("loads durable goals and opens goal detail targets", async () => {
@@ -194,6 +302,43 @@ describe("WorkbenchPanelHost entity refresh", () => {
           updated_at: "2026-03-12T10:00:00Z",
         },
       ],
+      portfolio_state: {
+        goals: [
+          {
+            goal_id: "goal-1",
+            title: "AI Real Estate Deal Finder",
+            planning_status: "decomposed",
+            goal_progress_status: "in_progress",
+            progress_percent: 25,
+            health_status: "active",
+            active_threads: 1,
+            blocked_threads: 0,
+            recent_execution_count: 2,
+            coordination_priority: {
+              value: "medium",
+              reasons: ["Goal has active execution or queueable progress but no blocking condition."],
+            },
+          },
+        ],
+        insights: [
+          {
+            key: "steady_progress",
+            summary: "Portfolio activity is balanced with AI Real Estate Deal Finder showing the strongest current forward progress.",
+            evidence: ["AI Real Estate Deal Finder is at 25% progress with 1 active thread."],
+            goal_ids: ["goal-1"],
+          },
+        ],
+        recommended_goal: {
+          goal_id: "goal-1",
+          title: "AI Real Estate Deal Finder",
+          coordination_priority: "medium",
+          summary: "Queue the next smallest slice from Listing Data Ingestion.",
+          reasoning: "Goal has active execution or queueable progress but no blocking condition.",
+          thread_id: "thread-1",
+          work_item_id: "task-1",
+          queue_action_type: "queue_first_slice",
+        },
+      },
     });
 
     render(
@@ -208,6 +353,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(apiMocks.listGoals).toHaveBeenCalledWith("ws-1"));
     await waitFor(() => expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument());
+    expect(screen.getByText(/Recommended Goal: AI Real Estate Deal Finder/i)).toBeInTheDocument();
+    expect(screen.getByText(/Portfolio activity is balanced/i)).toBeInTheDocument();
   });
 
   it("loads durable goal detail with threads, work items, and recommendation", async () => {
@@ -281,6 +428,34 @@ describe("WorkbenchPanelHost entity refresh", () => {
           title: "Identify the first listing source and capture the ingestion contract",
           status: "queued",
           target_repo: "xyn-platform",
+          change_set: {
+            available: true,
+            status: "changed",
+            has_changes: true,
+            source: "workspace",
+            repository_slug: "xyn-platform",
+            changed_file_count: 1,
+            files: [{ path: "services/ingestion.py", change_type: "modified", patch_available: true }],
+            patch_available: true,
+            message: "1 file changed in the managed workspace.",
+          },
+          execution_brief_review: {
+            has_brief: true,
+            review_state: "draft",
+            revision: 1,
+            history_count: 0,
+            summary: "Bound the listing-ingestion coding handoff",
+            objective: "Keep the first slice focused on the ingestion contract.",
+            target_repository_slug: "xyn-platform",
+            target_branch: "develop",
+            gated: true,
+            ready: false,
+            blocked: true,
+            blocked_reason: "brief_not_ready",
+            blocked_message: "Execution brief review is required before coding execution can proceed.",
+            review_notes: "Needs human review",
+            available_actions: ["mark_ready", "approve", "reject", "regenerate"],
+          },
           task_type: "codegen",
           priority: 100,
           attempts: 0,
@@ -404,6 +579,9 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("in_progress").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Artifacts")).toBeInTheDocument();
     expect(screen.getAllByText("Identify the first listing source and capture the ingestion contract").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("1 file changed")).toBeInTheDocument();
+    expect(screen.getByText("Draft · blocked")).toBeInTheDocument();
+    expect(screen.getByText("Execution brief review is required before coding execution can proceed.")).toBeInTheDocument();
     expect(screen.getAllByText("1").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Queue the next smallest slice from Listing Data Ingestion.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve and Queue" })).toBeEnabled();
@@ -421,6 +599,977 @@ describe("WorkbenchPanelHost entity refresh", () => {
       ),
     );
     expect(screen.getByText("Approved and queued the recommended slice.")).toBeInTheDocument();
+  });
+
+  it("loads composer discovery state with factory catalog", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "factory_discovery",
+      context: { factory_key: null, application_plan_id: null, application_id: null, goal_id: null, thread_id: null },
+      factory_catalog: [
+        { key: "ai_real_estate_deal_finder", name: "AI Real Estate Deal Finder", description: "Deal sourcing workflow", use_case: "real estate" },
+      ],
+      application_plans: [],
+      applications: [],
+      related_goals: [],
+      related_threads: [],
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalledWith({ workspace_id: "ws-1" }));
+    expect(screen.getByText("Application efforts")).toBeInTheDocument();
+    expect(screen.getByText("Current workflow step")).toBeInTheDocument();
+    expect(screen.getByText("No active build in progress")).toBeInTheDocument();
+    expect(screen.getByText("Start a new application plan.")).toBeInTheDocument();
+    expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Build plan" })).toBeInTheDocument();
+  });
+
+  it("surfaces already queued next-slice guidance and focuses the recommended thread in Composer", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.reviewGoal.mockResolvedValue({
+      status: "already_queued",
+      goal: {
+        id: "goal-1",
+        application_id: "app-1",
+        title: "Workflow and Stabilization",
+        description: "Keep the app stable while extending the workflow.",
+        source_conversation_id: "conv-1",
+        requested_by: "admin@example.com",
+        goal_type: "delivery",
+        planning_status: "in_progress",
+        priority: "high",
+        planning_summary: "Queue the next smallest slice from Operator Workflow.",
+        resolution_notes: [],
+        thread_count: 4,
+        work_item_count: 4,
+        created_at: "2026-03-16T10:00:00Z",
+        updated_at: "2026-03-16T10:10:00Z",
+        recommendation: {
+          recommendation_id: "rec-1",
+          goal_id: "goal-1",
+          thread_id: "thread-operator",
+          thread_title: "Operator Workflow",
+          work_item_id: "task-operator-1",
+          work_item_title: "Define the first operator workflow state",
+          recommended_work_items: [
+            {
+              id: "task-operator-1",
+              title: "Define the first operator workflow state",
+              thread_id: "thread-operator",
+              thread_title: "Operator Workflow",
+            },
+          ],
+          queue_suggestion: {
+            action_type: "queue_next_slice",
+            thread_id: "thread-operator",
+            work_item_id: "task-operator-1",
+            reason: "It is first in deterministic order.",
+            summary: "Queue the next operator workflow slice.",
+          },
+          actions: [{ type: "approve_and_queue", label: "Approve and queue", queueable: true, target_thread: "thread-operator" }],
+          summary: "Queue the next operator workflow slice.",
+          reasoning_summary: "Operator Workflow is the next unblocked slice.",
+        },
+        threads: [],
+        work_items: [],
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "goal_focus",
+      context: {
+        application_id: "app-1",
+        goal_id: "goal-1",
+        thread_id: null,
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application: {
+        id: "app-1",
+        name: "Lunch Poll",
+        status: "active",
+        source_factory_key: "lunch_poll",
+        summary: "Lunch polling app",
+        goal_count: 2,
+        goals: [],
+      },
+      goal: {
+        id: "goal-1",
+        application_id: "app-1",
+        title: "Workflow and Stabilization",
+        planning_status: "in_progress",
+        goal_progress_status: "active",
+        thread_count: 4,
+        threads: [],
+        work_items: [],
+        recommendation: {
+          recommendation_id: "rec-1",
+          goal_id: "goal-1",
+          thread_id: "thread-operator",
+          thread_title: "Operator Workflow",
+          work_item_id: "task-operator-1",
+          work_item_title: "Define the first operator workflow state",
+          recommended_work_items: [
+            {
+              id: "task-operator-1",
+              title: "Define the first operator workflow state",
+              thread_id: "thread-operator",
+              thread_title: "Operator Workflow",
+            },
+          ],
+          queue_suggestion: {
+            action_type: "queue_next_slice",
+            thread_id: "thread-operator",
+            work_item_id: "task-operator-1",
+            reason: "It is first in deterministic order.",
+            summary: "Queue the next operator workflow slice.",
+          },
+          actions: [{ type: "approve_and_queue", label: "Approve and queue", queueable: true, target_thread: "thread-operator" }],
+          summary: "Queue the next operator workflow slice.",
+          reasoning_summary: "Operator Workflow is the next unblocked slice.",
+        },
+      },
+      related_goals: [],
+      related_threads: [],
+      breadcrumbs: [
+        { kind: "composer", label: "Composer" },
+        { kind: "application", label: "Lunch Poll", id: "app-1" },
+        { kind: "goal", label: "Workflow and Stabilization", id: "goal-1" },
+      ],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", goal_id: "goal-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Approve Next Slice" })).toBeEnabled());
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Approve Next Slice" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.reviewGoal).toHaveBeenCalledWith("goal-1", "approve_and_queue", "rec-1"));
+    expect(screen.getByText("That slice is already queued. Open the thread and dispatch the ready work item.")).toBeInTheDocument();
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "composer_detail",
+        params: expect.objectContaining({
+          workspace_id: "ws-1",
+          application_id: "app-1",
+          goal_id: "goal-1",
+          thread_id: "thread-operator",
+          work_item_id: "task-operator-1",
+        }),
+      })
+    );
+  });
+
+  it("groups composer work under application efforts and isolates unlinked coordination items", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: { factory_key: null, application_plan_id: null, application_id: "app-2", goal_id: null, thread_id: null },
+      factory_catalog: [],
+      application_plans: [
+        {
+          id: "plan-1",
+          name: "Knowledgebase Plan",
+          status: "review",
+          source_factory_key: "generic_application_mvp",
+          summary: "Plan ready for review",
+          request_objective: "Build a personal knowledgebase",
+          created_at: "2026-03-16T15:00:00Z",
+          updated_at: "2026-03-16T15:00:00Z",
+        },
+      ],
+      applications: [
+        {
+          id: "app-1",
+          name: "Lunch Poll",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Older lunch app effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 1,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+        {
+          id: "app-2",
+          name: "Knowledgebase",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Current app effort",
+          request_objective: "Build a personal knowledgebase",
+          goal_count: 1,
+          created_at: "2026-03-16T10:00:00Z",
+          updated_at: "2026-03-16T16:00:00Z",
+        },
+      ],
+      application: {
+        id: "app-2",
+        name: "Knowledgebase",
+        status: "active",
+        source_factory_key: "generic_application_mvp",
+        summary: "Current app effort",
+        request_objective: "Build a personal knowledgebase",
+        goal_count: 1,
+        goals: [],
+        created_at: "2026-03-16T10:00:00Z",
+        updated_at: "2026-03-16T16:00:00Z",
+      },
+      related_goals: [
+        {
+          id: "goal-kb-1",
+          application_id: "app-2",
+          title: "Knowledge Capture",
+          planning_status: "decomposed",
+          goal_progress_status: "active",
+          thread_count: 1,
+          work_item_count: 1,
+          planning_summary: "Define the first durable knowledge workflow.",
+          resolution_notes: [],
+          created_at: "2026-03-16T16:05:00Z",
+          updated_at: "2026-03-16T16:05:00Z",
+        },
+        {
+          id: "goal-1",
+          application_id: "app-1",
+          title: "Workflow and Stabilization",
+          planning_status: "decomposed",
+          goal_progress_status: "blocked",
+          thread_count: 1,
+          work_item_count: 2,
+          planning_summary: "Repair the lunch app workflow.",
+          resolution_notes: [],
+          created_at: "2026-03-15T11:05:00Z",
+          updated_at: "2026-03-15T11:05:00Z",
+        },
+        {
+          id: "goal-legacy",
+          application_id: null,
+          title: "Legacy cleanup",
+          planning_status: "decomposed",
+          goal_progress_status: "active",
+          thread_count: 1,
+          work_item_count: 1,
+          planning_summary: "Unlinked work.",
+          resolution_notes: [],
+          created_at: "2026-03-14T10:00:00Z",
+          updated_at: "2026-03-14T10:10:00Z",
+        },
+      ],
+      related_threads: [
+        {
+          id: "thread-kb-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-kb-1",
+          goal_title: "Knowledge Capture",
+          title: "Capture workflow",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "queued",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-2",
+          queued_work_items: 1,
+          running_work_items: 0,
+          awaiting_review_work_items: 0,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-16T16:06:00Z",
+          updated_at: "2026-03-16T16:06:00Z",
+        },
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          goal_title: "Workflow and Stabilization",
+          title: "Smoke test",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-1",
+          queued_work_items: 0,
+          running_work_items: 0,
+          awaiting_review_work_items: 1,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-15T11:06:00Z",
+          updated_at: "2026-03-15T11:06:00Z",
+        },
+        {
+          id: "thread-legacy",
+          workspace_id: "ws-1",
+          goal_id: "goal-legacy",
+          goal_title: "Legacy cleanup",
+          title: "Cleanup slice",
+          description: "",
+          owner: null,
+          priority: "normal",
+          status: "queued",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-0",
+          queued_work_items: 1,
+          running_work_items: 0,
+          awaiting_review_work_items: 0,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-14T10:11:00Z",
+          updated_at: "2026-03-14T10:11:00Z",
+        },
+      ],
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-grouped", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1", application_id: "app-2" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getByText("Current application effort")).toBeInTheDocument();
+    expect(screen.getByText("Application efforts")).toBeInTheDocument();
+    expect(screen.getAllByText("Knowledgebase").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Lunch Poll")).not.toBeInTheDocument();
+    const effortSection = screen.getByText("Application efforts").closest("section");
+    expect(effortSection).not.toBeNull();
+    const knowledgebaseCard = within(effortSection as HTMLElement).getByRole("heading", { name: "Knowledgebase" }).closest(".composer-effort-card");
+    expect(knowledgebaseCard).not.toBeNull();
+    const applicationGoalsSection = within(knowledgebaseCard as HTMLElement).getByText("Work goals for this application").closest(".composer-effort-children");
+    expect(applicationGoalsSection).not.toBeNull();
+    await act(async () => {
+      within(applicationGoalsSection as HTMLElement).getByRole("button", { name: "Open goal" }).click();
+    });
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "composer_detail",
+        params: expect.objectContaining({
+          workspace_id: "ws-1",
+          application_id: "app-2",
+          goal_id: "goal-kb-1",
+        }),
+      })
+    );
+    await act(async () => {
+      screen.getByRole("button", { name: "Failed (1)" }).click();
+    });
+    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
+    expect(screen.getByText("Unlinked work")).toBeInTheDocument();
+    expect(screen.getAllByText("Legacy cleanup").length).toBeGreaterThan(0);
+  });
+
+  it("filters stale failed efforts out of the default active view and restores them in the failed filter", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: { factory_key: null, application_plan_id: null, application_id: "app-2", goal_id: null, thread_id: null },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [
+        {
+          id: "app-1",
+          name: "Lunch Poll",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Older lunch app effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 1,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+        {
+          id: "app-2",
+          name: "Knowledgebase",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Current app effort",
+          request_objective: "Build a personal knowledgebase",
+          goal_count: 0,
+          created_at: "2026-03-16T10:00:00Z",
+          updated_at: "2026-03-16T16:00:00Z",
+        },
+      ],
+      application: {
+        id: "app-2",
+        name: "Knowledgebase",
+        status: "active",
+        source_factory_key: "generic_application_mvp",
+        summary: "Current app effort",
+        request_objective: "Build a personal knowledgebase",
+        goal_count: 0,
+        goals: [],
+        created_at: "2026-03-16T10:00:00Z",
+        updated_at: "2026-03-16T16:00:00Z",
+      },
+      related_goals: [
+        {
+          id: "goal-1",
+          application_id: "app-1",
+          title: "Workflow and Stabilization",
+          planning_status: "decomposed",
+          goal_progress_status: "blocked",
+          thread_count: 1,
+          work_item_count: 2,
+          planning_summary: "Repair the lunch app workflow.",
+          resolution_notes: [],
+          created_at: "2026-03-15T11:05:00Z",
+          updated_at: "2026-03-15T11:05:00Z",
+        },
+      ],
+      related_threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          goal_title: "Workflow and Stabilization",
+          title: "Smoke test",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-1",
+          queued_work_items: 0,
+          running_work_items: 0,
+          awaiting_review_work_items: 1,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-15T11:06:00Z",
+          updated_at: "2026-03-15T11:06:00Z",
+        },
+      ],
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-filtered", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1", application_id: "app-2" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.queryByText("Lunch Poll")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Failed (1)" })).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Failed (1)" }).click();
+    });
+
+    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
+  });
+
+  it("archives and restarts application efforts through lifecycle controls", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: { factory_key: null, application_plan_id: null, application_id: "app-1", goal_id: null, thread_id: null },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [
+        {
+          id: "app-1",
+          name: "Lunch Poll",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Current app effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 0,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+      ],
+      application: {
+        id: "app-1",
+        name: "Lunch Poll",
+        status: "active",
+        source_factory_key: "generic_application_mvp",
+        summary: "Current app effort",
+        request_objective: "Build a lunch poll app",
+        goal_count: 0,
+        goals: [],
+        created_at: "2026-03-15T10:00:00Z",
+        updated_at: "2026-03-15T11:00:00Z",
+      },
+      related_goals: [],
+      related_threads: [],
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+    apiMocks.updateApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Lunch Poll",
+      summary: "Current app effort",
+      source_factory_key: "generic_application_mvp",
+      status: "archived",
+      request_objective: "Build a lunch poll app",
+      goal_count: 0,
+      goals: [],
+      created_at: "2026-03-15T10:00:00Z",
+      updated_at: "2026-03-15T11:00:00Z",
+    });
+    apiMocks.generateApplicationPlan.mockResolvedValue({
+      id: "plan-2",
+      workspace_id: "ws-1",
+      application_id: null,
+      name: "Lunch Poll",
+      summary: "Fresh reviewable plan",
+      source_factory_key: "generic_application_mvp",
+      status: "review",
+      request_objective: "Build a lunch poll app",
+      created_at: "2026-03-16T16:00:00Z",
+      updated_at: "2026-03-16T16:00:00Z",
+      generated_plan: {
+        application_name: "Lunch Poll",
+        application_summary: "Fresh reviewable plan",
+        source_factory_key: "generic_application_mvp",
+        request_objective: "Build a lunch poll app",
+        ordering_hints: [],
+        dependency_hints: [],
+        resolution_notes: [],
+        generated_goals: [],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-restart", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1", application_id: "app-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+
+    await act(async () => {
+      screen.getAllByRole("button", { name: "Start Over" })[0].click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.generateApplicationPlan).toHaveBeenCalledWith({
+        workspace_id: "ws-1",
+        objective: "Build a lunch poll app",
+        factory_key: "generic_application_mvp",
+        application_name: "Lunch Poll",
+      }),
+    );
+    await waitFor(() => expect(apiMocks.updateApplication).toHaveBeenCalledWith("app-1", { status: "archived" }));
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "composer_detail",
+        params: expect.objectContaining({
+          workspace_id: "ws-1",
+          application_plan_id: "plan-2",
+          factory_key: "generic_application_mvp",
+        }),
+      }),
+    );
+  });
+
+  it("keeps Composer focused on the new plan after restart instead of rendering stale application coordination state", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "plan_review",
+      context: { factory_key: "generic_application_mvp", application_plan_id: "plan-2", application_id: null, goal_id: null, thread_id: null },
+      factory_catalog: [],
+      application_plans: [
+        {
+          id: "plan-2",
+          workspace_id: "ws-1",
+          application_id: null,
+          name: "Lunch Poll",
+          summary: "Fresh reviewable plan",
+          source_factory_key: "generic_application_mvp",
+          status: "review",
+          request_objective: "Build a lunch poll app",
+          created_at: "2026-03-16T16:00:00Z",
+          updated_at: "2026-03-16T16:00:00Z",
+        },
+      ],
+      applications: [
+        {
+          id: "app-1",
+          name: "Lunch Poll",
+          status: "archived",
+          source_factory_key: "generic_application_mvp",
+          summary: "Old archived effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 2,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+      ],
+      application_plan: {
+        id: "plan-2",
+        workspace_id: "ws-1",
+        application_id: null,
+        name: "Lunch Poll",
+        summary: "Fresh reviewable plan",
+        source_factory_key: "generic_application_mvp",
+        status: "review",
+        request_objective: "Build a lunch poll app",
+        created_at: "2026-03-16T16:00:00Z",
+        updated_at: "2026-03-16T16:00:00Z",
+        generated_goals: [{ title: "Core Domain Foundation", planning_summary: "Start the next attempt cleanly.", threads: [], work_items: [] }],
+        factory: { key: "generic_application_mvp", name: "Generic Application MVP", description: "General app plan", use_case: "general" },
+      },
+      application: {
+        id: "app-1",
+        name: "Lunch Poll",
+        status: "archived",
+        source_factory_key: "generic_application_mvp",
+        summary: "Old archived effort",
+        request_objective: "Build a lunch poll app",
+        goal_count: 2,
+        goals: [],
+        created_at: "2026-03-15T10:00:00Z",
+        updated_at: "2026-03-15T11:00:00Z",
+      },
+      goal: {
+        id: "goal-1",
+        application_id: "app-1",
+        title: "Workflow and Stabilization",
+        planning_status: "in_progress",
+        goal_progress_status: "active",
+        thread_count: 2,
+        threads: [],
+        work_items: [],
+      },
+      thread: {
+        id: "thread-1",
+        workspace_id: "ws-1",
+        goal_id: "goal-1",
+        title: "Operational Surface",
+        description: "",
+        owner: null,
+        priority: "high",
+        status: "active",
+        domain: "development",
+        work_in_progress_limit: 1,
+        execution_policy: {},
+        source_conversation_id: "conv-1",
+        queued_work_items: 1,
+        running_work_items: 0,
+        awaiting_review_work_items: 0,
+        completed_work_items: 0,
+        failed_work_items: 0,
+        recent_run_ids: [],
+        work_items_completed: 0,
+        work_items_blocked: 0,
+      },
+      related_goals: [
+        {
+          id: "goal-1",
+          application_id: "app-1",
+          title: "Workflow and Stabilization",
+          planning_status: "in_progress",
+          goal_progress_status: "active",
+          thread_count: 2,
+        },
+      ],
+      related_threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          goal_title: "Workflow and Stabilization",
+          title: "Operational Surface",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-1",
+          queued_work_items: 1,
+          running_work_items: 0,
+          awaiting_review_work_items: 0,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+        },
+      ],
+      breadcrumbs: [
+        { kind: "composer", label: "Composer" },
+        { kind: "application_plan", label: "Lunch Poll", id: "plan-2" },
+      ],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-plan-clean", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1", application_plan_id: "plan-2" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getByText("Selected application plan")).toBeInTheDocument();
+    expect(screen.queryByText("Selected application overview")).not.toBeInTheDocument();
+    expect(screen.queryByText("Work goals for this application")).not.toBeInTheDocument();
+    expect(screen.queryByText("Selected work goal")).not.toBeInTheDocument();
+    expect(screen.queryByText("Selected execution thread")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Active (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Archived (1)" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "All (2)" })).toBeInTheDocument();
+  });
+
+  it("loads composer plan review state and applies plans through the existing plan seam", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "plan_review",
+      context: { factory_key: "ai_real_estate_deal_finder", application_plan_id: "plan-1", application_id: null, goal_id: null, thread_id: null },
+      factory_catalog: [],
+      selected_factory: { key: "ai_real_estate_deal_finder", name: "AI Real Estate Deal Finder", description: "Deal sourcing workflow", use_case: "real estate" },
+      application_plans: [],
+      applications: [],
+      application_plan: {
+        id: "plan-1",
+        name: "Deal Finder",
+        status: "review",
+        source_factory_key: "ai_real_estate_deal_finder",
+        summary: "Reviewable plan",
+        generated_goals: [{ title: "Listing and Property Foundation", planning_summary: "Start with ingestion", threads: [], work_items: [] }],
+        factory: { key: "ai_real_estate_deal_finder", name: "AI Real Estate Deal Finder", description: "Deal sourcing workflow", use_case: "real estate" },
+      },
+      related_goals: [],
+      related_threads: [],
+      breadcrumbs: [{ kind: "composer", label: "Composer" }, { kind: "application_plan", label: "Deal Finder", id: "plan-1" }],
+      available_actions: [{ type: "apply_plan", label: "Apply Plan", enabled: true, target_kind: "application_plan", target_id: "plan-1" }],
+    });
+    apiMocks.applyApplicationPlan.mockResolvedValue({
+      status: "applied",
+      application: { id: "app-1", name: "Deal Finder", status: "active", source_factory_key: "ai_real_estate_deal_finder", summary: "Deal Finder", goal_count: 1, goals: [] },
+      application_plan: { id: "plan-1", name: "Deal Finder", status: "applied", source_factory_key: "ai_real_estate_deal_finder", summary: "Reviewable plan", generated_goals: [] },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1", application_plan_id: "plan-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0));
+    expect(screen.getByText("Selected application plan")).toBeInTheDocument();
+    expect(screen.getByText("Reviewing the implementation plan")).toBeInTheDocument();
+    expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
+    expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
+    await act(async () => {
+      screen.getAllByRole("button", { name: "Apply plan" })[0].click();
+    });
+    await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
+    await waitFor(() =>
+      expect(onOpenPanel).toHaveBeenCalledWith({
+        key: "composer_detail",
+        params: { workspace_id: "ws-1", application_id: "app-1" },
+      })
+    );
+  });
+
+  it("disables no-op composer focus actions and points blocked threads to work-item review", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "thread_focus",
+      context: {
+        application_id: "app-1",
+        goal_id: "goal-1",
+        thread_id: "thread-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application: {
+        id: "app-1",
+        name: "Lunch Poll",
+        status: "active",
+        source_factory_key: "lunch_poll",
+        summary: "Lunch polling app",
+        goal_count: 2,
+        goals: [],
+      },
+      goal: {
+        id: "goal-1",
+        application_id: "app-1",
+        title: "Workflow and Stabilization",
+        planning_status: "ready",
+        goal_progress_status: "active",
+        thread_count: 1,
+        threads: [],
+        work_items: [],
+      },
+      thread: {
+        id: "thread-1",
+        workspace_id: "ws-1",
+        goal_id: "goal-1",
+        title: "Verification and Smoke Test",
+        description: "",
+        owner: null,
+        priority: "high",
+        status: "active",
+        domain: "development",
+        work_in_progress_limit: 1,
+        execution_policy: { max_concurrent_runs: 1 },
+        source_conversation_id: "thread-conversation-1",
+        queued_work_items: 0,
+        running_work_items: 0,
+        awaiting_review_work_items: 1,
+        completed_work_items: 0,
+        failed_work_items: 0,
+        recent_run_ids: [],
+        work_items_completed: 0,
+        work_items_blocked: 1,
+        thread_diagnostic: {
+          status: "blocked",
+          observations: ["Execution brief review is still blocking coding dispatch for this thread."],
+          likely_causes: [],
+          evidence: [],
+          provenance: { summary: "Execution brief review is required before coding execution can proceed." },
+          suggested_human_review_action: "Review the blocking execution brief and approve it before dispatch.",
+        },
+      },
+      related_goals: [
+        {
+          id: "goal-1",
+          application_id: "app-1",
+          title: "Workflow and Stabilization",
+          planning_status: "ready",
+          goal_progress_status: "active",
+          thread_count: 1,
+        },
+      ],
+      related_threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          title: "Verification and Smoke Test",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: { max_concurrent_runs: 1 },
+          source_conversation_id: "thread-conversation-1",
+          queued_work_items: 0,
+          running_work_items: 0,
+          awaiting_review_work_items: 1,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+        },
+      ],
+      breadcrumbs: [
+        { kind: "composer", label: "Composer" },
+        { kind: "application", label: "Lunch Poll", id: "app-1" },
+        { kind: "goal", label: "Workflow and Stabilization", id: "goal-1" },
+        { kind: "thread", label: "Verification and Smoke Test", id: "thread-1" },
+      ],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", goal_id: "goal-1", thread_id: "thread-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument());
+    expect(screen.getByText("Waiting on a fix or input")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Current goal" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Current thread" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resume thread" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Queue next slice" })).toBeDisabled();
+    expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument();
+    expect(screen.getAllByText(/review the blocking execution brief/i).length).toBeGreaterThan(0);
+
+    await act(async () => {
+      screen.getAllByRole("button", { name: "Review work items" })[0].click();
+    });
+
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "thread_detail",
+        params: { thread_id: "thread-1" },
+      })
+    );
   });
 
   it("loads XCO thread detail with work item, run, artifact, and timeline navigation", async () => {
@@ -558,6 +1707,23 @@ describe("WorkbenchPanelHost entity refresh", () => {
           status: "running",
           target_repo: "xyn-platform",
           runtime_run_id: "run-1",
+          execution_brief_review: {
+            has_brief: true,
+            review_state: "approved",
+            revision: 2,
+            history_count: 1,
+            summary: "Implement scheduler handoff",
+            objective: "Keep the scheduler change scoped.",
+            target_repository_slug: "xyn-platform",
+            target_branch: "develop",
+            gated: true,
+            ready: true,
+            blocked: false,
+            blocked_reason: null,
+            blocked_message: "Execution brief is ready for execution.",
+            review_notes: "Approved for execution",
+            available_actions: ["reject", "regenerate"],
+          },
           task_type: "codegen",
           priority: 0,
           attempts: 0,
@@ -626,6 +1792,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Avg Run Duration")).toBeInTheDocument();
     expect(screen.getByText("120s")).toBeInTheDocument();
     expect(screen.getByText("Scheduler refactor is running")).toBeInTheDocument();
+    expect(screen.getByText("Approved")).toBeInTheDocument();
+    expect(screen.getByText("Execution brief is ready for execution.")).toBeInTheDocument();
 
     await act(async () => {
       screen.getByRole("button", { name: "Queue Next Slice" }).click();
@@ -633,6 +1801,848 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(apiMocks.reviewCoordinationThread).toHaveBeenCalledWith("thread-1", "queue_next_slice"));
     expect(screen.getByText("Approved the next slice for Runtime Refactor.")).toBeInTheDocument();
+  });
+
+  it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {
+    apiMocks.getWorkItem.mockResolvedValue({
+      id: "task-1",
+      work_item_id: "wi-1",
+      title: "Implement scheduler",
+      description: "Use the stored brief instead of inferring intent.",
+      status: "awaiting_review",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 0,
+      max_attempts: 2,
+      has_execution_brief: true,
+      execution_brief_revision: 2,
+      execution_brief_history_count: 1,
+      execution_brief_review_state: "draft",
+      execution_brief_review_notes: "Needs explicit approval",
+      execution_queue: {
+        queue_ready: false,
+        dispatchable: false,
+        dispatched: false,
+        blocked: true,
+        status: "blocked",
+        reason: "brief_not_ready",
+        message: "Execution brief review is required before coding execution can proceed.",
+      },
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "draft",
+        revision: 2,
+        history_count: 1,
+        summary: "Implement scheduler via the bounded handoff",
+        objective: "Keep changes inside the scheduler seam.",
+        target_repository_slug: "xyn-platform",
+        target_branch: "develop",
+        gated: true,
+        ready: false,
+        blocked: true,
+        blocked_reason: "brief_not_ready",
+        blocked_message: "Execution brief review is required before coding execution can proceed.",
+        review_notes: "Needs explicit approval",
+        available_actions: ["mark_ready", "approve", "reject", "regenerate"],
+      },
+      execution_run: {
+        has_run: false,
+        run_id: null,
+        source: null,
+        state: "not_started",
+        raw_status: null,
+        validation_status: "not_run",
+        summary: null,
+        error: null,
+        started_at: null,
+        finished_at: null,
+        artifact_count: 0,
+        artifact_labels: [],
+        message: "No execution run has been dispatched yet.",
+      },
+      change_set: {
+        available: true,
+        status: "changed",
+        has_changes: true,
+        source: "workspace",
+        repository_slug: "xyn-platform",
+        changed_file_count: 2,
+        files: [
+          { path: "services/scheduler.py", change_type: "modified", patch_available: true },
+          { path: "services/queue.py", change_type: "added", patch_available: true },
+        ],
+        patch_available: true,
+        message: "2 files changed in the managed workspace.",
+        diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
+      },
+      publish_state: {
+        status: "idle",
+        repository_slug: "xyn-platform",
+        branch: "xyn/task/task-1",
+        commit: null,
+        push_status: null,
+        message: "No publish action has been recorded yet.",
+        available_actions: ["commit", "commit_and_push"],
+      },
+      execution_brief: {
+        schema_version: "v1",
+        revision: 2,
+        summary: "Implement scheduler via the bounded handoff",
+        objective: "Keep changes inside the scheduler seam.",
+      },
+      execution_brief_history: [{ revision: 1 }],
+    });
+    apiMocks.updateWorkItem.mockResolvedValue({
+      id: "task-1",
+      work_item_id: "wi-1",
+      title: "Implement scheduler",
+      description: "Use the stored brief instead of inferring intent.",
+      status: "queued",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 0,
+      max_attempts: 2,
+      has_execution_brief: true,
+      execution_brief_revision: 2,
+      execution_brief_history_count: 1,
+      execution_brief_review_state: "approved",
+      execution_brief_review_notes: "Approved for coding",
+      execution_queue: {
+        queue_ready: true,
+        dispatchable: true,
+        dispatched: false,
+        blocked: false,
+        status: "queue_ready",
+        reason: null,
+        message: "Task is approved and ready for queue dispatch.",
+      },
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "approved",
+        revision: 2,
+        history_count: 1,
+        summary: "Implement scheduler via the bounded handoff",
+        objective: "Keep changes inside the scheduler seam.",
+        target_repository_slug: "xyn-platform",
+        target_branch: "develop",
+        gated: true,
+        ready: true,
+        blocked: false,
+        blocked_reason: null,
+        blocked_message: "Execution brief is ready for execution.",
+        review_notes: "Approved for coding",
+        available_actions: ["reject", "regenerate"],
+      },
+      execution_run: {
+        has_run: false,
+        run_id: null,
+        source: null,
+        state: "not_started",
+        raw_status: null,
+        validation_status: "not_run",
+        summary: null,
+        error: null,
+        started_at: null,
+        finished_at: null,
+        artifact_count: 0,
+        artifact_labels: [],
+        message: "No execution run has been dispatched yet.",
+      },
+      change_set: {
+        available: true,
+        status: "changed",
+        has_changes: true,
+        source: "workspace",
+        repository_slug: "xyn-platform",
+        changed_file_count: 2,
+        files: [
+          { path: "services/scheduler.py", change_type: "modified", patch_available: true },
+          { path: "services/queue.py", change_type: "added", patch_available: true },
+        ],
+        patch_available: true,
+        message: "2 files changed in the managed workspace.",
+        diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
+      },
+      publish_state: {
+        status: "idle",
+        repository_slug: "xyn-platform",
+        branch: "xyn/task/task-1",
+        commit: null,
+        push_status: null,
+        message: "No publish action has been recorded yet.",
+        available_actions: ["commit", "commit_and_push"],
+      },
+      execution_brief: {
+        schema_version: "v1",
+        revision: 2,
+        summary: "Implement scheduler via the bounded handoff",
+        objective: "Keep changes inside the scheduler seam.",
+      },
+      execution_brief_history: [{ revision: 1 }],
+    });
+    apiMocks.dispatchWorkItem.mockResolvedValue({
+      status: "dispatched",
+      queue_item: { thread_id: "thread-1", work_item_id: "wi-1", task_id: "task-1" },
+      run_id: "run-1",
+      work_item: {
+        id: "task-1",
+        work_item_id: "wi-1",
+        title: "Implement scheduler",
+        description: "Use the stored brief instead of inferring intent.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        runtime_run_id: "run-1",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 0,
+        max_attempts: 2,
+        has_execution_brief: true,
+        execution_brief_revision: 2,
+        execution_brief_history_count: 1,
+        execution_brief_review_state: "approved",
+        execution_brief_review_notes: "Approved for coding",
+        execution_queue: {
+          queue_ready: false,
+          dispatchable: false,
+          dispatched: true,
+          blocked: false,
+          status: "dispatched",
+          reason: "in_flight",
+          message: "Task has already been dispatched and is in progress.",
+        },
+        execution_brief_review: {
+          has_brief: true,
+          review_state: "approved",
+          revision: 2,
+          history_count: 1,
+          summary: "Implement scheduler via the bounded handoff",
+          objective: "Keep changes inside the scheduler seam.",
+          target_repository_slug: "xyn-platform",
+          target_branch: "develop",
+          gated: true,
+          ready: true,
+          blocked: false,
+          blocked_reason: null,
+          blocked_message: "Execution brief is ready for execution.",
+          review_notes: "Approved for coding",
+          available_actions: ["reject", "regenerate"],
+        },
+        execution_run: {
+          has_run: true,
+          run_id: "run-1",
+          source: "runtime",
+          state: "queued",
+          raw_status: "queued",
+          validation_status: "pending",
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "Task has been dispatched and is waiting to start.",
+        },
+        change_set: {
+          available: true,
+          status: "changed",
+          has_changes: true,
+          source: "workspace",
+          repository_slug: "xyn-platform",
+          changed_file_count: 2,
+          files: [
+            { path: "services/scheduler.py", change_type: "modified", patch_available: true },
+            { path: "services/queue.py", change_type: "added", patch_available: true },
+          ],
+          patch_available: true,
+          message: "2 files changed in the managed workspace.",
+          diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
+        },
+        publish_state: {
+          status: "idle",
+          repository_slug: "xyn-platform",
+          branch: "xyn/task/task-1",
+          commit: null,
+          push_status: null,
+          message: "No publish action has been recorded yet.",
+          available_actions: ["commit", "commit_and_push"],
+        },
+        execution_brief: {
+          schema_version: "v1",
+          revision: 2,
+          summary: "Implement scheduler via the bounded handoff",
+          objective: "Keep changes inside the scheduler seam.",
+        },
+        execution_brief_history: [{ revision: 1 }],
+      },
+    });
+    apiMocks.publishDevTask.mockResolvedValue({
+      status: "pushed",
+      push: true,
+      work_item: {
+        id: "task-1",
+        work_item_id: "wi-1",
+        title: "Implement scheduler",
+        description: "Use the stored brief instead of inferring intent.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        runtime_run_id: "run-1",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 0,
+        max_attempts: 2,
+        has_execution_brief: true,
+        execution_brief_revision: 2,
+        execution_brief_history_count: 1,
+        execution_brief_review_state: "approved",
+        execution_brief_review_notes: "Approved for coding",
+        execution_queue: {
+          queue_ready: true,
+          dispatchable: true,
+          dispatched: false,
+          blocked: false,
+          status: "ready",
+          reason: "ready",
+          message: "Task is approved and ready for queue dispatch.",
+        },
+        execution_brief_review: {
+          has_brief: true,
+          review_state: "approved",
+          revision: 2,
+          history_count: 1,
+          summary: "Implement scheduler via the bounded handoff",
+          objective: "Keep changes inside the scheduler seam.",
+          target_repository_slug: "xyn-platform",
+          target_branch: "develop",
+          gated: true,
+          ready: true,
+          blocked: false,
+          blocked_reason: null,
+          blocked_message: "Execution brief is ready for execution.",
+          review_notes: "Approved for coding",
+          available_actions: ["reject", "regenerate"],
+        },
+        execution_run: {
+          has_run: false,
+          run_id: null,
+          source: null,
+          state: "not_run",
+          raw_status: null,
+          validation_status: null,
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "No execution run has been dispatched yet.",
+        },
+        change_set: {
+          available: true,
+          status: "changed",
+          has_changes: true,
+          source: "workspace",
+          repository_slug: "xyn-platform",
+          changed_file_count: 2,
+          files: [
+            { path: "services/scheduler.py", change_type: "modified", patch_available: true },
+            { path: "services/queue.py", change_type: "added", patch_available: true },
+          ],
+          patch_available: true,
+          message: "2 files changed in the managed workspace.",
+          diff_text: "diff --git a/services/scheduler.py b/services/scheduler.py\n@@ -1 +1 @@\n-old\n+new\n",
+        },
+        publish_state: {
+          status: "pushed",
+          repository_slug: "xyn-platform",
+          branch: "xyn/task/task-1",
+          commit: "abc1234",
+          push_status: "pushed",
+          published_at: "2026-03-14T10:00:00Z",
+          pushed_at: "2026-03-14T10:05:00Z",
+          message: "Committed changes and pushed the task branch.",
+          available_actions: [],
+        },
+        execution_brief: {
+          schema_version: "v1",
+          revision: 2,
+          summary: "Implement scheduler via the bounded handoff",
+          objective: "Keep changes inside the scheduler seam.",
+        },
+        execution_brief_history: [{ revision: 1 }],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail", panel_type: "detail", instance_key: "work-item:task-1", key: "work_item_detail", params: { work_item_id: "task-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getWorkItem).toHaveBeenCalledWith("task-1"));
+    expect(screen.getByText("Execution Queue")).toBeInTheDocument();
+    expect(screen.getAllByText("Execution brief review is required before coding execution can proceed.").length).toBeGreaterThan(0);
+    expect(screen.getByText("Execution Brief Review")).toBeInTheDocument();
+    expect(screen.getByText("Execution Run")).toBeInTheDocument();
+    expect(screen.getByText("Workspace Changes")).toBeInTheDocument();
+    expect(screen.getByText("Publish")).toBeInTheDocument();
+    expect(screen.getByText("Execution Blocked")).toBeInTheDocument();
+    expect(screen.getByText("Implement scheduler via the bounded handoff")).toBeInTheDocument();
+    expect(screen.getByText("No execution run has been dispatched yet.")).toBeInTheDocument();
+    expect(screen.getByText("Not Run")).toBeInTheDocument();
+    expect(screen.getByText("2 files changed in the managed workspace.")).toBeInTheDocument();
+    expect(screen.getByText(/Modified: services\/scheduler\.py/)).toBeInTheDocument();
+    expect(screen.getByText(/diff --git a\/services\/scheduler\.py b\/services\/scheduler\.py/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Commit & Push" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Dispatch Task" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Approve" }).click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.updateWorkItem).toHaveBeenCalledWith("task-1", {
+        execution_brief_action: "approve",
+        execution_brief_revision_reason: undefined,
+      }),
+    );
+    expect(screen.getByText("Task is approved and ready for queue dispatch.")).toBeInTheDocument();
+    expect(screen.getByText("Queue Ready")).toBeInTheDocument();
+    expect(screen.getByText("Execution Ready")).toBeInTheDocument();
+    expect(screen.getByText("Execution brief is ready for execution.")).toBeInTheDocument();
+    expect(screen.getByText("Execution brief Approve.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dispatch Task" })).toBeEnabled();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Dispatch Task" }).click();
+    });
+    await waitFor(() => expect(apiMocks.dispatchWorkItem).toHaveBeenCalledWith("task-1", "ws-1"));
+    expect(screen.getByText("Task has already been dispatched and is in progress.")).toBeInTheDocument();
+    expect(screen.getByText("Dispatched wi-1.")).toBeInTheDocument();
+    expect(screen.getByText("Latest execution run: run-1 · workspace ws-1")).toBeInTheDocument();
+    expect(screen.getByText("Task has been dispatched and is waiting to start.")).toBeInTheDocument();
+  });
+
+  it("shows recovery state and supports retry and requeue from work item detail", async () => {
+    apiMocks.getWorkItem.mockResolvedValueOnce({
+      id: "task-2",
+      work_item_id: "wi-2",
+      title: "Recover failed scheduler task",
+      description: "Retry after the last failed coding run.",
+      status: "failed",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      runtime_run_id: "run-failed",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 1,
+      max_attempts: 2,
+      has_execution_brief: true,
+      execution_brief_revision: 1,
+      execution_brief_history_count: 0,
+      execution_brief_review_state: "approved",
+      execution_brief_review_notes: "Approved for retry",
+      execution_queue: {
+        queue_ready: false,
+        dispatchable: false,
+        dispatched: false,
+        blocked: false,
+        status: "terminal",
+        reason: "status_failed",
+        message: "Task is failed and is no longer dispatchable.",
+      },
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "approved",
+        revision: 1,
+        history_count: 0,
+        summary: "Recover failed scheduler task",
+        objective: "Retry the failed coding work.",
+        target_repository_slug: "xyn-platform",
+        target_branch: "develop",
+        gated: true,
+        ready: true,
+        blocked: false,
+        blocked_reason: null,
+        blocked_message: "Execution brief is ready for execution.",
+        review_notes: "Approved for retry",
+        available_actions: ["reject", "regenerate"],
+      },
+      execution_run: {
+        has_run: true,
+        run_id: "run-failed",
+        source: "runtime",
+        state: "failed",
+        raw_status: "failed",
+        validation_status: "failed",
+        summary: "Tests failed",
+        error: "tests_failed",
+        started_at: "2026-03-14T12:00:00Z",
+        finished_at: "2026-03-14T12:05:00Z",
+        artifact_count: 1,
+        artifact_labels: ["failure.log"],
+        message: "Tests failed",
+      },
+      execution_recovery: {
+        retryable: true,
+        requeueable: true,
+        in_flight: false,
+        failed: true,
+        blocked: false,
+        status: "retryable",
+        reason: null,
+        message: "Execution failed and can be retried now or returned to the queue.",
+        available_actions: ["retry_now", "requeue"],
+        last_failure: {
+          run_id: "run-failed",
+          source: "runtime",
+          state: "failed",
+          summary: "Tests failed",
+          error: "tests_failed",
+          finished_at: "2026-03-14T12:05:00Z",
+          recorded_at: "2026-03-14T12:05:01Z",
+          action: null,
+        },
+      },
+    });
+    apiMocks.retryDevTask.mockResolvedValue({
+      status: "queued",
+      run_id: "run-retry",
+      work_item: {
+        id: "task-2",
+        work_item_id: "wi-2",
+        title: "Recover failed scheduler task",
+        description: "Retry after the last failed coding run.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        runtime_run_id: "run-retry",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 1,
+        max_attempts: 2,
+        execution_queue: {
+          queue_ready: false,
+          dispatchable: false,
+          dispatched: true,
+          blocked: false,
+          status: "dispatched",
+          reason: "in_flight",
+          message: "Task has already been dispatched and is in progress.",
+        },
+        execution_run: {
+          has_run: true,
+          run_id: "run-retry",
+          source: "runtime",
+          state: "queued",
+          raw_status: "queued",
+          validation_status: "pending",
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "Task has been dispatched and is waiting to start.",
+        },
+        execution_recovery: {
+          retryable: false,
+          requeueable: false,
+          in_flight: true,
+          failed: false,
+          blocked: true,
+          status: "in_flight",
+          reason: "in_flight",
+          message: "Execution is already in progress and cannot be retried or requeued.",
+          available_actions: [],
+          last_failure: {
+            run_id: "run-failed",
+            source: "runtime",
+            state: "failed",
+            summary: "Tests failed",
+            error: "tests_failed",
+            finished_at: "2026-03-14T12:05:00Z",
+            recorded_at: "2026-03-14T12:05:01Z",
+            action: "retry",
+          },
+        },
+      },
+    });
+    apiMocks.requeueDevTask.mockResolvedValue({
+      status: "queued",
+      work_item: {
+        id: "task-2",
+        work_item_id: "wi-2",
+        title: "Recover failed scheduler task",
+        description: "Retry after the last failed coding run.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 1,
+        max_attempts: 2,
+        execution_queue: {
+          queue_ready: true,
+          dispatchable: true,
+          dispatched: false,
+          blocked: false,
+          status: "queue_ready",
+          reason: null,
+          message: "Task is approved and ready for queue dispatch.",
+        },
+        execution_run: {
+          has_run: false,
+          run_id: null,
+          source: null,
+          state: "not_started",
+          raw_status: null,
+          validation_status: "not_run",
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "No execution run has been dispatched yet.",
+        },
+        execution_recovery: {
+          retryable: false,
+          requeueable: false,
+          in_flight: false,
+          failed: false,
+          blocked: false,
+          status: "requeued",
+          reason: "requeued",
+          message: "Task has been returned to the execution queue after a failed run.",
+          available_actions: [],
+          last_failure: {
+            run_id: "run-failed",
+            source: "runtime",
+            state: "failed",
+            summary: "Tests failed",
+            error: "tests_failed",
+            finished_at: "2026-03-14T12:05:00Z",
+            recorded_at: "2026-03-14T12:05:01Z",
+            action: "requeue",
+          },
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail-recovery", panel_type: "detail", instance_key: "work-item:task-2", key: "work_item_detail", params: { work_item_id: "task-2" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getWorkItem).toHaveBeenCalledWith("task-2"));
+    expect(screen.getByText("Recovery")).toBeInTheDocument();
+    expect(screen.getByText("Execution failed and can be retried now or returned to the queue.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry Now" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Requeue" })).toBeEnabled();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Retry Now" }).click();
+    });
+    await waitFor(() => expect(apiMocks.retryDevTask).toHaveBeenCalledWith("task-2"));
+    expect(screen.getByText("Retried wi-2 as run run-retry.")).toBeInTheDocument();
+    expect(screen.getByText("Execution is already in progress and cannot be retried or requeued.")).toBeInTheDocument();
+
+    apiMocks.getWorkItem.mockResolvedValueOnce({
+      id: "task-2",
+      work_item_id: "wi-2",
+      title: "Recover failed scheduler task",
+      description: "Retry after the last failed coding run.",
+      status: "failed",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 1,
+      max_attempts: 2,
+      execution_queue: {
+        queue_ready: false,
+        dispatchable: false,
+        dispatched: false,
+        blocked: false,
+        status: "terminal",
+        reason: "status_failed",
+        message: "Task is failed and is no longer dispatchable.",
+      },
+      execution_run: {
+        has_run: true,
+        run_id: "run-failed",
+        source: "runtime",
+        state: "failed",
+        raw_status: "failed",
+        validation_status: "failed",
+        summary: "Tests failed",
+        error: "tests_failed",
+        started_at: "2026-03-14T12:00:00Z",
+        finished_at: "2026-03-14T12:05:00Z",
+        artifact_count: 1,
+        artifact_labels: ["failure.log"],
+        message: "Tests failed",
+      },
+      execution_recovery: {
+        retryable: true,
+        requeueable: true,
+        in_flight: false,
+        failed: true,
+        blocked: false,
+        status: "retryable",
+        reason: null,
+        message: "Execution failed and can be retried now or returned to the queue.",
+        available_actions: ["retry_now", "requeue"],
+        last_failure: {
+          run_id: "run-failed",
+          source: "runtime",
+          state: "failed",
+          summary: "Tests failed",
+          error: "tests_failed",
+          finished_at: "2026-03-14T12:05:00Z",
+          recorded_at: "2026-03-14T12:05:01Z",
+          action: null,
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail-requeue", panel_type: "detail", instance_key: "work-item:task-2-requeue", key: "work_item_detail", params: { work_item_id: "task-2" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getWorkItem).toHaveBeenCalledWith("task-2"));
+    await act(async () => {
+      const buttons = screen.getAllByRole("button", { name: "Requeue" });
+      buttons[buttons.length - 1].click();
+    });
+    await waitFor(() => expect(apiMocks.requeueDevTask).toHaveBeenCalledWith("task-2"));
+    expect(screen.getByText("Returned wi-2 to the queue.")).toBeInTheDocument();
+    expect(screen.getByText("Task has been returned to the execution queue after a failed run.")).toBeInTheDocument();
+  });
+
+  it("hides dispatch for a ready item when another queued item is next", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getWorkItem.mockResolvedValue({
+      id: "task-3",
+      work_item_id: "wi-3",
+      title: "Validate the first slice with tests and runtime observability",
+      description: "Review the queued validation slice.",
+      status: "queued",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 0,
+      max_attempts: 3,
+      has_execution_brief: true,
+      execution_brief_revision: 1,
+      execution_brief_history_count: 0,
+      execution_brief_review_state: "approved",
+      execution_brief_review_notes: "",
+      execution_queue: {
+        queue_ready: true,
+        dispatchable: true,
+        dispatched: false,
+        blocked: false,
+        status: "queue_ready",
+        message:
+          "Validate the first slice with tests and runtime observability is approved, but Define the first operator workflow state is next in the execution queue for Operator Workflow.",
+        selected_for_dispatch: false,
+        next_dispatchable_task_id: "task-next",
+        next_dispatchable_work_item_id: "wi-next",
+        next_dispatchable_title: "Define the first operator workflow state",
+        next_dispatchable_thread_id: "thread-next",
+        next_dispatchable_thread_title: "Operator Workflow",
+      },
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "approved",
+        revision: 1,
+        history_count: 0,
+        summary: "Validate the first slice with tests and runtime observability",
+        objective: "Confirm the slice works end-to-end.",
+        gated: true,
+        ready: true,
+        blocked: false,
+        blocked_reason: null,
+        blocked_message: "Execution brief is ready for execution.",
+        review_notes: "",
+        available_actions: ["reject", "regenerate"],
+      },
+      execution_run: {
+        has_run: false,
+        state: "not_run",
+        artifact_count: 0,
+        artifact_labels: [],
+        message: "No execution run has been dispatched yet.",
+      },
+      execution_recovery: {
+        available: true,
+        retryable: false,
+        requeueable: false,
+        status: "idle",
+        message: "Task has not failed recently.",
+      },
+      change_set: {
+        available: false,
+        has_changes: false,
+        changed_file_count: 0,
+        files: [],
+        message: "No workspace changes recorded.",
+      },
+      publish_state: {
+        available: false,
+        status: "idle",
+        message: "Nothing to publish yet.",
+        available_actions: [],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail", panel_type: "detail", instance_key: "work-item:task-3", key: "work_item_detail", params: { work_item_id: "task-3" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getWorkItem).toHaveBeenCalledWith("task-3"));
+    expect(screen.getByText(/Define the first operator workflow state is next in the execution queue/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Dispatch Task" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Open next ready work item" }).click();
+    });
+
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "work_item_detail",
+        params: { work_item_id: "task-next" },
+      }),
+    );
   });
 
   it("loads runtime artifact content for runtime-backed artifact detail panels", async () => {
@@ -1061,6 +3071,204 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("Final summary")).toHaveLength(1);
   });
 
+  it("loads application plan detail and applies through the application API", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getApplicationPlan.mockResolvedValue({
+      id: "plan-1",
+      workspace_id: "ws-1",
+      application_id: null,
+      name: "Deal Finder",
+      summary: "Reviewable application plan",
+      source_factory_key: "ai_real_estate_deal_finder",
+      source_conversation_id: "thread-1",
+      requested_by: "user-1",
+      status: "review",
+      request_objective: "Build an AI real estate deal finder",
+      plan_fingerprint: "fp-1",
+      generated_goal_count: 2,
+      created_at: "2026-03-13T10:00:00Z",
+      updated_at: "2026-03-13T10:00:00Z",
+      factory: {
+        key: "ai_real_estate_deal_finder",
+        name: "AI Real Estate Deal Finder",
+        description: "Builds a real estate opportunity workflow.",
+        intended_use_case: "Property discovery and scoring",
+        generated_goal_families: ["foundation", "analysis"],
+        assumptions: ["MVP first"],
+      },
+      application_name: "Deal Finder",
+      application_summary: "A real estate deal finder",
+      ordering_hints: ["Start with ingestion."],
+      dependency_hints: ["Scoring depends on comps."],
+      resolution_notes: ["Review before apply."],
+      generated_goals: [
+        {
+          title: "Listing and Property Foundation",
+          description: "Build the first slice",
+          priority: "high",
+          goal_type: "build_system",
+          planning_summary: "Start with durable entities.",
+          resolution_notes: [],
+          threads: [],
+          work_items: [],
+        },
+      ],
+      generated_plan: {
+        application_name: "Deal Finder",
+        application_summary: "A real estate deal finder",
+        source_factory_key: "ai_real_estate_deal_finder",
+        request_objective: "Build an AI real estate deal finder",
+        ordering_hints: ["Start with ingestion."],
+        dependency_hints: ["Scoring depends on comps."],
+        resolution_notes: ["Review before apply."],
+        generated_goals: [
+          {
+            title: "Listing and Property Foundation",
+            description: "Build the first slice",
+            priority: "high",
+            goal_type: "build_system",
+            planning_summary: "Start with durable entities.",
+            resolution_notes: [],
+            threads: [],
+            work_items: [],
+          },
+        ],
+      },
+    });
+    apiMocks.applyApplicationPlan.mockResolvedValue({
+      status: "applied",
+      application: {
+        id: "app-1",
+        workspace_id: "ws-1",
+        name: "Deal Finder",
+        summary: "A real estate deal finder",
+        source_factory_key: "ai_real_estate_deal_finder",
+        source_conversation_id: "thread-1",
+        requested_by: "user-1",
+        status: "active",
+        request_objective: "Build an AI real estate deal finder",
+        goal_count: 1,
+        portfolio_state: { goals: [], insights: [], recommended_goal: null },
+        created_at: "2026-03-13T10:00:00Z",
+        updated_at: "2026-03-13T10:05:00Z",
+        factory: null,
+        goals: [],
+        metadata: {},
+      },
+      application_plan: { id: "plan-1" },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "plan-1", panel_type: "detail", instance_key: "application_plan:plan-1", key: "application_plan_detail", params: { application_plan_id: "plan-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getApplicationPlan).toHaveBeenCalledWith("plan-1"));
+    await waitFor(() => expect(screen.getByText("Reviewable application plan")).toBeInTheDocument());
+    await act(async () => {
+      screen.getAllByRole("button", { name: "Apply Plan" })[0].click();
+    });
+    await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
+    await waitFor(() =>
+      expect(onOpenPanel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          key: "application_detail",
+          params: { application_id: "app-1" },
+        }),
+      ),
+    );
+  });
+
+  it("loads application detail with grouped goals and portfolio summary", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "A real estate deal finder",
+      source_factory_key: "ai_real_estate_deal_finder",
+      source_conversation_id: "thread-1",
+      requested_by: "user-1",
+      status: "active",
+      request_objective: "Build an AI real estate deal finder",
+      goal_count: 1,
+      portfolio_state: {
+        goals: [
+          {
+            goal_id: "goal-1",
+            title: "Listing and Property Foundation",
+            planning_status: "decomposed",
+            goal_progress_status: "in_progress",
+            progress_percent: 25,
+            health_status: "active",
+            active_threads: 1,
+            blocked_threads: 0,
+            recent_execution_count: 1,
+            coordination_priority: { value: "medium", reasons: ["queueable work exists"] },
+          },
+        ],
+        insights: [
+          {
+            key: "steady_progress",
+            summary: "Portfolio activity is balanced around Listing and Property Foundation.",
+            evidence: ["1 active thread exists."],
+            goal_ids: ["goal-1"],
+          },
+        ],
+        recommended_goal: null,
+      },
+      created_at: "2026-03-13T10:00:00Z",
+      updated_at: "2026-03-13T10:05:00Z",
+      factory: {
+        key: "ai_real_estate_deal_finder",
+        name: "AI Real Estate Deal Finder",
+        description: "Builds a real estate opportunity workflow.",
+        intended_use_case: "Property discovery and scoring",
+        generated_goal_families: ["foundation"],
+        assumptions: ["MVP first"],
+      },
+      goals: [
+        {
+          id: "goal-1",
+          workspace_id: "ws-1",
+          application_id: "app-1",
+          title: "Listing and Property Foundation",
+          description: "Build the first slice",
+          goal_type: "build_system",
+          planning_status: "decomposed",
+          priority: "high",
+          planning_summary: "Start with durable entities.",
+          resolution_notes: [],
+          thread_count: 1,
+          work_item_count: 2,
+          created_at: "2026-03-13T10:00:00Z",
+          updated_at: "2026-03-13T10:00:00Z",
+        },
+      ],
+      metadata: {},
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "app-1", panel_type: "detail", instance_key: "application:app-1", key: "application_detail", params: { application_id: "app-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await waitFor(() => expect(screen.getByText("Application")).toBeInTheDocument());
+    expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
+    expect(screen.getByText("Listing and Property Foundation")).toBeInTheDocument();
+    expect(screen.getByText("Active Goals")).toBeInTheDocument();
+  });
+
   it("does not render duplicate panel chrome headings or close buttons", async () => {
     render(
       <MemoryRouter>
@@ -1075,5 +3283,372 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "Platform Settings" })).toBeInTheDocument();
+  });
+
+  it("loads composer discovery state with factory catalog", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "factory_discovery",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [
+        {
+          key: "ai_real_estate_deal_finder",
+          name: "AI Real Estate Deal Finder",
+          description: "Plans a real estate deal finder MVP.",
+          use_case: "real_estate",
+          generated_goal_families: ["listing_ingestion", "deal_scoring"],
+          assumptions: ["Bias toward MVP-first slices."],
+        },
+      ],
+      selected_factory: null,
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-1", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() =>
+      expect(apiMocks.getComposerState).toHaveBeenCalledWith({
+        workspace_id: "ws-1",
+        factory_key: undefined,
+        application_plan_id: undefined,
+        application_id: undefined,
+        goal_id: undefined,
+        thread_id: undefined,
+      })
+    );
+    expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
+    expect(screen.getByText("Application efforts")).toBeInTheDocument();
+    expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Composer" })).not.toBeInTheDocument();
+  });
+
+  it("auto-selects the only viable composer effort when no explicit focus is provided", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [
+        {
+          id: "app-knowledgebase",
+          name: "Knowledgebase",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Current app effort",
+          request_objective: "Build a personal knowledgebase",
+          goal_count: 0,
+          created_at: "2026-03-16T10:00:00Z",
+          updated_at: "2026-03-16T16:00:00Z",
+        },
+      ],
+      application: null,
+      application_plan: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-auto", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(onOpenPanel).toHaveBeenCalled());
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "composer_detail",
+        params: expect.objectContaining({
+          workspace_id: "ws-1",
+          application_id: "app-knowledgebase",
+        }),
+      })
+    );
+  });
+
+  it("shows an unresolved chooser state when multiple efforts exist and none is current", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [],
+      application_plans: [
+        {
+          id: "plan-knowledgebase",
+          name: "Knowledgebase Plan",
+          status: "review",
+          source_factory_key: "generic_application_mvp",
+          summary: "Newer plan effort",
+          request_objective: "Build a personal knowledgebase",
+          created_at: "2026-03-16T15:00:00Z",
+          updated_at: "2026-03-16T15:00:00Z",
+        },
+      ],
+      applications: [
+        {
+          id: "app-lunch",
+          name: "Lunch Poll",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Older lunch app effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 1,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+      ],
+      application: null,
+      application_plan: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-chooser", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getAllByText("Choose an application effort").length).toBeGreaterThan(0);
+    expect(screen.getByText("Awaiting Selection")).toBeInTheDocument();
+    expect(screen.getByText("Composer is not focused on a single effort yet. Choose one from the list below to see its work goals, execution threads, and next steps.")).toBeInTheDocument();
+    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
+    expect(screen.getByText("Knowledgebase Plan")).toBeInTheDocument();
+  });
+
+  it("does not auto-select stale failed work when it is the only remaining history", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [
+        {
+          id: "app-lunch",
+          name: "Lunch Poll",
+          status: "active",
+          source_factory_key: "generic_application_mvp",
+          summary: "Older lunch app effort",
+          request_objective: "Build a lunch poll app",
+          goal_count: 1,
+          created_at: "2026-03-15T10:00:00Z",
+          updated_at: "2026-03-15T11:00:00Z",
+        },
+      ],
+      application: null,
+      application_plan: null,
+      goal: null,
+      thread: null,
+      related_goals: [
+        {
+          id: "goal-1",
+          application_id: "app-lunch",
+          title: "Workflow and Stabilization",
+          planning_status: "decomposed",
+          goal_progress_status: "blocked",
+          thread_count: 1,
+          work_item_count: 2,
+          planning_summary: "Repair the lunch app workflow.",
+          resolution_notes: [],
+          created_at: "2026-03-15T11:05:00Z",
+          updated_at: "2026-03-15T11:05:00Z",
+        },
+      ],
+      related_threads: [
+        {
+          id: "thread-1",
+          workspace_id: "ws-1",
+          goal_id: "goal-1",
+          goal_title: "Workflow and Stabilization",
+          title: "Smoke test",
+          description: "",
+          owner: null,
+          priority: "high",
+          status: "active",
+          domain: "development",
+          work_in_progress_limit: 1,
+          execution_policy: {},
+          source_conversation_id: "conv-1",
+          queued_work_items: 0,
+          running_work_items: 0,
+          awaiting_review_work_items: 1,
+          completed_work_items: 0,
+          failed_work_items: 0,
+          recent_run_ids: [],
+          created_at: "2026-03-15T11:06:00Z",
+          updated_at: "2026-03-15T11:06:00Z",
+        },
+      ],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-stale", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getAllByText("Choose an application effort").length).toBeGreaterThan(0);
+    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
+    expect(screen.getByText("Needs attention")).toBeInTheDocument();
+    expect(screen.getByText("Most recent")).toBeInTheDocument();
+  });
+
+  it("loads composer plan review state and applies plans through the existing apply seam", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "plan_review",
+      context: {
+        factory_key: "ai_real_estate_deal_finder",
+        application_plan_id: "plan-1",
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [],
+      selected_factory: {
+        key: "ai_real_estate_deal_finder",
+        name: "AI Real Estate Deal Finder",
+        description: "Plans a real estate deal finder MVP.",
+        use_case: "real_estate",
+        generated_goal_families: ["listing_ingestion"],
+        assumptions: ["Bias toward MVP-first slices."],
+      },
+      application_plans: [],
+      applications: [],
+      application_plan: {
+        id: "plan-1",
+        name: "Deal Finder",
+        summary: "A reviewable MVP plan.",
+        status: "review",
+        source_factory_key: "ai_real_estate_deal_finder",
+        generated_goals: [{ title: "Listing and Property Foundation" }],
+        generated_threads: [],
+        generated_work_items: [],
+        resolution_notes: [],
+        planning_output: { goal_count: 1 },
+      },
+      application: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [
+        { kind: "composer", label: "Composer" },
+        { kind: "factory", label: "AI Real Estate Deal Finder", id: "ai_real_estate_deal_finder" },
+        { kind: "application_plan", label: "Deal Finder", id: "plan-1" },
+      ],
+      available_actions: [{ action_type: "apply_plan", label: "Apply Plan", enabled: true, target_kind: "application_plan", target_id: "plan-1" }],
+    });
+    apiMocks.applyApplicationPlan.mockResolvedValue({
+      status: "applied",
+      application: { id: "app-1", name: "Deal Finder" },
+      application_plan: { id: "plan-1" },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_plan_id: "plan-1", factory_key: "ai_real_estate_deal_finder" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0));
+    expect(screen.getByText("Selected application plan")).toBeInTheDocument();
+    expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
+    await act(async () => {
+      screen.getAllByRole("button", { name: /apply plan/i })[0].click();
+    });
+    await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "composer_detail",
+        params: {
+          workspace_id: "ws-1",
+          application_id: "app-1",
+        },
+      })
+    );
   });
 });

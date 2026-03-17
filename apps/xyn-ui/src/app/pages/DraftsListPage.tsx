@@ -6,6 +6,8 @@ import { listAppIntentDrafts } from "../../api/xyn";
 import type { AppIntentDraft, CanvasTableQuery, CanvasTableResponse } from "../../api/types";
 import WorkspaceContextBar from "../components/common/WorkspaceContextBar";
 import { toWorkspacePath } from "../routing/workspaceRouting";
+import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
+import { openViewDescriptor } from "../navigation/openViewDescriptor";
 
 export default function DraftsListPage({
   workspaceId,
@@ -62,7 +64,7 @@ export default function DraftsListPage({
         primary_key: "id",
         columns: [
           { key: "title", label: "Title", type: "string", sortable: true, filterable: true, searchable: true },
-          { key: "type", label: "Type", type: "string", sortable: true, filterable: true, searchable: true },
+          { key: "type", label: "Experience", type: "string", sortable: true, filterable: true, searchable: true },
           { key: "status", label: "Status", type: "string", sortable: true, filterable: true, searchable: true },
           { key: "created_by", label: "Created By", type: "string", sortable: true, filterable: true, searchable: true },
           { key: "updated_at", label: "Updated", type: "datetime", sortable: true, filterable: true },
@@ -70,7 +72,7 @@ export default function DraftsListPage({
         rows: drafts.map((draft) => ({
           id: draft.id,
           title: draft.title || "Untitled Draft",
-          type: draft.type || "app_intent",
+          type: "Application Draft",
           status: draft.status,
           created_by: draft.created_by || "user",
           updated_at: draft.updated_at,
@@ -88,7 +90,7 @@ export default function DraftsListPage({
       <div className="page-header">
         <div>
           <h2>Drafts</h2>
-          <p className="muted">App intent drafts in this workspace.</p>
+          <p className="muted">Application drafts in this workspace. Open a draft to continue application design and execution from an app-focused workspace.</p>
         </div>
         <div className="inline-actions">
           <button className="ghost" onClick={() => void load()} disabled={loading || !workspaceId}>
@@ -115,7 +117,12 @@ export default function DraftsListPage({
             });
           }}
           onRowActivate={(rowId) => {
-            onSelectDraft ? onSelectDraft(rowId) : navigate(toWorkspacePath(workspaceId, `drafts/${rowId}`));
+            if (onSelectDraft) {
+              onSelectDraft(rowId);
+              return;
+            }
+            const descriptor = getAppDraftViewDescriptor({ id: rowId, title: "" }, workspaceId);
+            openViewDescriptor(descriptor, navigate);
           }}
         />
       </section>

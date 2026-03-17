@@ -2133,7 +2133,42 @@ class EnvironmentAppState(models.Model):
         return f"{self.environment.slug}:{self.app_id}"
 
 
+class ManagedRepository(models.Model):
+    AUTH_MODE_CHOICES = [
+        ("", "Default"),
+        ("local", "Local"),
+        ("https_token", "HTTPS token"),
+        ("ssh", "SSH"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    slug = models.SlugField(max_length=120, unique=True)
+    display_name = models.CharField(max_length=200, blank=True)
+    remote_url = models.TextField()
+    default_branch = models.CharField(max_length=120, default="main")
+    is_active = models.BooleanField(default=True)
+    auth_mode = models.CharField(max_length=32, blank=True, default="", choices=AUTH_MODE_CHOICES)
+    metadata_json = models.JSONField(null=True, blank=True)
+    local_cache_relpath = models.CharField(max_length=240, blank=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["slug"]
+
+    def __str__(self) -> str:
+        return self.display_name or self.slug
+
+
 class DevTask(models.Model):
+    EXECUTION_BRIEF_REVIEW_STATES = [
+        ("draft", "Draft"),
+        ("ready", "Ready"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+        ("superseded", "Superseded"),
+    ]
     STATUS_CHOICES = [
         ("queued", "Queued"),
         ("running", "Running"),
@@ -2167,6 +2202,14 @@ class DevTask(models.Model):
     intent_type = models.CharField(max_length=80, blank=True)
     target_repo = models.CharField(max_length=120, blank=True)
     target_branch = models.CharField(max_length=120, blank=True)
+    execution_brief = models.JSONField(null=True, blank=True)
+    execution_brief_history = models.JSONField(default=list, blank=True)
+    execution_brief_review_state = models.CharField(max_length=20, choices=EXECUTION_BRIEF_REVIEW_STATES, default="draft")
+    execution_brief_review_notes = models.TextField(blank=True)
+    execution_brief_reviewed_at = models.DateTimeField(null=True, blank=True)
+    execution_brief_reviewed_by = models.ForeignKey(
+        "auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="dev_tasks_brief_reviewed"
+    )
     execution_policy = models.JSONField(null=True, blank=True)
     goal = models.ForeignKey("Goal", null=True, blank=True, on_delete=models.SET_NULL, related_name="work_items")
     coordination_thread = models.ForeignKey(
@@ -2702,6 +2745,9 @@ class Goal(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="goals")
+    application = models.ForeignKey(
+        "Application", null=True, blank=True, on_delete=models.SET_NULL, related_name="goals"
+    )
     title = models.CharField(max_length=240)
     description = models.TextField(blank=True)
     source_conversation_id = models.CharField(max_length=120, blank=True)
@@ -2721,3 +2767,86 @@ class Goal(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+
+class Application(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("completed", "Completed"),
+        ("archived", "Archived"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="applications")
+    name = models.CharField(max_length=240)
+    summary = models.TextField(blank=True)
+    source_factory_key = models.CharField(max_length=120)
+    source_conversation_id = models.CharField(max_length=120, blank=True)
+    requested_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="requested_applications"
+    )
+    target_repository = models.ForeignKey(
+        "ManagedRepository", null=True, blank=True, on_delete=models.SET_NULL, related_name="applications"
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    plan_fingerprint = models.CharField(max_length=128, blank=True, default="")
+    request_objective = models.TextField(blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "plan_fingerprint"],
+                condition=Q(plan_fingerprint__gt=""),
+                name="uniq_application_plan_fingerprint_per_workspace",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class ApplicationPlan(models.Model):
+    STATUS_CHOICES = [
+        ("review", "Review"),
+        ("applied", "Applied"),
+        ("canceled", "Canceled"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="application_plans")
+    application = models.ForeignKey(
+        "Application", null=True, blank=True, on_delete=models.SET_NULL, related_name="plans"
+    )
+    name = models.CharField(max_length=240)
+    summary = models.TextField(blank=True)
+    source_factory_key = models.CharField(max_length=120)
+    source_conversation_id = models.CharField(max_length=120, blank=True)
+    requested_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="requested_application_plans"
+    )
+    target_repository = models.ForeignKey(
+        "ManagedRepository", null=True, blank=True, on_delete=models.SET_NULL, related_name="application_plans"
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="review")
+    request_objective = models.TextField(blank=True)
+    plan_fingerprint = models.CharField(max_length=128, blank=True, default="")
+    plan_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "plan_fingerprint"],
+                condition=Q(plan_fingerprint__gt=""),
+                name="uniq_application_plan_fingerprint_review_per_workspace",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return self.name

@@ -600,7 +600,7 @@ class IntentEngineApiTests(TestCase):
         self.assertEqual(payload[0]["match_reason"], "related_artifact_ids")
         self.assertEqual(payload[0]["prompt_or_request"], "Build a network inventory app.")
         self.assertIn("AppSpec validated.", payload[0]["validation_summary"])
-        self.assertIn("Build a new app", str((prompt_item or {}).get("prompt") or ""))
+        self.assertIn("Build a network inventory app.", str(payload[0].get("prompt_or_request") or ""))
 
     def test_apply_patch_rejects_unauthorized_fields(self):
         create_response = self.client.post(
@@ -1131,10 +1131,12 @@ class IntentEngineApiTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(resolve_response.status_code, 200, resolve_response.content.decode())
-        draft_payload = resolve_response.json().get("draft_payload") or {}
-        self.assertEqual(draft_payload.get("__operation"), "open_artifact_panel")
-        self.assertEqual(draft_payload.get("panel_key"), "artifact_list")
-        self.assertEqual((draft_payload.get("params") or {}).get("namespace"), "core")
+        payload = resolve_response.json()
+        self.assertEqual(payload.get("status"), "IntentResolved")
+        panel_action = next((row for row in payload.get("next_actions", []) if row.get("action") == "OpenPanel"), None)
+        self.assertIsNotNone(panel_action)
+        self.assertEqual((panel_action or {}).get("panel_key"), "artifact_list")
+        self.assertEqual((((panel_action or {}).get("params") or {}).get("namespace")), "core")
 
         apply_response = self.client.post(
             "/xyn/api/xyn/intent/apply",
@@ -1142,7 +1144,11 @@ class IntentEngineApiTests(TestCase):
                 {
                     "action_type": "CreateDraft",
                     "artifact_type": "Workspace",
-                    "payload": draft_payload,
+                    "payload": {
+                        "__operation": "open_artifact_panel",
+                        "panel_key": "artifact_list",
+                        "params": {"namespace": "core"},
+                    },
                 }
             ),
             content_type="application/json",
@@ -1158,9 +1164,12 @@ class IntentEngineApiTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(raw_resolve.status_code, 200, raw_resolve.content.decode())
-        raw_payload = raw_resolve.json().get("draft_payload") or {}
-        self.assertEqual(raw_payload.get("panel_key"), "artifact_raw_json")
-        self.assertEqual((raw_payload.get("params") or {}).get("slug"), "core.authn-jwt")
+        raw_payload = raw_resolve.json()
+        self.assertEqual(raw_payload.get("status"), "IntentResolved")
+        raw_panel_action = next((row for row in raw_payload.get("next_actions", []) if row.get("action") == "OpenPanel"), None)
+        self.assertIsNotNone(raw_panel_action)
+        self.assertEqual((raw_panel_action or {}).get("panel_key"), "artifact_raw_json")
+        self.assertEqual((((raw_panel_action or {}).get("params") or {}).get("slug")), "core.authn-jwt")
 
     def test_artifact_slug_endpoints_return_full_raw_json_and_files(self):
         module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
@@ -1233,7 +1242,9 @@ class IntentEngineApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 200, response.content.decode())
         payload = response.json()
-        self.assertEqual(payload.get("status"), "IntentResolved")
+        self.assertEqual(payload.get("status"), "DraftReady")
+        self.assertEqual(((payload.get("conversation_action") or {}).get("action_type")), "dispatch_run")
+        self.assertEqual(((payload.get("draft_payload") or {}).get("__operation")), "execute_conversation_action")
         intent = payload.get("intent") or {}
         self.assertEqual(intent.get("intent_family"), "development_work")
         self.assertEqual(intent.get("intent_type"), "create_and_dispatch_run")

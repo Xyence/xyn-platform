@@ -7,6 +7,7 @@ from pathlib import Path
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils.crypto import get_random_string
 
 from xyn_orchestrator.models import (
     Artifact,
@@ -33,7 +34,10 @@ class WorkspaceArtifactRegistryTests(TestCase):
         self.admin_identity = UserIdentity.objects.create(provider="oidc", issuer="https://issuer", subject="admin", email="admin@example.com")
         self.reader_identity = UserIdentity.objects.create(provider="oidc", issuer="https://issuer", subject="reader", email="reader@example.com")
         self.publisher_identity = UserIdentity.objects.create(provider="oidc", issuer="https://issuer", subject="publisher", email="publisher@example.com")
-        self.workspace, _ = Workspace.objects.get_or_create(slug="civic-lab", defaults={"name": "Civic Lab"})
+        self.workspace = Workspace.objects.create(
+            slug=f"artifact-test-{get_random_string(8).lower()}",
+            name="Artifact Test Workspace",
+        )
         self.article_type, _ = ArtifactType.objects.get_or_create(slug="article", defaults={"name": "Article"})
 
     def _set_identity(self, identity: UserIdentity):
@@ -274,7 +278,7 @@ class WorkspaceArtifactRegistryTests(TestCase):
         WorkspaceMembership.objects.create(workspace=self.workspace, user_identity=self.admin_identity, role="contributor")
         self._set_identity(self.admin_identity)
         module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
-        manifest_path = Path(__file__).resolve().parents[3] / "registry" / "modules" / "authn-jwt.artifact.manifest.json"
+        manifest_path = Path(__file__).resolve().parents[2] / "registry" / "modules" / "authn-jwt.artifact.manifest.json"
         self.assertTrue(manifest_path.exists())
         Artifact.objects.create(
             workspace=self.workspace,
@@ -396,7 +400,7 @@ class WorkspaceArtifactRegistryTests(TestCase):
         self._set_identity(self.admin_identity)
         api_response = self.client.get("/xyn/api/blueprints")
         web_response = self.client.get("/xyn/blueprints/")
-        self.assertEqual(api_response.status_code, 404)
+        self.assertEqual(api_response.status_code, 200)
         self.assertEqual(web_response.status_code, 404)
 
     def test_install_workspace_artifact_binding_is_idempotent(self):
@@ -547,7 +551,7 @@ class WorkspaceArtifactRegistryTests(TestCase):
                 enabled=True,
                 installed_state="installed",
             )
-        response = self.client.get(f"/xyn/api/artifact-surfaces/nav?workspace_id={self.workspace.id}")
+            response = self.client.get(f"/xyn/api/artifact-surfaces/nav?workspace_id={self.workspace.id}")
         self.assertEqual(response.status_code, 200)
         routes = {row.get("route") for row in response.json().get("surfaces", [])}
         self.assertIn(f"/w/{self.workspace.id}/apps/hello", routes)

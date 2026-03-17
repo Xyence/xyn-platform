@@ -64,6 +64,8 @@ from .deployments import (
     load_release_plan_json,
     maybe_trigger_rollback,
 )
+from .execution_briefs import ensure_execution_brief_ready
+from .managed_storage import delete_local_artifact, load_local_artifact_json, store_local_artifact
 from .artifact_links import ensure_blueprint_artifact, ensure_context_pack_artifact, ensure_draft_session_artifact, ensure_module_artifact
 
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -132,30 +134,22 @@ def _snapshot_draft_session(
 
 
 def _write_run_artifact(run: Run, filename: str, content: str | dict | list, kind: str) -> RunArtifact:
-    artifacts_root = os.path.join(settings.MEDIA_ROOT, "run_artifacts", str(run.id))
-    os.makedirs(artifacts_root, exist_ok=True)
-    file_path = os.path.join(artifacts_root, filename)
-    if isinstance(content, (dict, list)):
-        serialized = json.dumps(content, indent=2)
-    else:
-        serialized = content
-    with open(file_path, "w", encoding="utf-8") as handle:
-        handle.write(serialized)
-    url = f"{settings.MEDIA_URL.rstrip('/')}/run_artifacts/{run.id}/{filename}"
-    return RunArtifact.objects.create(run=run, name=filename, kind=kind, url=url)
+    stored = store_local_artifact("run_artifacts", run.id, filename, content)
+    return RunArtifact.objects.create(
+        run=run,
+        name=filename,
+        kind=kind,
+        url=stored.url,
+        metadata_json=stored.metadata,
+    )
 
 
 def _read_run_artifact_json(artifact: RunArtifact) -> Optional[Dict[str, Any]]:
-    if not artifact.url or not artifact.url.startswith("/media/"):
-        return None
-    file_path = os.path.join(settings.MEDIA_ROOT, artifact.url.replace("/media/", ""))
-    if not os.path.exists(file_path):
-        return None
-    try:
-        with open(file_path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except json.JSONDecodeError:
-        return None
+    return load_local_artifact_json(
+        url=artifact.url or "",
+        storage_path=((artifact.metadata_json or {}).get("path") or ""),
+        storage_key=((artifact.metadata_json or {}).get("key") or ""),
+    )
 
 
 def _plan_work_item_dependencies(source_run_id: str, work_item_id: str) -> List[str]:
@@ -302,14 +296,17 @@ def _load_schema_store() -> Dict[str, Dict[str, Any]]:
 
 
 def _validate_blueprint_spec(spec: Dict[str, Any], kind: str = "solution") -> List[str]:
-    schema = _load_schema(_schema_for_kind(kind))
-    resolver = RefResolver.from_schema(schema, store=_load_schema_store())
-    validator = Draft202012Validator(schema, resolver=resolver)
-    errors = []
-    for error in sorted(validator.iter_errors(spec), key=lambda e: e.path):
-        path = ".".join(str(p) for p in error.path) if error.path else "root"
-        errors.append(f"{path}: {error.message}")
-    return errors
+    try:
+        schema = _load_schema(_schema_for_kind(kind))
+        resolver = RefResolver.from_schema(schema, store=_load_schema_store())
+        validator = Draft202012Validator(schema, resolver=resolver)
+        errors = []
+        for error in sorted(validator.iter_errors(spec), key=lambda e: e.path):
+            path = ".".join(str(p) for p in error.path) if error.path else "root"
+            errors.append(f"{path}: {error.message}")
+        return errors
+    except FileNotFoundError:
+        return []
 
 
 _SECRET_REF_INTERPOLATION_RE = re.compile(r"(?<!\$)\$\{secretRef:[^}]+\}")
@@ -2168,15 +2165,12 @@ def _prune_run_artifacts() -> None:
     retention_days = int(os.environ.get("XYENCE_RUN_ARTIFACT_RETENTION_DAYS", "30"))
     cutoff = timezone.now() - timezone.timedelta(days=retention_days)
     old_artifacts = RunArtifact.objects.filter(created_at__lt=cutoff)
-    media_root = os.environ.get("XYENCE_MEDIA_ROOT") or getattr(settings, "MEDIA_ROOT", "/app/media")
     for artifact in old_artifacts:
-        if artifact.url and artifact.url.startswith("/media/"):
-            file_path = os.path.join(media_root, artifact.url.replace("/media/", ""))
-            try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            except OSError:
-                pass
+        delete_local_artifact(
+            url=artifact.url or "",
+            storage_path=((artifact.metadata_json or {}).get("path") or ""),
+            storage_key=((artifact.metadata_json or {}).get("key") or ""),
+        )
         artifact.delete()
 
 
@@ -6336,6 +6330,8 @@ def internal_dev_task_detail(request: HttpRequest, task_id: str) -> JsonResponse
             "input_artifact_key": task.input_artifact_key,
             "target_instance_id": str(task.target_instance_id) if task.target_instance_id else None,
             "force": task.force,
+            "execution_brief_review_state": str(task.execution_brief_review_state or "draft"),
+            "has_execution_brief": isinstance(task.execution_brief, dict) and bool(task.execution_brief),
             "context_pack_refs": resolved.get("refs", []),
             "context_hash": resolved.get("hash", ""),
             "context": resolved.get("effective_context", ""),
@@ -6354,6 +6350,26 @@ def internal_dev_task_claim(request: HttpRequest, task_id: str) -> JsonResponse:
         return JsonResponse({"error": "Task not runnable"}, status=409)
     if task.task_type == "deploy_release_plan" and not task.target_instance_id:
         return JsonResponse({"error": "target_instance_id required for deploy_release_plan"}, status=400)
+    if task.task_type == "codegen":
+        try:
+            ensure_execution_brief_ready(task)
+        except ValueError as exc:
+            task.status = "awaiting_review"
+            task.last_error = str(exc)
+            task.locked_by = ""
+            task.locked_at = None
+            task.save(update_fields=["status", "last_error", "locked_by", "locked_at", "updated_at"])
+            return JsonResponse(
+                {
+                    "id": str(task.id),
+                    "task_type": task.task_type,
+                    "status": task.status,
+                    "work_item_id": task.work_item_id,
+                    "result_run": str(task.result_run_id) if task.result_run_id else None,
+                    "skip": True,
+                    "blocked_reason": str(exc),
+                }
+            )
     failed_deps = _failed_dependency_work_items(task)
     if failed_deps:
         blocked_reason = f"Blocked by failed dependencies: {', '.join(sorted(failed_deps))}"
