@@ -145,6 +145,7 @@ from .xco import (
     valid_thread_transition,
     work_item_is_blocked,
 )
+from .managed_storage import managed_artifact_root
 from .goal_planning import (
     GoalPlanningOutput,
     decompose_goal,
@@ -4968,6 +4969,87 @@ def _load_platform_config() -> Dict[str, Any]:
     return _migrate_video_generation_to_video(merged)
 
 
+def _platform_storage_status(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    cfg = payload if isinstance(payload, dict) else _default_platform_config()
+    storage = cfg.get("storage") if isinstance(cfg.get("storage"), dict) else {}
+    primary = storage.get("primary") if isinstance(storage.get("primary"), dict) else {}
+    providers = storage.get("providers") if isinstance(storage.get("providers"), list) else []
+
+    provider_map: Dict[str, Dict[str, Any]] = {}
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        name = str(provider.get("name") or "").strip()
+        if not name:
+            continue
+        provider_map[name] = provider
+
+    primary_name = str(primary.get("name") or "").strip()
+    primary_type = str(primary.get("type") or "local").strip().lower() or "local"
+    primary_provider = provider_map.get(primary_name, {})
+
+    configured_complete = True
+    configured_summary = ""
+    if primary_type == "s3":
+        s3_cfg = primary_provider.get("s3") if isinstance(primary_provider.get("s3"), dict) else {}
+        bucket = str(s3_cfg.get("bucket") or "").strip()
+        region = str(s3_cfg.get("region") or "").strip()
+        configured_complete = bool(bucket and region)
+        if configured_complete:
+            configured_summary = f"S3 bucket {bucket} in {region}"
+        else:
+            missing: list[str] = []
+            if not bucket:
+                missing.append("bucket")
+            if not region:
+                missing.append("region")
+            configured_summary = f"S3 configuration is incomplete: missing {', '.join(missing)}"
+    else:
+        local_cfg = primary_provider.get("local") if isinstance(primary_provider.get("local"), dict) else {}
+        local_path = str(local_cfg.get("base_path") or "").strip() or "/tmp/xyn-uploads"
+        configured_summary = f"Local platform-managed storage at {local_path}"
+
+    runtime_root = str(managed_artifact_root())
+    remote_durability_active = False
+    warnings: list[str] = []
+    if not remote_durability_active:
+        warnings.append(
+            "Artifacts are currently stored only on local filesystem storage. Remote-backed storage is not active, so artifacts may not be preserved across host loss or environment rebuilds."
+        )
+    if primary_type == "s3" and configured_complete:
+        warnings.append(
+            "S3 is configured for platform-managed storage, but core runtime artifacts still use local filesystem storage today."
+        )
+    elif primary_type == "s3" and not configured_complete:
+        warnings.append(
+            "S3 is selected in Platform Settings, but the configuration is incomplete and is not active for platform-managed storage."
+        )
+
+    # Platform Settings configures platform-managed storage providers, but the core runtime
+    # artifact store remains filesystem-backed today. Report both so the UI can avoid
+    # implying remote durability where it does not exist.
+    return {
+        "configured_provider": {
+            "name": primary_name or ("default" if primary_type == "s3" else "local"),
+            "type": primary_type,
+            "complete": configured_complete,
+            "summary": configured_summary,
+        },
+        "effective_platform_storage": {
+            "provider": primary_type if configured_complete else "local",
+            "mode": "object_storage" if primary_type == "s3" and configured_complete else "filesystem",
+            "configured": configured_complete,
+        },
+        "effective_runtime_artifact_storage": {
+            "provider": "local",
+            "mode": "filesystem",
+            "path": runtime_root,
+        },
+        "remote_durability_active": remote_durability_active,
+        "warnings": warnings,
+    }
+
+
 def _video_rendering_config(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     cfg = _migrate_video_generation_to_video(payload or _default_platform_config())
     video = cfg.get("video") if isinstance(cfg.get("video"), dict) else {}
@@ -5625,6 +5707,7 @@ def platform_config_collection(request: HttpRequest) -> JsonResponse:
             {
                 "version": int(latest.version) if latest else 0,
                 "config": payload,
+                "storage_status": _platform_storage_status(payload),
             }
         )
     if request.method in {"PUT", "PATCH"}:
@@ -5642,7 +5725,13 @@ def platform_config_collection(request: HttpRequest) -> JsonResponse:
             config_json=payload,
             created_by=request.user if request.user.is_authenticated else None,
         )
-        return JsonResponse({"version": int(document.version), "config": document.config_json})
+        return JsonResponse(
+            {
+                "version": int(document.version),
+                "config": document.config_json,
+                "storage_status": _platform_storage_status(document.config_json),
+            }
+        )
     return JsonResponse({"error": "method not allowed"}, status=405)
 
 

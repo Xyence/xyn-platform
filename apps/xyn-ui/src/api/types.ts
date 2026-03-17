@@ -3268,6 +3268,26 @@ export type PlatformConfig = {
 export type PlatformConfigResponse = {
   version: number;
   config: PlatformConfig;
+  storage_status?: {
+    configured_provider: {
+      name: string;
+      type: "s3" | "local" | string;
+      complete: boolean;
+      summary: string;
+    };
+    effective_platform_storage: {
+      provider: "s3" | "local" | string;
+      mode: "object_storage" | "filesystem" | string;
+      configured: boolean;
+    };
+    effective_runtime_artifact_storage: {
+      provider: "s3" | "local" | string;
+      mode: "object_storage" | "filesystem" | string;
+      path?: string;
+    };
+    remote_durability_active: boolean;
+    warnings: string[];
+  };
 };
 
 export type VideoAdapterDefinition = {

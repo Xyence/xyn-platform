@@ -481,6 +481,21 @@ input {
   grid-column: 1 / -1;
 }
 
+.settings-static-value {
+  border: 1px solid var(--border);
+  background: var(--surface-soft);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 72px;
+}
+
+.settings-static-value strong {
+  font-weight: 600;
+}
+
 input {
   padding: 10px 12px;
   border-radius: 10px;

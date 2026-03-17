@@ -21,6 +21,7 @@ import {
 } from "../../api/xyn";
 import type {
   PlatformConfig,
+  PlatformConfigResponse,
   VideoAdapterConfigRecord,
   VideoAdapterDefinition,
   WorkspaceAuthPolicy,
@@ -147,6 +148,51 @@ function ensureConfig(config?: PlatformConfig): PlatformConfig {
   return merged;
 }
 
+function fallbackStorageStatus(config: PlatformConfig): NonNullable<PlatformConfigResponse["storage_status"]> {
+  const providers = config.storage?.providers || [];
+  const primary = config.storage?.primary || { type: "local", name: "local" };
+  const selected = providers.find((provider) => provider.name === primary.name) || null;
+  const isS3 = primary.type === "s3";
+  const bucket = selected?.s3?.bucket?.trim() || "";
+  const region = selected?.s3?.region?.trim() || "";
+  const complete = isS3 ? Boolean(bucket && region) : true;
+  const configuredSummary = isS3
+    ? complete
+      ? `S3 bucket ${bucket} in ${region}`
+      : "S3 configuration is incomplete"
+    : `Local platform-managed storage at ${selected?.local?.base_path || "/tmp/xyn-uploads"}`;
+  const warnings = [
+    "Artifacts are currently stored only on local filesystem storage. Remote-backed storage is not active, so artifacts may not be preserved across host loss or environment rebuilds.",
+  ];
+  if (isS3) {
+    warnings.push(
+      complete
+        ? "S3 is configured for platform-managed storage, but core runtime artifacts still use local filesystem storage today."
+        : "S3 is selected in Platform Settings, but the configuration is incomplete and is not active for platform-managed storage."
+    );
+  }
+  return {
+    configured_provider: {
+      name: primary.name || (isS3 ? "default" : "local"),
+      type: primary.type || "local",
+      complete,
+      summary: configuredSummary,
+    },
+    effective_platform_storage: {
+      provider: isS3 && complete ? "s3" : "local",
+      mode: isS3 && complete ? "object_storage" : "filesystem",
+      configured: complete,
+    },
+    effective_runtime_artifact_storage: {
+      provider: "local",
+      mode: "filesystem",
+      path: "/app/media",
+    },
+    remote_durability_active: false,
+    warnings,
+  };
+}
+
 function statusChipClass(status: SettingsCard["status"]): string {
   if (status === "Configured" || status === "Available") return "status-chip active";
   if (status === "Legacy") return "status-chip deprecated";
@@ -188,6 +234,7 @@ export default function PlatformSettingsPage() {
   const workspaceId = String(params.workspaceId || "").trim();
   const [searchParams, setSearchParams] = useSearchParams();
   const [config, setConfig] = useState<PlatformConfig>(defaultConfig);
+  const [storageStatusDetails, setStorageStatusDetails] = useState<PlatformConfigResponse["storage_status"] | null>(null);
   const [version, setVersion] = useState<number>(0);
   const [loading, setLoading] = useState(false);
   const [loadingAdapters, setLoadingAdapters] = useState(false);
@@ -243,6 +290,7 @@ export default function PlatformSettingsPage() {
       const result = await getPlatformConfig();
       setVersion(result.version);
       setConfig(ensureConfig(result.config));
+      setStorageStatusDetails(result.storage_status || fallbackStorageStatus(ensureConfig(result.config)));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -359,6 +407,7 @@ export default function PlatformSettingsPage() {
     type: "s3",
     s3: { bucket: "", region: "", prefix: "xyn/", acl: "private" },
   };
+  const effectiveStorageStatus = storageStatusDetails || fallbackStorageStatus(config);
   const discordChannel =
     config.notifications.channels.find((channel) => channel.type === "discord") ||
     ({ name: "discord-default", type: "discord", enabled: false, discord: { webhook_url_ref: "" } } as const);
@@ -424,6 +473,7 @@ export default function PlatformSettingsPage() {
       const result = await updatePlatformConfig(config);
       setVersion(result.version);
       setConfig(ensureConfig(result.config));
+      setStorageStatusDetails(result.storage_status || fallbackStorageStatus(ensureConfig(result.config)));
       setMessage("Platform settings saved.");
     } catch (err) {
       setError((err as Error).message);
@@ -1185,6 +1235,54 @@ export default function PlatformSettingsPage() {
               <h3>Storage</h3>
               <span className={statusChipClass(storageStatus)}>{storageStatus}</span>
             </div>
+            <p className="muted small">
+              Effective storage status reflects the currently saved platform configuration and the runtime artifact backend in use today.
+            </p>
+            <div className="form-grid" style={{ marginBottom: 12 }}>
+              <label>
+                Configured provider
+                <div className="settings-static-value">
+                  <strong>{effectiveStorageStatus.configured_provider.type.toUpperCase()}</strong>
+                  <span className="muted small">{effectiveStorageStatus.configured_provider.summary}</span>
+                </div>
+              </label>
+              <label>
+                Effective platform-managed storage
+                <div className="settings-static-value">
+                  <strong>
+                    {effectiveStorageStatus.effective_platform_storage.provider === "s3" ? "S3 object storage" : "Local filesystem"}
+                  </strong>
+                  <span className="muted small">
+                    {effectiveStorageStatus.effective_platform_storage.configured
+                      ? "Used by platform-managed attachments and related uploads."
+                      : "Primary storage configuration is incomplete, so remote platform-managed storage is not active."}
+                  </span>
+                </div>
+              </label>
+              <label>
+                Effective runtime artifact storage
+                <div className="settings-static-value">
+                  <strong>Local filesystem</strong>
+                  <span className="muted small">
+                    {effectiveStorageStatus.effective_runtime_artifact_storage.path || "Instance-local managed artifact root"}
+                  </span>
+                </div>
+              </label>
+              <label>
+                Remote-backed durability
+                <div className="settings-static-value">
+                  <strong>{effectiveStorageStatus.remote_durability_active ? "Active" : "Not active"}</strong>
+                  <span className="muted small">
+                    {effectiveStorageStatus.remote_durability_active
+                      ? "Runtime artifacts are preserved in remote-backed storage."
+                      : "Core runtime artifacts are not currently stored in remote-backed durable storage."}
+                  </span>
+                </div>
+              </label>
+            </div>
+            {effectiveStorageStatus.warnings.map((warning) => (
+              <InlineMessage key={warning} tone="warn" title="Storage warning" body={warning} />
+            ))}
             <div className="form-grid">
               <label>
                 Primary provider
