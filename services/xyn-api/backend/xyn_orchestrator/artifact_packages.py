@@ -34,6 +34,7 @@ ALLOWED_ARTIFACT_TYPES = {
     "application",
     "article",
     "workflow",
+    "policy_bundle",
     "app_shell",
     "auth_login",
     "data_model",
@@ -552,6 +553,9 @@ def _run_install_hook(*, artifact_type: str, slug: str, content: Dict[str, Any],
     if artifact_type == "workflow":
         _upsert_platform_config("workflow_registry", slug, content, user=user)
         return {"registered": True, "section": "workflow_registry"}
+    if artifact_type == "policy_bundle":
+        _upsert_platform_config("policy_bundle_registry", slug, content, user=user)
+        return {"registered": True, "section": "policy_bundle_registry"}
     return {"registered": False}
 
 
