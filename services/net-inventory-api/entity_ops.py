@@ -240,6 +240,139 @@ def load_entity_contracts() -> list[dict[str, Any]]:
     raise RuntimeError("GENERATED_ENTITY_CONTRACTS_JSON did not include any entity contracts")
 
 
+def load_policy_bundle() -> dict[str, Any]:
+    raw = str(os.getenv("GENERATED_POLICY_BUNDLE_JSON", "") or "").strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GENERATED_POLICY_BUNDLE_JSON is invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("GENERATED_POLICY_BUNDLE_JSON must decode to an object")
+    return _deepcopy(payload)
+
+
+def _compiled_policy_map() -> dict[str, dict[str, list[dict[str, Any]]]]:
+    return {
+        "relation_constraints": {},
+        "status_write_policies": {},
+        "transition_guards": {},
+        "unsupported": {},
+    }
+
+
+def _policy_entries(policy_bundle: dict[str, Any], family: str) -> list[dict[str, Any]]:
+    policies = policy_bundle.get("policies") if isinstance(policy_bundle.get("policies"), dict) else {}
+    rows = policies.get(family) if isinstance(policies.get(family), list) else []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _require_policy_parameters(policy: dict[str, Any], required: Iterable[str]) -> dict[str, Any]:
+    params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else None
+    if not params:
+        raise RuntimeError(f"Policy '{policy.get('id') or policy.get('name') or 'unknown'}' is missing parameters")
+    missing = [key for key in required if params.get(key) in (None, "", [])]
+    if missing:
+        raise RuntimeError(
+            f"Policy '{policy.get('id') or policy.get('name') or 'unknown'}' is missing required parameters: {', '.join(missing)}"
+        )
+    return params
+
+
+def compile_policy_bundle(*, policy_bundle: dict[str, Any], entity_contracts: Iterable[dict[str, Any]]) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    compiled = _compiled_policy_map()
+    contracts = {
+        str(contract.get("key") or "").strip(): copy.deepcopy(contract)
+        for contract in entity_contracts
+        if isinstance(contract, dict) and str(contract.get("key") or "").strip()
+    }
+    if not policy_bundle:
+        return compiled
+
+    for policy in _policy_entries(policy_bundle, "relation_constraints"):
+        params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else {}
+        if str(params.get("runtime_rule") or "").strip() != "match_related_field":
+            compiled["unsupported"].setdefault("relation_constraints", []).append(copy.deepcopy(policy))
+            continue
+        params = _require_policy_parameters(
+            policy,
+            ["entity_key", "source_field", "related_entity", "related_match_field", "comparison_field"],
+        )
+        entity_key = str(params["entity_key"]).strip()
+        if entity_key not in contracts:
+            raise RuntimeError(f"Policy '{policy.get('id')}' references unknown entity '{entity_key}'")
+        compiled["relation_constraints"].setdefault(entity_key, []).append(
+            {
+                "policy_id": str(policy.get("id") or policy.get("name") or "relation-constraint").strip(),
+                "source_field": str(params["source_field"]).strip(),
+                "related_entity": str(params["related_entity"]).strip(),
+                "related_lookup_field": str(params.get("related_lookup_field") or "id").strip() or "id",
+                "related_match_field": str(params["related_match_field"]).strip(),
+                "comparison_field": str(params["comparison_field"]).strip(),
+                "message": str((policy.get("explanation") or {}).get("user_summary") or policy.get("description") or "Related records must stay aligned.").strip(),
+            }
+        )
+
+    for policy in _policy_entries(policy_bundle, "validation_policies"):
+        params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else {}
+        runtime_rule = str(params.get("runtime_rule") or "").strip()
+        if runtime_rule not in {"parent_status_gate", "record_status_gate"}:
+            compiled["unsupported"].setdefault("validation_policies", []).append(copy.deepcopy(policy))
+            continue
+        required = ["entity_key", "status_field", "on_operations"] if runtime_rule == "record_status_gate" else [
+            "entity_key",
+            "parent_entity",
+            "parent_relation_field",
+            "parent_status_field",
+            "on_operations",
+        ]
+        params = _require_policy_parameters(policy, required)
+        entity_key = str(params["entity_key"]).strip()
+        if entity_key not in contracts:
+            raise RuntimeError(f"Policy '{policy.get('id')}' references unknown entity '{entity_key}'")
+        compiled["status_write_policies"].setdefault(entity_key, []).append(
+            {
+                "policy_id": str(policy.get("id") or policy.get("name") or "status-write-policy").strip(),
+                "runtime_rule": runtime_rule,
+                "parent_entity": str(params.get("parent_entity") or "").strip(),
+                "parent_relation_field": str(params.get("parent_relation_field") or "").strip(),
+                "status_field": str(params.get("status_field") or params.get("parent_status_field") or "").strip(),
+                "allowed_statuses": [str(value).strip() for value in params.get("allowed_parent_statuses") or params.get("allowed_statuses") or [] if str(value).strip()],
+                "blocked_statuses": [str(value).strip() for value in params.get("blocked_parent_statuses") or params.get("blocked_statuses") or [] if str(value).strip()],
+                "on_operations": [str(value).strip() for value in params.get("on_operations") or [] if str(value).strip()],
+                "message": str((policy.get("explanation") or {}).get("user_summary") or policy.get("description") or "Writes are blocked by policy.").strip(),
+            }
+        )
+
+    for policy in _policy_entries(policy_bundle, "transition_policies"):
+        params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else {}
+        if str(params.get("runtime_rule") or "").strip() != "field_transition_guard":
+            compiled["unsupported"].setdefault("transition_policies", []).append(copy.deepcopy(policy))
+            continue
+        params = _require_policy_parameters(policy, ["entity_key", "field_name", "allowed_transitions"])
+        entity_key = str(params["entity_key"]).strip()
+        if entity_key not in contracts:
+            raise RuntimeError(f"Policy '{policy.get('id')}' references unknown entity '{entity_key}'")
+        allowed_transitions = {
+            str(source).strip(): [str(target).strip() for target in targets if str(target).strip()]
+            for source, targets in (params.get("allowed_transitions") or {}).items()
+            if str(source).strip() and isinstance(targets, list)
+        }
+        if not allowed_transitions:
+            raise RuntimeError(f"Policy '{policy.get('id')}' did not include any allowed transitions")
+        compiled["transition_guards"].setdefault(entity_key, []).append(
+            {
+                "policy_id": str(policy.get("id") or policy.get("name") or "transition-guard").strip(),
+                "field_name": str(params["field_name"]).strip(),
+                "allowed_transitions": allowed_transitions,
+                "message": str((policy.get("explanation") or {}).get("user_summary") or policy.get("description") or "Transition not allowed.").strip(),
+            }
+        )
+
+    return compiled
+
+
 class EntityOperationError(Exception):
     def __init__(self, status_code: int, detail: str, *, meta: Optional[Dict[str, Any]] = None):
         super().__init__(detail)
@@ -429,14 +562,19 @@ class PostgresEntityStorageAdapter:
 
 
 class GenericEntityOperationsService:
-    def __init__(self, *, entity_contracts: Iterable[Dict[str, Any]], storage_adapter: Any):
+    def __init__(self, *, entity_contracts: Iterable[Dict[str, Any]], storage_adapter: Any, policy_bundle: Optional[Dict[str, Any]] = None):
         contracts = [copy.deepcopy(item) for item in entity_contracts if isinstance(item, dict)]
         self._contracts = {str(item.get("key") or "").strip(): item for item in contracts if str(item.get("key") or "").strip()}
         self._storage = storage_adapter
+        self._compiled_policies = compile_policy_bundle(policy_bundle=policy_bundle or {}, entity_contracts=contracts)
 
     @property
     def contracts(self) -> Dict[str, Dict[str, Any]]:
         return self._contracts
+
+    @property
+    def compiled_policies(self) -> Dict[str, Dict[str, list[dict[str, Any]]]]:
+        return self._compiled_policies
 
     def entity_contract(self, entity_key: str) -> Dict[str, Any]:
         contract = self._contracts.get(str(entity_key or "").strip())
@@ -511,6 +649,89 @@ class GenericEntityOperationsService:
         target = self._resolve_record_reference(target_entity, str(raw_value), workspace_id=workspace_id)
         return str(target.get(relation.get("target_field") or "id") or "")
 
+    def _record_for_policy(self, contract: Dict[str, Any], *, record_id: Optional[str], workspace_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        normalized_id = _parse_uuid(record_id)
+        if not normalized_id:
+            return None
+        return self._storage.get_by_id(contract, record_id=normalized_id, workspace_id=workspace_id)
+
+    def _enforce_relation_constraints(
+        self,
+        entity_key: str,
+        *,
+        candidate: Dict[str, Any],
+        workspace_id: Optional[str],
+    ) -> None:
+        for policy in self._compiled_policies.get("relation_constraints", {}).get(entity_key, []):
+            source_id = _parse_uuid(candidate.get(policy["source_field"]))
+            comparison_value = candidate.get(policy["comparison_field"])
+            if not source_id or comparison_value in (None, ""):
+                continue
+            related_contract = self.entity_contract(policy["related_entity"])
+            related_row = self._record_for_policy(related_contract, record_id=source_id, workspace_id=workspace_id)
+            if not related_row:
+                raise EntityOperationError(404, f"{policy['related_entity'].rstrip('s').replace('_', ' ')} not found")
+            if str(related_row.get(policy["related_match_field"]) or "") != str(comparison_value):
+                raise EntityOperationError(
+                    400,
+                    policy["message"],
+                    meta={
+                        "policy_id": policy["policy_id"],
+                        "source_field": policy["source_field"],
+                        "comparison_field": policy["comparison_field"],
+                    },
+                )
+
+    def _enforce_status_write_policies(
+        self,
+        entity_key: str,
+        *,
+        operation: str,
+        candidate: Dict[str, Any],
+        existing: Optional[Dict[str, Any]],
+        workspace_id: Optional[str],
+    ) -> None:
+        for policy in self._compiled_policies.get("status_write_policies", {}).get(entity_key, []):
+            if operation not in set(policy.get("on_operations") or []):
+                continue
+            if policy.get("runtime_rule") == "parent_status_gate":
+                relation_field = str(policy.get("parent_relation_field") or "").strip()
+                parent_record_id = _parse_uuid(candidate.get(relation_field) or (existing or {}).get(relation_field))
+                if not parent_record_id:
+                    continue
+                parent_contract = self.entity_contract(str(policy.get("parent_entity") or "").strip())
+                parent_row = self._record_for_policy(parent_contract, record_id=parent_record_id, workspace_id=workspace_id)
+                if not parent_row:
+                    raise EntityOperationError(404, f"{str(policy.get('parent_entity') or '').rstrip('s').replace('_', ' ')} not found")
+                status_value = str(parent_row.get(policy["status_field"]) or "").strip()
+            else:
+                status_value = str(candidate.get(policy["status_field"]) or (existing or {}).get(policy["status_field"]) or "").strip()
+                if not status_value:
+                    continue
+            allowed_statuses = set(policy.get("allowed_statuses") or [])
+            blocked_statuses = set(policy.get("blocked_statuses") or [])
+            if allowed_statuses and status_value not in allowed_statuses:
+                raise EntityOperationError(400, policy["message"], meta={"policy_id": policy["policy_id"], "status_value": status_value})
+            if blocked_statuses and status_value in blocked_statuses:
+                raise EntityOperationError(400, policy["message"], meta={"policy_id": policy["policy_id"], "status_value": status_value})
+
+    def _enforce_transition_guards(self, entity_key: str, *, existing: Dict[str, Any], candidate: Dict[str, Any]) -> None:
+        for policy in self._compiled_policies.get("transition_guards", {}).get(entity_key, []):
+            field_name = str(policy.get("field_name") or "").strip()
+            if field_name not in candidate:
+                continue
+            previous = str(existing.get(field_name) or "").strip()
+            current = str(candidate.get(field_name) or "").strip()
+            if not previous or not current or previous == current:
+                continue
+            allowed = set((policy.get("allowed_transitions") or {}).get(previous) or [])
+            if current not in allowed:
+                raise EntityOperationError(
+                    400,
+                    policy["message"],
+                    meta={"policy_id": policy["policy_id"], "from": previous, "to": current, "field_name": field_name},
+                )
+
     def list_records(self, entity_key: str, *, context: RecordContext) -> list[Dict[str, Any]]:
         contract = self._operation_contract(entity_key, "list")
         if not context.workspace_id:
@@ -525,6 +746,8 @@ class GenericEntityOperationsService:
         contract = self._operation_contract(entity_key, "create")
         workspace_id = context.workspace_id or str(fields.get("workspace_id") or "").strip() or None
         normalized = self._normalize_payload(contract, fields, mode="create", workspace_id=workspace_id)
+        self._enforce_status_write_policies(entity_key, operation="create", candidate=normalized, existing=None, workspace_id=workspace_id)
+        self._enforce_relation_constraints(entity_key, candidate=normalized, workspace_id=workspace_id)
         return self._storage.insert(contract, values=normalized)
 
     def update_record(self, entity_key: str, id_or_reference: str, fields: Dict[str, Any], *, context: RecordContext) -> Dict[str, Any]:
@@ -532,6 +755,11 @@ class GenericEntityOperationsService:
         existing = self._resolve_record_reference(entity_key, id_or_reference, workspace_id=context.workspace_id)
         workspace_id = str(existing.get("workspace_id") or context.workspace_id or "").strip() or None
         normalized = self._normalize_payload(contract, fields, mode="update", workspace_id=workspace_id)
+        candidate = dict(existing)
+        candidate.update(normalized)
+        self._enforce_status_write_policies(entity_key, operation="update", candidate=candidate, existing=existing, workspace_id=workspace_id)
+        self._enforce_relation_constraints(entity_key, candidate=candidate, workspace_id=workspace_id)
+        self._enforce_transition_guards(entity_key, existing=existing, candidate=candidate)
         return self._storage.update(contract, record_id=str(existing.get("id")), workspace_id=workspace_id, values=normalized)
 
     def delete_record(self, entity_key: str, id_or_reference: str, *, context: RecordContext) -> Dict[str, Any]:

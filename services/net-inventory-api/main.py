@@ -12,7 +12,14 @@ from fastapi.responses import HTMLResponse
 from psycopg2.extras import RealDictCursor
 from psycopg2 import sql
 
-from entity_ops import EntityOperationError, GenericEntityOperationsService, PostgresEntityStorageAdapter, RecordContext, load_entity_contracts
+from entity_ops import (
+    EntityOperationError,
+    GenericEntityOperationsService,
+    PostgresEntityStorageAdapter,
+    RecordContext,
+    load_entity_contracts,
+    load_policy_bundle,
+)
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://xyn:xyn_dev_password@localhost:5432/net_inventory")
@@ -113,6 +120,7 @@ def _http_error(exc: EntityOperationError) -> HTTPException:
 def _build_entity_service() -> GenericEntityOperationsService:
     return GenericEntityOperationsService(
         entity_contracts=load_entity_contracts(),
+        policy_bundle=load_policy_bundle(),
         storage_adapter=PostgresEntityStorageAdapter(get_conn=get_conn),
     )
 

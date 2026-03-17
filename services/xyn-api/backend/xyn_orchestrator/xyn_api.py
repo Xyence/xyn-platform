@@ -10589,15 +10589,24 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
 
     manifest = package.manifest if isinstance(package.manifest, dict) else {}
     artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), list) else []
-    invalid = [
-        f"{item.get('type')}:{item.get('slug')}@{item.get('version')}"
-        for item in artifacts
-        if isinstance(item, dict) and not str(item.get("slug") or "").strip().startswith("app.")
-    ]
+    invalid = []
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        artifact_type = str(item.get("type") or "").strip()
+        slug = str(item.get("slug") or "").strip()
+        allowed = (
+            artifact_type == "application" and slug.startswith("app.")
+        ) or (
+            artifact_type == "policy_bundle" and slug.startswith("policy.")
+        )
+        if allowed:
+            continue
+        invalid.append(f"{artifact_type}:{slug}@{item.get('version')}")
     if invalid:
         return JsonResponse(
             {
-                "error": "generated artifact import only accepts app.* slugs",
+                "error": "generated artifact import only accepts application app.* and policy_bundle policy.* slugs",
                 "details": invalid,
             },
             status=400,

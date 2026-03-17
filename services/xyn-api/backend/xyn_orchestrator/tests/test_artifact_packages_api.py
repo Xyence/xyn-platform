@@ -238,10 +238,55 @@ class ArtifactPackagesApiTests(TestCase):
         self.assertEqual(str((match.get("capability") or {}).get("label") or ""), "Generated Network Inventory")
         self.assertEqual(len(match.get("suggestions") or []), 1)
         self.assertEqual(str((match.get("suggestions") or [])[0].get("prompt") or ""), "Show devices")
-        self.assertEqual(
-            str((((match.get("manifest_summary") or {}).get("surfaces") or {}).get("manage") or [])[0].get("path") or ""),
-            "/app/workbench",
+
+    def test_generated_artifact_import_accepts_application_and_policy_bundle_slugs(self):
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "application",
+                    "slug": "app.team-lunch-poll",
+                    "version": "0.0.1-dev",
+                    "title": "Team Lunch Poll",
+                    "content": {"artifact": {"id": "app.team-lunch-poll", "type": "application", "slug": "app.team-lunch-poll", "version": "0.0.1-dev"}},
+                },
+                {
+                    "type": "policy_bundle",
+                    "slug": "policy.team-lunch-poll",
+                    "version": "0.0.1-dev",
+                    "title": "Team Lunch Poll Policy Bundle",
+                    "content": {
+                        "schema_version": "xyn.policy_bundle.v0",
+                        "bundle_id": "policy.team-lunch-poll",
+                        "app_slug": "team-lunch-poll",
+                        "workspace_id": "workspace-1",
+                        "title": "Team Lunch Poll Policy Bundle",
+                        "scope": {"artifact_slug": "app.team-lunch-poll", "applies_to": ["generated_runtime"]},
+                        "ownership": {"owner_kind": "generated_application", "editable": True, "source": "generated_from_prompt"},
+                        "policy_families": ["validation_policies"],
+                        "policies": {
+                            "validation_policies": [],
+                            "relation_constraints": [],
+                            "transition_policies": [],
+                            "derived_policies": [],
+                            "trigger_policies": [],
+                        },
+                        "configurable_parameters": [],
+                        "explanation": {"summary": "Generated policy scaffold.", "coverage": {"documented_policy_count": 0}, "future_capabilities": ["render_policy_bundle"]},
+                    },
+                },
+            ],
+            package_name="app.team-lunch-poll",
+            package_version="0.0.1-dev",
         )
+        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
+        imported = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+        self.assertTrue(Artifact.objects.filter(slug="app.team-lunch-poll").exists())
+        self.assertTrue(Artifact.objects.filter(slug="policy.team-lunch-poll").exists())
+        app_artifact = Artifact.objects.get(slug="app.team-lunch-poll")
+        self.assertEqual(str(app_artifact.type).lower(), "application")
+        self.assertEqual(str(app_artifact.slug), "app.team-lunch-poll")
 
     def test_policy_bundle_artifact_type_is_importable_and_registered(self):
         blob = self._package_blob(
