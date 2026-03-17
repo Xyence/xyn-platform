@@ -131,11 +131,12 @@ def _lunch_poll_contracts():
                 {"name": "restaurant", "type": "string", "required": True, "readable": True, "writable": True, "identity": False},
                 {"name": "notes", "type": "string|null", "required": False, "readable": True, "writable": True, "identity": False},
                 {"name": "active", "type": "string", "required": True, "readable": True, "writable": True, "identity": False, "options": ["yes", "no"]},
+                {"name": "selected", "type": "string", "required": False, "readable": True, "writable": True, "identity": False, "options": ["yes", "no"]},
                 {"name": "created_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
                 {"name": "updated_at", "type": "datetime", "required": True, "readable": True, "writable": False, "identity": False},
             ],
-            "presentation": {"default_list_fields": ["name", "restaurant", "active"], "default_detail_fields": ["id", "poll_id", "name", "restaurant", "active"], "title_field": "name"},
-            "validation": {"required_on_create": ["workspace_id", "poll_id", "name", "restaurant", "active"], "allowed_on_update": ["poll_id", "name", "restaurant", "notes", "active"]},
+            "presentation": {"default_list_fields": ["name", "restaurant", "active", "selected"], "default_detail_fields": ["id", "poll_id", "name", "restaurant", "active", "selected"], "title_field": "name"},
+            "validation": {"required_on_create": ["workspace_id", "poll_id", "name", "restaurant", "active"], "allowed_on_update": ["poll_id", "name", "restaurant", "notes", "active", "selected"]},
             "relationships": [{"field": "poll_id", "target_entity": "polls", "target_field": "id", "relation_kind": "belongs_to", "required": True}],
         },
         {
@@ -195,7 +196,7 @@ def _lunch_poll_policy_bundle():
         "title": "Team Lunch Poll Policy Bundle",
         "scope": {"artifact_slug": "app.team-lunch-poll", "applies_to": ["generated_runtime"]},
         "ownership": {"owner_kind": "generated_application", "editable": True, "source": "generated_from_prompt"},
-        "policy_families": ["validation_policies", "relation_constraints", "transition_policies"],
+        "policy_families": ["validation_policies", "relation_constraints", "transition_policies", "derived_policies", "trigger_policies"],
         "policies": {
             "validation_policies": [
                 {
@@ -247,8 +248,42 @@ def _lunch_poll_policy_bundle():
                     },
                 }
             ],
-            "derived_policies": [{"id": "unsupported-derived", "parameters": {"runtime_rule": "count_rollup"}}],
-            "trigger_policies": [],
+            "derived_policies": [
+                {
+                    "id": "team-lunch-poll-204",
+                    "description": "Expose vote counts per lunch option.",
+                    "explanation": {"user_summary": "Vote counts are available on each lunch option."},
+                    "parameters": {
+                        "runtime_rule": "related_count",
+                        "entity_key": "lunch_options",
+                        "child_entity": "votes",
+                        "child_relation_field": "lunch_option_id",
+                        "output_field": "votes_count",
+                        "surfaces": ["list", "detail"],
+                    },
+                },
+                {"id": "unsupported-derived", "parameters": {"runtime_rule": "count_rollup"}},
+            ],
+            "trigger_policies": [
+                {
+                    "id": "team-lunch-poll-205",
+                    "description": "Selecting an option updates the parent poll status.",
+                    "explanation": {"user_summary": "When an option is selected, the related poll becomes selected."},
+                    "parameters": {
+                        "runtime_rule": "post_write_related_update",
+                        "source_entity": "lunch_options",
+                        "on_operations": ["create", "update"],
+                        "condition_field": "selected",
+                        "condition_equals": "yes",
+                        "target_entity": "polls",
+                        "target_relation_field": "poll_id",
+                        "target_lookup_field": "id",
+                        "target_update_field": "status",
+                        "target_update_value": "selected",
+                    },
+                },
+                {"id": "unsupported-trigger", "parameters": {"runtime_rule": "multi_step_chain"}},
+            ],
         },
         "configurable_parameters": [],
         "explanation": {"summary": "test", "coverage": {}, "future_capabilities": []},
@@ -393,9 +428,13 @@ class NetInventoryCrudTests(unittest.TestCase):
         self.assertIn("votes", compiled["status_write_policies"])
         self.assertIn("votes", compiled["relation_constraints"])
         self.assertIn("polls", compiled["transition_guards"])
+        self.assertIn("lunch_options", compiled["derived_policies"])
+        self.assertIn("lunch_options", compiled["trigger_policies"])
         self.assertEqual(len(compiled["unsupported"]["validation_policies"]) if "validation_policies" in compiled["unsupported"] else 0, 0)
         self.assertEqual(len(compiled["unsupported"]["relation_constraints"]) if "relation_constraints" in compiled["unsupported"] else 0, 0)
         self.assertEqual(len(compiled["unsupported"]["transition_policies"]) if "transition_policies" in compiled["unsupported"] else 0, 0)
+        self.assertEqual(len(compiled["unsupported"]["derived_policies"]) if "derived_policies" in compiled["unsupported"] else 0, 1)
+        self.assertEqual(len(compiled["unsupported"]["trigger_policies"]) if "trigger_policies" in compiled["unsupported"] else 0, 1)
 
     def test_vote_creation_is_blocked_when_parent_poll_is_not_open(self):
         service = GenericEntityOperationsService(
@@ -478,6 +517,89 @@ class NetInventoryCrudTests(unittest.TestCase):
 
         self.assertEqual(updated.status_code, 400, updated.text)
         self.assertIn("workflow order", updated.text)
+
+    def test_related_count_policy_exposes_vote_counts_on_lunch_options(self):
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=_lunch_poll_policy_bundle(),
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "open"}).json()
+        option_a = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "no"},
+        ).json()
+        option_b = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Sushi", "restaurant": "Uchi", "active": "yes", "selected": "no"},
+        ).json()
+        client.post(
+            "/votes",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "lunch_option_id": option_a["id"], "voter_name": "Avery"},
+        )
+        client.post(
+            "/votes",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "lunch_option_id": option_a["id"], "voter_name": "Jordan"},
+        )
+
+        listed = client.get("/lunch_options", params={"workspace_id": self.workspace_id})
+        self.assertEqual(listed.status_code, 200, listed.text)
+        counts = {row["id"]: row.get("_derived", {}).get("votes_count") for row in listed.json()["items"]}
+        self.assertEqual(counts[option_a["id"]], 2)
+        self.assertEqual(counts[option_b["id"]], 0)
+
+        detailed = client.get(f"/lunch_options/{option_a['id']}", params={"workspace_id": self.workspace_id})
+        self.assertEqual(detailed.status_code, 200, detailed.text)
+        self.assertEqual(detailed.json()["_derived"]["votes_count"], 2)
+
+    def test_trigger_policy_updates_parent_poll_status_when_option_selected(self):
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=_lunch_poll_policy_bundle(),
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "closed"}).json()
+        option = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "no"},
+        ).json()
+
+        updated = client.patch(
+            f"/lunch_options/{option['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"selected": "yes"},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+
+        poll_detail = client.get(f"/polls/{poll['id']}", params={"workspace_id": self.workspace_id})
+        self.assertEqual(poll_detail.status_code, 200, poll_detail.text)
+        self.assertEqual(poll_detail.json()["status"], "selected")
+
+    def test_trigger_policy_does_not_fire_for_non_matching_write(self):
+        service = GenericEntityOperationsService(
+            entity_contracts=_lunch_poll_contracts(),
+            policy_bundle=_lunch_poll_policy_bundle(),
+            storage_adapter=InMemoryStorageAdapter(),
+        )
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        poll = client.post("/polls", json={"workspace_id": self.workspace_id, "title": "Friday Lunch", "poll_date": "2026-03-17", "status": "closed"}).json()
+        option = client.post(
+            "/lunch_options",
+            json={"workspace_id": self.workspace_id, "poll_id": poll["id"], "name": "Tacos", "restaurant": "La Tejana", "active": "yes", "selected": "no"},
+        ).json()
+
+        updated = client.patch(
+            f"/lunch_options/{option['id']}",
+            params={"workspace_id": self.workspace_id},
+            json={"notes": "Keep as backup"},
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+
+        poll_detail = client.get(f"/polls/{poll['id']}", params={"workspace_id": self.workspace_id})
+        self.assertEqual(poll_detail.status_code, 200, poll_detail.text)
+        self.assertEqual(poll_detail.json()["status"], "closed")
 
 
 if __name__ == "__main__":

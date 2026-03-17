@@ -258,6 +258,8 @@ def _compiled_policy_map() -> dict[str, dict[str, list[dict[str, Any]]]]:
         "relation_constraints": {},
         "status_write_policies": {},
         "transition_guards": {},
+        "derived_policies": {},
+        "trigger_policies": {},
         "unsupported": {},
     }
 
@@ -367,6 +369,65 @@ def compile_policy_bundle(*, policy_bundle: dict[str, Any], entity_contracts: It
                 "field_name": str(params["field_name"]).strip(),
                 "allowed_transitions": allowed_transitions,
                 "message": str((policy.get("explanation") or {}).get("user_summary") or policy.get("description") or "Transition not allowed.").strip(),
+            }
+        )
+
+    for policy in _policy_entries(policy_bundle, "derived_policies"):
+        params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else {}
+        if str(params.get("runtime_rule") or "").strip() != "related_count":
+            compiled["unsupported"].setdefault("derived_policies", []).append(copy.deepcopy(policy))
+            continue
+        params = _require_policy_parameters(policy, ["entity_key", "child_entity", "child_relation_field", "output_field"])
+        entity_key = str(params["entity_key"]).strip()
+        child_entity = str(params["child_entity"]).strip()
+        if entity_key not in contracts or child_entity not in contracts:
+            raise RuntimeError(f"Policy '{policy.get('id')}' references unknown entity")
+        compiled["derived_policies"].setdefault(entity_key, []).append(
+            {
+                "policy_id": str(policy.get("id") or policy.get("name") or "derived-policy").strip(),
+                "runtime_rule": "related_count",
+                "child_entity": child_entity,
+                "child_relation_field": str(params["child_relation_field"]).strip(),
+                "output_field": str(params["output_field"]).strip(),
+                "surfaces": [str(value).strip() for value in params.get("surfaces") or [] if str(value).strip()],
+                "message": str((policy.get("explanation") or {}).get("user_summary") or policy.get("description") or "Derived values are available.").strip(),
+            }
+        )
+
+    for policy in _policy_entries(policy_bundle, "trigger_policies"):
+        params = policy.get("parameters") if isinstance(policy.get("parameters"), dict) else {}
+        if str(params.get("runtime_rule") or "").strip() != "post_write_related_update":
+            compiled["unsupported"].setdefault("trigger_policies", []).append(copy.deepcopy(policy))
+            continue
+        params = _require_policy_parameters(
+            policy,
+            [
+                "source_entity",
+                "on_operations",
+                "condition_field",
+                "target_entity",
+                "target_relation_field",
+                "target_update_field",
+                "target_update_value",
+            ],
+        )
+        source_entity = str(params["source_entity"]).strip()
+        target_entity = str(params["target_entity"]).strip()
+        if source_entity not in contracts or target_entity not in contracts:
+            raise RuntimeError(f"Policy '{policy.get('id')}' references unknown entity")
+        compiled["trigger_policies"].setdefault(source_entity, []).append(
+            {
+                "policy_id": str(policy.get("id") or policy.get("name") or "trigger-policy").strip(),
+                "runtime_rule": "post_write_related_update",
+                "on_operations": [str(value).strip() for value in params.get("on_operations") or [] if str(value).strip()],
+                "condition_field": str(params["condition_field"]).strip(),
+                "condition_equals": params.get("condition_equals"),
+                "target_entity": target_entity,
+                "target_relation_field": str(params["target_relation_field"]).strip(),
+                "target_lookup_field": str(params.get("target_lookup_field") or "id").strip() or "id",
+                "target_update_field": str(params["target_update_field"]).strip(),
+                "target_update_value": params["target_update_value"],
+                "message": str((policy.get("explanation") or {}).get("user_summary") or policy.get("description") or "Related record updated by policy.").strip(),
             }
         )
 
@@ -655,6 +716,91 @@ class GenericEntityOperationsService:
             return None
         return self._storage.get_by_id(contract, record_id=normalized_id, workspace_id=workspace_id)
 
+    def _augment_with_derived_fields(self, entity_key: str, *, row: Dict[str, Any], workspace_id: Optional[str], surface: str) -> Dict[str, Any]:
+        if not isinstance(row, dict):
+            return row
+        derived_values: Dict[str, Any] = {}
+        row_id = _parse_uuid(row.get("id"))
+        if not row_id or not workspace_id:
+            return row
+        for policy in self._compiled_policies.get("derived_policies", {}).get(entity_key, []):
+            surfaces = set(policy.get("surfaces") or [])
+            if surfaces and surface not in surfaces:
+                continue
+            if policy.get("runtime_rule") == "related_count":
+                child_contract = self.entity_contract(str(policy.get("child_entity") or "").strip())
+                child_rows = self._storage.list(child_contract, workspace_id=workspace_id)
+                derived_values[str(policy.get("output_field") or "").strip()] = sum(
+                    1
+                    for child in child_rows
+                    if str(child.get(str(policy.get("child_relation_field") or "").strip()) or "") == row_id
+                )
+        if not derived_values:
+            return row
+        enriched = copy.deepcopy(row)
+        enriched["_derived"] = derived_values
+        return enriched
+
+    def _apply_post_write_triggers(
+        self,
+        entity_key: str,
+        *,
+        operation: str,
+        row: Dict[str, Any],
+        workspace_id: Optional[str],
+    ) -> None:
+        for policy in self._compiled_policies.get("trigger_policies", {}).get(entity_key, []):
+            if operation not in set(policy.get("on_operations") or []):
+                continue
+            condition_field = str(policy.get("condition_field") or "").strip()
+            if not condition_field:
+                continue
+            actual_value = row.get(condition_field)
+            expected_value = policy.get("condition_equals")
+            if str(actual_value) != str(expected_value):
+                continue
+            target_contract = self.entity_contract(str(policy.get("target_entity") or "").strip())
+            target_record_id = _parse_uuid(row.get(str(policy.get("target_relation_field") or "").strip()))
+            if not target_record_id:
+                continue
+            target_row = self._record_for_policy(target_contract, record_id=target_record_id, workspace_id=workspace_id)
+            if not target_row:
+                raise EntityOperationError(404, f"{str(policy.get('target_entity') or '').rstrip('s').replace('_', ' ')} not found")
+            target_workspace_id = str(target_row.get("workspace_id") or workspace_id or "").strip() or None
+            normalized_update = self._normalize_payload(
+                target_contract,
+                {
+                    str(policy.get("target_update_field") or "").strip(): policy.get("target_update_value"),
+                },
+                mode="update",
+                workspace_id=target_workspace_id,
+            )
+            candidate = dict(target_row)
+            candidate.update(normalized_update)
+            self._enforce_status_write_policies(
+                str(policy.get("target_entity") or "").strip(),
+                operation="update",
+                candidate=candidate,
+                existing=target_row,
+                workspace_id=target_workspace_id,
+            )
+            self._enforce_relation_constraints(
+                str(policy.get("target_entity") or "").strip(),
+                candidate=candidate,
+                workspace_id=target_workspace_id,
+            )
+            self._enforce_transition_guards(
+                str(policy.get("target_entity") or "").strip(),
+                existing=target_row,
+                candidate=candidate,
+            )
+            self._storage.update(
+                target_contract,
+                record_id=str(target_row.get("id")),
+                workspace_id=target_workspace_id,
+                values=normalized_update,
+            )
+
     def _enforce_relation_constraints(
         self,
         entity_key: str,
@@ -736,11 +882,14 @@ class GenericEntityOperationsService:
         contract = self._operation_contract(entity_key, "list")
         if not context.workspace_id:
             raise EntityOperationError(400, "workspace_id is required")
-        return self._storage.list(contract, workspace_id=context.workspace_id)
+        rows = self._storage.list(contract, workspace_id=context.workspace_id)
+        return [self._augment_with_derived_fields(entity_key, row=row, workspace_id=context.workspace_id, surface="list") for row in rows]
 
     def get_record(self, entity_key: str, id_or_reference: str, *, context: RecordContext) -> Dict[str, Any]:
         self._operation_contract(entity_key, "get")
-        return self._resolve_record_reference(entity_key, id_or_reference, workspace_id=context.workspace_id)
+        row = self._resolve_record_reference(entity_key, id_or_reference, workspace_id=context.workspace_id)
+        workspace_id = str(row.get("workspace_id") or context.workspace_id or "").strip() or None
+        return self._augment_with_derived_fields(entity_key, row=row, workspace_id=workspace_id, surface="detail")
 
     def create_record(self, entity_key: str, fields: Dict[str, Any], *, context: RecordContext) -> Dict[str, Any]:
         contract = self._operation_contract(entity_key, "create")
@@ -748,7 +897,9 @@ class GenericEntityOperationsService:
         normalized = self._normalize_payload(contract, fields, mode="create", workspace_id=workspace_id)
         self._enforce_status_write_policies(entity_key, operation="create", candidate=normalized, existing=None, workspace_id=workspace_id)
         self._enforce_relation_constraints(entity_key, candidate=normalized, workspace_id=workspace_id)
-        return self._storage.insert(contract, values=normalized)
+        row = self._storage.insert(contract, values=normalized)
+        self._apply_post_write_triggers(entity_key, operation="create", row=row, workspace_id=workspace_id)
+        return self._augment_with_derived_fields(entity_key, row=row, workspace_id=workspace_id, surface="detail")
 
     def update_record(self, entity_key: str, id_or_reference: str, fields: Dict[str, Any], *, context: RecordContext) -> Dict[str, Any]:
         contract = self._operation_contract(entity_key, "update")
@@ -760,7 +911,9 @@ class GenericEntityOperationsService:
         self._enforce_status_write_policies(entity_key, operation="update", candidate=candidate, existing=existing, workspace_id=workspace_id)
         self._enforce_relation_constraints(entity_key, candidate=candidate, workspace_id=workspace_id)
         self._enforce_transition_guards(entity_key, existing=existing, candidate=candidate)
-        return self._storage.update(contract, record_id=str(existing.get("id")), workspace_id=workspace_id, values=normalized)
+        row = self._storage.update(contract, record_id=str(existing.get("id")), workspace_id=workspace_id, values=normalized)
+        self._apply_post_write_triggers(entity_key, operation="update", row=row, workspace_id=workspace_id)
+        return self._augment_with_derived_fields(entity_key, row=row, workspace_id=workspace_id, surface="detail")
 
     def delete_record(self, entity_key: str, id_or_reference: str, *, context: RecordContext) -> Dict[str, Any]:
         contract = self._operation_contract(entity_key, "delete")
