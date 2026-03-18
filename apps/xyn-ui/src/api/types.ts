@@ -2817,6 +2817,43 @@ export type ApplicationDetail = ApplicationSummary & {
   portfolio_state?: GoalPortfolioState;
 };
 
+export type CampaignTypeDefinition = {
+  key: string;
+  label: string;
+  description: string;
+  icon?: string;
+  scope?: "global" | "workspace" | string;
+  workspace_id?: string | null;
+  enabled?: boolean;
+  metadata?: Record<string, unknown>;
+};
+
+export type CampaignSummary = {
+  id: string;
+  workspace_id: string;
+  slug: string;
+  name: string;
+  campaign_type: string;
+  status: "draft" | "active" | "paused" | "completed" | "archived" | string;
+  description: string;
+  archived: boolean;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CampaignDetail = CampaignSummary & {
+  campaign_type_definition?: CampaignTypeDefinition;
+  available_campaign_types?: CampaignTypeDefinition[];
+  metadata?: Record<string, unknown>;
+};
+
+export type CampaignListResponse = {
+  workspace_id: string;
+  campaigns: CampaignSummary[];
+  campaign_types: CampaignTypeDefinition[];
+};
+
 export type ComposerAction = {
   type: string;
   label: string;
@@ -3650,9 +3687,13 @@ export type ConversationAction = {
     | "create_thread"
     | "list_threads"
     | "show_thread"
+    | "show_thread_review"
     | "pause_thread"
     | "resume_thread"
     | "prioritize_thread"
+    | "create_campaign"
+    | "list_campaigns"
+    | "show_campaign"
     | string;
   source_message_id: string;
   thread_id?: string | null;

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +9,10 @@ const apiMocks = vi.hoisted(() => ({
   executeAppPalettePrompt: vi.fn(),
   listGoals: vi.fn(),
   getGoal: vi.fn(),
+  listCampaigns: vi.fn(),
+  createCampaign: vi.fn(),
+  getCampaign: vi.fn(),
+  updateCampaign: vi.fn(),
   reviewGoal: vi.fn(),
   getApplicationPlan: vi.fn(),
   applyApplicationPlan: vi.fn(),
@@ -63,6 +67,10 @@ vi.mock("../../../api/xyn", async () => {
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
+    listCampaigns: apiMocks.listCampaigns,
+    createCampaign: apiMocks.createCampaign,
+    getCampaign: apiMocks.getCampaign,
+    updateCampaign: apiMocks.updateCampaign,
     reviewGoal: apiMocks.reviewGoal,
     getApplicationPlan: apiMocks.getApplicationPlan,
     applyApplicationPlan: apiMocks.applyApplicationPlan,
@@ -414,6 +422,137 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument());
     expect(screen.getByText(/Recommended Goal: AI Real Estate Deal Finder/i)).toBeInTheDocument();
     expect(screen.getByText(/Portfolio activity is balanced/i)).toBeInTheDocument();
+  });
+
+  it("lists campaigns and supports creating a campaign from the list panel", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.listCampaigns
+      .mockResolvedValueOnce({
+        workspace_id: "ws-1",
+        campaigns: [],
+        campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      })
+      .mockResolvedValueOnce({
+        workspace_id: "ws-1",
+        campaigns: [
+          {
+            id: "camp-1",
+            workspace_id: "ws-1",
+            slug: "launch-2026",
+            name: "Launch 2026",
+            campaign_type: "generic",
+            status: "draft",
+            description: "",
+            archived: false,
+            created_at: "2026-03-18T10:00:00Z",
+            updated_at: "2026-03-18T10:00:00Z",
+          },
+        ],
+        campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      });
+    apiMocks.createCampaign.mockResolvedValue({
+      id: "camp-1",
+      workspace_id: "ws-1",
+      slug: "launch-2026",
+      name: "Launch 2026",
+      campaign_type: "generic",
+      status: "draft",
+      description: "",
+      archived: false,
+      created_at: "2026-03-18T10:00:00Z",
+      updated_at: "2026-03-18T10:00:00Z",
+      campaign_type_definition: { key: "generic", label: "Generic Campaign", description: "Default campaign type." },
+      available_campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      metadata: {},
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "campaign-list", panel_type: "table", instance_key: "campaign-list", key: "campaign_list", params: { workspace_id: "ws-1", create: true } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.listCampaigns).toHaveBeenCalledWith("ws-1"));
+    fireEvent.change(screen.getByLabelText("Campaign name"), { target: { value: "Launch 2026" } });
+    await act(async () => {
+      screen.getByRole("button", { name: "Create" }).click();
+    });
+    await waitFor(() =>
+      expect(apiMocks.createCampaign).toHaveBeenCalledWith({
+        workspace_id: "ws-1",
+        name: "Launch 2026",
+        campaign_type: "generic",
+        description: undefined,
+      }),
+    );
+    await waitFor(() =>
+      expect(onOpenPanel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          key: "campaign_detail",
+          params: { campaign_id: "camp-1", workspace_id: "ws-1" },
+        }),
+      ),
+    );
+  });
+
+  it("loads and updates a campaign detail panel", async () => {
+    apiMocks.getCampaign.mockResolvedValue({
+      id: "camp-1",
+      workspace_id: "ws-1",
+      slug: "launch-2026",
+      name: "Launch 2026",
+      campaign_type: "generic",
+      status: "draft",
+      description: "Initial campaign",
+      archived: false,
+      created_at: "2026-03-18T10:00:00Z",
+      updated_at: "2026-03-18T10:00:00Z",
+      campaign_type_definition: { key: "generic", label: "Generic Campaign", description: "Default campaign type." },
+      available_campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      metadata: {},
+    });
+    apiMocks.updateCampaign.mockResolvedValue({
+      id: "camp-1",
+      workspace_id: "ws-1",
+      slug: "launch-2026",
+      name: "Launch 2026",
+      campaign_type: "generic",
+      status: "active",
+      description: "Initial campaign",
+      archived: false,
+      created_at: "2026-03-18T10:00:00Z",
+      updated_at: "2026-03-18T11:00:00Z",
+      campaign_type_definition: { key: "generic", label: "Generic Campaign", description: "Default campaign type." },
+      available_campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      metadata: {},
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "campaign-detail", panel_type: "detail", instance_key: "campaign:camp-1", key: "campaign_detail", params: { campaign_id: "camp-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getCampaign).toHaveBeenCalledWith("camp-1"));
+    fireEvent.change(screen.getByLabelText("Campaign status"), { target: { value: "active" } });
+    await act(async () => {
+      screen.getByRole("button", { name: "Save" }).click();
+    });
+    await waitFor(() =>
+      expect(apiMocks.updateCampaign).toHaveBeenCalledWith("camp-1", {
+        name: "Launch 2026",
+        description: "Initial campaign",
+        status: "active",
+      }),
+    );
   });
 
   it("loads durable goal detail with threads, work items, and recommendation", async () => {

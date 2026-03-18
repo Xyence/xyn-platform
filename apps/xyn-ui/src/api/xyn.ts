@@ -50,6 +50,9 @@ import type {
   ApplicationPlanDetail,
   ApplicationSummary,
   ApplicationDetail,
+  CampaignTypeDefinition,
+  CampaignListResponse,
+  CampaignDetail,
   WorkQueueResponse,
   ContextPackCreatePayload,
   ContextPackDetail,
@@ -4543,6 +4546,63 @@ export async function updateApplication(id: string, payload: { status: "active" 
     body: JSON.stringify(payload),
   });
   return handle<ApplicationDetail>(response);
+}
+
+export async function listCampaignTypes(workspaceId: string): Promise<{ campaign_types: CampaignTypeDefinition[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/campaign-types`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<{ campaign_types: CampaignTypeDefinition[] }>(response);
+}
+
+export async function listCampaigns(
+  workspaceId: string,
+  options?: { status?: string; campaign_type?: string; include_archived?: boolean },
+): Promise<CampaignListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/campaigns`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.status) url.searchParams.set("status", options.status);
+  if (options?.campaign_type) url.searchParams.set("campaign_type", options.campaign_type);
+  if (options?.include_archived) url.searchParams.set("include_archived", "true");
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<CampaignListResponse>(response);
+}
+
+export async function createCampaign(payload: {
+  workspace_id: string;
+  name: string;
+  campaign_type?: string;
+  description?: string;
+}): Promise<CampaignDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/campaigns`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<CampaignDetail>(response);
+}
+
+export async function getCampaign(id: string): Promise<CampaignDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/campaigns/${id}`, {
+    credentials: "include",
+  });
+  return handle<CampaignDetail>(response);
+}
+
+export async function updateCampaign(id: string, payload: Record<string, unknown>): Promise<CampaignDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/campaigns/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<CampaignDetail>(response);
 }
 
 export async function listCoordinationThreads(workspaceId: string, status?: string): Promise<CoordinationThreadListResponse> {

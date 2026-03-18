@@ -2900,6 +2900,67 @@ class CoordinationEvent(models.Model):
         return f"{self.thread_id}:{self.event_type}"
 
 
+class CampaignType(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", null=True, blank=True, on_delete=models.CASCADE, related_name="campaign_types")
+    key = models.CharField(max_length=120)
+    label = models.CharField(max_length=160)
+    description = models.TextField(blank=True)
+    icon = models.CharField(max_length=80, blank=True, default="")
+    enabled = models.BooleanField(default=True, db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["label", "key"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="uniq_campaign_type_workspace_key"),
+            models.UniqueConstraint(
+                fields=["key"],
+                condition=Q(workspace__isnull=True),
+                name="uniq_campaign_type_global_key",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.label or self.key
+
+
+class Campaign(models.Model):
+    STATUS_CHOICES = [
+        ("draft", "Draft"),
+        ("active", "Active"),
+        ("paused", "Paused"),
+        ("completed", "Completed"),
+        ("archived", "Archived"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="campaigns")
+    slug = models.SlugField(max_length=120)
+    name = models.CharField(max_length=240)
+    campaign_type = models.CharField(max_length=120, default="generic")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
+    description = models.TextField(blank=True)
+    archived = models.BooleanField(default=False, db_index=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_campaigns"
+    )
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "slug"], name="uniq_campaign_workspace_slug"),
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class Goal(models.Model):
     STATUS_CHOICES = [
         ("proposed", "Proposed"),

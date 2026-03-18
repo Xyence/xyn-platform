@@ -18,6 +18,8 @@ from xyn_orchestrator.portfolio_intelligence import (
 from xyn_orchestrator.models import (
     Application,
     ApplicationPlan,
+    Campaign,
+    CampaignType,
     CoordinationEvent,
     CoordinationThread,
     DevTask,
@@ -33,6 +35,9 @@ from xyn_orchestrator.xyn_api import (
     application_plan_apply,
     application_plan_detail,
     application_plans_collection,
+    campaign_detail,
+    campaign_types_collection,
+    campaigns_collection,
     composer_state,
     goal_decompose,
     goal_detail,
@@ -127,6 +132,111 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(valid_goal_transition("proposed", "decomposed"))
         self.assertTrue(valid_goal_transition("decomposed", "in_progress"))
         self.assertFalse(valid_goal_transition("completed", "in_progress"))
+
+    def test_campaign_can_be_created_listed_and_updated(self):
+        create_request = self._request(
+            "/xyn/api/campaigns",
+            method="post",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "name": "Q2 Launch",
+                    "campaign_type": "generic",
+                    "description": "Baseline launch campaign",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_response = campaigns_collection(create_request)
+        self.assertEqual(create_response.status_code, 201)
+        created = json.loads(create_response.content)
+        self.assertEqual(created["name"], "Q2 Launch")
+        self.assertEqual(created["campaign_type"], "generic")
+        self.assertEqual(created["status"], "draft")
+        self.assertEqual(created["slug"], "q2-launch")
+
+        list_request = self._request("/xyn/api/campaigns", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            list_response = campaigns_collection(list_request)
+        listing = json.loads(list_response.content)
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(len(listing["campaigns"]), 1)
+        self.assertEqual(listing["campaigns"][0]["id"], created["id"])
+
+        detail_request = self._request(
+            f"/xyn/api/campaigns/{created['id']}",
+            method="patch",
+            data=json.dumps({"status": "active", "description": "Updated description"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            detail_response = campaign_detail(detail_request, str(created["id"]))
+        updated = json.loads(detail_response.content)
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(updated["status"], "active")
+        self.assertEqual(updated["description"], "Updated description")
+
+    def test_campaign_listing_is_workspace_scoped(self):
+        other_workspace = Workspace.objects.create(name="Other Workspace", slug=f"other-workspace-{uuid.uuid4().hex[:8]}")
+        WorkspaceMembership.objects.create(
+            workspace=other_workspace,
+            user_identity=self.identity,
+            role="admin",
+            termination_authority=True,
+        )
+        Campaign.objects.create(
+            workspace=self.workspace,
+            slug="primary-campaign",
+            name="Primary Campaign",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+        Campaign.objects.create(
+            workspace=other_workspace,
+            slug="other-campaign",
+            name="Other Campaign",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+        request = self._request("/xyn/api/campaigns", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = campaigns_collection(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["name"] for row in payload["campaigns"]], ["Primary Campaign"])
+
+    def test_campaign_type_catalog_includes_generic_and_enabled_extensions(self):
+        CampaignType.objects.create(
+            key="global_marketing",
+            label="Global Marketing",
+            description="Global extension type",
+            enabled=True,
+        )
+        CampaignType.objects.create(
+            workspace=self.workspace,
+            key="workspace_ops",
+            label="Workspace Ops",
+            description="Workspace extension type",
+            enabled=True,
+        )
+        CampaignType.objects.create(
+            workspace=self.workspace,
+            key="disabled_type",
+            label="Disabled Type",
+            description="Should be filtered",
+            enabled=False,
+        )
+        request = self._request("/xyn/api/campaign-types", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = campaign_types_collection(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        keys = {row["key"] for row in payload["campaign_types"]}
+        self.assertIn("generic", keys)
+        self.assertIn("global_marketing", keys)
+        self.assertIn("workspace_ops", keys)
+        self.assertNotIn("disabled_type", keys)
 
     def test_goal_decomposition_is_deterministic_and_mvp_first(self):
         goal = Goal.objects.create(

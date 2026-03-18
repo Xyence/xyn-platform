@@ -66,6 +66,8 @@ from .models import (
     CoordinationEvent,
     CoordinationThread,
     DevTask,
+    Campaign,
+    CampaignType,
     Goal,
     Application,
     ApplicationPlan,
@@ -1006,6 +1008,9 @@ def _prompt_interpretation_from_intent(
         "decompose_goal": ("plan", "Decompose goal"),
         "summarize_plan": ("show", "Summarize plan"),
         "queue_first_slice": ("queue", "Queue first slice"),
+        "create_campaign": ("create", "Create campaign"),
+        "list_campaigns": ("show", "List campaigns"),
+        "show_campaign": ("show", "Show campaign"),
         "list_application_factories": ("show", "List application factories"),
         "open_composer": ("show", "Open composer"),
         "generate_application_plan": ("plan", "Generate application plan"),
@@ -1120,7 +1125,7 @@ def _prompt_interpretation_from_intent(
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CONTINUATION.value
     elif intent.intent_type in {"create_and_dispatch_run", "run_validation", "investigate_issue", "retry_run", "continue_run"}:
         execution_mode = PromptInterpretationExecutionMode.QUEUED_RUN.value
-    elif intent.intent_type in {"create_thread", "create_goal"}:
+    elif intent.intent_type in {"create_thread", "create_goal", "create_campaign"}:
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
     elif intent.intent_type in {"decompose_goal", "approve_plan", "approve_recommendation", "queue_first_slice", "queue_next_slice", "apply_application_plan"}:
         execution_mode = PromptInterpretationExecutionMode.AWAITING_REVIEW.value
@@ -1328,6 +1333,9 @@ def _conversation_action_from_intent(
             IntentType.QUEUE_FIRST_SLICE.value: ConversationActionType.QUEUE_FIRST_SLICE.value,
             IntentType.LIST_GOALS.value: ConversationActionType.LIST_GOALS.value,
             IntentType.SHOW_GOAL.value: ConversationActionType.SHOW_GOAL.value,
+            IntentType.CREATE_CAMPAIGN.value: ConversationActionType.CREATE_CAMPAIGN.value,
+            IntentType.LIST_CAMPAIGNS.value: ConversationActionType.LIST_CAMPAIGNS.value,
+            IntentType.SHOW_CAMPAIGN.value: ConversationActionType.SHOW_CAMPAIGN.value,
             IntentType.LIST_APPLICATION_FACTORIES.value: ConversationActionType.LIST_APPLICATION_FACTORIES.value,
             IntentType.OPEN_COMPOSER.value: ConversationActionType.OPEN_COMPOSER.value,
             IntentType.GENERATE_APPLICATION_PLAN.value: ConversationActionType.GENERATE_APPLICATION_PLAN.value,
@@ -1344,6 +1352,12 @@ def _conversation_action_from_intent(
         target_kind = "goal"
         if intent.intent_type == IntentType.LIST_APPLICATION_FACTORIES.value:
             target_kind = "workspace"
+        elif intent.intent_type == IntentType.LIST_CAMPAIGNS.value:
+            target_kind = "workspace"
+        elif intent.intent_type == IntentType.CREATE_CAMPAIGN.value:
+            target_kind = "workspace"
+        elif intent.intent_type == IntentType.SHOW_CAMPAIGN.value:
+            target_kind = "campaign"
         elif intent.intent_type == IntentType.GENERATE_APPLICATION_PLAN.value:
             target_kind = "application_plan"
         elif intent.intent_type == IntentType.APPLY_APPLICATION_PLAN.value:
@@ -17872,6 +17886,23 @@ def _match_core_surface_command(message: str) -> Optional[Tuple[str, Dict[str, A
     }
     if normalized in platform_settings_aliases:
         return ("platform_settings", {})
+    campaign_aliases = {
+        "campaigns",
+        "show campaigns",
+        "open campaigns",
+        "list campaigns",
+        "go to campaigns",
+    }
+    if normalized in campaign_aliases:
+        return ("campaign_list", {})
+    create_campaign_aliases = {
+        "new campaign",
+        "create campaign",
+        "add campaign",
+        "start campaign",
+    }
+    if normalized in create_campaign_aliases:
+        return ("campaign_list", {"create": True})
     return None
 
 
@@ -17955,6 +17986,12 @@ def _direct_panel_target_for_conversation_action(
         return "composer_detail", {"workspace_id": workspace_id}
     if action_type == ConversationActionType.SHOW_GOAL.value and target_id and not summary_mode:
         return "composer_detail", {"workspace_id": workspace_id, "goal_id": target_id}
+    if action_type == ConversationActionType.LIST_CAMPAIGNS.value:
+        return "campaign_list", {"workspace_id": workspace_id}
+    if action_type == ConversationActionType.CREATE_CAMPAIGN.value:
+        return "campaign_list", {"workspace_id": workspace_id, "create": True}
+    if action_type == ConversationActionType.SHOW_CAMPAIGN.value and target_id:
+        return "campaign_detail", {"workspace_id": workspace_id, "campaign_id": target_id}
     if action_type == ConversationActionType.SHOW_APPLICATION.value and target_id:
         return "composer_detail", {"workspace_id": workspace_id, "application_id": target_id}
     return None
@@ -21339,9 +21376,15 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     core_surface_request = _match_core_surface_command(message)
     if core_surface_request:
         panel_key, params = core_surface_request
+        if panel_key == "campaign_list":
+            action_label = "Open campaigns"
+            summary = "Will open campaigns."
+        else:
+            action_label = "Open platform settings"
+            summary = "Will open platform settings."
         prompt_interpretation = _direct_panel_prompt_interpretation(
             intent_type="open_view",
-            action_label="Open platform settings",
+            action_label=action_label,
             resolution_notes=["resolved as a direct platform surface navigation action"],
         )
         response_payload = {
@@ -21349,7 +21392,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             "action_type": "ValidateDraft",
             "artifact_type": "Workspace",
             "artifact_id": None,
-            "summary": "Will open platform settings.",
+            "summary": summary,
             "prompt_interpretation": prompt_interpretation,
             "next_actions": [
                 {"label": "Open panel", "action": "OpenPanel", "panel_key": panel_key, "params": params},
@@ -27416,6 +27459,92 @@ def _serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
     return serialize_goal_summary(goal)
 
 
+def _campaign_slug_exists(workspace_id: str, slug: str, *, exclude_campaign_id: Optional[str] = None) -> bool:
+    qs = Campaign.objects.filter(workspace_id=workspace_id, slug=slug)
+    if exclude_campaign_id:
+        qs = qs.exclude(id=exclude_campaign_id)
+    return qs.exists()
+
+
+def _next_available_campaign_slug(workspace_id: str, name: str, *, exclude_campaign_id: Optional[str] = None) -> str:
+    base = slugify(name)[:120] or "campaign"
+    candidate = base
+    suffix = 2
+    while _campaign_slug_exists(workspace_id, candidate, exclude_campaign_id=exclude_campaign_id):
+        token = f"-{suffix}"
+        candidate = f"{base[: max(1, 120 - len(token))]}{token}"
+        suffix += 1
+    return candidate
+
+
+def _builtin_campaign_type_definition() -> Dict[str, Any]:
+    return {
+        "key": "generic",
+        "label": "Generic Campaign",
+        "description": "Default campaign type for platform-level workflows.",
+        "icon": "campaign",
+        "scope": "global",
+        "workspace_id": None,
+        "enabled": True,
+        "metadata": {},
+    }
+
+
+def _campaign_type_definitions_for_workspace(workspace: Workspace) -> List[Dict[str, Any]]:
+    rows: Dict[str, Dict[str, Any]] = {"generic": _builtin_campaign_type_definition()}
+    for record in (
+        CampaignType.objects.filter(Q(workspace__isnull=True) | Q(workspace=workspace))
+        .filter(enabled=True)
+        .order_by("label", "key")
+    ):
+        key = str(record.key or "").strip()
+        if not key:
+            continue
+        rows[key] = {
+            "key": key,
+            "label": str(record.label or key),
+            "description": str(record.description or ""),
+            "icon": str(record.icon or ""),
+            "scope": "workspace" if record.workspace_id else "global",
+            "workspace_id": str(record.workspace_id) if record.workspace_id else None,
+            "enabled": bool(record.enabled),
+            "metadata": record.metadata_json if isinstance(record.metadata_json, dict) else {},
+        }
+    return list(rows.values())
+
+
+def _serialize_campaign_summary(campaign: Campaign) -> Dict[str, Any]:
+    return {
+        "id": str(campaign.id),
+        "workspace_id": str(campaign.workspace_id),
+        "slug": str(campaign.slug or ""),
+        "name": campaign.name,
+        "campaign_type": campaign.campaign_type,
+        "status": campaign.status,
+        "description": campaign.description or "",
+        "archived": bool(campaign.archived),
+        "created_by": str(campaign.created_by_id) if campaign.created_by_id else None,
+        "created_at": campaign.created_at,
+        "updated_at": campaign.updated_at,
+    }
+
+
+def _serialize_campaign_detail(campaign: Campaign, *, workspace: Optional[Workspace] = None) -> Dict[str, Any]:
+    resolved_workspace = workspace or Workspace.objects.filter(id=campaign.workspace_id).first()
+    available_types = _campaign_type_definitions_for_workspace(resolved_workspace) if resolved_workspace else [_builtin_campaign_type_definition()]
+    type_lookup = {
+        str(entry.get("key") or "").strip(): entry
+        for entry in available_types
+        if isinstance(entry, dict) and str(entry.get("key") or "").strip()
+    }
+    return {
+        **_serialize_campaign_summary(campaign),
+        "campaign_type_definition": type_lookup.get(campaign.campaign_type) or _builtin_campaign_type_definition(),
+        "available_campaign_types": available_types,
+        "metadata": campaign.metadata_json if isinstance(campaign.metadata_json, dict) else {},
+    }
+
+
 def _serialize_goal_recent_result(goal: Goal, result: Any, *, goal_status: str) -> Dict[str, Any]:
     task = goal.work_items.filter(work_item_id=result.work_item_id).select_related("coordination_thread").first()
     artifact_labels: List[str] = []
@@ -28481,6 +28610,9 @@ def _execute_conversation_action(
         ConversationActionType.QUEUE_FIRST_SLICE.value,
         ConversationActionType.LIST_GOALS.value,
         ConversationActionType.SHOW_GOAL.value,
+        ConversationActionType.CREATE_CAMPAIGN.value,
+        ConversationActionType.LIST_CAMPAIGNS.value,
+        ConversationActionType.SHOW_CAMPAIGN.value,
         ConversationActionType.LIST_APPLICATION_FACTORIES.value,
         ConversationActionType.OPEN_COMPOSER.value,
         ConversationActionType.GENERATE_APPLICATION_PLAN.value,
@@ -28501,9 +28633,13 @@ def _execute_conversation_action(
         application_id = target_id if target_kind == "application" else ""
         application_plan_id = target_id if target_kind == "application_plan" else ""
         goal_id = target_id if target_kind == "goal" else ""
+        campaign_id = target_id if target_kind == "campaign" else ""
         goal: Optional[Goal] = None
         if goal_id:
             goal = Goal.objects.filter(id=goal_id, workspace=workspace).first()
+        campaign: Optional[Campaign] = None
+        if campaign_id:
+            campaign = Campaign.objects.filter(id=campaign_id, workspace=workspace).first()
         application: Optional[Application] = None
         if application_id:
             application = Application.objects.filter(id=application_id, workspace=workspace).first()
@@ -28552,6 +28688,125 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"workspace_id": str(workspace.id)},
                 },
+            )
+        if action_type == ConversationActionType.LIST_CAMPAIGNS.value:
+            rows = [
+                _serialize_campaign_summary(item)
+                for item in Campaign.objects.filter(workspace=workspace, archived=False).order_by("-updated_at", "-created_at")[:200]
+            ]
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=f"Found {len(rows)} campaign(s).",
+                panel_key="campaign_list",
+                params={"workspace_id": str(workspace.id)},
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
+                    "intent": intent_payload,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"campaigns": rows},
+                },
+            )
+        if action_type == ConversationActionType.CREATE_CAMPAIGN.value:
+            name = str(action_payload.get("name") or action_payload.get("title") or prompt).strip() or "New Campaign"
+            campaign_type = str(action_payload.get("campaign_type") or "generic").strip() or "generic"
+            allowed_types = {
+                str(item.get("key") or "").strip()
+                for item in _campaign_type_definitions_for_workspace(workspace)
+                if isinstance(item, dict)
+            }
+            if campaign_type not in allowed_types:
+                campaign_type = "generic"
+            campaign = Campaign.objects.create(
+                workspace=workspace,
+                slug=_next_available_campaign_slug(str(workspace.id), name),
+                name=name[:240],
+                campaign_type=campaign_type,
+                status="draft",
+                description=str(action_payload.get("description") or "").strip(),
+                created_by=identity,
+            )
+            detail = _serialize_campaign_detail(campaign, workspace=workspace)
+            action = {
+                **action,
+                "target_object": {
+                    "kind": "campaign",
+                    "id": str(campaign.id),
+                    "label": campaign.name,
+                    "workspace_id": str(workspace.id),
+                },
+            }
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Created campaign {campaign.name}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"campaign": detail},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "campaign_detail", "label": "Open Campaign", "params": {"workspace_id": str(workspace.id), "campaign_id": str(campaign.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.SHOW_CAMPAIGN.value:
+            if campaign is None:
+                return JsonResponse(
+                    {
+                        "status": "IntentClarificationRequired",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": "No campaign could be resolved from the conversation context.",
+                        "intent": intent_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": action,
+                        "operation_result": False,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    },
+                    status=409,
+                )
+            detail = _serialize_campaign_detail(campaign, workspace=workspace)
+            direct_campaign_target = _direct_panel_target_for_conversation_action(
+                action_type=action_type,
+                workspace_id=str(workspace.id),
+                action_payload=action_payload,
+                target={"id": str(campaign.id)},
+            )
+            if direct_campaign_target:
+                panel_key, params = direct_campaign_target
+                return _direct_panel_intent_response(
+                    request_id=request_id,
+                    summary=f"Showing campaign {campaign.name}.",
+                    panel_key=panel_key,
+                    params=params,
+                    prompt_interpretation=prompt_interpretation,
+                    extra_payload={
+                        "intent": intent_payload,
+                        "conversation_action": action,
+                        "operation_result": True,
+                        "result": {"campaign": detail},
+                    },
+                )
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Showing campaign {campaign.name}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"campaign": detail},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "campaign_detail", "label": "Open Campaign", "params": {"workspace_id": str(workspace.id), "campaign_id": str(campaign.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
             )
         if action_type == ConversationActionType.GENERATE_APPLICATION_PLAN.value:
             objective = str(action_payload.get("objective") or action_payload.get("reference") or prompt).strip()
@@ -29601,6 +29856,13 @@ def _goal_queryset(identity: UserIdentity, workspace_id: str):
     return workspace, _active_goals_for_workspace(workspace)
 
 
+def _campaign_queryset(identity: UserIdentity, workspace_id: str):
+    workspace = _resolve_workspace_for_identity(identity, workspace_id)
+    if not workspace:
+        raise PermissionDenied("workspace not accessible")
+    return workspace, Campaign.objects.filter(workspace=workspace).select_related("created_by")
+
+
 def _active_goals_for_workspace(workspace: Workspace):
     qs = Goal.objects.filter(workspace=workspace)
     if hasattr(qs, "filter"):
@@ -30226,6 +30488,142 @@ def application_detail(request: HttpRequest, application_id: str) -> JsonRespons
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     return JsonResponse(_serialize_application_detail(application))
+
+
+@login_required
+def campaign_types_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, _ = _campaign_queryset(identity, workspace_id)
+    return JsonResponse({"campaign_types": _campaign_type_definitions_for_workspace(workspace)})
+
+
+@csrf_exempt
+@login_required
+def campaigns_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        if not workspace_id or not name:
+            return JsonResponse({"error": "workspace_id and name are required"}, status=400)
+        workspace, _ = _campaign_queryset(identity, workspace_id)
+        available_types = _campaign_type_definitions_for_workspace(workspace)
+        allowed_types = {str(item.get("key") or "").strip() for item in available_types if isinstance(item, dict)}
+        campaign_type = str(payload.get("campaign_type") or "generic").strip() or "generic"
+        if campaign_type not in allowed_types:
+            return JsonResponse({"error": "campaign_type is not enabled for this workspace"}, status=400)
+        status_value = str(payload.get("status") or "draft").strip().lower() or "draft"
+        allowed_statuses = {choice for choice, _label in Campaign.STATUS_CHOICES}
+        if status_value not in allowed_statuses:
+            return JsonResponse({"error": "invalid status"}, status=400)
+        campaign = Campaign.objects.create(
+            workspace=workspace,
+            slug=_next_available_campaign_slug(str(workspace.id), name),
+            name=name[:240],
+            campaign_type=campaign_type,
+            status=status_value,
+            description=str(payload.get("description") or "").strip(),
+            created_by=identity,
+            archived=bool(payload.get("archived")),
+            metadata_json=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        )
+        return JsonResponse(_serialize_campaign_detail(campaign, workspace=workspace), status=201)
+
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace, qs = _campaign_queryset(identity, workspace_id)
+    status_filter = str(request.GET.get("status") or "").strip().lower()
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+    campaign_type = str(request.GET.get("campaign_type") or "").strip()
+    if campaign_type:
+        qs = qs.filter(campaign_type=campaign_type)
+    include_archived = str(request.GET.get("include_archived") or "").strip().lower() in {"1", "true", "yes"}
+    if not include_archived:
+        qs = qs.filter(archived=False)
+    rows = [_serialize_campaign_summary(campaign) for campaign in qs.order_by("-updated_at", "-created_at")]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "campaigns": rows,
+            "campaign_types": _campaign_type_definitions_for_workspace(workspace),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def campaign_detail(request: HttpRequest, campaign_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    campaign = get_object_or_404(Campaign.objects.select_related("workspace", "created_by"), id=campaign_id)
+    if not _workspace_membership(identity, str(campaign.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        return JsonResponse(_serialize_campaign_detail(campaign, workspace=campaign.workspace))
+    if request.method not in {"PATCH", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    update_fields: List[str] = []
+    if "name" in payload:
+        next_name = str(payload.get("name") or "").strip()
+        if not next_name:
+            return JsonResponse({"error": "name cannot be empty"}, status=400)
+        campaign.name = next_name[:240]
+        update_fields.append("name")
+    if "slug" in payload:
+        slug = slugify(str(payload.get("slug") or "").strip())[:120]
+        if not slug:
+            return JsonResponse({"error": "slug cannot be empty"}, status=400)
+        if _campaign_slug_exists(str(campaign.workspace_id), slug, exclude_campaign_id=str(campaign.id)):
+            return JsonResponse({"error": "slug already exists in this workspace"}, status=409)
+        campaign.slug = slug
+        update_fields.append("slug")
+    if "description" in payload:
+        campaign.description = str(payload.get("description") or "").strip()
+        update_fields.append("description")
+    if "status" in payload:
+        next_status = str(payload.get("status") or "").strip().lower()
+        allowed_statuses = {choice for choice, _label in Campaign.STATUS_CHOICES}
+        if next_status not in allowed_statuses:
+            return JsonResponse({"error": "invalid status"}, status=400)
+        campaign.status = next_status
+        update_fields.append("status")
+    if "campaign_type" in payload:
+        next_type = str(payload.get("campaign_type") or "").strip() or "generic"
+        allowed_types = {
+            str(item.get("key") or "").strip()
+            for item in _campaign_type_definitions_for_workspace(campaign.workspace)
+            if isinstance(item, dict)
+        }
+        if next_type not in allowed_types:
+            return JsonResponse({"error": "campaign_type is not enabled for this workspace"}, status=400)
+        campaign.campaign_type = next_type
+        update_fields.append("campaign_type")
+    if "archived" in payload:
+        campaign.archived = bool(payload.get("archived"))
+        update_fields.append("archived")
+    if "metadata" in payload:
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return JsonResponse({"error": "metadata must be an object"}, status=400)
+        campaign.metadata_json = metadata or {}
+        update_fields.append("metadata_json")
+    if update_fields:
+        campaign.save(update_fields=[*update_fields, "updated_at"])
+    return JsonResponse(_serialize_campaign_detail(campaign, workspace=campaign.workspace))
 
 
 @login_required

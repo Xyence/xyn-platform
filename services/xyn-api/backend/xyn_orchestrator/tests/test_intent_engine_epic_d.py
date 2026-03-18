@@ -631,6 +631,26 @@ class EpicDIntentEngineTests(unittest.TestCase):
     def test_core_surface_matcher_does_not_trap_broader_platform_help_requests(self):
         self.assertIsNone(intent_api._match_core_surface_command("help me understand how platform settings work"))
 
+    def test_core_surface_matcher_accepts_campaign_navigation_commands(self):
+        self.assertEqual(
+            intent_api._match_core_surface_command("campaigns"),
+            ("campaign_list", {}),
+        )
+        self.assertEqual(
+            intent_api._match_core_surface_command("show campaigns"),
+            ("campaign_list", {}),
+        )
+
+    def test_core_surface_matcher_accepts_campaign_create_commands(self):
+        self.assertEqual(
+            intent_api._match_core_surface_command("create campaign"),
+            ("campaign_list", {"create": True}),
+        )
+        self.assertEqual(
+            intent_api._match_core_surface_command("new campaign"),
+            ("campaign_list", {"create": True}),
+        )
+
     def test_rules_panel_matcher_supports_direct_rules_commands(self):
         self.assertEqual(
             intent_api._match_rules_panel_command("show rules"),

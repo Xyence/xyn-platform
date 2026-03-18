@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   applyApplicationPlan,
+  createCampaign,
   executeAppPalettePrompt,
   getApplication,
   getApplicationPlan,
+  getCampaign,
   getComposerState,
   getGoal,
   getArtifactConsoleDetailBySlug,
@@ -27,6 +29,7 @@ import {
   listCoordinationThreads,
   listWorkItems,
   listAppBuilderArtifacts,
+  listCampaigns,
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
   publishDevTask,
@@ -39,6 +42,7 @@ import {
   retryDevTask,
   updateApplication,
   updateApplicationPlan,
+  updateCampaign,
   updateWorkItem,
 } from "../../../api/xyn";
 import type {
@@ -46,6 +50,8 @@ import type {
   ApplicationDetail,
   ApplicationFactorySummary,
   ApplicationPlanDetail,
+  CampaignDetail,
+  CampaignListResponse,
   AppPaletteResult,
   AiAgent,
   AiAgentResolution,
@@ -111,6 +117,8 @@ export type ConsolePanelKey =
   | "goal_detail"
   | "application_plan_detail"
   | "application_detail"
+  | "campaign_list"
+  | "campaign_detail"
   | "workspaces"
   | "thread_list"
   | "thread_detail"
@@ -1090,6 +1098,258 @@ function GoalListPanel({
               ) : null}
             </tbody>
           </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CampaignListPanel({
+  workspaceId,
+  onOpenPanel,
+  onTitleChange,
+  autoCreate,
+}: {
+  workspaceId: string;
+  onTitleChange?: (title: string) => void;
+  autoCreate?: boolean;
+} & PanelProps) {
+  const [payload, setPayload] = useState<CampaignListResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(Boolean(autoCreate));
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [campaignType, setCampaignType] = useState("generic");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function loadCampaigns() {
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await listCampaigns(workspaceId);
+      setPayload(next);
+      const defaultType =
+        next.campaign_types.find((row) => row.key === "generic")?.key ||
+        next.campaign_types[0]?.key ||
+        "generic";
+      setCampaignType(defaultType);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load campaigns");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadCampaigns();
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (autoCreate) setCreateOpen(true);
+  }, [autoCreate]);
+
+  useEffect(() => {
+    onTitleChange?.("Campaigns");
+  }, [onTitleChange]);
+
+  async function handleCreate(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!name.trim() || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const created = await createCampaign({
+        workspace_id: workspaceId,
+        name: name.trim(),
+        campaign_type: campaignType,
+        description: description.trim() || undefined,
+      });
+      setName("");
+      setDescription("");
+      setCreateOpen(false);
+      await loadCampaigns();
+      onOpenPanel("campaign_detail", { campaign_id: created.id, workspace_id: workspaceId });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create campaign");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (loading) return <p className="muted">Loading campaigns…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  const campaigns = payload?.campaigns || [];
+  const campaignTypes = payload?.campaign_types || [{ key: "generic", label: "Generic Campaign", description: "" }];
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="panel-row-actions">
+          <button type="button" className="ghost sm" onClick={() => setCreateOpen((current) => !current)}>
+            {createOpen ? "Cancel" : "Create campaign"}
+          </button>
+        </div>
+        {createOpen ? (
+          <form className="panel-inline-form" onSubmit={handleCreate}>
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Campaign name"
+              aria-label="Campaign name"
+              required
+            />
+            <select value={campaignType} onChange={(event) => setCampaignType(event.target.value)} aria-label="Campaign type">
+              {campaignTypes.map((type) => (
+                <option key={type.key} value={type.key}>
+                  {type.label}
+                </option>
+              ))}
+            </select>
+            <input
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="Description (optional)"
+              aria-label="Campaign description"
+            />
+            <button type="submit" className="primary sm" disabled={submitting || !name.trim()}>
+              {submitting ? "Creating…" : "Create"}
+            </button>
+          </form>
+        ) : null}
+      </section>
+      <section className="card">
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Updated</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {campaigns.map((campaign) => (
+                <tr key={campaign.id}>
+                  <td>{campaign.name}</td>
+                  <td>{campaign.campaign_type}</td>
+                  <td>{campaign.status}</td>
+                  <td>{formatPanelTimestamp(campaign.updated_at)}</td>
+                  <td>
+                    <button type="button" className="ghost sm" onClick={() => onOpenPanel("campaign_detail", { campaign_id: campaign.id })}>
+                      Open
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!campaigns.length ? (
+                <tr>
+                  <td colSpan={5} className="muted">No campaigns found in this workspace.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CampaignDetailPanel({
+  campaignId,
+  workspaceId,
+  onTitleChange,
+}: {
+  campaignId: string;
+  workspaceId: string;
+  onTitleChange?: (title: string) => void;
+}) {
+  const [payload, setPayload] = useState<CampaignDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [status, setStatus] = useState("draft");
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getCampaign(campaignId);
+        if (!active) return;
+        setPayload(next);
+        setName(next.name || "");
+        setDescription(next.description || "");
+        setStatus(next.status || "draft");
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load campaign");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [campaignId]);
+
+  useEffect(() => {
+    onTitleChange?.(payload?.name || "Campaign");
+  }, [onTitleChange, payload?.name]);
+
+  async function handleSave(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!payload || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await updateCampaign(payload.id, {
+        name: name.trim(),
+        description: description.trim(),
+        status,
+      });
+      setPayload(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save campaign");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <p className="muted">Loading campaign…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Campaign not found.</p>;
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <form className="panel-inline-form" onSubmit={handleSave}>
+          <input value={name} onChange={(event) => setName(event.target.value)} aria-label="Campaign name" required />
+          <select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Campaign status">
+            <option value="draft">Draft</option>
+            <option value="active">Active</option>
+            <option value="paused">Paused</option>
+            <option value="completed">Completed</option>
+            <option value="archived">Archived</option>
+          </select>
+          <input value={description} onChange={(event) => setDescription(event.target.value)} aria-label="Campaign description" placeholder="Description" />
+          <button type="submit" className="primary sm" disabled={saving || !name.trim()}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </form>
+      </section>
+      <section className="card">
+        <div className="detail-grid">
+          <div><div className="field-label">Campaign ID</div><div className="field-value">{payload.id}</div></div>
+          <div><div className="field-label">Workspace</div><div className="field-value">{workspaceId}</div></div>
+          <div><div className="field-label">Slug</div><div className="field-value">{payload.slug}</div></div>
+          <div><div className="field-label">Type</div><div className="field-value">{payload.campaign_type}</div></div>
+          <div><div className="field-label">Created</div><div className="field-value">{formatPanelTimestamp(payload.created_at)}</div></div>
+          <div><div className="field-label">Updated</div><div className="field-value">{formatPanelTimestamp(payload.updated_at)}</div></div>
         </div>
       </section>
     </div>
@@ -5001,6 +5261,8 @@ const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   workspaces: "Workspaces",
   goal_list: "Goals",
   goal_detail: "Goal",
+  campaign_list: "Campaigns",
+  campaign_detail: "Campaign",
   application_plan_detail: "Application Plan",
   application_detail: "Application",
   thread_list: "Threads",
@@ -5226,6 +5488,27 @@ export default function WorkbenchPanelHost({
 
     if (panel.key === "goal_list") {
       return <GoalListPanel workspaceId={workspaceId} onOpenPanel={openPanel} onTitleChange={setResolvedTitle} />;
+    }
+
+    if (panel.key === "campaign_list") {
+      return (
+        <CampaignListPanel
+          workspaceId={workspaceId}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
+          autoCreate={panel.params?.create === true}
+        />
+      );
+    }
+
+    if (panel.key === "campaign_detail") {
+      return (
+        <CampaignDetailPanel
+          campaignId={String(panel.params?.campaign_id || "")}
+          workspaceId={workspaceId}
+          onTitleChange={setResolvedTitle}
+        />
+      );
     }
 
     if (panel.key === "goal_detail") {
