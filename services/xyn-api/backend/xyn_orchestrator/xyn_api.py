@@ -68,6 +68,14 @@ from .models import (
     DevTask,
     Campaign,
     CampaignType,
+    OrchestrationPipeline,
+    OrchestrationJobDefinition,
+    OrchestrationJobSchedule,
+    OrchestrationJobDependency,
+    OrchestrationRun,
+    OrchestrationJobRun,
+    OrchestrationJobRunAttempt,
+    OrchestrationJobRunOutput,
     Goal,
     Application,
     ApplicationPlan,
@@ -138,6 +146,9 @@ from .models import (
     Report,
     ReportAttachment,
 )
+from .orchestration import AppNotificationFailureNotifier
+from .orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
+from .orchestration.lifecycle import OrchestrationLifecycleService
 from .xco import (
     THREAD_PRIORITY_ORDER,
     active_run_count,
@@ -30643,6 +30654,620 @@ def campaign_detail(request: HttpRequest, campaign_id: str) -> JsonResponse:
     if update_fields:
         campaign.save(update_fields=[*update_fields, "updated_at"])
     return JsonResponse(_serialize_campaign_detail(campaign, workspace=campaign.workspace))
+
+
+def _orchestration_workspace(identity: UserIdentity, workspace_id: str) -> Workspace:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    return workspace
+
+
+def _orchestration_pipeline_for_workspace(workspace: Workspace, pipeline_key: str) -> Optional[OrchestrationPipeline]:
+    key = str(pipeline_key or "").strip()
+    if not key:
+        return None
+    return OrchestrationPipeline.objects.filter(workspace=workspace, key=key).first()
+
+
+def _serialize_orchestration_job_definition(job: OrchestrationJobDefinition) -> Dict[str, Any]:
+    return {
+        "id": str(job.id),
+        "pipeline_id": str(job.pipeline_id),
+        "job_key": job.job_key,
+        "stage_key": job.stage_key,
+        "name": job.name,
+        "description": job.description or "",
+        "handler_key": job.handler_key,
+        "enabled": bool(job.enabled),
+        "only_if_upstream_changed": bool(job.only_if_upstream_changed),
+        "runs_per_jurisdiction": bool(job.runs_per_jurisdiction),
+        "runs_per_source": bool(job.runs_per_source),
+        "concurrency_limit": int(job.concurrency_limit or 1),
+        "retry_policy": {
+            "max_attempts": int(job.retry_max_attempts or 1),
+            "initial_backoff_seconds": int(job.backoff_initial_seconds or 1),
+            "max_backoff_seconds": int(job.backoff_max_seconds or 1),
+            "multiplier": float(job.backoff_multiplier or 1.0),
+        },
+        "artifact": {
+            "produces_artifact": bool(job.produces_artifact),
+            "artifact_kind": str(job.artifact_kind or "").strip() or None,
+        },
+        "schedule": job.schedule_json if isinstance(job.schedule_json, dict) else {},
+        "metadata": job.metadata_json if isinstance(job.metadata_json, dict) else {},
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+    }
+
+
+def _serialize_orchestration_schedule(schedule: OrchestrationJobSchedule) -> Dict[str, Any]:
+    return {
+        "id": str(schedule.id),
+        "job_definition_id": str(schedule.job_definition_id),
+        "schedule_key": schedule.schedule_key,
+        "schedule_kind": schedule.schedule_kind,
+        "enabled": bool(schedule.enabled),
+        "cron_expression": schedule.cron_expression or "",
+        "interval_seconds": int(schedule.interval_seconds or 0),
+        "timezone_name": schedule.timezone_name or "UTC",
+        "next_fire_at": schedule.next_fire_at.isoformat() if schedule.next_fire_at else None,
+        "last_fired_at": schedule.last_fired_at.isoformat() if schedule.last_fired_at else None,
+        "metadata": schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {},
+        "created_at": schedule.created_at.isoformat() if schedule.created_at else None,
+        "updated_at": schedule.updated_at.isoformat() if schedule.updated_at else None,
+    }
+
+
+def _serialize_orchestration_job_run_summary(job_run: OrchestrationJobRun) -> Dict[str, Any]:
+    return {
+        "id": str(job_run.id),
+        "job_definition_id": str(job_run.job_definition_id),
+        "job_key": str(job_run.job_definition.job_key),
+        "stage_key": str(job_run.job_definition.stage_key),
+        "status": str(job_run.status),
+        "attempt_count": int(job_run.attempt_count or 0),
+        "max_attempts": int(job_run.max_attempts or 1),
+        "next_attempt_at": job_run.next_attempt_at.isoformat() if job_run.next_attempt_at else None,
+        "upstream_changed": bool(job_run.upstream_changed),
+        "scope_jurisdiction": str(job_run.scope_jurisdiction or ""),
+        "scope_source": str(job_run.scope_source or ""),
+        "summary": str(job_run.summary or ""),
+        "error_text": str(job_run.error_text or ""),
+        "metrics": job_run.metrics_json if isinstance(job_run.metrics_json, dict) else {},
+        "error_details": job_run.error_details_json if isinstance(job_run.error_details_json, dict) else {},
+        "output_change_token": str(job_run.output_change_token or ""),
+        "queued_at": job_run.queued_at.isoformat() if job_run.queued_at else None,
+        "started_at": job_run.started_at.isoformat() if job_run.started_at else None,
+        "heartbeat_at": job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None,
+        "completed_at": job_run.completed_at.isoformat() if job_run.completed_at else None,
+        "stale_deadline_at": job_run.stale_deadline_at.isoformat() if job_run.stale_deadline_at else None,
+        "stale_at": job_run.stale_at.isoformat() if job_run.stale_at else None,
+        "stale_reason": str(job_run.stale_reason or ""),
+        "created_at": job_run.created_at.isoformat() if job_run.created_at else None,
+        "updated_at": job_run.updated_at.isoformat() if job_run.updated_at else None,
+    }
+
+
+def _serialize_orchestration_run_summary(run: OrchestrationRun) -> Dict[str, Any]:
+    return {
+        "id": str(run.id),
+        "workspace_id": str(run.workspace_id),
+        "pipeline_id": str(run.pipeline_id),
+        "pipeline_key": str(run.pipeline.key),
+        "status": str(run.status),
+        "trigger_cause": str(run.trigger_cause),
+        "trigger_key": str(run.trigger_key or ""),
+        "correlation_id": str(run.correlation_id or ""),
+        "chain_id": str(run.chain_id or ""),
+        "scope_jurisdiction": str(run.scope_jurisdiction or ""),
+        "scope_source": str(run.scope_source or ""),
+        "summary": str(run.summary or ""),
+        "error_text": str(run.error_text or ""),
+        "queued_at": run.queued_at.isoformat() if run.queued_at else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "heartbeat_at": run.heartbeat_at.isoformat() if run.heartbeat_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "stale_deadline_at": run.stale_deadline_at.isoformat() if run.stale_deadline_at else None,
+        "stale_at": run.stale_at.isoformat() if run.stale_at else None,
+        "stale_reason": str(run.stale_reason or ""),
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+    }
+
+
+def _serialize_orchestration_run_detail(run: OrchestrationRun) -> Dict[str, Any]:
+    dependency_rows = list(
+        OrchestrationJobDependency.objects.filter(pipeline=run.pipeline)
+        .select_related("upstream_job", "downstream_job")
+        .order_by("created_at")
+    )
+    dependency_map: Dict[str, List[str]] = {}
+    for edge in dependency_rows:
+        downstream_key = str(edge.downstream_job.job_key)
+        upstream_key = str(edge.upstream_job.job_key)
+        dependency_map.setdefault(downstream_key, []).append(upstream_key)
+
+    job_runs = list(
+        OrchestrationJobRun.objects.filter(run=run)
+        .select_related("job_definition")
+        .order_by("job_definition__stage_key", "job_definition__job_key", "created_at")
+    )
+    job_run_ids = [row.id for row in job_runs]
+    attempts_by_job_run: Dict[str, List[Dict[str, Any]]] = {}
+    outputs_by_job_run: Dict[str, List[Dict[str, Any]]] = {}
+
+    attempt_rows = list(
+        OrchestrationJobRunAttempt.objects.filter(job_run_id__in=job_run_ids)
+        .order_by("job_run_id", "attempt_number", "created_at")
+    )
+    for attempt in attempt_rows:
+        key = str(attempt.job_run_id)
+        attempts_by_job_run.setdefault(key, []).append(
+            {
+                "id": str(attempt.id),
+                "attempt_number": int(attempt.attempt_number or 0),
+                "status": str(attempt.status),
+                "executor_key": str(attempt.executor_key or ""),
+                "summary": str(attempt.summary or ""),
+                "error_text": str(attempt.error_text or ""),
+                "error_details": attempt.error_details_json if isinstance(attempt.error_details_json, dict) else {},
+                "metrics": attempt.metrics_json if isinstance(attempt.metrics_json, dict) else {},
+                "output": attempt.output_json if isinstance(attempt.output_json, dict) else {},
+                "retryable": bool(attempt.retryable),
+                "queued_at": attempt.queued_at.isoformat() if attempt.queued_at else None,
+                "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
+                "heartbeat_at": attempt.heartbeat_at.isoformat() if attempt.heartbeat_at else None,
+                "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
+                "stale_at": attempt.stale_at.isoformat() if attempt.stale_at else None,
+                "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
+                "updated_at": attempt.updated_at.isoformat() if attempt.updated_at else None,
+            }
+        )
+
+    output_rows = list(
+        OrchestrationJobRunOutput.objects.filter(job_run_id__in=job_run_ids)
+        .order_by("job_run_id", "created_at")
+    )
+    for output in output_rows:
+        key = str(output.job_run_id)
+        outputs_by_job_run.setdefault(key, []).append(
+            {
+                "id": str(output.id),
+                "attempt_id": str(output.attempt_id) if output.attempt_id else None,
+                "output_key": str(output.output_key),
+                "output_type": str(output.output_type),
+                "output_uri": str(output.output_uri or ""),
+                "output_change_token": str(output.output_change_token or ""),
+                "artifact_id": str(output.artifact_id) if output.artifact_id else None,
+                "metadata": output.metadata_json if isinstance(output.metadata_json, dict) else {},
+                "payload": output.payload_json if isinstance(output.payload_json, dict) else {},
+                "created_at": output.created_at.isoformat() if output.created_at else None,
+            }
+        )
+
+    jobs_payload: List[Dict[str, Any]] = []
+    for row in job_runs:
+        item = _serialize_orchestration_job_run_summary(row)
+        item["dependencies"] = dependency_map.get(str(row.job_definition.job_key), [])
+        item["attempts"] = attempts_by_job_run.get(str(row.id), [])
+        item["outputs"] = outputs_by_job_run.get(str(row.id), [])
+        jobs_payload.append(item)
+
+    metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+    return {
+        **_serialize_orchestration_run_summary(run),
+        "metrics": run.metrics_json if isinstance(run.metrics_json, dict) else {},
+        "error_details": run.error_details_json if isinstance(run.error_details_json, dict) else {},
+        "idempotency_key": str(run.idempotency_key or ""),
+        "dedupe_key": str(run.dedupe_key or ""),
+        "rerun_of_id": str(run.rerun_of_id) if run.rerun_of_id else None,
+        "initiated_by_id": str(run.initiated_by_id) if run.initiated_by_id else None,
+        "metadata": metadata,
+        "dependency_context": dependency_map,
+        "jobs": jobs_payload,
+    }
+
+
+def _orchestration_failure_recipient_ids(workspace: Workspace) -> List[str]:
+    memberships = (
+        WorkspaceMembership.objects.filter(workspace=workspace)
+        .select_related("user_identity")
+        .order_by("created_at")
+    )
+    recipient_ids: List[str] = []
+    for membership in memberships:
+        if membership.role not in {"admin", "moderator"} and not membership.termination_authority:
+            continue
+        if not membership.user_identity_id:
+            continue
+        recipient_ids.append(str(membership.user_identity_id))
+    return recipient_ids
+
+
+def _notify_orchestration_failure(run: OrchestrationRun, *, reason: str, actor: Optional[UserIdentity] = None) -> None:
+    recipients = _orchestration_failure_recipient_ids(run.workspace)
+    if not recipients:
+        return
+    notifier = AppNotificationFailureNotifier(recipient_ids=recipients)
+    notifier.notify_run_failure(
+        workspace_id=str(run.workspace_id),
+        run_id=str(run.id),
+        pipeline_key=str(run.pipeline.key),
+        job_key="pipeline",
+        error_text=f"Orchestration run {run.status}: {reason}",
+        metadata={"status": str(run.status), "reason": reason, "actor_id": str(actor.id) if actor else ""},
+    )
+
+
+@login_required
+def orchestration_job_definitions_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    qs = OrchestrationJobDefinition.objects.filter(pipeline__workspace=workspace).select_related("pipeline")
+    if pipeline_key:
+        qs = qs.filter(pipeline__key=pipeline_key)
+    rows = [
+        {
+            **_serialize_orchestration_job_definition(item),
+            "pipeline_key": str(item.pipeline.key),
+        }
+        for item in qs.order_by("pipeline__key", "stage_key", "job_key")
+    ]
+    return JsonResponse({"workspace_id": str(workspace.id), "job_definitions": rows})
+
+
+@login_required
+def orchestration_schedules_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    job_key = str(request.GET.get("job_key") or "").strip()
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    qs = OrchestrationJobSchedule.objects.filter(job_definition__pipeline__workspace=workspace).select_related("job_definition", "job_definition__pipeline")
+    if pipeline_key:
+        qs = qs.filter(job_definition__pipeline__key=pipeline_key)
+    if job_key:
+        qs = qs.filter(job_definition__job_key=job_key)
+    rows = [
+        {
+            **_serialize_orchestration_schedule(item),
+            "pipeline_key": str(item.job_definition.pipeline.key),
+            "job_key": str(item.job_definition.job_key),
+        }
+        for item in qs.order_by("job_definition__pipeline__key", "job_definition__job_key", "schedule_key")
+    ]
+    return JsonResponse({"workspace_id": str(workspace.id), "schedules": rows})
+
+
+@login_required
+def orchestration_dependency_graph(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    if not workspace_id or not pipeline_key:
+        return JsonResponse({"error": "workspace_id and pipeline_key are required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key)
+    if pipeline is None:
+        return JsonResponse({"error": "pipeline not found"}, status=404)
+    job_rows = list(pipeline.job_definitions.order_by("stage_key", "job_key"))
+    edges = list(
+        OrchestrationJobDependency.objects.filter(pipeline=pipeline)
+        .select_related("upstream_job", "downstream_job")
+        .order_by("created_at")
+    )
+    nodes = [
+        {
+            "job_key": str(job.job_key),
+            "stage_key": str(job.stage_key),
+            "name": str(job.name),
+            "only_if_upstream_changed": bool(job.only_if_upstream_changed),
+            "enabled": bool(job.enabled),
+        }
+        for job in job_rows
+    ]
+    edge_rows = [
+        {
+            "upstream_job_key": str(edge.upstream_job.job_key),
+            "downstream_job_key": str(edge.downstream_job.job_key),
+        }
+        for edge in edges
+    ]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "pipeline_id": str(pipeline.id),
+            "pipeline_key": str(pipeline.key),
+            "nodes": nodes,
+            "edges": edge_rows,
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        pipeline_key = str(payload.get("pipeline_key") or "").strip()
+        if not workspace_id or not pipeline_key:
+            return JsonResponse({"error": "workspace_id and pipeline_key are required"}, status=400)
+        try:
+            workspace = _orchestration_workspace(identity, workspace_id)
+        except PermissionDenied:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key)
+        if pipeline is None:
+            return JsonResponse({"error": "pipeline not found"}, status=404)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        manual_params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+        trigger_key = str(payload.get("trigger_key") or "manual_api").strip() or "manual_api"
+        lifecycle = OrchestrationLifecycleService()
+        run = lifecycle.create_run(
+            RunCreateRequest(
+                workspace_id=str(workspace.id),
+                pipeline_key=str(pipeline.key),
+                trigger=RunTrigger(trigger_cause="manual", trigger_key=trigger_key),
+                initiated_by_id=str(identity.id),
+                scope=ExecutionScope(
+                    jurisdiction=str(payload.get("jurisdiction") or "").strip(),
+                    source=str(payload.get("source") or "").strip(),
+                ),
+                metadata={
+                    **metadata,
+                    "manual_parameters": manual_params,
+                },
+            )
+        )
+        _audit_action(
+            "orchestration_manual_trigger",
+            metadata={
+                "workspace_id": str(workspace.id),
+                "pipeline_key": str(pipeline.key),
+                "run_id": str(run.id),
+                "trigger_key": trigger_key,
+                "jurisdiction": str(payload.get("jurisdiction") or "").strip(),
+                "source": str(payload.get("source") or "").strip(),
+            },
+            request=request,
+        )
+        run = OrchestrationRun.objects.select_related("pipeline", "workspace").get(id=run.id)
+        return JsonResponse(_serialize_orchestration_run_summary(run), status=201)
+
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    qs = OrchestrationRun.objects.filter(workspace=workspace).select_related("pipeline")
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    if pipeline_key:
+        qs = qs.filter(pipeline__key=pipeline_key)
+    status_filter = str(request.GET.get("status") or "").strip().lower()
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+    trigger_cause = str(request.GET.get("trigger_cause") or "").strip().lower()
+    if trigger_cause:
+        qs = qs.filter(trigger_cause=trigger_cause)
+    job_key = str(request.GET.get("job_key") or "").strip()
+    if job_key:
+        qs = qs.filter(job_runs__job_definition__job_key=job_key).distinct()
+    jurisdiction = str(request.GET.get("jurisdiction") or "").strip()
+    if jurisdiction:
+        qs = qs.filter(scope_jurisdiction=jurisdiction)
+    source = str(request.GET.get("source") or "").strip()
+    if source:
+        qs = qs.filter(scope_source=source)
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    created_after = _parse_iso_datetime(request.GET.get("created_after"))
+    if created_after is not None:
+        qs = qs.filter(created_at__gte=created_after)
+    created_before = _parse_iso_datetime(request.GET.get("created_before"))
+    if created_before is not None:
+        qs = qs.filter(created_at__lte=created_before)
+    failed_or_stale = str(request.GET.get("failed_or_stale") or "").strip().lower() in {"1", "true", "yes"}
+    if failed_or_stale:
+        qs = qs.filter(status__in=["failed", "stale"])
+    try:
+        limit = int(request.GET.get("limit") or "100")
+    except ValueError:
+        limit = 100
+    limit = max(1, min(limit, 500))
+    rows = [
+        _serialize_orchestration_run_summary(run)
+        for run in qs.order_by("-created_at")[:limit]
+    ]
+    return JsonResponse({"workspace_id": str(workspace.id), "runs": rows})
+
+
+@csrf_exempt
+@login_required
+def orchestration_run_detail(request: HttpRequest, run_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    run = get_object_or_404(
+        OrchestrationRun.objects.select_related("workspace", "pipeline", "initiated_by", "rerun_of"),
+        id=run_id,
+    )
+    if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not context_workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        if context_workspace_id != str(run.workspace_id):
+            return JsonResponse({"error": "run not found in workspace context"}, status=404)
+        return JsonResponse(_serialize_orchestration_run_detail(run))
+    return JsonResponse({"error": "method not allowed"}, status=405)
+
+
+@csrf_exempt
+@login_required
+def orchestration_run_rerun(request: HttpRequest, run_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    run = get_object_or_404(OrchestrationRun.objects.select_related("workspace", "pipeline"), id=run_id)
+    if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(run.workspace_id):
+        return JsonResponse({"error": "run not found in workspace context"}, status=404)
+    lifecycle = OrchestrationLifecycleService()
+    rerun = lifecycle.request_rerun(run_id=str(run.id), requested_by_id=str(identity.id))
+    _audit_action(
+        "orchestration_manual_rerun",
+        metadata={
+            "workspace_id": str(run.workspace_id),
+            "pipeline_key": str(run.pipeline.key),
+            "run_id": str(run.id),
+            "rerun_id": str(rerun.id),
+        },
+        request=request,
+    )
+    rerun = OrchestrationRun.objects.select_related("pipeline", "workspace").get(id=rerun.id)
+    return JsonResponse(_serialize_orchestration_run_summary(rerun), status=201)
+
+
+@csrf_exempt
+@login_required
+def orchestration_run_cancel(request: HttpRequest, run_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    run = get_object_or_404(OrchestrationRun.objects.select_related("workspace", "pipeline"), id=run_id)
+    if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(run.workspace_id):
+        return JsonResponse({"error": "run not found in workspace context"}, status=404)
+
+    with transaction.atomic():
+        locked = OrchestrationRun.objects.select_for_update().get(id=run.id)
+        if locked.status not in {"pending", "queued"}:
+            return JsonResponse({"error": "only pending or queued runs can be cancelled"}, status=409)
+        now = timezone.now()
+        locked.status = "cancelled"
+        locked.completed_at = now
+        locked.summary = str(payload.get("summary") or locked.summary or "Cancelled by operator")[:240]
+        locked.save(update_fields=["status", "completed_at", "summary", "updated_at"])
+        OrchestrationJobRun.objects.filter(run=locked, status__in=["pending", "queued", "waiting_retry"]).update(
+            status="cancelled",
+            completed_at=now,
+            updated_at=now,
+        )
+        OrchestrationJobRunAttempt.objects.filter(
+            job_run__run=locked,
+            status__in=["pending", "queued", "running"],
+        ).update(status="cancelled", completed_at=now, updated_at=now)
+
+    _audit_action(
+        "orchestration_run_cancelled",
+        metadata={
+            "workspace_id": str(run.workspace_id),
+            "pipeline_key": str(run.pipeline.key),
+            "run_id": str(run.id),
+        },
+        request=request,
+    )
+    locked = OrchestrationRun.objects.select_related("pipeline", "workspace").get(id=run.id)
+    return JsonResponse(_serialize_orchestration_run_summary(locked))
+
+
+@csrf_exempt
+@login_required
+def orchestration_run_failure_ack(request: HttpRequest, run_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    run = get_object_or_404(OrchestrationRun.objects.select_related("workspace", "pipeline"), id=run_id)
+    if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(run.workspace_id):
+        return JsonResponse({"error": "run not found in workspace context"}, status=404)
+    if run.status not in {"failed", "stale"}:
+        return JsonResponse({"error": "run is not failed or stale"}, status=409)
+    metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+    now = timezone.now().isoformat()
+    metadata["operator_ack"] = {
+        "acknowledged_at": now,
+        "acknowledged_by_id": str(identity.id),
+        "note": str(payload.get("note") or "").strip(),
+    }
+    run.metadata_json = metadata
+    run.save(update_fields=["metadata_json", "updated_at"])
+    _notify_orchestration_failure(run, reason="operator_acknowledged", actor=identity)
+    _audit_action(
+        "orchestration_failure_acknowledged",
+        metadata={
+            "workspace_id": str(run.workspace_id),
+            "pipeline_key": str(run.pipeline.key),
+            "run_id": str(run.id),
+        },
+        request=request,
+    )
+    return JsonResponse(_serialize_orchestration_run_detail(run))
 
 
 @login_required

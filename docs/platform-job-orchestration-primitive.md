@@ -90,6 +90,7 @@ Apps should:
 5. Use dependency graph readiness to drive downstream execution.
 
 See [Platform Job Authoring Guide](./platform-job-authoring-guide.md) for examples.
+See [Orchestration Operator API](./orchestration-operator-api.md) for runtime visibility and intervention endpoints.
 
 ## Run lifecycle service
 `xyn_orchestrator/orchestration/lifecycle.py` provides guarded transitions:
