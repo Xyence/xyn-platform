@@ -186,6 +186,13 @@ import type {
   AppBuilderArtifact,
   AppPaletteResult,
   AppJobPatchPayload,
+  ApplicationNotificationFeedResponse,
+  ApplicationNotificationUnreadCountResponse,
+  ApplicationNotificationReadResponse,
+  ApplicationNotificationReadAllResponse,
+  NotificationDeliveryTargetsResponse,
+  NotificationDeliveryTargetResponse,
+  NotificationDeliveryPreferenceResponse,
 } from "./types";
 import { authHeaders, resolveApiBaseUrl, resolveSeedBaseUrl } from "./client";
 
@@ -5013,4 +5020,124 @@ export async function triggerControlPlaneRollback(payload: {
     body: JSON.stringify(payload),
   });
   return handle<{ rollback_deployment_id: string; rollback_status: string }>(response);
+}
+
+export async function listApplicationNotifications(params: {
+  limit?: number;
+  offset?: number;
+  unread_only?: boolean;
+  source_app_key?: string;
+  category?: string;
+} = {}): Promise<ApplicationNotificationFeedResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/notifications`);
+  if (params.limit !== undefined) {
+    url.searchParams.set("limit", String(params.limit));
+  }
+  if (params.offset !== undefined) {
+    url.searchParams.set("offset", String(params.offset));
+  }
+  if (params.unread_only !== undefined) {
+    url.searchParams.set("unread_only", params.unread_only ? "1" : "0");
+  }
+  if (params.source_app_key) {
+    url.searchParams.set("source_app_key", params.source_app_key);
+  }
+  if (params.category) {
+    url.searchParams.set("category", params.category);
+  }
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<ApplicationNotificationFeedResponse>(response);
+}
+
+export async function getApplicationNotificationUnreadCount(): Promise<ApplicationNotificationUnreadCountResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/unread-count`, { credentials: "include" });
+  return handle<ApplicationNotificationUnreadCountResponse>(response);
+}
+
+export async function markApplicationNotificationRead(notificationId: string): Promise<ApplicationNotificationReadResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/${encodeURIComponent(notificationId)}/read`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildHeaders(),
+  });
+  return handle<ApplicationNotificationReadResponse>(response);
+}
+
+export async function markAllApplicationNotificationsRead(): Promise<ApplicationNotificationReadAllResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/read-all`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildHeaders(),
+  });
+  return handle<ApplicationNotificationReadAllResponse>(response);
+}
+
+export async function listNotificationDeliveryTargets(): Promise<NotificationDeliveryTargetsResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets`, { credentials: "include" });
+  return handle<NotificationDeliveryTargetsResponse>(response);
+}
+
+export async function createNotificationDeliveryTarget(payload: {
+  address: string;
+  enabled?: boolean;
+  is_primary?: boolean;
+}): Promise<NotificationDeliveryTargetResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildHeaders(),
+    body: JSON.stringify(payload),
+  });
+  return handle<NotificationDeliveryTargetResponse>(response);
+}
+
+export async function setNotificationDeliveryTargetEnabled(targetId: string, enabled: boolean): Promise<NotificationDeliveryTargetResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets/${encodeURIComponent(targetId)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: buildHeaders(),
+    body: JSON.stringify({ enabled }),
+  });
+  return handle<NotificationDeliveryTargetResponse>(response);
+}
+
+export async function removeNotificationDeliveryTarget(targetId: string): Promise<{ status: string }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets/${encodeURIComponent(targetId)}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return handle<{ status: string }>(response);
+}
+
+export async function getNotificationDeliveryPreference(sourceAppKey = ""): Promise<NotificationDeliveryPreferenceResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/notifications/preferences`);
+  if (sourceAppKey.trim()) {
+    url.searchParams.set("source_app_key", sourceAppKey.trim());
+  }
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<NotificationDeliveryPreferenceResponse>(response);
+}
+
+export async function setNotificationDeliveryPreference(payload: {
+  source_app_key?: string;
+  in_app_enabled: boolean;
+  email_enabled: boolean;
+}): Promise<NotificationDeliveryPreferenceResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/preferences`, {
+    method: "PUT",
+    credentials: "include",
+    headers: buildHeaders(),
+    body: JSON.stringify(payload),
+  });
+  return handle<NotificationDeliveryPreferenceResponse>(response);
 }

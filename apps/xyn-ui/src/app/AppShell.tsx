@@ -14,6 +14,8 @@ const AIConfigPage = lazy(() => import("./pages/AIConfigPage"));
 const IdentityConfigurationPage = lazy(() => import("./pages/IdentityConfigurationPage"));
 const AccessControlPage = lazy(() => import("./pages/AccessControlPage"));
 const RunsPage = lazy(() => import("./pages/RunsPage"));
+const ApplicationNotificationsPage = lazy(() => import("./pages/ApplicationNotificationsPage"));
+const ApplicationNotificationSettingsPage = lazy(() => import("./pages/ApplicationNotificationSettingsPage"));
 const JobsListPage = lazy(() => import("./pages/JobsListPage"));
 const JobDetailPage = lazy(() => import("./pages/JobDetailPage"));
 const ActivityPage = lazy(() => import("./pages/ActivityPage"));
@@ -1148,6 +1150,8 @@ export default function AppShell() {
             <Route path="package/releases" element={<Navigate to={settingsDeployPath} replace />} />
             <Route path="run/instances" element={<InstancesPage />} />
             <Route path="run/runs" element={<RunsPage />} />
+            <Route path="notifications" element={<ApplicationNotificationsPage />} />
+            <Route path="notifications/settings" element={<ApplicationNotificationSettingsPage />} />
             <Route
               path="run/jobs"
               element={<JobsListPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />}

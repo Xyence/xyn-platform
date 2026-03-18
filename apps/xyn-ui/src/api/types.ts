@@ -3290,6 +3290,78 @@ export type PlatformConfigResponse = {
   };
 };
 
+export type ApplicationNotification = {
+  notification_id: string;
+  recipient_row_id: string;
+  source_app_key: string;
+  category: string;
+  notification_type_key: string;
+  title: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  deep_link: string;
+  source_entity_type: string;
+  source_entity_id: string;
+  source_metadata: Record<string, unknown>;
+  workspace_id: string | null;
+  unread: boolean;
+  read_at: string | null;
+  created_at: string;
+};
+
+export type ApplicationNotificationFeedResponse = {
+  notifications: ApplicationNotification[];
+  count: number;
+  limit: number;
+  offset: number;
+  unread_count: number;
+};
+
+export type ApplicationNotificationUnreadCountResponse = {
+  unread_count: number;
+};
+
+export type ApplicationNotificationReadResponse = {
+  notification_id: string;
+  unread: boolean;
+  unread_count: number;
+};
+
+export type ApplicationNotificationReadAllResponse = {
+  updated: number;
+  unread_count: number;
+};
+
+export type NotificationDeliveryTarget = {
+  id: string;
+  owner_id: string;
+  channel: string;
+  address: string;
+  enabled: boolean;
+  verification_status: string;
+  is_primary: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NotificationDeliveryTargetsResponse = {
+  targets: NotificationDeliveryTarget[];
+};
+
+export type NotificationDeliveryTargetResponse = {
+  target: NotificationDeliveryTarget | null;
+};
+
+export type NotificationDeliveryPreference = {
+  source_app_key: string;
+  in_app_enabled: boolean;
+  email_enabled: boolean;
+};
+
+export type NotificationDeliveryPreferenceResponse = {
+  preference: NotificationDeliveryPreference;
+};
+
 export type VideoAdapterDefinition = {
   id: string;
   name: string;
