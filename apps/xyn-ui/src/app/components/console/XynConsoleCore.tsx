@@ -41,6 +41,7 @@ type ArtifactStructuredQuery = {
 
 type ResolvedPanelCommand =
   | { panelKey: "composer_detail"; params: Record<string, never> }
+  | { panelKey: "campaign_list"; params: { create?: boolean } }
   | { panelKey: "artifact_list"; params: { namespace?: string; query?: ArtifactStructuredQuery; query_error?: string } }
   | { panelKey: "workspaces"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "runs"; params: { query?: Record<string, unknown>; query_error?: string } }
@@ -207,6 +208,16 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
     || /^(open|show|go to)\s+workbench$/.test(normalized)
   ) {
     return { panelKey: "composer_detail", params: {} };
+  }
+  if (
+    /^(campaigns|show campaigns|open campaigns|list campaigns|go to campaigns)$/.test(normalized)
+  ) {
+    return { panelKey: "campaign_list", params: {} };
+  }
+  if (
+    /^(new campaign|create campaign|add campaign|start campaign)$/.test(normalized)
+  ) {
+    return { panelKey: "campaign_list", params: { create: true } };
   }
   if (/^(show|list|open)\s+drafts$/.test(normalized)) {
     return { panelKey: "drafts_list", params: {} };
@@ -411,12 +422,18 @@ export function resolveDirectPanelOpenParams(
   directPanel: ResolvedPanelCommand,
   workspaceId?: string | null,
 ): Record<string, unknown> {
-  if (directPanel.panelKey !== "composer_detail") {
-    return directPanel.params;
+  if (directPanel.panelKey === "composer_detail") {
+    return {
+      workspace_id: workspaceId || undefined,
+    };
   }
-  return {
-    workspace_id: workspaceId || undefined,
-  };
+  if (directPanel.panelKey === "campaign_list") {
+    return {
+      workspace_id: workspaceId || undefined,
+      ...(directPanel.params.create ? { create: true } : {}),
+    };
+  }
+  return directPanel.params;
 }
 
 function stringifyValue(value: unknown): string {
