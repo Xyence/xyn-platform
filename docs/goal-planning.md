@@ -117,21 +117,9 @@ Planning does not auto-dispatch broad work by default.
 - leaves the resulting `DevTask` in queue-ready state
 - does not bypass canonical queue derivation or runtime dispatch
 
-## Real Estate Deal Finder Example
+## Illustrative Example
 
-The domain seed for a real-estate deal finder goal biases toward MVP-first execution:
-
-1. Listing Data Ingestion
-2. Property Model and CRUD
-3. Comparable Analysis
-4. Deal Scoring
-5. Opportunity Review UI
-6. Lead and Outreach Workflow
-
-The first work items intentionally start with:
-- identifying the first listing source
-- defining the property-centered entity model
-- exposing CRUD/list/detail inspection before broader analysis
+Illustrative examples may describe domain-specific plans, but those examples are not built-in runtime planner behavior in core Xyn.
 
 ## Panels and Conversation
 
@@ -388,3 +376,10 @@ Do not:
 - expand into speculative autonomy beyond XCO scheduling
 - add autonomous replanning or dependency-graph planning in this layer
 - introduce automatic queueing, background execution agents, or autonomous execution
+
+## Runtime Agnostic Guard
+
+Named example applications are allowed in tests, docs, and example fixtures only.
+Core runtime modules in `services/xyn-api/backend/xyn_orchestrator` must stay
+application-agnostic and must not embed product- or vertical-specific business
+logic.

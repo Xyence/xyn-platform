@@ -192,7 +192,7 @@ class EpicDIntentEngineTests(unittest.TestCase):
         )
         self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
         self.assertEqual(envelope.intent_type, IntentType.GENERATE_APPLICATION_PLAN.value)
-        self.assertEqual(envelope.action_payload.get("factory_key"), "ai_real_estate_deal_finder")
+        self.assertEqual(envelope.action_payload.get("factory_key"), "generic_application_mvp")
         self.assertIn("deal finder", str(envelope.action_payload.get("application_name") or "").lower())
         self.assertEnvelopeStable(envelope)
 
@@ -220,7 +220,7 @@ class EpicDIntentEngineTests(unittest.TestCase):
         )
         self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
         self.assertEqual(envelope.intent_type, IntentType.GENERATE_APPLICATION_PLAN.value)
-        self.assertEqual(envelope.action_payload.get("factory_key"), "ai_real_estate_deal_finder")
+        self.assertEqual(envelope.action_payload.get("factory_key"), "generic_application_mvp")
         self.assertIn("deal finder", str(envelope.action_payload.get("application_name") or "").lower())
         self.assertEnvelopeStable(envelope)
 
@@ -2475,15 +2475,15 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual(((payload.get("next_actions") or [])[0].get("params") or {}).get("goal_id"), "goal-1")
 
     def test_execute_conversation_action_generate_application_plan_returns_plan_panel_action(self):
-        plan = SimpleNamespace(id="plan-1", name="Deal Finder", source_factory_key="ai_real_estate_deal_finder")
+        plan = SimpleNamespace(id="plan-1", name="Deal Finder", source_factory_key="generic_application_mvp")
         detail = {
             "id": "plan-1",
             "name": "Deal Finder",
             "status": "review",
-            "source_factory_key": "ai_real_estate_deal_finder",
+            "source_factory_key": "generic_application_mvp",
             "generated_goals": [{"title": "Listing and Property Foundation"}],
         }
-        factory = {"key": "ai_real_estate_deal_finder", "name": "AI Real Estate Deal Finder"}
+        factory = {"key": "generic_application_mvp", "name": "Generic Application MVP"}
         generated = SimpleNamespace(model_dump=lambda mode="json": {"application_name": "Deal Finder"})
         with patch.object(
             intent_api,
@@ -2499,7 +2499,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
                 action={
                     "action_type": "generate_application_plan",
                     "thread_id": "thread-1",
-                    "payload": {"action_payload": {"application_name": "Deal Finder", "factory_key": "ai_real_estate_deal_finder"}},
+                    "payload": {"action_payload": {"application_name": "Deal Finder", "factory_key": "generic_application_mvp"}},
                     "target_object": {"workspace_id": "ws-1"},
                 },
                 prompt="build an AI real estate deal finder",

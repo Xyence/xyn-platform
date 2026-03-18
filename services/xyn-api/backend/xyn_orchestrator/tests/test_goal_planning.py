@@ -128,7 +128,7 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(valid_goal_transition("decomposed", "in_progress"))
         self.assertFalse(valid_goal_transition("completed", "in_progress"))
 
-    def test_real_estate_goal_decomposition_is_deterministic_and_mvp_first(self):
+    def test_goal_decomposition_is_deterministic_and_mvp_first(self):
         goal = Goal.objects.create(
             workspace=self.workspace,
             title="AI Real Estate Deal Finder",
@@ -143,12 +143,12 @@ class GoalPlanningTests(TestCase):
 
         self.assertEqual(plan_a.model_dump(mode="json"), plan_b.model_dump(mode="json"))
         self.assertEqual([thread.title for thread in plan_a.threads[:3]], [
-            "Listing Data Ingestion",
-            "Property Model and CRUD",
-            "Comparable Analysis",
+            "Core Domain Slice",
+            "Operational Surface",
+            "Stabilization",
         ])
-        self.assertIn("smallest vertical slice", plan_a.planning_summary.lower())
-        self.assertEqual(plan_a.work_items[0].title, "Identify the first listing source and capture the ingestion contract")
+        self.assertIn("vertical slice", plan_a.planning_summary.lower())
+        self.assertEqual(plan_a.work_items[0].title, "Define the minimum durable model for the first working slice")
 
     def test_generic_goal_decomposition_starts_with_durable_xyn_records(self):
         goal = Goal.objects.create(
@@ -183,13 +183,13 @@ class GoalPlanningTests(TestCase):
         goal.refresh_from_db()
 
         self.assertEqual(goal.planning_status, "decomposed")
-        self.assertEqual(goal.threads.count(), 6)
-        self.assertEqual(goal.work_items.count(), 8)
-        self.assertEqual(len(persisted["threads"]), 6)
-        self.assertEqual(len(persisted["work_items"]), 8)
+        self.assertEqual(goal.threads.count(), 3)
+        self.assertEqual(goal.work_items.count(), 4)
+        self.assertEqual(len(persisted["threads"]), 3)
+        self.assertEqual(len(persisted["work_items"]), 4)
         self.assertTrue(all(thread.goal_id == goal.id for thread in goal.threads.all()))
         self.assertTrue(all(task.goal_id == goal.id for task in goal.work_items.all()))
-        self.assertTrue(goal.work_items.filter(coordination_thread__title="Property Model and CRUD").exists())
+        self.assertTrue(goal.work_items.filter(coordination_thread__title="Core Domain Slice").exists())
         first_task = goal.work_items.order_by("priority", "created_at", "id").first()
         self.assertIsNotNone(first_task)
         self.assertEqual((first_task.execution_brief or {}).get("schema_version"), "v1")
@@ -404,7 +404,7 @@ class GoalPlanningTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
         factory_keys = [row["key"] for row in payload["factories"]]
-        self.assertIn("ai_real_estate_deal_finder", factory_keys)
+        self.assertIn("generic_application_mvp", factory_keys)
         self.assertIn("telecom_support_operations_console", factory_keys)
         self.assertIn("reseller_portal", factory_keys)
 
@@ -431,7 +431,7 @@ class GoalPlanningTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 201)
         self.assertEqual(payload["status"], "review")
-        self.assertEqual(payload["source_factory_key"], "ai_real_estate_deal_finder")
+        self.assertEqual(payload["source_factory_key"], "generic_application_mvp")
         self.assertGreaterEqual(len(payload["generated_goals"]), 1)
         self.assertEqual(Application.objects.count(), applications_before)
         self.assertEqual(Goal.objects.count(), goals_before)
@@ -547,7 +547,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Reviewable plan",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="review",
@@ -559,7 +559,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Deal finder app",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="active",
@@ -604,7 +604,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Deal finder app",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="active",
@@ -629,7 +629,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Reviewable plan",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="review",
@@ -721,7 +721,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Reviewable plan",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="review",
@@ -745,7 +745,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Deal finder app",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="active",
@@ -989,9 +989,9 @@ class GoalPlanningTests(TestCase):
         )
         persist_goal_plan(goal, decompose_goal(goal), user=self.user)
         recommendation = recommend_next_slice(goal)
-        self.assertEqual(recommendation.thread_title, "Listing Data Ingestion")
+        self.assertEqual(recommendation.thread_title, "Core Domain Slice")
         self.assertEqual(len(recommendation.recommended_work_items), 1)
-        self.assertIn("Listing Data Ingestion", recommendation.reasoning_summary)
+        self.assertIn("Core Domain Slice", recommendation.reasoning_summary)
         self.assertIsNotNone(recommendation.queue_suggestion)
         self.assertEqual(recommendation.queue_suggestion.action_type, "queue_first_slice")
         action_types = [action.type for action in recommendation.actions]
