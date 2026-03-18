@@ -174,6 +174,7 @@ import type {
   ArtifactConsoleListResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFilesResponse,
+  RuleBrowserResponse,
   LocalProvisionResponse,
   AppIntentDraft,
   AppIntentDraftCreatePayload,
@@ -513,6 +514,33 @@ export async function getArtifactConsoleFilesBySlug(slug: string): Promise<Artif
     headers: buildHeaders(),
   });
   return handle<ArtifactConsoleFilesResponse>(response);
+}
+
+export async function getRulesBrowser(params?: {
+  workspaceId?: string;
+  artifactSlug?: string;
+  appSlug?: string;
+  q?: string;
+  family?: string;
+  editable?: boolean;
+  system?: boolean;
+  bundleId?: string;
+}): Promise<RuleBrowserResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/rules`);
+  if (params?.workspaceId) url.searchParams.set("workspace_id", params.workspaceId);
+  if (params?.artifactSlug) url.searchParams.set("artifact_slug", params.artifactSlug);
+  if (params?.appSlug) url.searchParams.set("app_slug", params.appSlug);
+  if (params?.q) url.searchParams.set("q", params.q);
+  if (params?.family) url.searchParams.set("family", params.family);
+  if (params?.editable !== undefined) url.searchParams.set("editable", String(params.editable));
+  if (params?.system !== undefined) url.searchParams.set("system", String(params.system));
+  if (params?.bundleId) url.searchParams.set("bundle_id", params.bundleId);
+  const response = await apiFetch(url.toString(), {
+    credentials: "include",
+    headers: buildHeaders(),
+  });
+  return handle<RuleBrowserResponse>(response);
 }
 
 export async function getRecentArtifacts(limit = 6): Promise<RecentArtifactListResponse> {

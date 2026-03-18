@@ -631,6 +631,30 @@ class EpicDIntentEngineTests(unittest.TestCase):
     def test_core_surface_matcher_does_not_trap_broader_platform_help_requests(self):
         self.assertIsNone(intent_api._match_core_surface_command("help me understand how platform settings work"))
 
+    def test_rules_panel_matcher_supports_direct_rules_commands(self):
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show rules"),
+            ("rules_browser", {}),
+        )
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show editable rules"),
+            ("rules_browser", {"editable": True}),
+        )
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show system rules"),
+            ("rules_browser", {"system": True}),
+        )
+
+    def test_rules_panel_matcher_supports_targeted_rules_commands(self):
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show rules for Team Lunch Poll"),
+            ("rules_browser", {"q": "team lunch poll"}),
+        )
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show policy bundle for app.team-lunch-poll"),
+            ("rules_browser", {"q": "app.team-lunch-poll", "app_slug": "app.team-lunch-poll"}),
+        )
+
     def test_legacy_article_intake_extracts_title_from_with_the_title_phrase(self):
         engine = IntentResolutionEngine(
             proposal_provider=_FakeProvider(),

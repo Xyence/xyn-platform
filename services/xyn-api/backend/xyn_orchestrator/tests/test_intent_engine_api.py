@@ -1171,6 +1171,39 @@ class IntentEngineApiTests(TestCase):
         self.assertEqual((raw_panel_action or {}).get("panel_key"), "artifact_raw_json")
         self.assertEqual((((raw_panel_action or {}).get("params") or {}).get("slug")), "core.authn-jwt")
 
+    def test_rules_panel_commands_return_open_panel_actions(self):
+        resolve_response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": "show editable rules"}),
+            content_type="application/json",
+        )
+        self.assertEqual(resolve_response.status_code, 200, resolve_response.content.decode())
+        payload = resolve_response.json()
+        panel_action = next((row for row in payload.get("next_actions", []) if row.get("action") == "OpenPanel"), None)
+        self.assertIsNotNone(panel_action)
+        self.assertEqual((panel_action or {}).get("panel_key"), "rules_browser")
+        self.assertEqual((((panel_action or {}).get("params") or {}).get("editable")), True)
+
+        apply_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": {
+                        "__operation": "open_artifact_panel",
+                        "panel_key": "rules_browser",
+                        "params": {"editable": True},
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(apply_response.status_code, 200, apply_response.content.decode())
+        applied_panel_action = next((row for row in apply_response.json().get("next_actions", []) if row.get("action") == "OpenPanel"), None)
+        self.assertIsNotNone(applied_panel_action)
+        self.assertEqual((applied_panel_action or {}).get("panel_key"), "rules_browser")
+
     def test_artifact_slug_endpoints_return_full_raw_json_and_files(self):
         module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
         artifact, _ = Artifact.objects.get_or_create(

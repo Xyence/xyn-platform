@@ -95,6 +95,7 @@ import AIConfigPage from "../../pages/AIConfigPage";
 import PlatformRenderingSettingsPage from "../../pages/PlatformRenderingSettingsPage";
 import PlatformDeploySettingsPage from "../../pages/PlatformDeploySettingsPage";
 import PlatformBrandingPage from "../../pages/PlatformBrandingPage";
+import RulesBrowserPanel from "../rules/RulesBrowserPanel";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 
 export type ConsolePanelKey =
@@ -121,6 +122,7 @@ export type ConsolePanelKey =
   | "artifact_detail"
   | "artifact_raw_json"
   | "artifact_files"
+  | "rules_browser"
   | "ems_devices"
   | "ems_registrations"
   | "ems_device_status_rollup"
@@ -3332,6 +3334,9 @@ function ArtifactDetailPanel({
         <button type="button" className="ghost sm" onClick={() => onOpenPanel("artifact_files", { slug: payload.artifact.slug })}>
           Open Files
         </button>
+        <button type="button" className="ghost sm" onClick={() => onOpenPanel("rules_browser", { artifact_slug: payload.artifact.slug })}>
+          Browse Rules
+        </button>
       </div>
       {manage.length ? (
         <div>
@@ -4815,6 +4820,7 @@ const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   artifact_detail: "Artifact Detail",
   artifact_raw_json: "Artifact Raw JSON",
   artifact_files: "Artifact Files",
+  rules_browser: "Rules Browser",
   ems_devices: "EMS Devices",
   ems_registrations: "EMS Registrations",
   ems_device_status_rollup: "EMS Device Status Rollup",
@@ -5155,6 +5161,18 @@ export default function WorkbenchPanelHost({
     }
     if (panel.key === "artifact_raw_json") return <ArtifactRawJsonPanel slug={String(panel.params?.slug || "")} />;
     if (panel.key === "artifact_files") return <ArtifactFilesPanel slug={String(panel.params?.slug || "")} />;
+    if (panel.key === "rules_browser") {
+      return (
+        <RulesBrowserPanel
+          workspaceId={workspaceId}
+          artifactSlug={String(panel.params?.artifact_slug || "") || undefined}
+          appSlug={String(panel.params?.app_slug || "") || undefined}
+          query={String(panel.params?.q || panel.params?.query || "") || undefined}
+          editableOnly={panel.params?.editable === true}
+          systemOnly={panel.params?.system === true}
+        />
+      );
+    }
     if (panel.key === "record_detail") {
       return (
         <GenericRecordDetailPanel

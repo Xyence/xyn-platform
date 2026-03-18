@@ -10346,6 +10346,406 @@ def _artifact_file_metadata_rows(artifact: Artifact) -> List[Dict[str, Any]]:
     return rows
 
 
+_RULE_FAMILY_LABELS: Dict[str, str] = {
+    "validation_policies": "Validation Policies",
+    "relation_constraints": "Relation Constraints",
+    "transition_policies": "Transition Policies",
+    "invariant_policies": "Invariant Policies",
+    "derived_policies": "Derived Policies",
+    "trigger_policies": "Trigger Policies",
+}
+
+
+def _humanize_rule_token(value: str) -> str:
+    return " ".join(
+        part.capitalize()
+        for part in re.split(r"[_\-\s]+", str(value or "").strip())
+        if part
+    )
+
+
+def _policy_bundle_from_artifact(artifact: Artifact) -> Optional[Dict[str, Any]]:
+    payload = _latest_artifact_content_json(artifact)
+    if str(payload.get("schema_version") or "").strip() == "xyn.policy_bundle.v0":
+        return payload
+    nested = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
+    if str(nested.get("schema_version") or "").strip() == "xyn.policy_bundle.v0":
+        return nested
+    return None
+
+
+def _policy_slug_for_app_slug(app_slug: str) -> str:
+    token = str(app_slug or "").strip().lower()
+    if not token:
+        return ""
+    if token.startswith("app."):
+        token = token[4:]
+    token = token.replace(" ", "-")
+    token = re.sub(r"[^a-z0-9._-]+", "", token).strip(".-")
+    return f"policy.{token}" if token else ""
+
+
+def _policy_rule_owner_kind(bundle: Dict[str, Any], rule: Dict[str, Any]) -> str:
+    override = str(rule.get("owner_kind") or "").strip()
+    if override:
+        return override
+    ownership = bundle.get("ownership") if isinstance(bundle.get("ownership"), dict) else {}
+    return str(ownership.get("owner_kind") or "generated_application").strip() or "generated_application"
+
+
+def _policy_rule_editable(bundle: Dict[str, Any], rule: Dict[str, Any]) -> bool:
+    if isinstance(rule.get("editable"), bool):
+        return bool(rule.get("editable"))
+    ownership = bundle.get("ownership") if isinstance(bundle.get("ownership"), dict) else {}
+    return bool(ownership.get("editable"))
+
+
+def _policy_scope_label(bundle: Dict[str, Any], rule: Dict[str, Any]) -> str:
+    scope = rule.get("scope") if isinstance(rule.get("scope"), dict) else {}
+    if scope:
+        return str(scope.get("scope_kind") or scope.get("kind") or scope.get("scope") or "").strip()
+    bundle_scope = bundle.get("scope") if isinstance(bundle.get("scope"), dict) else {}
+    applies_to = bundle_scope.get("applies_to") if isinstance(bundle_scope.get("applies_to"), list) else []
+    return str(applies_to[0] if applies_to else "generated_runtime").strip() or "generated_runtime"
+
+
+def _can_view_policy_bundle(identity: UserIdentity, bundle: Dict[str, Any]) -> bool:
+    if _is_platform_admin(identity):
+        return True
+    ownership = bundle.get("ownership") if isinstance(bundle.get("ownership"), dict) else {}
+    owner_kind = str(ownership.get("owner_kind") or "").strip().lower()
+    if owner_kind in {"platform", "platform_managed", "system"}:
+        return False
+    scope = bundle.get("scope") if isinstance(bundle.get("scope"), dict) else {}
+    applies_to = [str(item).strip().lower() for item in (scope.get("applies_to") if isinstance(scope.get("applies_to"), list) else [])]
+    if "system" in applies_to:
+        return False
+    return True
+
+
+def _policy_rule_visibility(
+    *,
+    identity: UserIdentity,
+    bundle: Dict[str, Any],
+    rule: Dict[str, Any],
+    editable_only: Optional[bool],
+    system_only: Optional[bool],
+) -> bool:
+    if not _can_view_policy_bundle(identity, bundle):
+        return False
+    owner_kind = _policy_rule_owner_kind(bundle, rule).lower()
+    rule_editable = _policy_rule_editable(bundle, rule)
+    if editable_only is True and not rule_editable:
+        return False
+    if editable_only is False and rule_editable:
+        return False
+    is_system = owner_kind in {"platform", "platform_managed", "system"}
+    if system_only is True and not is_system:
+        return False
+    if system_only is False and is_system:
+        return False
+    return True
+
+
+def _policy_rule_rows_for_bundle(
+    *,
+    identity: UserIdentity,
+    artifact: Artifact,
+    bundle: Dict[str, Any],
+    family_filters: Set[str],
+    editable_only: Optional[bool],
+    system_only: Optional[bool],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    policies = bundle.get("policies") if isinstance(bundle.get("policies"), dict) else {}
+    bundle_id = str(bundle.get("bundle_id") or _artifact_slug(artifact) or "").strip()
+    for family, entries in policies.items():
+        if family_filters and family not in family_filters:
+            continue
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if not _policy_rule_visibility(
+                identity=identity,
+                bundle=bundle,
+                rule=entry,
+                editable_only=editable_only,
+                system_only=system_only,
+            ):
+                continue
+            enforcement_stage = str(entry.get("enforcement_stage") or "").strip() or "not_compiled"
+            enforced = enforcement_stage == "runtime_enforced"
+            owner_kind = _policy_rule_owner_kind(bundle, entry)
+            rule_id = str(entry.get("id") or "").strip() or f"{bundle_id}:{family}:{len(rows) + 1}"
+            rows.append(
+                {
+                    "id": rule_id,
+                    "title": str(entry.get("name") or entry.get("description") or rule_id),
+                    "name": str(entry.get("name") or ""),
+                    "description": str(entry.get("description") or ""),
+                    "family": family,
+                    "family_label": _RULE_FAMILY_LABELS.get(family, _humanize_rule_token(family)),
+                    "enforced": enforced,
+                    "enforcement_status": "enforced" if enforced else "documented_only",
+                    "enforcement_stage": enforcement_stage,
+                    "scope": _policy_scope_label(bundle, entry),
+                    "ownership": owner_kind,
+                    "editable": _policy_rule_editable(bundle, entry),
+                    "summary": str(((entry.get("explanation") or {}) if isinstance(entry.get("explanation"), dict) else {}).get("user_summary") or ""),
+                    "source_policy_bundle": {
+                        "bundle_id": bundle_id,
+                        "artifact_slug": _artifact_slug(artifact),
+                        "app_slug": str(bundle.get("app_slug") or ""),
+                    },
+                    "metadata": {
+                        "status": str(entry.get("status") or ""),
+                        "targets": entry.get("targets") if isinstance(entry.get("targets"), list) else [],
+                        "parameters": entry.get("parameters") if isinstance(entry.get("parameters"), dict) else {},
+                        "source": entry.get("source") if isinstance(entry.get("source"), dict) else {},
+                    },
+                }
+            )
+    return rows
+
+
+def _rules_payload_from_candidates(
+    *,
+    identity: UserIdentity,
+    candidates: Iterable[Artifact],
+    family_filters: Set[str],
+    editable_only: Optional[bool],
+    system_only: Optional[bool],
+    bundle_id_filter: str = "",
+) -> Dict[str, Any]:
+    bundles: List[Dict[str, Any]] = []
+    rules: List[Dict[str, Any]] = []
+    filtered_bundle_count = 0
+    for artifact in candidates:
+        bundle = _policy_bundle_from_artifact(artifact)
+        if not bundle:
+            continue
+        bundle_id = str(bundle.get("bundle_id") or _artifact_slug(artifact) or "").strip()
+        if bundle_id_filter and bundle_id != bundle_id_filter:
+            continue
+        if not _can_view_policy_bundle(identity, bundle):
+            filtered_bundle_count += 1
+            continue
+        ownership = bundle.get("ownership") if isinstance(bundle.get("ownership"), dict) else {}
+        owner_kind = str(ownership.get("owner_kind") or "generated_application").strip() or "generated_application"
+        bundle_editable = bool(ownership.get("editable"))
+        is_system_bundle = owner_kind.lower() in {"platform", "platform_managed", "system"}
+        if editable_only is True and not bundle_editable:
+            continue
+        if editable_only is False and bundle_editable:
+            continue
+        if system_only is True and not is_system_bundle:
+            continue
+        if system_only is False and is_system_bundle:
+            continue
+        bundle_rules = _policy_rule_rows_for_bundle(
+            identity=identity,
+            artifact=artifact,
+            bundle=bundle,
+            family_filters=family_filters,
+            editable_only=editable_only,
+            system_only=system_only,
+        )
+        rules.extend(bundle_rules)
+        bundles.append(
+            {
+                "bundle_id": bundle_id,
+                "title": str(bundle.get("title") or artifact.title or bundle_id),
+                "app_slug": str(bundle.get("app_slug") or ""),
+                "artifact_slug": _artifact_slug(artifact),
+                "description": str(bundle.get("description") or ""),
+                "scope": bundle.get("scope") if isinstance(bundle.get("scope"), dict) else {},
+                "ownership": {
+                    "owner_kind": owner_kind,
+                    "editable": bundle_editable,
+                    "source": str(ownership.get("source") or ""),
+                },
+                "rule_count": len(bundle_rules),
+                "compiled_rule_count": sum(1 for row in bundle_rules if bool(row.get("enforced"))),
+                "documented_rule_count": sum(1 for row in bundle_rules if not bool(row.get("enforced"))),
+                "artifact_id": str(artifact.id),
+                "updated_at": artifact.updated_at.isoformat() if artifact.updated_at else "",
+            }
+        )
+    grouped_counts: Dict[str, Dict[str, int]] = {}
+    for row in rules:
+        family = str(row.get("family") or "").strip()
+        if not family:
+            continue
+        bucket = grouped_counts.setdefault(family, {"count": 0, "enforced": 0, "documented_only": 0})
+        bucket["count"] += 1
+        if bool(row.get("enforced")):
+            bucket["enforced"] += 1
+        else:
+            bucket["documented_only"] += 1
+    groups = [
+        {
+            "family": family,
+            "label": _RULE_FAMILY_LABELS.get(family, _humanize_rule_token(family)),
+            "count": counts["count"],
+            "enforced": counts["enforced"],
+            "documented_only": counts["documented_only"],
+        }
+        for family, counts in sorted(grouped_counts.items(), key=lambda item: item[0])
+    ]
+    return {
+        "bundles": bundles,
+        "rules": rules,
+        "groups": groups,
+        "access": {"filtered_out_bundles": filtered_bundle_count},
+    }
+
+
+def _resolve_policy_bundle_candidates(
+    *,
+    artifact_slug: str = "",
+    app_slug: str = "",
+    query: str = "",
+) -> List[Artifact]:
+    policy_qs = Artifact.objects.select_related("type").filter(type__slug="policy_bundle").order_by("-updated_at", "-created_at")
+    normalized_artifact_slug = str(artifact_slug or "").strip()
+    normalized_app_slug = str(app_slug or "").strip()
+    normalized_query = str(query or "").strip()
+    if normalized_artifact_slug:
+        target = _resolve_artifact_by_slug(normalized_artifact_slug)
+        if target is None:
+            return []
+        if target.type_id and str(target.type.slug or "") == "policy_bundle":
+            return [target]
+        candidates = []
+        bundle = _policy_bundle_from_artifact(target)
+        if bundle:
+            candidates.append(target)
+        mapped_slug = _policy_slug_for_app_slug(normalized_artifact_slug)
+        if mapped_slug:
+            candidates.extend(list(policy_qs.filter(slug=mapped_slug)[:5]))
+        target_app_slug = str((bundle or {}).get("app_slug") or normalized_artifact_slug).strip()
+        mapped_app_slug = str(target_app_slug or "").strip()
+        if mapped_app_slug:
+            candidates.extend(
+                list(
+                    policy_qs.filter(
+                        Q(slug__iexact=_policy_slug_for_app_slug(mapped_app_slug))
+                        | Q(title__icontains=mapped_app_slug.replace(".", " "))
+                    )[:10]
+                )
+            )
+        dedup: Dict[str, Artifact] = {}
+        for row in candidates:
+            dedup[str(row.id)] = row
+        return list(dedup.values())
+    if normalized_app_slug:
+        mapped_slug = _policy_slug_for_app_slug(normalized_app_slug)
+        if mapped_slug:
+            rows = list(policy_qs.filter(slug=mapped_slug)[:10])
+            if rows:
+                return rows
+        return list(policy_qs.filter(Q(title__icontains=normalized_app_slug) | Q(slug__icontains=normalized_app_slug))[:25])
+    if normalized_query:
+        return list(policy_qs.filter(Q(title__icontains=normalized_query) | Q(slug__icontains=normalized_query))[:40])
+    return list(policy_qs[:40])
+
+
+def _parse_optional_bool_filter(raw: Optional[str]) -> Optional[bool]:
+    token = str(raw or "").strip().lower()
+    if token in {"", "any", "all"}:
+        return None
+    return _parse_bool_param(token, default=False)
+
+
+@csrf_exempt
+@login_required
+def rules_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if workspace_id and _resolve_workspace_for_identity(identity, workspace_id) is None:
+        return JsonResponse({"error": "workspace not found or forbidden"}, status=403)
+    artifact_slug = str(request.GET.get("artifact_slug") or "").strip()
+    app_slug = str(request.GET.get("app_slug") or "").strip()
+    query = str(request.GET.get("q") or "").strip()
+    bundle_id_filter = str(request.GET.get("bundle_id") or "").strip()
+    editable_only = _parse_optional_bool_filter(request.GET.get("editable"))
+    system_only = _parse_optional_bool_filter(request.GET.get("system"))
+    family_tokens = [
+        str(token or "").strip()
+        for token in str(request.GET.get("family") or "").split(",")
+        if str(token or "").strip()
+    ]
+    family_filters = set(family_tokens)
+    candidates = _resolve_policy_bundle_candidates(
+        artifact_slug=artifact_slug,
+        app_slug=app_slug,
+        query=query,
+    )
+    payload = _rules_payload_from_candidates(
+        identity=identity,
+        candidates=candidates,
+        family_filters=family_filters,
+        editable_only=editable_only,
+        system_only=system_only,
+        bundle_id_filter=bundle_id_filter,
+    )
+    payload["target"] = {
+        "artifact_slug": artifact_slug or None,
+        "app_slug": app_slug or None,
+        "query": query or None,
+        "workspace_id": workspace_id or None,
+        "bundle_id": bundle_id_filter or None,
+    }
+    payload["filters"] = {
+        "family": sorted(family_filters),
+        "editable": editable_only,
+        "system": system_only,
+    }
+    return JsonResponse(payload)
+
+
+@csrf_exempt
+@login_required
+def artifact_by_slug_rules(request: HttpRequest, artifact_slug: str) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if workspace_id and _resolve_workspace_for_identity(identity, workspace_id) is None:
+        return JsonResponse({"error": "workspace not found or forbidden"}, status=403)
+    family_tokens = [
+        str(token or "").strip()
+        for token in str(request.GET.get("family") or "").split(",")
+        if str(token or "").strip()
+    ]
+    payload = _rules_payload_from_candidates(
+        identity=identity,
+        candidates=_resolve_policy_bundle_candidates(artifact_slug=artifact_slug),
+        family_filters=set(family_tokens),
+        editable_only=_parse_optional_bool_filter(request.GET.get("editable")),
+        system_only=_parse_optional_bool_filter(request.GET.get("system")),
+        bundle_id_filter=str(request.GET.get("bundle_id") or "").strip(),
+    )
+    payload["target"] = {
+        "artifact_slug": str(artifact_slug or "").strip(),
+        "workspace_id": workspace_id or None,
+    }
+    payload["filters"] = {
+        "family": sorted(set(family_tokens)),
+        "editable": _parse_optional_bool_filter(request.GET.get("editable")),
+        "system": _parse_optional_bool_filter(request.GET.get("system")),
+    }
+    return JsonResponse(payload)
+
+
 @csrf_exempt
 @login_required
 def artifact_by_slug_detail(request: HttpRequest, artifact_slug: str) -> JsonResponse:
@@ -17055,6 +17455,41 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
     return None
 
 
+def _match_rules_panel_command(message: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    lower = re.sub(r"\s+", " ", text.lower()).strip()
+    lower = re.sub(r"^(?:please[,\s]+)+", "", lower)
+    lower = re.sub(r"^(?:can|could|would)\s+you\s+", "", lower)
+    lower = re.sub(r"^take\s+me\s+to\s+", "go to ", lower)
+    lower = re.sub(r"[.!?,:;]+$", "", lower)
+    lower = re.sub(r"^show\s+me\s+", "show ", lower)
+    lower = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", lower)
+    lower = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", lower)
+    lower = re.sub(r"[.!?,:;]+$", "", lower)
+
+    target_match = re.search(r"(?:show|open|list)\s+(?:rules|policy bundle)\s+for\s+(.+)$", lower)
+    if target_match:
+        raw_target = str(target_match.group(1) or "").strip().strip("\"' ")
+        params: Dict[str, Any] = {"q": raw_target}
+        if raw_target.startswith("policy."):
+            params["artifact_slug"] = raw_target
+        elif raw_target.startswith("app."):
+            params["app_slug"] = raw_target
+        return ("rules_browser", params)
+
+    if re.fullmatch(r"(?:show|open|list)\s+editable\s+rules", lower):
+        return ("rules_browser", {"editable": True})
+    if re.fullmatch(r"(?:show|open|list)\s+system\s+rules", lower):
+        return ("rules_browser", {"system": True})
+    if re.fullmatch(r"(?:show|open|list)\s+policy\s+bundle", lower):
+        return ("rules_browser", {"policy_bundle": True})
+    if re.fullmatch(r"(?:show|open|list)\s+rules", lower):
+        return ("rules_browser", {})
+    return None
+
+
 def _unsupported_artifact_filter_reason(message: str) -> Optional[str]:
     text = str(message or "").strip()
     if not text:
@@ -20373,7 +20808,7 @@ def _intent_apply_open_artifact_panel(
 ) -> JsonResponse:
     panel_key = str(payload.get("panel_key") or "").strip()
     params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-    valid_panel_keys = {"artifact_list", "artifact_detail", "artifact_raw_json", "artifact_files"}
+    valid_panel_keys = {"artifact_list", "artifact_detail", "artifact_raw_json", "artifact_files", "rules_browser"}
     if panel_key not in valid_panel_keys:
         return JsonResponse({"error": "unsupported panel_key"}, status=400)
 
@@ -20584,6 +21019,51 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 thread_id=context_thread_id,
             )
         return JsonResponse(response_payload)
+    rules_panel_request = _match_rules_panel_command(message)
+    if rules_panel_request:
+        panel_key, params = rules_panel_request
+        prompt_interpretation = _direct_panel_prompt_interpretation(
+            intent_type="open_rules_panel",
+            action_label="Open rules browser",
+            resolution_notes=["resolved as a direct policy bundle and rules navigation action"],
+        )
+        response_payload = {
+            "status": "IntentResolved",
+            "action_type": "ValidateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": "Will open rules browser.",
+            "prompt_interpretation": prompt_interpretation,
+            "next_actions": [
+                {"label": "Open panel", "action": "OpenPanel", "panel_key": panel_key, "params": params},
+            ],
+            "audit": {
+                "request_id": str(uuid.uuid4()),
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=None,
+                proposal={"operation": "open_rules_panel", "panel_key": panel_key, "params": params, "prompt": message},
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="completed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=context_workspace_id,
+                summary=response_payload["summary"],
+                prompt_interpretation=prompt_interpretation,
+                thread_id=context_thread_id,
+            )
+        return JsonResponse(response_payload)
+
     artifact_panel_request = _match_artifact_panel_command(message)
     if artifact_panel_request:
         panel_key, params = artifact_panel_request
@@ -28668,21 +29148,25 @@ def _goal_queryset(identity: UserIdentity, workspace_id: str):
 
 
 def _active_goals_for_workspace(workspace: Workspace):
-    return (
-        Goal.objects.filter(workspace=workspace)
-        .filter(Q(application__isnull=True) | ~Q(application__status="archived"))
-        .select_related("requested_by")
-        .prefetch_related("threads__work_items", "work_items")
-    )
+    qs = Goal.objects.filter(workspace=workspace)
+    if hasattr(qs, "filter"):
+        qs = qs.filter(Q(application__isnull=True) | ~Q(application__status="archived"))
+    if hasattr(qs, "select_related"):
+        qs = qs.select_related("requested_by")
+    if hasattr(qs, "prefetch_related"):
+        qs = qs.prefetch_related("threads__work_items", "work_items")
+    return qs
 
 
 def _active_coordination_threads_for_workspace(workspace: Workspace):
-    return (
-        CoordinationThread.objects.filter(workspace=workspace)
-        .filter(Q(goal__application__isnull=True) | ~Q(goal__application__status="archived"))
-        .select_related("owner")
-        .prefetch_related("work_items", "events")
-    )
+    qs = CoordinationThread.objects.filter(workspace=workspace)
+    if hasattr(qs, "filter"):
+        qs = qs.filter(Q(goal__application__isnull=True) | ~Q(goal__application__status="archived"))
+    if hasattr(qs, "select_related"):
+        qs = qs.select_related("owner")
+    if hasattr(qs, "prefetch_related"):
+        qs = qs.prefetch_related("work_items", "events")
+    return qs
 
 
 def _activate_goal_first_slice(goal: Goal) -> Dict[str, Optional[str]]:

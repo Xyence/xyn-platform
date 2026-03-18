@@ -3757,6 +3757,74 @@ export type ArtifactConsoleFilesResponse = {
   files: ArtifactConsoleFileRow[];
 };
 
+export type RuleBrowserBundle = {
+  bundle_id: string;
+  title: string;
+  app_slug: string;
+  artifact_slug: string;
+  description?: string;
+  scope?: Record<string, unknown>;
+  ownership?: {
+    owner_kind?: string;
+    editable?: boolean;
+    source?: string;
+  };
+  rule_count: number;
+  compiled_rule_count: number;
+  documented_rule_count: number;
+  artifact_id?: string;
+  updated_at?: string;
+};
+
+export type RuleBrowserRule = {
+  id: string;
+  title: string;
+  name?: string;
+  description?: string;
+  family: string;
+  family_label: string;
+  enforced: boolean;
+  enforcement_status: "enforced" | "documented_only" | string;
+  enforcement_stage: string;
+  scope: string;
+  ownership: string;
+  editable: boolean;
+  summary?: string;
+  source_policy_bundle: {
+    bundle_id: string;
+    artifact_slug: string;
+    app_slug: string;
+  };
+  metadata?: Record<string, unknown>;
+};
+
+export type RuleBrowserResponse = {
+  target?: {
+    artifact_slug?: string | null;
+    app_slug?: string | null;
+    query?: string | null;
+    workspace_id?: string | null;
+    bundle_id?: string | null;
+  };
+  filters?: {
+    family?: string[];
+    editable?: boolean | null;
+    system?: boolean | null;
+  };
+  bundles: RuleBrowserBundle[];
+  groups: Array<{
+    family: string;
+    label: string;
+    count: number;
+    enforced: number;
+    documented_only: number;
+  }>;
+  rules: RuleBrowserRule[];
+  access?: {
+    filtered_out_bundles?: number;
+  };
+};
+
 export type XynIntentOptionsResponse = {
   artifact_type: "ArticleDraft" | "ContextPack";
   field: "category" | "format" | "duration";
