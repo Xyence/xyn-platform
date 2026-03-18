@@ -30500,7 +30500,10 @@ def campaign_types_collection(request: HttpRequest) -> JsonResponse:
     workspace_id = str(request.GET.get("workspace_id") or "").strip()
     if not workspace_id:
         return JsonResponse({"error": "workspace_id is required"}, status=400)
-    workspace, _ = _campaign_queryset(identity, workspace_id)
+    try:
+        workspace, _ = _campaign_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
     return JsonResponse({"campaign_types": _campaign_type_definitions_for_workspace(workspace)})
 
 
@@ -30516,7 +30519,10 @@ def campaigns_collection(request: HttpRequest) -> JsonResponse:
         name = str(payload.get("name") or "").strip()
         if not workspace_id or not name:
             return JsonResponse({"error": "workspace_id and name are required"}, status=400)
-        workspace, _ = _campaign_queryset(identity, workspace_id)
+        try:
+            workspace, _ = _campaign_queryset(identity, workspace_id)
+        except PermissionDenied:
+            return JsonResponse({"error": "forbidden"}, status=403)
         available_types = _campaign_type_definitions_for_workspace(workspace)
         allowed_types = {str(item.get("key") or "").strip() for item in available_types if isinstance(item, dict)}
         campaign_type = str(payload.get("campaign_type") or "generic").strip() or "generic"
@@ -30542,7 +30548,10 @@ def campaigns_collection(request: HttpRequest) -> JsonResponse:
     workspace_id = str(request.GET.get("workspace_id") or "").strip()
     if not workspace_id:
         return JsonResponse({"error": "workspace_id is required"}, status=400)
-    workspace, qs = _campaign_queryset(identity, workspace_id)
+    try:
+        workspace, qs = _campaign_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
     status_filter = str(request.GET.get("status") or "").strip().lower()
     if status_filter:
         qs = qs.filter(status=status_filter)
