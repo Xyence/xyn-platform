@@ -27,9 +27,17 @@ from .scheduling import ScheduledTrigger, TriggerKind
 from .service import JobOrchestrationService, exponential_backoff_seconds
 
 try:
+    from .engine import ConcurrencyGuard, DependencyResolver, DueJobScanner, OrchestrationEngine, RunDispatcher, RunPlanner, StaleRunDetector
     from .lifecycle import OrchestrationLifecycleService, OutputRecord
     from .repository import DjangoOrchestrationRepository
 except Exception:  # pragma: no cover - allows importing pure orchestration helpers without Django runtime
+    ConcurrencyGuard = None  # type: ignore[assignment]
+    DependencyResolver = None  # type: ignore[assignment]
+    DueJobScanner = None  # type: ignore[assignment]
+    OrchestrationEngine = None  # type: ignore[assignment]
+    RunDispatcher = None  # type: ignore[assignment]
+    RunPlanner = None  # type: ignore[assignment]
+    StaleRunDetector = None  # type: ignore[assignment]
     OrchestrationLifecycleService = None  # type: ignore[assignment]
     OutputRecord = None  # type: ignore[assignment]
     DjangoOrchestrationRepository = None  # type: ignore[assignment]
@@ -55,6 +63,13 @@ __all__ = [
     "DependencySnapshot",
     "AppNotificationFailureNotifier",
     "DjangoOrchestrationRepository",
+    "DueJobScanner",
+    "RunPlanner",
+    "DependencyResolver",
+    "RunDispatcher",
+    "ConcurrencyGuard",
+    "StaleRunDetector",
+    "OrchestrationEngine",
     "exponential_backoff_seconds",
     "OrchestrationLifecycleService",
     "OutputRecord",

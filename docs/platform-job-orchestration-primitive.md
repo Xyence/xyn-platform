@@ -27,8 +27,21 @@ New module: `xyn_orchestrator/orchestration/`
   - repository interface, executor interface, notifier interface
   - run creation and execution context contracts
 - `service.py`
-  - service seam for run creation, stale detection, rerun entry point
+  - orchestration service seam for run creation and rerun entry point
   - exponential backoff utility
+- `repository.py`
+  - Django ORM repository implementation for durable runs, attempts, outputs
+- `lifecycle.py`
+  - guarded run/job transitions and attempt/output persistence
+- `engine.py`
+  - scheduler/orchestration runtime components:
+    - `DueJobScanner` (due schedule polling)
+    - `RunPlanner` (scheduled run materialization + partition fanout)
+    - `DependencyResolver` (deterministic dependency readiness)
+    - `ConcurrencyGuard` (global/pipeline/job/partition dispatch limits)
+    - `RunDispatcher` (executor dispatch + success/fail/skip handling)
+    - `StaleRunDetector` (queued/running stale reconciliation)
+    - `OrchestrationEngine` (single tick loop composing all steps)
 - `notifiers.py`
   - adapter to existing AppNotification infrastructure for failure notifications
 
@@ -85,13 +98,21 @@ Apps should:
 Illegal transitions raise `ValueError` (for example, `pending -> succeeded` without running).
 The lifecycle service writes attempt rows and output rows, and recomputes parent run status from job-run state.
 
+## Runtime execution flow
+1. `DueJobScanner` polls enabled schedule rows with `next_fire_at <= now`.
+2. `RunPlanner` creates workspace-scoped `OrchestrationRun` rows (with correlation/chain ids and partition scope) and advances schedule fire times.
+3. `DependencyResolver` evaluates dependencies and transitions ready `OrchestrationJobRun` rows to `queued`.
+4. `RunDispatcher` applies concurrency guard checks, starts job runs, invokes registered executors, and records success/failure/skip outputs.
+5. Retryable failures move to `waiting_retry` with exponential backoff; dispatch re-queues them when `next_attempt_at` is due.
+6. `StaleRunDetector` marks long-stuck queued/running jobs as `stale`.
+7. Run status is recomputed from job-run state at each lifecycle transition.
+
 Future apps (including Deal Finder) should only provide pipeline definitions + handlers, not custom orchestration infrastructure.
 
 ## Current TODOs
-- TODO: add repository implementation backed by new ORM models.
-- TODO: add scheduler loop to materialize scheduled triggers.
-- TODO: add dispatcher worker to execute ready job runs with per-pipeline/per-job concurrency enforcement.
-- TODO: add run-state aggregation and terminal propagation on failure/skip/stale.
+- TODO: replace cron placeholder advancement logic with a robust cron iterator.
+- TODO: add optional automatic stale-retry/failure escalation policy hooks.
+- TODO: integrate engine tick with the platform worker/queue cadence.
 - TODO: add API endpoints/UI surfaces for run status visibility, manual rerun, and scoped rerun.
-- TODO: add change-detection policy helpers for upstream diff/change-token semantics.
+- TODO: add richer change-detection policy helpers for upstream diff semantics beyond output tokens.
 - TODO: add workspace-level recipient resolution for failure notifications.
