@@ -18,6 +18,10 @@ from .service import (
     set_delivery_preference,
     set_delivery_target_enabled,
 )
+from .publisher import (
+    PublishApplicationNotificationResult,
+    publish_application_notification,
+)
 
 __all__ = [
     "NotifierRegistry",
@@ -37,4 +41,6 @@ __all__ = [
     "set_delivery_preference",
     "resolve_delivery_targets_and_preference",
     "record_delivery_attempt",
+    "publish_application_notification",
+    "PublishApplicationNotificationResult",
 ]
