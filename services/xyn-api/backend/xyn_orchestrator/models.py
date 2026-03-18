@@ -2961,6 +2961,202 @@ class Campaign(models.Model):
         return self.name
 
 
+class OrchestrationPipeline(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="orchestration_pipelines")
+    key = models.CharField(max_length=120)
+    name = models.CharField(max_length=240)
+    description = models.TextField(blank=True)
+    version = models.CharField(max_length=40, default="v1")
+    enabled = models.BooleanField(default=True, db_index=True)
+    max_concurrency = models.PositiveIntegerField(default=1)
+    stale_run_timeout_seconds = models.PositiveIntegerField(default=3600)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_orchestration_pipelines"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "key"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="uniq_orchestration_pipeline_workspace_key"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.key} ({self.workspace_id})"
+
+
+class OrchestrationJobDefinition(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="job_definitions")
+    job_key = models.CharField(max_length=120)
+    stage_key = models.CharField(max_length=80)
+    name = models.CharField(max_length=240)
+    description = models.TextField(blank=True)
+    handler_key = models.CharField(max_length=160)
+    enabled = models.BooleanField(default=True, db_index=True)
+    only_if_upstream_changed = models.BooleanField(default=False)
+    runs_per_jurisdiction = models.BooleanField(default=False)
+    runs_per_source = models.BooleanField(default=False)
+    concurrency_limit = models.PositiveIntegerField(default=1)
+    retry_max_attempts = models.PositiveIntegerField(default=3)
+    backoff_initial_seconds = models.PositiveIntegerField(default=30)
+    backoff_max_seconds = models.PositiveIntegerField(default=1800)
+    backoff_multiplier = models.FloatField(default=2.0)
+    produces_artifact = models.BooleanField(default=False)
+    artifact_kind = models.CharField(max_length=120, blank=True, default="")
+    schedule_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["stage_key", "job_key"]
+        constraints = [
+            models.UniqueConstraint(fields=["pipeline", "job_key"], name="uniq_orchestration_job_definition_key"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pipeline_id}:{self.job_key}"
+
+
+class OrchestrationJobDependency(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="job_dependencies")
+    upstream_job = models.ForeignKey(
+        OrchestrationJobDefinition, on_delete=models.CASCADE, related_name="downstream_dependencies"
+    )
+    downstream_job = models.ForeignKey(
+        OrchestrationJobDefinition, on_delete=models.CASCADE, related_name="upstream_dependencies"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["pipeline", "upstream_job", "downstream_job"],
+                name="uniq_orchestration_job_dependency",
+            ),
+            models.CheckConstraint(
+                check=~Q(upstream_job=models.F("downstream_job")),
+                name="check_orchestration_dependency_not_self",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["pipeline", "downstream_job"], name="ix_orch_dependency_downstream"),
+            models.Index(fields=["pipeline", "upstream_job"], name="ix_orch_dependency_upstream"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.upstream_job_id}->{self.downstream_job_id}"
+
+
+class OrchestrationRun(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("running", "Running"),
+        ("succeeded", "Succeeded"),
+        ("failed", "Failed"),
+        ("canceled", "Canceled"),
+        ("stale", "Stale"),
+    ]
+    TRIGGER_CHOICES = [
+        ("manual", "Manual"),
+        ("scheduled", "Scheduled"),
+        ("rerun", "Rerun"),
+        ("event", "Event"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="orchestration_runs")
+    pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="runs")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True)
+    trigger_type = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default="manual")
+    trigger_key = models.CharField(max_length=120, blank=True, default="")
+    initiated_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="orchestration_runs"
+    )
+    rerun_of = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.SET_NULL, related_name="rerun_children"
+    )
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    summary = models.CharField(max_length=240, blank=True, default="")
+    error_text = models.TextField(blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    stale_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["workspace", "pipeline", "status"], name="ix_orch_run_ws_pipeline_status"),
+            models.Index(fields=["workspace", "created_at"], name="ix_orch_run_ws_created"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pipeline_id}:{self.status}:{self.id}"
+
+
+class OrchestrationJobRun(models.Model):
+    STATUS_CHOICES = [
+        ("queued", "Queued"),
+        ("running", "Running"),
+        ("succeeded", "Succeeded"),
+        ("failed", "Failed"),
+        ("skipped", "Skipped"),
+        ("canceled", "Canceled"),
+        ("stale", "Stale"),
+        ("waiting_retry", "Waiting Retry"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    run = models.ForeignKey(OrchestrationRun, on_delete=models.CASCADE, related_name="job_runs")
+    job_definition = models.ForeignKey(
+        OrchestrationJobDefinition, on_delete=models.CASCADE, related_name="job_runs"
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued", db_index=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    max_attempts = models.PositiveIntegerField(default=1)
+    next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    upstream_changed = models.BooleanField(default=False)
+    skipped_reason = models.CharField(max_length=240, blank=True, default="")
+    summary = models.CharField(max_length=240, blank=True, default="")
+    error_text = models.TextField(blank=True, default="")
+    output_change_token = models.CharField(max_length=160, blank=True, default="")
+    output_json = models.JSONField(default=dict, blank=True)
+    output_artifact = models.ForeignKey(
+        "Artifact", null=True, blank=True, on_delete=models.SET_NULL, related_name="orchestration_job_runs"
+    )
+    metadata_json = models.JSONField(default=dict, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    stale_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["run", "job_definition"], name="uniq_orchestration_job_run_per_run"),
+        ]
+        indexes = [
+            models.Index(fields=["run", "status"], name="ix_orch_job_run_run_status"),
+            models.Index(fields=["status", "next_attempt_at"], name="ix_orch_job_run_status_retry"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_id}:{self.job_definition_id}:{self.status}"
+
+
 class Goal(models.Model):
     STATUS_CHOICES = [
         ("proposed", "Proposed"),
