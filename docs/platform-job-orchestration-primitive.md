@@ -42,6 +42,11 @@ New module: `xyn_orchestrator/orchestration/`
     - `RunDispatcher` (executor dispatch + success/fail/skip handling)
     - `StaleRunDetector` (queued/running stale reconciliation)
     - `OrchestrationEngine` (single tick loop composing all steps)
+- `registration.py`
+  - app-facing typed DSL for job definition and pipeline composition
+  - pipeline validation and registry for handlers + pipeline templates
+- `examples.py`
+  - generic sample pipeline (`refresh_source` -> `emit_notifications`) for app onboarding
 - `notifiers.py`
   - adapter to existing AppNotification infrastructure for failure notifications
 
@@ -78,11 +83,13 @@ All records are workspace-confined either directly (`OrchestrationPipeline`, `Or
 
 ## How apps consume this primitive
 Apps should:
-1. Register or persist pipeline/job definitions for a workspace.
+1. Define jobs/pipelines with the registration API (`define_job`, `compose_pipeline`, `OrchestrationRegistry`).
 2. Use `JobOrchestrationService.create_run(...)` for manual or scheduled triggers.
 3. Provide executor implementations keyed by `handler_key`.
 4. Store artifacts/change tokens in job-run outputs.
 5. Use dependency graph readiness to drive downstream execution.
+
+See [Platform Job Authoring Guide](./platform-job-authoring-guide.md) for examples.
 
 ## Run lifecycle service
 `xyn_orchestrator/orchestration/lifecycle.py` provides guarded transitions:

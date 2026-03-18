@@ -23,6 +23,21 @@ from .interfaces import (
     StaleRunRecord,
 )
 from .notifiers import AppNotificationFailureNotifier
+from .registration import (
+    ArtifactDeclaration,
+    ConcurrencyPolicy,
+    ManualTriggerParameter,
+    OrchestrationRegistry,
+    PartitionStrategy,
+    PipelineComposer,
+    PipelineRegistration,
+    RegisteredJob,
+    StalePolicy,
+    compose_pipeline,
+    define_job,
+    validate_pipeline_registration,
+)
+from .examples import build_sample_data_pipeline, register_sample_data_pipeline
 from .scheduling import ScheduledTrigger, TriggerKind
 from .service import JobOrchestrationService, exponential_backoff_seconds
 
@@ -62,7 +77,15 @@ __all__ = [
     "TriggerKind",
     "DependencySnapshot",
     "AppNotificationFailureNotifier",
+    "ArtifactDeclaration",
+    "ConcurrencyPolicy",
     "DjangoOrchestrationRepository",
+    "ManualTriggerParameter",
+    "OrchestrationRegistry",
+    "PartitionStrategy",
+    "PipelineComposer",
+    "PipelineRegistration",
+    "RegisteredJob",
     "DueJobScanner",
     "RunPlanner",
     "DependencyResolver",
@@ -70,6 +93,12 @@ __all__ = [
     "ConcurrencyGuard",
     "StaleRunDetector",
     "OrchestrationEngine",
+    "StalePolicy",
+    "compose_pipeline",
+    "define_job",
+    "validate_pipeline_registration",
+    "build_sample_data_pipeline",
+    "register_sample_data_pipeline",
     "exponential_backoff_seconds",
     "OrchestrationLifecycleService",
     "OutputRecord",
