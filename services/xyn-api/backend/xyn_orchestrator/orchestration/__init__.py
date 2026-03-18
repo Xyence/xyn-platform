@@ -26,6 +26,14 @@ from .notifiers import AppNotificationFailureNotifier
 from .scheduling import ScheduledTrigger, TriggerKind
 from .service import JobOrchestrationService, exponential_backoff_seconds
 
+try:
+    from .lifecycle import OrchestrationLifecycleService, OutputRecord
+    from .repository import DjangoOrchestrationRepository
+except Exception:  # pragma: no cover - allows importing pure orchestration helpers without Django runtime
+    OrchestrationLifecycleService = None  # type: ignore[assignment]
+    OutputRecord = None  # type: ignore[assignment]
+    DjangoOrchestrationRepository = None  # type: ignore[assignment]
+
 __all__ = [
     "ExecutionScope",
     "FailureNotifier",
@@ -46,7 +54,10 @@ __all__ = [
     "TriggerKind",
     "DependencySnapshot",
     "AppNotificationFailureNotifier",
+    "DjangoOrchestrationRepository",
     "exponential_backoff_seconds",
+    "OrchestrationLifecycleService",
+    "OutputRecord",
     "STAGE_SOURCE_REFRESH",
     "STAGE_SOURCE_NORMALIZATION",
     "STAGE_PROPERTY_GRAPH_REBUILD",

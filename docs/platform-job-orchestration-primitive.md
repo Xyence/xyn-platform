@@ -33,18 +33,33 @@ New module: `xyn_orchestrator/orchestration/`
   - adapter to existing AppNotification infrastructure for failure notifications
 
 ## Persistence scaffolding
-New ORM models in `models.py` and migration `0125_orchestration_scaffolding.py`:
+New ORM models in `models.py` and migrations `0125_orchestration_scaffolding.py` + `0126_orchestration_lifecycle_persistence.py`:
 - `OrchestrationPipeline`
   - workspace-scoped pipeline definition
   - pipeline-level concurrency and stale timeout
 - `OrchestrationJobDefinition`
   - job-level retry/backoff, concurrency, scope flags, output/artifact declaration
+- `OrchestrationJobSchedule`
+  - durable schedule rows per job definition (`manual`/`interval`/`cron`/`event`)
+  - poll-friendly `enabled + next_fire_at` index
 - `OrchestrationJobDependency`
   - explicit upstream/downstream edges
 - `OrchestrationRun`
-  - run trigger (`manual`/`scheduled`/`rerun`/`event`), scope (`jurisdiction`, `source`), status/heartbeat
+  - run trigger cause (`scheduled`/`upstream_change`/`manual`/`retry`/`backfill`/`system`)
+  - scope partitions (`jurisdiction`, `source`)
+  - correlation and chain ids
+  - optional idempotency/dedupe keys
+  - status, stale fields, summary, metrics, structured error details
 - `OrchestrationJobRun`
-  - per-job run state, retries, stale markers, skip reason, output payload/artifact/change token
+  - per-job durable state with retry scheduling and stale fields
+  - query dimensions for status, partition, correlation/chain, and time range
+  - optional idempotency/dedupe keys
+  - structured metrics and error details
+- `OrchestrationJobRunAttempt`
+  - explicit per-attempt timeline and status
+  - retryability, structured metrics/error payload
+- `OrchestrationJobRunOutput`
+  - generic output records per job run (URI, change token, optional artifact ref, metadata/payload)
 
 All records are workspace-confined either directly (`OrchestrationPipeline`, `OrchestrationRun`) or transitively through pipeline/run relationships.
 
@@ -55,6 +70,20 @@ Apps should:
 3. Provide executor implementations keyed by `handler_key`.
 4. Store artifacts/change tokens in job-run outputs.
 5. Use dependency graph readiness to drive downstream execution.
+
+## Run lifecycle service
+`xyn_orchestrator/orchestration/lifecycle.py` provides guarded transitions:
+- `create_run`
+- `mark_job_queued`
+- `mark_job_running`
+- `mark_job_succeeded`
+- `mark_job_failed`
+- `mark_job_stale`
+- `mark_job_skipped`
+- `request_rerun`
+
+Illegal transitions raise `ValueError` (for example, `pending -> succeeded` without running).
+The lifecycle service writes attempt rows and output rows, and recomputes parent run status from job-run state.
 
 Future apps (including Deal Finder) should only provide pipeline definitions + handlers, not custom orchestration infrastructure.
 

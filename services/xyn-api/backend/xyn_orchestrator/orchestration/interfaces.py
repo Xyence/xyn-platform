@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from .definitions import PipelineDefinition
-from .scheduling import TriggerKind
+
+if TYPE_CHECKING:
+    from xyn_orchestrator.models import OrchestrationJobRun, OrchestrationRun
+
+TriggerCause = Literal["scheduled", "upstream_change", "manual", "retry", "backfill", "system"]
 
 
 @dataclass(frozen=True)
@@ -16,7 +20,7 @@ class ExecutionScope:
 
 @dataclass(frozen=True)
 class RunTrigger:
-    trigger_type: TriggerKind
+    trigger_cause: TriggerCause
     trigger_key: str = ""
 
 
@@ -66,7 +70,7 @@ class StaleRunRecord:
 class OrchestrationRepository(Protocol):
     def get_pipeline_definition(self, *, workspace_id: str, pipeline_key: str) -> PipelineDefinition | None: ...
 
-    def create_run(self, request: RunCreateRequest) -> dict[str, Any]: ...
+    def create_run(self, request: RunCreateRequest) -> "OrchestrationRun": ...
 
     def list_dispatchable_job_runs(self, *, now: datetime, limit: int = 50) -> list[dict[str, Any]]: ...
 
@@ -84,7 +88,11 @@ class OrchestrationRepository(Protocol):
 
     def mark_run_terminal_if_finished(self, *, run_id: str, completed_at: datetime) -> None: ...
 
-    def create_manual_rerun(self, *, run_id: str, requested_by_id: str = "") -> dict[str, Any]: ...
+    def create_manual_rerun(self, *, run_id: str, requested_by_id: str = "") -> "OrchestrationRun": ...
+
+    def get_job_run_for_update(self, *, job_run_id: str) -> "OrchestrationJobRun": ...
+
+    def save_job_run(self, *, job_run: "OrchestrationJobRun", update_fields: list[str]) -> None: ...
 
 
 class JobExecutor(Protocol):
