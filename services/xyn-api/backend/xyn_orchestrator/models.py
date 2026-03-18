@@ -2667,6 +2667,184 @@ class ReportAttachment(models.Model):
         return f"{self.filename} ({self.report_id})"
 
 
+class AppNotification(models.Model):
+    CATEGORY_CHOICES = [
+        ("application", "Application"),
+        ("system", "System"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace, null=True, blank=True, on_delete=models.SET_NULL, related_name="app_notifications"
+    )
+    source_app_key = models.CharField(max_length=160, db_index=True)
+    category = models.CharField(max_length=40, choices=CATEGORY_CHOICES, default="application", db_index=True)
+    notification_type_key = models.CharField(max_length=120, db_index=True)
+    title = models.CharField(max_length=240)
+    summary = models.TextField(blank=True, default="")
+    payload_json = models.JSONField(default=dict, blank=True)
+    deep_link = models.CharField(max_length=500, blank=True, default="")
+    source_entity_type = models.CharField(max_length=120, blank=True, default="")
+    source_entity_id = models.CharField(max_length=160, blank=True, default="")
+    source_metadata_json = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        UserIdentity, null=True, blank=True, on_delete=models.SET_NULL, related_name="app_notifications_created"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["workspace", "created_at"], name="ix_app_notif_workspace_created"),
+            models.Index(fields=["source_app_key", "notification_type_key"], name="ix_app_notif_source_type"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.source_app_key}:{self.notification_type_key}:{self.title}"
+
+
+class NotificationRecipient(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    notification = models.ForeignKey(AppNotification, on_delete=models.CASCADE, related_name="recipients")
+    recipient = models.ForeignKey(UserIdentity, on_delete=models.CASCADE, related_name="notification_recipients")
+    unread = models.BooleanField(default=True, db_index=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["notification", "recipient"],
+                name="uniq_notification_recipient",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["recipient", "unread", "created_at"], name="ix_notif_recipient_feed"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.notification_id}:{self.recipient_id}:{'unread' if self.unread else 'read'}"
+
+
+class DeliveryTarget(models.Model):
+    CHANNEL_CHOICES = [
+        ("email", "Email"),
+    ]
+    VERIFICATION_STATUS_CHOICES = [
+        ("unverified", "Unverified"),
+        ("verified", "Verified"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(UserIdentity, on_delete=models.CASCADE, related_name="delivery_targets")
+    channel = models.CharField(max_length=40, choices=CHANNEL_CHOICES, default="email", db_index=True)
+    address = models.CharField(max_length=320)
+    enabled = models.BooleanField(default=True, db_index=True)
+    verification_status = models.CharField(
+        max_length=40, choices=VERIFICATION_STATUS_CHOICES, default="unverified", db_index=True
+    )
+    is_primary = models.BooleanField(default=False)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-is_primary", "-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "channel", "address"],
+                name="uniq_delivery_target_owner_channel_address",
+            ),
+            models.UniqueConstraint(
+                fields=["owner", "channel"],
+                condition=Q(is_primary=True),
+                name="uniq_primary_delivery_target_owner_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["owner", "channel", "enabled"], name="ix_dlv_tgt_owner_chan_en"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.owner_id}:{self.channel}:{self.address}"
+
+
+class DeliveryPreference(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(UserIdentity, on_delete=models.CASCADE, related_name="delivery_preferences")
+    workspace = models.ForeignKey(
+        Workspace, null=True, blank=True, on_delete=models.CASCADE, related_name="delivery_preferences"
+    )
+    source_app_key = models.CharField(max_length=160, blank=True, default="")
+    notification_type_key = models.CharField(max_length=120, blank=True, default="")
+    in_app_enabled = models.BooleanField(default=True)
+    email_enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "workspace", "source_app_key", "notification_type_key"],
+                condition=Q(workspace__isnull=False),
+                name="uniq_delivery_pref_owner_workspace_scope",
+            ),
+            models.UniqueConstraint(
+                fields=["owner", "source_app_key", "notification_type_key"],
+                condition=Q(workspace__isnull=True),
+                name="uniq_delivery_pref_owner_global_scope",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["owner", "workspace"], name="ix_dlv_pref_owner_ws"),
+            models.Index(fields=["owner", "source_app_key"], name="ix_dlv_pref_owner_src"),
+        ]
+
+    def __str__(self) -> str:
+        scope = str(self.workspace_id) if self.workspace_id else "global"
+        return f"{self.owner_id}:{scope}:{self.source_app_key}:{self.notification_type_key}"
+
+
+class DeliveryAttempt(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("delivered", "Delivered"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    notification = models.ForeignKey(AppNotification, on_delete=models.CASCADE, related_name="delivery_attempts")
+    recipient = models.ForeignKey(
+        NotificationRecipient, null=True, blank=True, on_delete=models.SET_NULL, related_name="delivery_attempts"
+    )
+    target = models.ForeignKey(DeliveryTarget, null=True, blank=True, on_delete=models.SET_NULL, related_name="delivery_attempts")
+    channel = models.CharField(max_length=40, choices=DeliveryTarget.CHANNEL_CHOICES, default="email", db_index=True)
+    status = models.CharField(max_length=40, choices=STATUS_CHOICES, default="pending", db_index=True)
+    retry_count = models.PositiveIntegerField(default=0)
+    provider_name = models.CharField(max_length=120, blank=True, default="")
+    provider_message_id = models.CharField(max_length=240, blank=True, default="")
+    error_text = models.TextField(blank=True, default="")
+    error_details_json = models.JSONField(null=True, blank=True)
+    attempted_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-attempted_at", "-created_at"]
+        indexes = [
+            models.Index(fields=["notification", "status", "attempted_at"], name="ix_dlv_attempt_notif_st"),
+            models.Index(fields=["target", "status", "attempted_at"], name="ix_dlv_attempt_tgt_st"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.notification_id}:{self.channel}:{self.status}:{self.retry_count}"
+
+
 class CoordinationThread(models.Model):
     STATUS_CHOICES = [
         ("active", "Active"),
