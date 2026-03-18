@@ -23,6 +23,7 @@ from authlib.jose import JsonWebKey, jwt
 from markdownify import markdownify as _markdownify_html
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.validators import validate_email
 from django.core.paginator import Paginator
 from django.db import models, transaction
 from django.db.models import Q
@@ -261,10 +262,16 @@ from .secret_stores import SecretStoreError, normalize_secret_logical_name, writ
 from .storage.registry import StorageProviderRegistry
 from .notifications.registry import NotifierRegistry, resolve_secret_ref_value
 from .notifications.service import (
+    create_delivery_target,
+    get_delivery_preference,
     get_unread_count_for_recipient,
+    list_delivery_targets,
     list_notifications_for_recipient,
     mark_all_notifications_as_read,
     mark_notification_as_read,
+    remove_delivery_target,
+    set_delivery_preference,
+    set_delivery_target_enabled,
 )
 from .dns_providers import Route53DnsProvider
 from .instance_drivers import (
@@ -8317,6 +8324,122 @@ def notifications_mark_all_read(request: HttpRequest) -> JsonResponse:
             "unread_count": get_unread_count_for_recipient(recipient=identity),
         }
     )
+
+
+def _coerce_bool(value: Any, *, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    token = str(value or "").strip().lower()
+    if token in {"true", "1", "yes"}:
+        return True
+    if token in {"false", "0", "no"}:
+        return False
+    raise ValueError(f"{field} must be a boolean")
+
+
+@csrf_exempt
+@login_required
+def notification_targets_collection(request: HttpRequest) -> JsonResponse:
+    if request.method == "GET":
+        identity = _require_authenticated(request)
+        if not identity:
+            return JsonResponse({"error": "not authenticated"}, status=401)
+        return JsonResponse({"targets": list_delivery_targets(owner=identity)})
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    payload = _parse_json(request)
+    address = str(payload.get("address") or "").strip().lower()
+    if not address:
+        return JsonResponse({"error": "address is required"}, status=400)
+    try:
+        validate_email(address)
+    except ValidationError:
+        return JsonResponse({"error": "invalid email address"}, status=400)
+    try:
+        enabled = _coerce_bool(payload.get("enabled", True), field="enabled")
+        is_primary = _coerce_bool(payload.get("is_primary", False), field="is_primary")
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    try:
+        row = create_delivery_target(
+            owner=identity,
+            address=address,
+            channel="email",
+            enabled=enabled,
+            is_primary=is_primary,
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    targets = list_delivery_targets(owner=identity)
+    target_payload = next((item for item in targets if str(item.get("id") or "") == str(row.id)), None)
+    return JsonResponse({"target": target_payload}, status=201)
+
+
+@csrf_exempt
+@login_required
+def notification_target_detail(request: HttpRequest, target_id: str) -> JsonResponse:
+    if request.method == "PATCH":
+        identity = _require_authenticated(request)
+        if not identity:
+            return JsonResponse({"error": "not authenticated"}, status=401)
+        payload = _parse_json(request)
+        if "enabled" not in payload:
+            return JsonResponse({"error": "enabled is required"}, status=400)
+        try:
+            enabled = _coerce_bool(payload.get("enabled"), field="enabled")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        row = set_delivery_target_enabled(
+            owner=identity,
+            target_id=str(target_id),
+            enabled=enabled,
+        )
+        if row is None:
+            return JsonResponse({"error": "delivery target not found"}, status=404)
+        targets = list_delivery_targets(owner=identity)
+        target_payload = next((item for item in targets if str(item.get("id") or "") == str(row.id)), None)
+        return JsonResponse({"target": target_payload})
+    if request.method == "DELETE":
+        identity = _require_authenticated(request)
+        if not identity:
+            return JsonResponse({"error": "not authenticated"}, status=401)
+        removed = remove_delivery_target(owner=identity, target_id=str(target_id))
+        if not removed:
+            return JsonResponse({"error": "delivery target not found"}, status=404)
+        return JsonResponse({"status": "deleted"})
+    return JsonResponse({"error": "method not allowed"}, status=405)
+
+
+@csrf_exempt
+@login_required
+def notification_preferences_detail(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "GET":
+        source_app_key = str(request.GET.get("source_app_key") or "").strip()
+        return JsonResponse({"preference": get_delivery_preference(owner=identity, source_app_key=source_app_key)})
+    if request.method not in {"PUT", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    source_app_key = str(payload.get("source_app_key") or "").strip()
+    if "in_app_enabled" not in payload or "email_enabled" not in payload:
+        return JsonResponse({"error": "in_app_enabled and email_enabled are required"}, status=400)
+    try:
+        in_app_enabled = _coerce_bool(payload.get("in_app_enabled"), field="in_app_enabled")
+        email_enabled = _coerce_bool(payload.get("email_enabled"), field="email_enabled")
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    set_delivery_preference(
+        owner=identity,
+        source_app_key=source_app_key,
+        in_app_enabled=in_app_enabled,
+        email_enabled=email_enabled,
+    )
+    return JsonResponse({"preference": get_delivery_preference(owner=identity, source_app_key=source_app_key)})
 
 
 def _serialize_tenant(tenant: Tenant) -> Dict[str, Any]:

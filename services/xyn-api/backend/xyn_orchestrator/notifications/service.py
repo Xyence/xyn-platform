@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from django.db import transaction
+from django.db.utils import IntegrityError
 from django.db.models import Q, QuerySet
 from django.utils import timezone
 
@@ -256,6 +257,134 @@ def resolve_delivery_targets_and_preference(
             "email_enabled": bool(preference.email_enabled) if preference else True,
         },
     }
+
+
+def _serialize_delivery_target(target: DeliveryTarget) -> Dict[str, Any]:
+    return {
+        "id": str(target.id),
+        "owner_id": str(target.owner_id),
+        "channel": str(target.channel or ""),
+        "address": str(target.address or ""),
+        "enabled": bool(target.enabled),
+        "verification_status": str(target.verification_status or ""),
+        "is_primary": bool(target.is_primary),
+        "metadata": target.metadata_json if isinstance(target.metadata_json, dict) else {},
+        "created_at": target.created_at.isoformat() if target.created_at else None,
+        "updated_at": target.updated_at.isoformat() if target.updated_at else None,
+    }
+
+
+def list_delivery_targets(*, owner: UserIdentity) -> List[Dict[str, Any]]:
+    rows = DeliveryTarget.objects.filter(owner=owner).order_by("-is_primary", "-updated_at", "-created_at")
+    return [_serialize_delivery_target(row) for row in rows]
+
+
+@transaction.atomic
+def create_delivery_target(
+    *,
+    owner: UserIdentity,
+    address: str,
+    channel: str = "email",
+    enabled: bool = True,
+    is_primary: bool = False,
+) -> DeliveryTarget:
+    if str(channel or "").strip().lower() != "email":
+        raise ValueError("only email delivery targets are supported")
+    normalized_address = str(address or "").strip().lower()
+    if not normalized_address:
+        raise ValueError("address is required")
+    try:
+        row = DeliveryTarget.objects.create(
+            owner=owner,
+            channel="email",
+            address=normalized_address,
+            enabled=bool(enabled),
+            verification_status="unverified",
+            is_primary=bool(is_primary),
+        )
+    except IntegrityError as exc:
+        raise ValueError("delivery target already exists") from exc
+    return row
+
+
+@transaction.atomic
+def set_delivery_target_enabled(
+    *,
+    owner: UserIdentity,
+    target_id: str,
+    enabled: bool,
+) -> Optional[DeliveryTarget]:
+    row = DeliveryTarget.objects.filter(owner=owner, id=target_id).first()
+    if row is None:
+        return None
+    row.enabled = bool(enabled)
+    row.save(update_fields=["enabled", "updated_at"])
+    return row
+
+
+@transaction.atomic
+def remove_delivery_target(
+    *,
+    owner: UserIdentity,
+    target_id: str,
+) -> bool:
+    deleted, _ = DeliveryTarget.objects.filter(owner=owner, id=target_id).delete()
+    return bool(deleted)
+
+
+def get_delivery_preference(
+    *,
+    owner: UserIdentity,
+    source_app_key: str = "",
+) -> Dict[str, Any]:
+    source_key = str(source_app_key or "").strip()
+    row = (
+        DeliveryPreference.objects.filter(
+            owner=owner,
+            workspace__isnull=True,
+            source_app_key=source_key,
+            notification_type_key="",
+        )
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+    if row is None:
+        return {
+            "source_app_key": source_key,
+            "in_app_enabled": True,
+            "email_enabled": True,
+            "created_at": None,
+            "updated_at": None,
+        }
+    return {
+        "source_app_key": str(row.source_app_key or ""),
+        "in_app_enabled": bool(row.in_app_enabled),
+        "email_enabled": bool(row.email_enabled),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@transaction.atomic
+def set_delivery_preference(
+    *,
+    owner: UserIdentity,
+    source_app_key: str = "",
+    in_app_enabled: bool,
+    email_enabled: bool,
+) -> DeliveryPreference:
+    source_key = str(source_app_key or "").strip()
+    row, _created = DeliveryPreference.objects.update_or_create(
+        owner=owner,
+        workspace=None,
+        source_app_key=source_key,
+        notification_type_key="",
+        defaults={
+            "in_app_enabled": bool(in_app_enabled),
+            "email_enabled": bool(email_enabled),
+        },
+    )
+    return row
 
 
 @transaction.atomic
