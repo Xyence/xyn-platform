@@ -30581,10 +30581,20 @@ def campaign_detail(request: HttpRequest, campaign_id: str) -> JsonResponse:
     if not _workspace_membership(identity, str(campaign.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method == "GET":
+        context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not context_workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        if context_workspace_id != str(campaign.workspace_id):
+            return JsonResponse({"error": "campaign not found in workspace context"}, status=404)
         return JsonResponse(_serialize_campaign_detail(campaign, workspace=campaign.workspace))
     if request.method not in {"PATCH", "POST"}:
         return JsonResponse({"error": "method not allowed"}, status=405)
     payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(campaign.workspace_id):
+        return JsonResponse({"error": "campaign not found in workspace context"}, status=404)
     update_fields: List[str] = []
     if "name" in payload:
         next_name = str(payload.get("name") or "").strip()

@@ -4586,15 +4586,17 @@ export async function createCampaign(payload: {
   return handle<CampaignDetail>(response);
 }
 
-export async function getCampaign(id: string): Promise<CampaignDetail> {
+export async function getCampaign(id: string, workspaceId: string): Promise<CampaignDetail> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/api/campaigns/${id}`, {
+  const url = new URL(`${apiBaseUrl}/xyn/api/campaigns/${id}`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), {
     credentials: "include",
   });
   return handle<CampaignDetail>(response);
 }
 
-export async function updateCampaign(id: string, payload: Record<string, unknown>): Promise<CampaignDetail> {
+export async function updateCampaign(id: string, payload: Record<string, unknown> & { workspace_id: string }): Promise<CampaignDetail> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/campaigns/${id}`, {
     method: "PATCH",

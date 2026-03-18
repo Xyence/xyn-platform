@@ -541,13 +541,14 @@ describe("WorkbenchPanelHost entity refresh", () => {
       </MemoryRouter>
     );
 
-    await waitFor(() => expect(apiMocks.getCampaign).toHaveBeenCalledWith("camp-1"));
+    await waitFor(() => expect(apiMocks.getCampaign).toHaveBeenCalledWith("camp-1", "ws-1"));
     fireEvent.change(screen.getByLabelText("Campaign status"), { target: { value: "active" } });
     await act(async () => {
       screen.getByRole("button", { name: "Save" }).click();
     });
     await waitFor(() =>
       expect(apiMocks.updateCampaign).toHaveBeenCalledWith("camp-1", {
+        workspace_id: "ws-1",
         name: "Launch 2026",
         description: "Initial campaign",
         status: "active",

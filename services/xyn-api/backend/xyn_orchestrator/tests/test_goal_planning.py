@@ -167,7 +167,7 @@ class GoalPlanningTests(TestCase):
         detail_request = self._request(
             f"/xyn/api/campaigns/{created['id']}",
             method="patch",
-            data=json.dumps({"status": "active", "description": "Updated description"}),
+            data=json.dumps({"workspace_id": str(self.workspace.id), "status": "active", "description": "Updated description"}),
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             detail_response = campaign_detail(detail_request, str(created["id"]))
@@ -390,12 +390,12 @@ class GoalPlanningTests(TestCase):
             email=f"foreign-{uuid.uuid4().hex[:8]}@example.com",
         )
 
-        get_request = self._request(f"/xyn/api/campaigns/{campaign.id}")
+        get_request = self._request(f"/xyn/api/campaigns/{campaign.id}", data={"workspace_id": str(self.workspace.id)})
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             get_response = campaign_detail(get_request, str(campaign.id))
         self.assertEqual(get_response.status_code, 200)
 
-        forbidden_get_request = self._request(f"/xyn/api/campaigns/{campaign.id}")
+        forbidden_get_request = self._request(f"/xyn/api/campaigns/{campaign.id}", data={"workspace_id": str(self.workspace.id)})
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=foreign_identity):
             forbidden_get_response = campaign_detail(forbidden_get_request, str(campaign.id))
         self.assertEqual(forbidden_get_response.status_code, 403)
@@ -403,11 +403,45 @@ class GoalPlanningTests(TestCase):
         forbidden_patch_request = self._request(
             f"/xyn/api/campaigns/{campaign.id}",
             method="patch",
-            data=json.dumps({"status": "active"}),
+            data=json.dumps({"workspace_id": str(self.workspace.id), "status": "active"}),
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=foreign_identity):
             forbidden_patch_response = campaign_detail(forbidden_patch_request, str(campaign.id))
         self.assertEqual(forbidden_patch_response.status_code, 403)
+
+    def test_campaign_detail_rejects_workspace_context_mismatch(self):
+        other_workspace = Workspace.objects.create(name="Context Workspace", slug=f"context-ws-{uuid.uuid4().hex[:8]}")
+        WorkspaceMembership.objects.create(
+            workspace=other_workspace,
+            user_identity=self.identity,
+            role="admin",
+            termination_authority=True,
+        )
+        campaign = Campaign.objects.create(
+            workspace=self.workspace,
+            slug="context-campaign",
+            name="Context Campaign",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+
+        get_request = self._request(
+            f"/xyn/api/campaigns/{campaign.id}",
+            data={"workspace_id": str(other_workspace.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            get_response = campaign_detail(get_request, str(campaign.id))
+        self.assertEqual(get_response.status_code, 404)
+
+        patch_request = self._request(
+            f"/xyn/api/campaigns/{campaign.id}",
+            method="patch",
+            data=json.dumps({"workspace_id": str(other_workspace.id), "status": "active"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            patch_response = campaign_detail(patch_request, str(campaign.id))
+        self.assertEqual(patch_response.status_code, 404)
 
     def test_campaign_patch_supports_mutations_and_slug_conflict_validation(self):
         CampaignType.objects.create(workspace=self.workspace, key="workspace_ops", label="Workspace Ops", enabled=True)
@@ -435,6 +469,7 @@ class GoalPlanningTests(TestCase):
             method="patch",
             data=json.dumps(
                 {
+                    "workspace_id": str(self.workspace.id),
                     "description": "Updated description",
                     "campaign_type": "workspace_ops",
                     "status": "active",
@@ -456,7 +491,7 @@ class GoalPlanningTests(TestCase):
         conflict_request = self._request(
             f"/xyn/api/campaigns/{primary.id}",
             method="patch",
-            data=json.dumps({"slug": "beta"}),
+            data=json.dumps({"workspace_id": str(self.workspace.id), "slug": "beta"}),
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             conflict_response = campaign_detail(conflict_request, str(primary.id))
@@ -466,7 +501,7 @@ class GoalPlanningTests(TestCase):
         invalid_type_request = self._request(
             f"/xyn/api/campaigns/{primary.id}",
             method="patch",
-            data=json.dumps({"campaign_type": "does_not_exist"}),
+            data=json.dumps({"workspace_id": str(self.workspace.id), "campaign_type": "does_not_exist"}),
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             invalid_type_response = campaign_detail(invalid_type_request, str(primary.id))

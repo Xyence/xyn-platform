@@ -1237,7 +1237,7 @@ function CampaignListPanel({
                   <td>{campaign.status}</td>
                   <td>{formatPanelTimestamp(campaign.updated_at)}</td>
                   <td>
-                    <button type="button" className="ghost sm" onClick={() => onOpenPanel("campaign_detail", { campaign_id: campaign.id })}>
+                    <button type="button" className="ghost sm" onClick={() => onOpenPanel("campaign_detail", { campaign_id: campaign.id, workspace_id: workspaceId })}>
                       Open
                     </button>
                   </td>
@@ -1279,7 +1279,7 @@ function CampaignDetailPanel({
       try {
         setLoading(true);
         setError(null);
-        const next = await getCampaign(campaignId);
+        const next = await getCampaign(campaignId, workspaceId);
         if (!active) return;
         setPayload(next);
         setName(next.name || "");
@@ -1295,7 +1295,7 @@ function CampaignDetailPanel({
     return () => {
       active = false;
     };
-  }, [campaignId]);
+  }, [campaignId, workspaceId]);
 
   useEffect(() => {
     onTitleChange?.(payload?.name || "Campaign");
@@ -1308,6 +1308,7 @@ function CampaignDetailPanel({
     setError(null);
     try {
       const next = await updateCampaign(payload.id, {
+        workspace_id: workspaceId,
         name: name.trim(),
         description: description.trim(),
         status,
