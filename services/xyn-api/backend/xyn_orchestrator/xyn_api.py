@@ -260,6 +260,12 @@ from .oidc import (
 from .secret_stores import SecretStoreError, normalize_secret_logical_name, write_secret_value
 from .storage.registry import StorageProviderRegistry
 from .notifications.registry import NotifierRegistry, resolve_secret_ref_value
+from .notifications.service import (
+    get_unread_count_for_recipient,
+    list_notifications_for_recipient,
+    mark_all_notifications_as_read,
+    mark_notification_as_read,
+)
 from .dns_providers import Route53DnsProvider
 from .instance_drivers import (
     SshDockerComposeInstanceDriver,
@@ -8225,6 +8231,90 @@ def api_me(request: HttpRequest) -> JsonResponse:
             "workspaces": workspace_payload,
             "preferred_workspace_id": preferred_workspace_id,
             "platform_initialization": _platform_initialization_state(identity),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def notifications_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    limit_raw = request.GET.get("limit")
+    offset_raw = request.GET.get("offset")
+    unread_only = _parse_bool_param(request.GET.get("unread_only"), default=False)
+    source_app_key = str(request.GET.get("source_app_key") or "").strip()
+    category = str(request.GET.get("category") or "").strip()
+    try:
+        limit = int(limit_raw) if limit_raw is not None else 50
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "invalid limit"}, status=400)
+    try:
+        offset = int(offset_raw) if offset_raw is not None else 0
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "invalid offset"}, status=400)
+    payload = list_notifications_for_recipient(
+        recipient=identity,
+        limit=limit,
+        offset=offset,
+        unread_only=unread_only,
+        source_app_key=source_app_key,
+        category=category,
+    )
+    payload["unread_count"] = get_unread_count_for_recipient(recipient=identity)
+    return JsonResponse(payload)
+
+
+@csrf_exempt
+@login_required
+def notifications_unread_count(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    return JsonResponse({"unread_count": get_unread_count_for_recipient(recipient=identity)})
+
+
+@csrf_exempt
+@login_required
+def notification_mark_read(request: HttpRequest, notification_id: str) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    changed = mark_notification_as_read(
+        recipient=identity,
+        notification_id=str(notification_id),
+    )
+    if not changed:
+        return JsonResponse({"error": "notification not found"}, status=404)
+    return JsonResponse(
+        {
+            "notification_id": str(notification_id),
+            "unread": False,
+            "unread_count": get_unread_count_for_recipient(recipient=identity),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def notifications_mark_all_read(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    updated = mark_all_notifications_as_read(recipient=identity)
+    return JsonResponse(
+        {
+            "updated": int(updated),
+            "unread_count": get_unread_count_for_recipient(recipient=identity),
         }
     )
 
