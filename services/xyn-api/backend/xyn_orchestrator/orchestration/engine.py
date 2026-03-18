@@ -4,6 +4,7 @@ import itertools
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from collections import defaultdict
 from typing import Any
 
 from django.db import transaction
@@ -311,47 +312,63 @@ class RunDispatcher:
             return [OutputRecord(output_key="default", output_type="generic", output_change_token=default_change_token, payload=body)]
         return []
 
+    @transaction.atomic
+    def _claim_dispatchable_job(self, *, job_run_id: str, now: datetime) -> tuple[OrchestrationJobRun, JobExecutor] | None:
+        row = (
+            OrchestrationJobRun.objects.select_for_update(skip_locked=True)
+            .select_related("job_definition", "run", "pipeline")
+            .filter(id=job_run_id)
+            .filter(Q(status="queued") | Q(status="waiting_retry", next_attempt_at__lte=now))
+            .first()
+        )
+        if row is None:
+            return None
+
+        decision = self._concurrency_guard.evaluate(job_run=row)
+        if not decision.allowed:
+            return None
+
+        executor = self._executors.get(str(row.job_definition.handler_key))
+        if executor is None:
+            self._lifecycle.mark_job_failed(
+                job_run_id=str(row.id),
+                now=now,
+                summary="No executor registered",
+                error_text=f"Missing executor for handler_key={row.job_definition.handler_key}",
+                retryable=False,
+            )
+            return None
+
+        self._lifecycle.mark_job_running(job_run_id=str(row.id), now=now, summary="dispatching")
+        row.refresh_from_db()
+        return row, executor
+
     def dispatch_once(self, *, now: datetime | None = None, limit: int = 20) -> list[str]:
         ts = now or datetime.now(timezone.utc)
-        queued_rows = list(
+        candidate_rows = list(
             OrchestrationJobRun.objects.select_related("job_definition", "run", "pipeline")
             .filter(Q(status="queued") | Q(status="waiting_retry", next_attempt_at__lte=ts))
             .order_by("next_attempt_at", "queued_at", "created_at")[: max(1, int(limit or 1))]
         )
+        blocked_reasons: dict[str, int] = defaultdict(int)
         dispatched: list[str] = []
-        for row in queued_rows:
-            decision = self._concurrency_guard.evaluate(job_run=row)
-            if not decision.allowed:
-                logger.info(
-                    "orchestration.dispatch.blocked",
-                    extra={
-                        "job_run_id": str(row.id),
-                        "reason": decision.reason,
-                        "job_key": str(row.job_definition.job_key),
-                        "pipeline_key": str(row.pipeline.key),
-                    },
-                )
+        for candidate in candidate_rows:
+            claimed = self._claim_dispatchable_job(job_run_id=str(candidate.id), now=ts)
+            if claimed is None:
+                decision = self._concurrency_guard.evaluate(job_run=candidate)
+                if not decision.allowed:
+                    blocked_reasons[decision.reason] += 1
+                else:
+                    blocked_reasons["skipped_locked_or_missing_executor"] += 1
                 continue
-
-            executor = self._executors.get(str(row.job_definition.handler_key))
-            if executor is None:
-                self._lifecycle.mark_job_failed(
-                    job_run_id=str(row.id),
-                    now=ts,
-                    summary="No executor registered",
-                    error_text=f"Missing executor for handler_key={row.job_definition.handler_key}",
-                    retryable=False,
-                )
-                continue
-
-            self._lifecycle.mark_job_running(job_run_id=str(row.id), now=ts, summary="dispatching")
+            row, executor = claimed
             context = JobExecutionContext(
                 workspace_id=str(row.workspace_id),
                 run_id=str(row.run_id),
                 job_run_id=str(row.id),
                 pipeline_key=str(row.pipeline.key),
                 job_key=str(row.job_definition.job_key),
-                attempt_count=max(1, int(row.attempt_count or 1)),
+                attempt_count=max(1, int(row.attempt_count or 0)),
                 scope=ExecutionScope(
                     jurisdiction=str(row.scope_jurisdiction or ""),
                     source=str(row.scope_source or ""),
@@ -359,12 +376,22 @@ class RunDispatcher:
                 metadata={
                     "correlation_id": str(row.correlation_id or ""),
                     "chain_id": str(row.chain_id or ""),
+                    "run_metadata": row.run.metadata_json if isinstance(row.run.metadata_json, dict) else {},
                 },
             )
 
             try:
                 result = executor.execute(context)
             except Exception as exc:  # pragma: no cover - defensive execution wrapper
+                logger.exception(
+                    "orchestration.dispatch.executor_exception",
+                    extra={
+                        "job_run_id": str(row.id),
+                        "job_key": str(row.job_definition.job_key),
+                        "pipeline_key": str(row.pipeline.key),
+                        "attempt_count": int(row.attempt_count or 0),
+                    },
+                )
                 result = JobExecutionResult(
                     status="failed",
                     summary="Executor raised exception",
@@ -398,6 +425,8 @@ class RunDispatcher:
                     retryable=bool(result.retryable),
                 )
             dispatched.append(str(row.id))
+        if blocked_reasons:
+            logger.info("orchestration.dispatch.blocked_summary", extra={"blocked_reasons": dict(blocked_reasons)})
         return dispatched
 
 
@@ -415,16 +444,29 @@ class StaleRunDetector:
         )
         marked: list[str] = []
         for row in candidates:
-            deadline = row.stale_deadline_at
-            if deadline is None:
-                timeout_seconds = int(row.pipeline.stale_run_timeout_seconds or self._default_timeout_seconds)
-                anchor = row.heartbeat_at or row.started_at or row.queued_at or row.created_at
-                deadline = anchor + timedelta(seconds=max(60, timeout_seconds))
+            timeout_seconds = int(row.pipeline.stale_run_timeout_seconds or self._default_timeout_seconds)
+            anchor = row.heartbeat_at or row.started_at or row.queued_at or row.created_at
+            computed_deadline = anchor + timedelta(seconds=max(60, timeout_seconds))
+            deadline = row.stale_deadline_at or computed_deadline
+            if computed_deadline > deadline:
+                deadline = computed_deadline
                 row.stale_deadline_at = deadline
                 row.save(update_fields=["stale_deadline_at", "updated_at"])
-            if deadline <= ts:
-                self._lifecycle.mark_job_stale(job_run_id=str(row.id), now=ts, reason="stale_timeout")
-                marked.append(str(row.id))
+            if deadline > ts:
+                continue
+            fresh_row = OrchestrationJobRun.objects.select_related("pipeline").filter(id=row.id).first()
+            if fresh_row is None or fresh_row.status not in {"queued", "running"}:
+                continue
+            fresh_anchor = fresh_row.heartbeat_at or fresh_row.started_at or fresh_row.queued_at or fresh_row.created_at
+            fresh_timeout_seconds = int(fresh_row.pipeline.stale_run_timeout_seconds or self._default_timeout_seconds)
+            fresh_deadline = (fresh_row.stale_deadline_at or (fresh_anchor + timedelta(seconds=max(60, fresh_timeout_seconds))))
+            if fresh_anchor + timedelta(seconds=max(60, fresh_timeout_seconds)) > fresh_deadline:
+                fresh_deadline = fresh_anchor + timedelta(seconds=max(60, fresh_timeout_seconds))
+                fresh_row.stale_deadline_at = fresh_deadline
+                fresh_row.save(update_fields=["stale_deadline_at", "updated_at"])
+            if fresh_deadline <= ts:
+                self._lifecycle.mark_job_stale(job_run_id=str(fresh_row.id), now=ts, reason="stale_timeout")
+                marked.append(str(fresh_row.id))
         return marked
 
 

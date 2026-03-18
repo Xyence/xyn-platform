@@ -91,6 +91,7 @@ Apps should:
 
 See [Platform Job Authoring Guide](./platform-job-authoring-guide.md) for examples.
 See [Orchestration Operator API](./orchestration-operator-api.md) for runtime visibility and intervention endpoints.
+See [Platform Orchestration v1](./platform-orchestration-v1.md) for production runtime and hardening notes.
 
 ## Run lifecycle service
 `xyn_orchestrator/orchestration/lifecycle.py` provides guarded transitions:

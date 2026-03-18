@@ -37,7 +37,12 @@ from .registration import (
     define_job,
     validate_pipeline_registration,
 )
-from .examples import build_sample_data_pipeline, register_sample_data_pipeline
+from .examples import (
+    build_sample_data_pipeline,
+    build_sample_data_pipeline_demo_executors,
+    register_sample_data_pipeline,
+    register_sample_data_pipeline_with_demo_handlers,
+)
 from .scheduling import ScheduledTrigger, TriggerKind
 from .service import JobOrchestrationService, exponential_backoff_seconds
 
@@ -98,7 +103,9 @@ __all__ = [
     "define_job",
     "validate_pipeline_registration",
     "build_sample_data_pipeline",
+    "build_sample_data_pipeline_demo_executors",
     "register_sample_data_pipeline",
+    "register_sample_data_pipeline_with_demo_handlers",
     "exponential_backoff_seconds",
     "OrchestrationLifecycleService",
     "OutputRecord",

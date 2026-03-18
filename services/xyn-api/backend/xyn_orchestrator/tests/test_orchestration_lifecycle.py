@@ -179,6 +179,33 @@ class OrchestrationLifecycleTests(TestCase):
         self.assertIsNotNone(job_run.next_attempt_at)
         self.assertEqual(run.status, "queued")
 
+    def test_attempt_count_increments_for_each_retry_attempt(self):
+        run = self._create_run()
+        job_run = OrchestrationJobRun.objects.get(run=run, job_definition=self.job_a)
+
+        self.lifecycle.mark_job_queued(job_run_id=str(job_run.id))
+        self.lifecycle.mark_job_running(job_run_id=str(job_run.id))
+        self.lifecycle.mark_job_failed(
+            job_run_id=str(job_run.id),
+            summary="temporary error",
+            error_text="upstream timeout",
+            retryable=True,
+        )
+        job_run.refresh_from_db()
+        self.assertEqual(job_run.attempt_count, 1)
+        self.assertEqual(job_run.status, "waiting_retry")
+
+        self.lifecycle.mark_job_running(job_run_id=str(job_run.id))
+        self.lifecycle.mark_job_failed(
+            job_run_id=str(job_run.id),
+            summary="second error",
+            error_text="another timeout",
+            retryable=False,
+        )
+        job_run.refresh_from_db()
+        self.assertEqual(job_run.attempt_count, 2)
+        self.assertEqual(job_run.status, "failed")
+
     def test_request_rerun_creates_correlated_child_run(self):
         original = self._create_run()
         rerun = self.lifecycle.request_rerun(run_id=str(original.id), requested_by_id=str(self.identity.id))

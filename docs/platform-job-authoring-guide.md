@@ -107,5 +107,14 @@ Use `build_sample_data_pipeline()` for a generic reference pipeline:
 - `refresh_source`
 - `normalize_source`
 - `rebuild_entities`
+- `match_signals`
 - `evaluate_rules`
 - `emit_notifications`
+
+## Handler idempotency requirements
+
+Handlers should be idempotent because retries and reruns are expected.
+
+- Treat `(run_id, job_run_id, partition)` as the idempotency scope.
+- Use deterministic output keys and external idempotency keys.
+- Ensure retries do not duplicate external side effects.

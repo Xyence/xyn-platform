@@ -7,11 +7,12 @@ from xyn_orchestrator.orchestration import (
     RetryPolicy,
     StalePolicy,
     build_sample_data_pipeline,
+    build_sample_data_pipeline_demo_executors,
     compose_pipeline,
     define_job,
     validate_pipeline_registration,
 )
-from xyn_orchestrator.orchestration.interfaces import JobExecutionResult
+from xyn_orchestrator.orchestration.interfaces import ExecutionScope, JobExecutionContext, JobExecutionResult
 from xyn_orchestrator.orchestration.scheduling import ScheduledTrigger
 
 
@@ -25,6 +26,7 @@ class OrchestrationRegistryTests(unittest.TestCase):
         registry.register_handler(handler_key="platform.jobs.refresh_source", executor=_NoopExecutor())
         registry.register_handler(handler_key="platform.jobs.normalize_source", executor=_NoopExecutor())
         registry.register_handler(handler_key="platform.jobs.rebuild_entities", executor=_NoopExecutor())
+        registry.register_handler(handler_key="platform.jobs.match_signals", executor=_NoopExecutor())
         registry.register_handler(handler_key="platform.jobs.evaluate_rules", executor=_NoopExecutor())
         registry.register_handler(handler_key="platform.jobs.emit_notifications", executor=_NoopExecutor())
 
@@ -143,11 +145,45 @@ class OrchestrationRegistryTests(unittest.TestCase):
             "refresh_source",
             "normalize_source",
             "rebuild_entities",
+            "match_signals",
             "evaluate_rules",
             "emit_notifications",
         ])
         self.assertEqual(pipeline.jobs[1].dependencies, ("refresh_source",))
         self.assertTrue(pipeline.jobs[1].only_if_upstream_changed)
+
+    def test_demo_executors_expose_retry_and_artifact_outputs(self):
+        executors = build_sample_data_pipeline_demo_executors()
+        self.assertIn("platform.jobs.normalize_source", executors)
+        context_retry_first = JobExecutionContext(
+            workspace_id="ws",
+            run_id="run-1",
+            job_run_id="jr-1",
+            pipeline_key="sample_data_sync",
+            job_key="normalize_source",
+            attempt_count=1,
+            scope=ExecutionScope(jurisdiction="tx", source="mls"),
+            metadata={"run_metadata": {"manual_parameters": {"simulate_retry_once": "true"}}},
+        )
+        first = executors["platform.jobs.normalize_source"].execute(context_retry_first)
+        self.assertEqual(first.status, "failed")
+        self.assertTrue(first.retryable)
+
+        context_retry_second = JobExecutionContext(
+            workspace_id="ws",
+            run_id="run-1",
+            job_run_id="jr-1",
+            pipeline_key="sample_data_sync",
+            job_key="normalize_source",
+            attempt_count=2,
+            scope=ExecutionScope(jurisdiction="tx", source="mls"),
+            metadata={"run_metadata": {"manual_parameters": {"simulate_retry_once": "true"}}},
+        )
+        second = executors["platform.jobs.normalize_source"].execute(context_retry_second)
+        self.assertEqual(second.status, "succeeded")
+        self.assertTrue(isinstance(second.output_payload, dict))
+        outputs = second.output_payload.get("outputs") if isinstance(second.output_payload.get("outputs"), list) else []
+        self.assertEqual(len(outputs), 1)
 
 
 if __name__ == "__main__":

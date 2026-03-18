@@ -88,6 +88,7 @@ class OrchestrationLifecycleService:
     def mark_job_running(self, *, job_run_id: str, now: datetime | None = None, summary: str = "") -> OrchestrationJobRun:
         ts = self._now(now)
         job_run = self._repository.get_job_run_for_update(job_run_id=job_run_id)
+        previous_status = str(job_run.status or "")
         if job_run.status == "pending":
             self._assert_job_transition(job_run.status, "queued")
             job_run.status = "queued"
@@ -96,7 +97,10 @@ class OrchestrationLifecycleService:
         job_run.status = "running"
         job_run.started_at = job_run.started_at or ts
         job_run.heartbeat_at = ts
-        job_run.attempt_count = max(1, int(job_run.attempt_count or 0))
+        if previous_status in {"pending", "queued", "waiting_retry"}:
+            job_run.attempt_count = max(0, int(job_run.attempt_count or 0)) + 1
+        else:
+            job_run.attempt_count = max(1, int(job_run.attempt_count or 0))
         if summary:
             job_run.summary = summary[:240]
         self._repository.save_job_run(

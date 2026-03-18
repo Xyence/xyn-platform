@@ -47,6 +47,11 @@ class _FailThenSucceedExecutor:
         return JobExecutionResult(status="succeeded", summary="ok", output_payload={"metrics": {"records": 1}}, output_change_token="tok-2")
 
 
+class _AlwaysFailExecutor:
+    def execute(self, context):
+        return JobExecutionResult(status="failed", summary="persistent", error_text="boom", retryable=True)
+
+
 class OrchestrationEngineTests(TestCase):
     def setUp(self):
         suffix = uuid.uuid4().hex[:8]
@@ -179,6 +184,55 @@ class OrchestrationEngineTests(TestCase):
         dispatcher.dispatch_once(now=later, limit=10)
         job_run.refresh_from_db()
         self.assertEqual(job_run.status, "succeeded")
+        self.assertEqual(job_run.attempt_count, 2)
+
+    def test_retry_max_attempts_transitions_to_failed(self):
+        self.job_a.retry_max_attempts = 2
+        self.job_a.save(update_fields=["retry_max_attempts", "updated_at"])
+        run = self._create_manual_run()
+        resolver = DependencyResolver(lifecycle=self.lifecycle, repository=self.repository)
+        queued = resolver.queue_ready_jobs(run=run, now=timezone.now())
+        self.assertEqual(len(queued), 1)
+
+        dispatcher = RunDispatcher(
+            executors={"handler.a": _AlwaysFailExecutor()},
+            lifecycle=self.lifecycle,
+            repository=self.repository,
+        )
+        dispatcher.dispatch_once(now=timezone.now(), limit=10)
+        job_run = OrchestrationJobRun.objects.get(id=queued[0])
+        self.assertEqual(job_run.status, "waiting_retry")
+        self.assertEqual(job_run.attempt_count, 1)
+
+        later = job_run.next_attempt_at + timedelta(seconds=1)
+        dispatcher.dispatch_once(now=later, limit=10)
+        job_run.refresh_from_db()
+        self.assertEqual(job_run.status, "failed")
+        self.assertEqual(job_run.attempt_count, 2)
+
+    def test_dependency_waits_for_retry_and_queues_after_recovery(self):
+        run = self._create_manual_run()
+        resolver = DependencyResolver(lifecycle=self.lifecycle, repository=self.repository)
+        dispatcher = RunDispatcher(
+            executors={
+                "handler.a": _FailThenSucceedExecutor(),
+                "handler.b": _StaticExecutor(JobExecutionResult(status="succeeded", summary="b")),
+            },
+            lifecycle=self.lifecycle,
+            repository=self.repository,
+        )
+        resolver.queue_ready_jobs(run=run, now=timezone.now())
+        dispatcher.dispatch_once(now=timezone.now(), limit=10)
+
+        # Downstream stays blocked while upstream is waiting_retry.
+        queued_mid = resolver.queue_ready_jobs(run=run, now=timezone.now())
+        self.assertEqual(queued_mid, [])
+
+        upstream = OrchestrationJobRun.objects.get(run=run, job_definition=self.job_a)
+        dispatcher.dispatch_once(now=upstream.next_attempt_at + timedelta(seconds=1), limit=10)
+        queued_after = resolver.queue_ready_jobs(run=run, now=timezone.now())
+        downstream = OrchestrationJobRun.objects.get(run=run, job_definition=self.job_b)
+        self.assertIn(str(downstream.id), queued_after)
 
     def test_concurrency_guard_blocks_when_global_limit_reached(self):
         run = self._create_manual_run()
@@ -213,6 +267,22 @@ class OrchestrationEngineTests(TestCase):
         self.assertIn(str(job_run.id), marked)
         job_run.refresh_from_db()
         self.assertEqual(job_run.status, "stale")
+
+    def test_stale_detection_respects_recent_heartbeat(self):
+        run = self._create_manual_run()
+        job_run = OrchestrationJobRun.objects.get(run=run, job_definition=self.job_a)
+        self.lifecycle.mark_job_queued(job_run_id=str(job_run.id), now=timezone.now() - timedelta(minutes=10))
+        self.lifecycle.mark_job_running(job_run_id=str(job_run.id), now=timezone.now() - timedelta(minutes=10))
+        job_run.refresh_from_db()
+        job_run.stale_deadline_at = timezone.now() - timedelta(seconds=1)
+        job_run.heartbeat_at = timezone.now()
+        job_run.save(update_fields=["stale_deadline_at", "heartbeat_at", "updated_at"])
+
+        detector = StaleRunDetector(lifecycle=self.lifecycle, default_timeout_seconds=60)
+        marked = detector.detect_and_mark_stale(now=timezone.now(), limit=10)
+        self.assertNotIn(str(job_run.id), marked)
+        job_run.refresh_from_db()
+        self.assertEqual(job_run.status, "running")
 
     def test_manual_rerun_flow(self):
         run = self._create_manual_run()
