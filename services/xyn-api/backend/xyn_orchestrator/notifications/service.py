@@ -88,6 +88,7 @@ def create_app_notification(
     source_entity_id: str = "",
     source_metadata: Optional[Dict[str, Any]] = None,
     created_by: Optional[UserIdentity] = None,
+    enqueue_email_delivery: bool = False,
 ) -> Tuple[AppNotification, List[NotificationRecipient]]:
     deduped_recipients = {
         str(identity.id): identity
@@ -128,6 +129,11 @@ def create_app_notification(
             for identity in deduped_recipients.values()
         ]
     )
+    if enqueue_email_delivery:
+        # Keep notification creation store-first; delivery is always queued asynchronously.
+        from .delivery import enqueue_notification_email_delivery
+
+        enqueue_notification_email_delivery(notification=notification, recipient_rows=recipient_rows)
     return notification, recipient_rows
 
 

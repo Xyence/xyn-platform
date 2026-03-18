@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 def _headers() -> Dict[str, str]:
     return {"X-Internal-Token": INTERNAL_TOKEN}
 
+
+def deliver_notification_email_attempt(attempt_id: str) -> None:
+    from .notifications.delivery import deliver_notification_email_attempt as _deliver_attempt
+
+    _deliver_attempt(str(attempt_id))
+
 def _media_path_from_url(url: str) -> Optional[str]:
     path = urlparse(url).path or ""
     if path.startswith("/media/"):

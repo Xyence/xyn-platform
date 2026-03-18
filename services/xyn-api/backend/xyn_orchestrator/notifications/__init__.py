@@ -1,4 +1,8 @@
 from .registry import NotifierRegistry, resolve_secret_ref_value
+from .delivery import (
+    deliver_notification_email_attempt,
+    enqueue_notification_email_delivery,
+)
 from .service import (
     create_delivery_target,
     create_app_notification,
@@ -18,6 +22,8 @@ from .service import (
 __all__ = [
     "NotifierRegistry",
     "resolve_secret_ref_value",
+    "enqueue_notification_email_delivery",
+    "deliver_notification_email_attempt",
     "create_app_notification",
     "create_delivery_target",
     "list_notifications_for_recipient",
