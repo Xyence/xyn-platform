@@ -148,6 +148,7 @@ import type {
   AiModelConfig,
   AiAgent,
   AiBootstrapStatusResponse,
+  AiRoutingStatusResponse,
   SystemReadinessResponse,
   ContextualCapabilityResponse,
   CapabilityGraphResponse,
@@ -4256,6 +4257,14 @@ export async function getSystemReadiness(): Promise<SystemReadinessResponse> {
     credentials: "include",
   });
   return handle<SystemReadinessResponse>(response);
+}
+
+export async function getAiRoutingStatus(): Promise<AiRoutingStatusResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/ai/routing`, {
+    credentials: "include",
+  });
+  return handle<AiRoutingStatusResponse>(response);
 }
 
 export async function getContextualCapabilities(params?: {

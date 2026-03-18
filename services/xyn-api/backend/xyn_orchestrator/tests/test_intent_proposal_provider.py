@@ -52,7 +52,21 @@ class IntentProposalProviderTests(TestCase):
                 "model": "fake-model",
             }
 
-        with patch("xyn_orchestrator.intent_engine.proposal_provider.resolve_ai_config", return_value={"model_name": "fake-model"}) as resolve_mock:
+        with patch(
+            "xyn_orchestrator.intent_engine.proposal_provider.resolve_ai_config",
+            return_value={
+                "model_name": "fake-model",
+                "agent_resolution": {
+                    "purpose": "planning",
+                    "resolved_agent_id": "agent-1",
+                    "resolved_agent_name": "Planner Agent",
+                    "resolution_source": "explicit",
+                    "fallback_agent_id": "agent-default",
+                    "fallback_agent_name": "Default Agent",
+                    "reason": "purpose 'planning' has an explicit default agent assignment",
+                },
+            },
+        ) as resolve_mock:
             with patch("xyn_orchestrator.intent_engine.proposal_provider.invoke_model", side_effect=_fake_invoke):
                 result = provider.propose(message="create explainer video")
 
@@ -62,3 +76,4 @@ class IntentProposalProviderTests(TestCase):
         self.assertIn("seeded-console-policy", str(developer_message.get("content") or ""))
         self.assertEqual(result.get("_context_pack_slug"), "xyn-console-default")
         self.assertTrue(str(result.get("_context_pack_hash") or "").strip())
+        self.assertEqual((result.get("_ai_resolution") or {}).get("resolved_agent_name"), "Planner Agent")

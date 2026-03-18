@@ -287,6 +287,7 @@ from .ai_runtime import (
     get_default_agent_bootstrap_status,
     invoke_model,
     mask_secret,
+    resolve_agent_routing,
     resolve_ai_config,
 )
 from .ai_compat import compute_effective_params
@@ -1420,6 +1421,7 @@ def _log_prompt_activity(
     structured_operation: Optional[Dict[str, Any]] = None,
     prompt_interpretation: Optional[Dict[str, Any]] = None,
     conversation_action: Optional[Dict[str, Any]] = None,
+    ai_resolution: Optional[Dict[str, Any]] = None,
 ) -> None:
     # Epic D trace coverage is asserted at this logging seam. End-to-end persistence
     # through the full activity-store test path remains separately blocked by the
@@ -1442,6 +1444,7 @@ def _log_prompt_activity(
             "structured_operation": structured_operation if isinstance(structured_operation, dict) else {},
             "prompt_interpretation": prompt_interpretation if isinstance(prompt_interpretation, dict) else {},
             "conversation_action": conversation_action if isinstance(conversation_action, dict) else {},
+            "agent_resolution": ai_resolution if isinstance(ai_resolution, dict) else {},
         },
     )
 
@@ -16114,6 +16117,52 @@ def ai_bootstrap_status(request: HttpRequest) -> JsonResponse:
 
 
 @csrf_exempt
+def ai_routing_status(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _can_manage_ai(identity):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    _ensure_default_agent_purposes()
+
+    default_routing = dict(resolve_agent_routing(purpose_slug=""))
+    default_routing["purpose"] = "default"
+    routing = [
+        default_routing,
+        resolve_agent_routing(purpose_slug="planning"),
+        resolve_agent_routing(purpose_slug="coding"),
+    ]
+
+    recent: List[Dict[str, Any]] = []
+    audit_rows = AuditLog.objects.filter(message__in=["ai_invocation", "intent.resolve"]).order_by("-created_at")[:80]
+    for row in audit_rows:
+        meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+        resolution = meta.get("agent_resolution") if isinstance(meta.get("agent_resolution"), dict) else None
+        if resolution is None and row.message == "intent.resolve":
+            proposal = meta.get("proposal") if isinstance(meta.get("proposal"), dict) else {}
+            resolution = proposal.get("_ai_resolution") if isinstance(proposal.get("_ai_resolution"), dict) else None
+        if not isinstance(resolution, dict):
+            continue
+        recent.append(
+            {
+                "event_id": str(row.id),
+                "event_type": row.message,
+                "created_at": row.created_at,
+                "purpose": str(resolution.get("purpose") or ""),
+                "resolved_agent_id": resolution.get("resolved_agent_id"),
+                "resolved_agent_name": resolution.get("resolved_agent_name"),
+                "resolution_source": resolution.get("resolution_source"),
+                "reason": resolution.get("reason"),
+            }
+        )
+        if len(recent) >= 20:
+            break
+    return JsonResponse({"routing": routing, "recent_resolutions": recent})
+
+
+@csrf_exempt
 def system_readiness(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
     if not identity:
@@ -22058,6 +22107,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             summary=str(result.get("summary") or ""),
             error=str((result.get("validation_errors") or [""])[0] or "") if str(result.get("status") or "") in {"UnsupportedIntent", "ValidationError"} else "",
             thread_id=context_thread_id,
+            ai_resolution=proposal.get("_ai_resolution") if isinstance(proposal, dict) and isinstance(proposal.get("_ai_resolution"), dict) else None,
         )
     return JsonResponse(result)
 
@@ -22670,9 +22720,12 @@ def ai_invoke(request: HttpRequest) -> JsonResponse:
         metadata_json={
             "actor_identity_id": str(identity.id),
             "agent_slug": resolved.get("agent_slug") or agent_slug,
+            "agent_id": resolved.get("agent_id"),
+            "agent_name": resolved.get("agent_name"),
             "provider": resolved.get("provider"),
             "model_name": resolved.get("model_name"),
             "purpose": resolved.get("purpose"),
+            "agent_resolution": resolved.get("agent_resolution") if isinstance(resolved.get("agent_resolution"), dict) else {},
             "metadata": metadata,
         },
     )
@@ -22685,6 +22738,9 @@ def ai_invoke(request: HttpRequest) -> JsonResponse:
             "effective_params": result.get("effective_params") if isinstance(result.get("effective_params"), dict) else {},
             "warnings": result.get("warnings") if isinstance(result.get("warnings"), list) else [],
             "agent_slug": resolved.get("agent_slug") or agent_slug,
+            "agent_name": resolved.get("agent_name"),
+            "purpose": resolved.get("purpose"),
+            "agent_resolution": resolved.get("agent_resolution") if isinstance(resolved.get("agent_resolution"), dict) else {},
         }
     )
 

@@ -16,6 +16,7 @@ const apiMocks = vi.hoisted(() => ({
   executeAppPalettePrompt: vi.fn(),
   getContextualCapabilities: vi.fn(),
   getExecutionPlan: vi.fn(),
+  getAiRoutingStatus: vi.fn(),
 }));
 
 vi.mock("../../../api/xyn", () => ({
@@ -27,6 +28,7 @@ vi.mock("../../../api/xyn", () => ({
   executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
   getContextualCapabilities: apiMocks.getContextualCapabilities,
   getExecutionPlan: apiMocks.getExecutionPlan,
+  getAiRoutingStatus: apiMocks.getAiRoutingStatus,
 }));
 
 function renderConsole() {
@@ -194,6 +196,27 @@ describe("XynConsole", () => {
       generated_commands: [],
       artifacts: ["application"],
     });
+    apiMocks.getAiRoutingStatus.mockResolvedValue({
+      routing: [
+        {
+          purpose: "default",
+          resolved_agent_id: "agent-default",
+          resolved_agent_name: "Bootstrap Default Agent",
+          resolution_source: "explicit",
+          reason: "default agent configured",
+        },
+        {
+          purpose: "planning",
+          resolved_agent_id: "agent-planning",
+          resolved_agent_name: "Claude Planning Agent",
+          resolution_source: "explicit",
+          fallback_agent_id: "agent-default",
+          fallback_agent_name: "Bootstrap Default Agent",
+          reason: "purpose 'planning' has an explicit default agent assignment",
+        },
+      ],
+      recent_resolutions: [],
+    });
     apiMocks.previewXynIntent.mockResolvedValue({
       status: "UnsupportedIntent",
       action_type: "ValidateDraft",
@@ -335,6 +358,15 @@ describe("XynConsole", () => {
       artifact_type: "Workspace",
       artifact_id: null,
       summary: "Will create and submit an app intent draft.",
+      _ai_resolution: {
+        purpose: "planning",
+        resolved_agent_id: "agent-planning",
+        resolved_agent_name: "Claude Planning Agent",
+        resolution_source: "explicit",
+        fallback_agent_id: "agent-default",
+        fallback_agent_name: "Bootstrap Default Agent",
+        reason: "purpose 'planning' has an explicit default agent assignment",
+      },
       draft_payload: {
         __operation: "create_app_intent_draft",
         workspace_id: "ws-1",
@@ -349,6 +381,11 @@ describe("XynConsole", () => {
     await userEvent.click(screen.getByRole("button", { name: "Submit" }));
 
     await screen.findByText("Will create and submit an app intent draft.");
+    expect(screen.getByText("Execution context")).toBeInTheDocument();
+    expect(screen.getByText("Planning")).toBeInTheDocument();
+    expect(screen.getByText("Claude Planning Agent")).toBeInTheDocument();
+    expect(screen.getByText("Explicit planning assignment")).toBeInTheDocument();
+    expect(screen.getByText("Bootstrap Default Agent not used")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create draft" })).toBeInTheDocument();
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
   });

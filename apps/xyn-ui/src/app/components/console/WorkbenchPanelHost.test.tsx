@@ -33,6 +33,7 @@ const apiMocks = vi.hoisted(() => ({
   updateWorkItem: vi.fn(),
   getRuntimeRunArtifactContent: vi.fn(),
   getSystemReadiness: vi.fn(),
+  getAiRoutingStatus: vi.fn(),
   getExecutionPlan: vi.fn(),
 }));
 
@@ -85,6 +86,7 @@ vi.mock("../../../api/xyn", async () => {
     updateWorkItem: apiMocks.updateWorkItem,
     getRuntimeRunArtifactContent: apiMocks.getRuntimeRunArtifactContent,
     getSystemReadiness: apiMocks.getSystemReadiness,
+    getAiRoutingStatus: apiMocks.getAiRoutingStatus,
     getExecutionPlan: apiMocks.getExecutionPlan,
   };
 });
@@ -119,6 +121,36 @@ describe("WorkbenchPanelHost entity refresh", () => {
         workspace_root: "/app/workspaces",
         artifact_root: "/app/media",
       },
+    });
+    apiMocks.getAiRoutingStatus.mockResolvedValue({
+      routing: [
+        {
+          purpose: "default",
+          resolved_agent_id: "agent-default",
+          resolved_agent_name: "Bootstrap Default Agent",
+          resolution_source: "explicit",
+          reason: "default agent configured",
+        },
+        {
+          purpose: "planning",
+          resolved_agent_id: "agent-planning",
+          resolved_agent_name: "Claude Planning Agent",
+          resolution_source: "explicit",
+          fallback_agent_id: "agent-default",
+          fallback_agent_name: "Bootstrap Default Agent",
+          reason: "purpose 'planning' has an explicit default agent assignment",
+        },
+        {
+          purpose: "coding",
+          resolved_agent_id: "agent-default",
+          resolved_agent_name: "Bootstrap Default Agent",
+          resolution_source: "default_fallback",
+          fallback_agent_id: "agent-default",
+          fallback_agent_name: "Bootstrap Default Agent",
+          reason: "no coding-specific agent is configured",
+        },
+      ],
+      recent_resolutions: [],
     });
     apiMocks.getExecutionPlan.mockResolvedValue({
       capability_id: "build_application",
@@ -158,6 +190,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getSystemReadiness).toHaveBeenCalled());
+    await waitFor(() => expect(apiMocks.getAiRoutingStatus).toHaveBeenCalled());
+    expect(screen.getByText("AI Agent Routing")).toBeInTheDocument();
+    expect(screen.getByText("Claude Planning Agent")).toBeInTheDocument();
+    expect(screen.getAllByText("Bootstrap Default Agent").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Fallback")).toBeInTheDocument();
     expect(screen.getByText("System Readiness")).toBeInTheDocument();
     expect(screen.getByText("Configuration required")).toBeInTheDocument();
     expect(screen.getByText(/No enabled coding agents are configured\./)).toBeInTheDocument();

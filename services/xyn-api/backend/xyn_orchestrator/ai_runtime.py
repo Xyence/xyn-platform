@@ -3,7 +3,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from cryptography.fernet import Fernet
@@ -470,15 +470,91 @@ def _migrate_legacy_default_assistant() -> bool:
     return True
 
 
-def _resolve_runtime_agent_for_purpose(purpose_slug: str) -> Optional[AgentDefinition]:
+def _default_runtime_agent() -> Optional[AgentDefinition]:
+    return (
+        AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
+        .filter(enabled=True, is_default=True)
+        .order_by("-updated_at", "slug")
+        .first()
+    )
+
+
+def _fallback_agent_payload(agent: Optional[AgentDefinition]) -> Tuple[Optional[str], Optional[str]]:
+    if not agent:
+        return None, None
+    return str(agent.id), str(agent.name or "")
+
+
+def _build_resolution_payload(
+    *,
+    purpose: str,
+    resolved: Optional[AgentDefinition],
+    fallback_agent: Optional[AgentDefinition],
+    source: str,
+    reason: str,
+) -> Dict[str, Any]:
+    fallback_id, fallback_name = _fallback_agent_payload(fallback_agent)
+    return {
+        "purpose": purpose or "coding",
+        "resolved_agent_id": str(resolved.id) if resolved else None,
+        "resolved_agent_name": str(resolved.name or "") if resolved else None,
+        "resolution_source": source,
+        "fallback_agent_id": fallback_id,
+        "fallback_agent_name": fallback_name,
+        "reason": reason,
+    }
+
+
+def resolve_agent_routing(*, purpose_slug: Optional[str] = None, agent_slug: Optional[str] = None) -> Dict[str, Any]:
     purpose = str(purpose_slug or "").strip().lower()
-    if not purpose:
-        return (
+    fallback_default = _default_runtime_agent()
+
+    if agent_slug:
+        explicit_agent = (
             AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
-            .filter(enabled=True, is_default=True)
+            .filter(slug=agent_slug, enabled=True)
+            .first()
+        )
+        if explicit_agent:
+            return _build_resolution_payload(
+                purpose=purpose,
+                resolved=explicit_agent,
+                fallback_agent=fallback_default,
+                source="explicit",
+                reason=f"explicit agent '{explicit_agent.slug}' requested",
+            )
+
+    if not purpose:
+        if fallback_default:
+            return _build_resolution_payload(
+                purpose="coding",
+                resolved=fallback_default,
+                fallback_agent=fallback_default,
+                source="default_fallback",
+                reason="no purpose provided; using default assistant",
+            )
+        first_enabled = (
+            AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
+            .filter(enabled=True)
             .order_by("-updated_at", "slug")
             .first()
         )
+        if first_enabled:
+            return _build_resolution_payload(
+                purpose="coding",
+                resolved=first_enabled,
+                fallback_agent=fallback_default,
+                source="default_fallback",
+                reason="no purpose provided and no default assistant flagged; using first enabled agent",
+            )
+        return _build_resolution_payload(
+            purpose="coding",
+            resolved=None,
+            fallback_agent=fallback_default,
+            source="default_fallback",
+            reason="no enabled agent configured",
+        )
+
     purpose_default = (
         AgentDefinitionPurpose.objects.select_related("agent_definition", "agent_definition__model_config__provider", "agent_definition__model_config__credential")
         .filter(purpose__slug=purpose, is_default_for_purpose=True, agent_definition__enabled=True)
@@ -486,7 +562,14 @@ def _resolve_runtime_agent_for_purpose(purpose_slug: str) -> Optional[AgentDefin
         .first()
     )
     if purpose_default:
-        return purpose_default.agent_definition
+        return _build_resolution_payload(
+            purpose=purpose,
+            resolved=purpose_default.agent_definition,
+            fallback_agent=fallback_default,
+            source="explicit",
+            reason=f"purpose '{purpose}' has an explicit default agent assignment",
+        )
+
     purpose_specific = (
         AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
         .filter(enabled=True, purposes__slug=purpose, is_default=False)
@@ -494,20 +577,44 @@ def _resolve_runtime_agent_for_purpose(purpose_slug: str) -> Optional[AgentDefin
         .first()
     )
     if purpose_specific:
-        return purpose_specific
-    fallback_default = (
-        AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
-        .filter(enabled=True, is_default=True)
-        .order_by("-updated_at", "slug")
-        .first()
-    )
+        return _build_resolution_payload(
+            purpose=purpose,
+            resolved=purpose_specific,
+            fallback_agent=fallback_default,
+            source="explicit",
+            reason=f"using enabled agent linked to purpose '{purpose}'",
+        )
+
     if fallback_default:
-        return fallback_default
-    return (
+        return _build_resolution_payload(
+            purpose=purpose,
+            resolved=fallback_default,
+            fallback_agent=fallback_default,
+            source="default_fallback",
+            reason=f"no explicit agent for purpose '{purpose}'; using default assistant",
+        )
+
+    purpose_linked = (
         AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
         .filter(enabled=True, purposes__slug=purpose)
         .order_by("-updated_at", "slug")
         .first()
+    )
+    if purpose_linked:
+        return _build_resolution_payload(
+            purpose=purpose,
+            resolved=purpose_linked,
+            fallback_agent=fallback_default,
+            source="explicit",
+            reason=f"no default agent available; using enabled purpose-linked agent for '{purpose}'",
+        )
+
+    return _build_resolution_payload(
+        purpose=purpose,
+        resolved=None,
+        fallback_agent=fallback_default,
+        source="default_fallback",
+        reason=f"no enabled agent available for purpose '{purpose}'",
     )
 
 
@@ -572,15 +679,15 @@ def _serialize_messages_for_provider(messages: List[Dict[str, str]]) -> List[Dic
 
 def resolve_ai_config(*, purpose_slug: Optional[str] = None, agent_slug: Optional[str] = None) -> Dict[str, Any]:
     purpose = str(purpose_slug or "").strip().lower()
-    agent = None
-    if agent_slug:
-        agent = (
-            AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
-            .filter(slug=agent_slug, enabled=True)
-            .first()
-        )
-    if agent is None:
-        agent = _resolve_runtime_agent_for_purpose(purpose)
+    routing = resolve_agent_routing(purpose_slug=purpose, agent_slug=agent_slug)
+    agent_id = str(routing.get("resolved_agent_id") or "").strip()
+    agent = (
+        AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
+        .filter(id=agent_id, enabled=True)
+        .first()
+        if agent_id
+        else None
+    )
     if not purpose:
         if agent:
             first_purpose = agent.purposes.order_by("slug").first()
@@ -609,9 +716,16 @@ def resolve_ai_config(*, purpose_slug: Optional[str] = None, agent_slug: Optiona
             "system_prompt": assemble_system_prompt(agent.system_prompt_text, purpose_preamble),
             "agent_slug": agent.slug,
             "agent_id": str(agent.id),
+            "agent_name": str(agent.name or ""),
             "purpose": purpose,
             "purpose_default_context_pack_refs_json": (purpose_obj.default_context_pack_refs_json if purpose_obj else None) or [],
             "agent_context_pack_refs_json": agent.context_pack_refs_json or [],
+            "agent_resolution": {
+                **routing,
+                "purpose": purpose,
+                "resolved_agent_id": str(agent.id),
+                "resolved_agent_name": str(agent.name or ""),
+            },
         }
 
     provider_alias = str(
@@ -646,9 +760,16 @@ def resolve_ai_config(*, purpose_slug: Optional[str] = None, agent_slug: Optiona
         "system_prompt": "",
         "agent_slug": None,
         "agent_id": None,
+        "agent_name": None,
         "purpose": purpose,
         "purpose_default_context_pack_refs_json": (purpose_obj.default_context_pack_refs_json if purpose_obj else None) or [],
         "agent_context_pack_refs_json": [],
+        "agent_resolution": {
+            **routing,
+            "purpose": purpose,
+            "resolved_agent_id": None,
+            "resolved_agent_name": None,
+        },
     }
 
 

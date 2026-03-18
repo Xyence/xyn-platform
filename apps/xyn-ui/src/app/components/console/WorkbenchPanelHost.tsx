@@ -15,6 +15,7 @@ import {
   getEmsStatusRollupCanvasTable,
   getRuntimeRunArtifactContent,
   getRuntimeRunCanvasApi,
+  getAiRoutingStatus,
   getSystemReadiness,
   getWorkItem,
   getWorkQueue,
@@ -45,6 +46,8 @@ import type {
   ApplicationFactorySummary,
   ApplicationPlanDetail,
   AppPaletteResult,
+  AiAgentResolution,
+  AiRoutingStatusResponse,
   ArtifactCanvasTableResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFileRow,
@@ -281,6 +284,50 @@ function SystemReadinessBanner({ readiness }: { readiness: SystemReadinessRespon
           ))}
         </div>
       </details>
+    </section>
+  );
+}
+
+function routingRowLabel(row: AiAgentResolution | null): "Explicit" | "Fallback" | "Missing" {
+  if (!row || !row.resolved_agent_name) return "Missing";
+  if (row.resolution_source === "explicit") return "Explicit";
+  if (row.resolution_source === "default_fallback") return "Fallback";
+  return "Missing";
+}
+
+function routingPurposeRow(routing: AiAgentResolution[], purpose: string): AiAgentResolution | null {
+  return routing.find((row) => String(row.purpose || "").trim().toLowerCase() === purpose) || null;
+}
+
+function AiAgentRoutingCard({ routing }: { routing: AiAgentResolution[] | null }) {
+  if (!routing || !routing.length) return null;
+  const defaultRow = routingPurposeRow(routing, "default");
+  const planningRow = routingPurposeRow(routing, "planning");
+  const codingRow = routingPurposeRow(routing, "coding");
+  const rows = [
+    { purpose: "Planning", row: planningRow },
+    { purpose: "Coding", row: codingRow },
+    { purpose: "Default", row: defaultRow },
+  ];
+  return (
+    <section className="card ai-routing-card">
+      <div className="card-header">
+        <h3>AI Agent Routing</h3>
+      </div>
+      <div className="ai-routing-rows">
+        {rows.map((entry) => {
+          const status = routingRowLabel(entry.row);
+          return (
+            <div key={entry.purpose} className="ai-routing-row">
+              <span className="field-label">{entry.purpose}</span>
+              <span className="field-value ai-routing-value">
+                <span>{entry.row?.resolved_agent_name || "Not configured"}</span>
+                <span className={`ai-routing-status ${status.toLowerCase()}`}>{status}</span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </section>
   );
 }
@@ -4881,6 +4928,7 @@ export default function WorkbenchPanelHost({
 }) {
   const [resolvedTitle, setResolvedTitle] = useState("");
   const [systemReadiness, setSystemReadiness] = useState<SystemReadinessResponse | null>(null);
+  const [aiRoutingStatus, setAiRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
   useEffect(() => {
     setResolvedTitle("");
   }, [panel?.panel_id, panel?.key]);
@@ -4893,6 +4941,20 @@ export default function WorkbenchPanelHost({
       })
       .catch(() => {
         if (active) setSystemReadiness(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    let active = true;
+    getAiRoutingStatus()
+      .then((next) => {
+        if (active) setAiRoutingStatus(next);
+      })
+      .catch(() => {
+        if (active) setAiRoutingStatus(null);
       });
     return () => {
       active = false;
@@ -5312,6 +5374,7 @@ export default function WorkbenchPanelHost({
             }}
           />
         </div>
+        <AiAgentRoutingCard routing={aiRoutingStatus?.routing || null} />
         <SystemReadinessBanner readiness={systemReadiness} />
       </div>
     );
@@ -5320,6 +5383,7 @@ export default function WorkbenchPanelHost({
   return (
     <div>
       <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>
+      <AiAgentRoutingCard routing={aiRoutingStatus?.routing || null} />
       <SystemReadinessBanner readiness={systemReadiness} />
     </div>
   );

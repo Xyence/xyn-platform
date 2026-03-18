@@ -1891,6 +1891,27 @@ export type AiBootstrapStatusResponse = {
   default_agent: AiBootstrapStatus;
 };
 
+export type AiAgentResolution = {
+  purpose: string;
+  resolved_agent_id?: string | null;
+  resolved_agent_name?: string | null;
+  resolution_source: "explicit" | "default_fallback" | string;
+  fallback_agent_id?: string | null;
+  fallback_agent_name?: string | null;
+  reason?: string | null;
+};
+
+export type AiRoutingStatusResponse = {
+  routing: AiAgentResolution[];
+  recent_resolutions: Array<
+    AiAgentResolution & {
+      event_id?: string;
+      event_type?: string;
+      created_at?: string;
+    }
+  >;
+};
+
 export type SystemReadinessCheck = {
   component: string;
   status: "ok" | "missing" | "error";
@@ -2119,6 +2140,9 @@ export type AiActivityEntry = {
   job_id?: string | null;
   error?: string;
   agent_slug?: string;
+  agent_name?: string;
+  purpose?: string;
+  agent_resolution?: AiAgentResolution;
   provider?: "openai" | "anthropic" | "google" | string;
   model_name?: string;
   artifact_id?: string;
@@ -3666,6 +3690,7 @@ export type XynIntentResolutionResult = {
     llm_model?: string;
     timestamp?: string;
   };
+  _ai_resolution?: AiAgentResolution;
 };
 
 export type EmsDeviceRow = {
