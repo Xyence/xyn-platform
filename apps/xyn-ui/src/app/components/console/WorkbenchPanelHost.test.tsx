@@ -34,6 +34,7 @@ const apiMocks = vi.hoisted(() => ({
   getRuntimeRunArtifactContent: vi.fn(),
   getSystemReadiness: vi.fn(),
   getAiRoutingStatus: vi.fn(),
+  listAiAgents: vi.fn(),
   getExecutionPlan: vi.fn(),
 }));
 
@@ -87,6 +88,7 @@ vi.mock("../../../api/xyn", async () => {
     getRuntimeRunArtifactContent: apiMocks.getRuntimeRunArtifactContent,
     getSystemReadiness: apiMocks.getSystemReadiness,
     getAiRoutingStatus: apiMocks.getAiRoutingStatus,
+    listAiAgents: apiMocks.listAiAgents,
     getExecutionPlan: apiMocks.getExecutionPlan,
   };
 });
@@ -151,6 +153,26 @@ describe("WorkbenchPanelHost entity refresh", () => {
         },
       ],
       recent_resolutions: [],
+    });
+    apiMocks.listAiAgents.mockResolvedValue({
+      agents: [
+        {
+          id: "agent-default",
+          slug: "default-assistant",
+          name: "Bootstrap Default Agent",
+          model_config_id: "model-default",
+          enabled: true,
+          purposes: ["default", "planning", "coding"],
+        },
+        {
+          id: "agent-coding-alt",
+          slug: "coding-alt",
+          name: "Claude Coding Agent",
+          model_config_id: "model-coding",
+          enabled: true,
+          purposes: ["coding"],
+        },
+      ],
     });
     apiMocks.getExecutionPlan.mockResolvedValue({
       capability_id: "build_application",
@@ -2267,6 +2289,214 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Dispatched wi-1.")).toBeInTheDocument();
     expect(screen.getByText("Latest execution run: run-1 · workspace ws-1")).toBeInTheDocument();
     expect(screen.getByText("Task has been dispatched and is waiting to start.")).toBeInTheDocument();
+  });
+
+  it("supports a temporary agent override at dispatch time", async () => {
+    apiMocks.getWorkItem.mockResolvedValueOnce({
+      id: "task-override",
+      work_item_id: "wi-override",
+      title: "Implement override dispatch",
+      description: "Dispatch with a one-off coding agent override.",
+      status: "queued",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 0,
+      max_attempts: 2,
+      execution_queue: {
+        queue_ready: true,
+        dispatchable: true,
+        dispatched: false,
+        blocked: false,
+        status: "queue_ready",
+        reason: null,
+        message: "Task is approved and ready for queue dispatch.",
+      },
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "approved",
+        revision: 1,
+        history_count: 0,
+        summary: "Implement override dispatch",
+        objective: "Use one-off override",
+        target_repository_slug: "xyn-platform",
+        target_branch: "develop",
+        gated: true,
+        ready: true,
+        blocked: false,
+        blocked_reason: null,
+        blocked_message: "Execution brief is ready for execution.",
+        review_notes: "Approved",
+        available_actions: [],
+      },
+      execution_run: {
+        has_run: false,
+        run_id: null,
+        source: null,
+        state: "not_started",
+        raw_status: null,
+        validation_status: "not_run",
+        summary: null,
+        error: null,
+        started_at: null,
+        finished_at: null,
+        artifact_count: 0,
+        artifact_labels: [],
+        message: "No execution run has been dispatched yet.",
+      },
+      execution_recovery: {
+        retryable: false,
+        requeueable: false,
+        in_flight: false,
+        failed: false,
+        blocked: false,
+        status: "idle",
+        reason: null,
+        message: "Recovery actions are unavailable.",
+        available_actions: [],
+      },
+      change_set: {
+        available: false,
+        status: "unavailable",
+        has_changes: false,
+        source: "workspace",
+        changed_file_count: 0,
+        files: [],
+        patch_available: false,
+        message: "No workspace change set found.",
+      },
+      publish_state: {
+        status: "idle",
+        message: "No publish action has been recorded yet.",
+        available_actions: [],
+      },
+    });
+    apiMocks.dispatchWorkItem.mockResolvedValue({
+      status: "dispatched",
+      queue_item: { thread_id: "thread-1", work_item_id: "wi-override", task_id: "task-override" },
+      run_id: "run-override",
+      work_item: {
+        id: "task-override",
+        work_item_id: "wi-override",
+        title: "Implement override dispatch",
+        description: "Dispatch with a one-off coding agent override.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        runtime_run_id: "run-override",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 0,
+        max_attempts: 2,
+        execution_queue: {
+          queue_ready: false,
+          dispatchable: false,
+          dispatched: true,
+          blocked: false,
+          status: "dispatched",
+          reason: "in_flight",
+          message: "Task has already been dispatched and is in progress.",
+        },
+        execution_brief_review: {
+          has_brief: true,
+          review_state: "approved",
+          revision: 1,
+          history_count: 0,
+          summary: "Implement override dispatch",
+          objective: "Use one-off override",
+          target_repository_slug: "xyn-platform",
+          target_branch: "develop",
+          gated: true,
+          ready: true,
+          blocked: false,
+          blocked_reason: null,
+          blocked_message: "Execution brief is ready for execution.",
+          review_notes: "Approved",
+          available_actions: [],
+        },
+        execution_run: {
+          has_run: true,
+          run_id: "run-override",
+          source: "runtime",
+          state: "queued",
+          raw_status: "queued",
+          validation_status: "pending",
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "Task has been dispatched and is waiting to start.",
+          agent_selection: {
+            purpose: "coding",
+            routed_agent_id: "agent-default",
+            routed_agent_name: "Bootstrap Default Agent",
+            routed_resolution_source: "default_fallback",
+            routed_resolution_label: "Default fallback",
+            effective_agent_id: "agent-coding-alt",
+            effective_agent_name: "Claude Coding Agent",
+            effective_resolution_source: "action_override",
+            effective_resolution_label: "Action override",
+            override_agent_id: "agent-coding-alt",
+            override_applied: true,
+          },
+        },
+        execution_recovery: {
+          retryable: false,
+          requeueable: false,
+          in_flight: true,
+          failed: false,
+          blocked: false,
+          status: "in_flight",
+          reason: null,
+          message: "Execution is in progress.",
+          available_actions: [],
+        },
+        change_set: {
+          available: false,
+          status: "unavailable",
+          has_changes: false,
+          source: "workspace",
+          changed_file_count: 0,
+          files: [],
+          patch_available: false,
+          message: "No workspace change set found.",
+        },
+        publish_state: {
+          status: "idle",
+          message: "No publish action has been recorded yet.",
+          available_actions: [],
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail", panel_type: "detail", instance_key: "work-item:task-override", key: "work_item_detail", params: { work_item_id: "task-override" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.listAiAgents).toHaveBeenCalledWith({ purpose: "coding", enabled: true }));
+    const overrideSelect = screen.getByLabelText("Agent override");
+    await act(async () => {
+      (overrideSelect as HTMLSelectElement).value = "agent-coding-alt";
+      overrideSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Dispatch Task" }).click();
+    });
+    await waitFor(() =>
+      expect(apiMocks.dispatchWorkItem).toHaveBeenCalledWith("task-override", "ws-1", { agent_override_id: "agent-coding-alt" }),
+    );
+    expect(screen.getByText("Override Used")).toBeInTheDocument();
+    expect(screen.getByText(/Source: Action override/)).toBeInTheDocument();
   });
 
   it("shows recovery state and supports retry and requeue from work item detail", async () => {

@@ -1896,6 +1896,9 @@ export type AiAgentResolution = {
   resolved_agent_id?: string | null;
   resolved_agent_name?: string | null;
   resolution_source: "explicit" | "default_fallback" | string;
+  resolution_type?: "required_default" | "explicit" | "falls_back_to_default" | string;
+  explicit_agent_id?: string | null;
+  explicit_agent_name?: string | null;
   fallback_agent_id?: string | null;
   fallback_agent_name?: string | null;
   reason?: string | null;
@@ -2441,6 +2444,19 @@ export type DevTaskSummary = {
     artifact_count: number;
     artifact_labels: string[];
     message: string;
+    agent_selection?: {
+      purpose: string;
+      routed_agent_id?: string | null;
+      routed_agent_name?: string | null;
+      routed_resolution_source?: string | null;
+      routed_resolution_label?: string | null;
+      effective_agent_id?: string | null;
+      effective_agent_name?: string | null;
+      effective_resolution_source?: string | null;
+      effective_resolution_label?: string | null;
+      override_agent_id?: string | null;
+      override_applied: boolean;
+    } | null;
   };
   execution_recovery?: {
     retryable: boolean;

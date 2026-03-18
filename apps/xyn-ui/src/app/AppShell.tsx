@@ -29,6 +29,7 @@ const XynMapPage = lazy(() => import("./pages/XynMapPage"));
 const CapabilityExplorerPage = lazy(() => import("./pages/CapabilityExplorerPage"));
 const PlatformSettingsPage = lazy(() => import("./pages/PlatformSettingsPage"));
 const PlatformSettingsHubPage = lazy(() => import("./pages/PlatformSettingsHubPage"));
+const AIAgentRoutingPage = lazy(() => import("./pages/AIAgentRoutingPage"));
 const PlatformDeploySettingsPage = lazy(() => import("./pages/PlatformDeploySettingsPage"));
 const PlatformRenderingSettingsPage = lazy(() => import("./pages/PlatformRenderingSettingsPage"));
 const VideoAdapterConfigPage = lazy(() => import("./pages/VideoAdapterConfigPage"));
@@ -247,6 +248,7 @@ type PlatformSettingsSurface =
   | "identity_configuration"
   | "secrets"
   | "activity"
+  | "ai_routing"
   | "ai_agents"
   | "rendering_settings"
   | "deploy_settings"
@@ -275,6 +277,8 @@ function platformSettingsSurfaceLabel(surface: PlatformSettingsSurface): string 
       return "Secrets";
     case "activity":
       return "Activity";
+    case "ai_routing":
+      return "AI Agent Routing";
     case "ai_agents":
       return "AI Agents";
     case "rendering_settings":
@@ -300,6 +304,8 @@ function platformSettingsSurfacePath(surface: PlatformSettingsSurface): string {
       return "/app/platform/secrets";
     case "activity":
       return "/app/platform/activity";
+    case "ai_routing":
+      return "/app/platform/ai-routing";
     case "ai_agents":
       return "/app/platform/ai-agents";
     case "rendering_settings":
@@ -321,6 +327,7 @@ function mapPlatformSettingsRouteToSurface(route: string): PlatformSettingsSurfa
   if (path.endsWith("/platform/identity-configuration")) return "identity_configuration";
   if (path.endsWith("/platform/secrets")) return "secrets";
   if (path.endsWith("/platform/activity")) return "activity";
+  if (path.endsWith("/platform/ai-routing")) return "ai_routing";
   if (path.endsWith("/platform/ai-agents")) return "ai_agents";
   if (path.endsWith("/platform/rendering-settings")) return "rendering_settings";
   if (path.endsWith("/platform/deploy")) return "deploy_settings";
@@ -429,6 +436,7 @@ function GlobalPlatformSettingsRoute({
       {activeSurface === "identity_configuration" ? <IdentityConfigurationPage /> : null}
       {activeSurface === "secrets" ? <SecretConfigurationPage /> : null}
       {activeSurface === "activity" ? <ActivityPage workspaceId="" /> : null}
+      {activeSurface === "ai_routing" ? <AIAgentRoutingPage /> : null}
       {activeSurface === "ai_agents" ? <AIConfigPage /> : null}
       {activeSurface === "rendering_settings" ? <PlatformRenderingSettingsPage /> : null}
       {activeSurface === "deploy_settings" ? <PlatformDeploySettingsPage /> : null}
@@ -1471,6 +1479,18 @@ export default function AppShell() {
             <Route path="platform/ai-config" element={<Navigate to={workspaceScopedTarget("platform/ai-agents")} replace />} />
             <Route path="platform/ai-configuration" element={<Navigate to={workspaceScopedTarget("platform/ai-agents")} replace />} />
             <Route
+              path="platform/ai-routing"
+              element={
+                <GlobalPlatformSettingsRoute
+                  initialSurface="ai_routing"
+                  activeWorkspaceId={activeWorkspace?.id || ""}
+                  activeWorkspaceName={activeWorkspace?.name || "Workspace"}
+                  canWorkspaceAdmin={canWorkspaceAdmin}
+                  canManageWorkspaces={isPlatformManager && !isPreviewReadOnly}
+                />
+              }
+            />
+            <Route
               path="platform/ai-agents"
               element={
                 <GlobalPlatformSettingsRoute
@@ -1486,6 +1506,7 @@ export default function AppShell() {
             <Route path="platform/ai/model-configs" element={<RedirectLegacyAiRoute tab="model-configs" />} />
             <Route path="platform/ai/agents" element={<RedirectLegacyAiRoute tab="agents" />} />
             <Route path="platform/ai/purposes" element={<RedirectLegacyAiRoute tab="purposes" />} />
+            <Route path="platform/ai/routing" element={<Navigate to={workspaceScopedTarget("platform/ai-routing")} replace />} />
             <Route path="settings" element={<WorkspaceSettingsPage workspaceName={activeWorkspace?.name || "Workspace"} />} />
             <Route path="*" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "workspaces"} replace />} />
           </Routes>

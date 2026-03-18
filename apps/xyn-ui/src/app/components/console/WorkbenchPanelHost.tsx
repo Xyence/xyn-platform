@@ -16,6 +16,7 @@ import {
   getRuntimeRunArtifactContent,
   getRuntimeRunCanvasApi,
   getAiRoutingStatus,
+  listAiAgents,
   getSystemReadiness,
   getWorkItem,
   getWorkQueue,
@@ -46,6 +47,7 @@ import type {
   ApplicationFactorySummary,
   ApplicationPlanDetail,
   AppPaletteResult,
+  AiAgent,
   AiAgentResolution,
   AiRoutingStatusResponse,
   ArtifactCanvasTableResponse,
@@ -95,6 +97,7 @@ import IdentityConfigurationPage from "../../pages/IdentityConfigurationPage";
 import SecretConfigurationPage from "../../pages/SecretConfigurationPage";
 import ActivityPage from "../../pages/ActivityPage";
 import AIConfigPage from "../../pages/AIConfigPage";
+import AIAgentRoutingPage from "../../pages/AIAgentRoutingPage";
 import PlatformRenderingSettingsPage from "../../pages/PlatformRenderingSettingsPage";
 import PlatformDeploySettingsPage from "../../pages/PlatformDeploySettingsPage";
 import PlatformBrandingPage from "../../pages/PlatformBrandingPage";
@@ -297,6 +300,28 @@ function routingRowLabel(row: AiAgentResolution | null): "Explicit" | "Fallback"
 
 function routingPurposeRow(routing: AiAgentResolution[], purpose: string): AiAgentResolution | null {
   return routing.find((row) => String(row.purpose || "").trim().toLowerCase() === purpose) || null;
+}
+
+function workItemDispatchPurpose(item: Pick<WorkItemDetail, "task_type" | "intent_type" | "context_purpose"> | null): "planning" | "coding" {
+  if (!item) return "coding";
+  const taskType = String(item.task_type || "").trim().toLowerCase();
+  const intentType = String(item.intent_type || "").trim().toLowerCase();
+  const contextPurpose = String(item.context_purpose || "").trim().toLowerCase();
+  if (
+    taskType.includes("plan")
+    || intentType.includes("plan")
+    || contextPurpose === "planning"
+  ) {
+    return "planning";
+  }
+  return "coding";
+}
+
+function routingResolutionLabel(row: AiAgentResolution | null, purpose: "planning" | "coding"): string {
+  if (!row) return "Unresolved routing";
+  if (row.resolution_source === "explicit") return `Explicit ${purpose} assignment`;
+  if (row.resolution_source === "default_fallback") return "Default fallback";
+  return titleCaseLabel(row.resolution_source || "unresolved");
 }
 
 function AiAgentRoutingCard({ routing }: { routing: AiAgentResolution[] | null }) {
@@ -1088,7 +1113,6 @@ function GoalDetailPanel({
     status: "idle",
     message: null,
   });
-
   useEffect(() => {
     let active = true;
     (async () => {
@@ -1935,6 +1959,12 @@ function WorkItemDetailPanel({
     status: "idle",
     message: null,
   });
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [routingStatus, setRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
+  const [compatibleAgents, setCompatibleAgents] = useState<AiAgent[]>([]);
+  const [agentSelectionLoading, setAgentSelectionLoading] = useState(false);
+  const [agentSelectionError, setAgentSelectionError] = useState<string | null>(null);
+  const [selectedAgentOverrideId, setSelectedAgentOverrideId] = useState("routed");
 
   async function loadWorkItem(active = true) {
     try {
@@ -1959,6 +1989,68 @@ function WorkItemDetailPanel({
     };
   }, [workItemId]);
 
+  const queue = payload?.execution_queue;
+  const canDispatchSelectedTask = Boolean(queue?.dispatchable && !queue?.dispatched && (queue?.selected_for_dispatch ?? true));
+  const dispatchPurpose = workItemDispatchPurpose(payload);
+  const routedResolution = routingPurposeRow(routingStatus?.routing || [], dispatchPurpose);
+  const routedAgentId = String(routedResolution?.resolved_agent_id || "").trim();
+  const routedAgentName = String(routedResolution?.resolved_agent_name || "").trim() || "No routed agent";
+  const routedResolutionText = routingResolutionLabel(routedResolution, dispatchPurpose);
+  const overrideAgent = selectedAgentOverrideId === "routed"
+    ? null
+    : compatibleAgents.find((agent) => agent.id === selectedAgentOverrideId) || null;
+  const effectiveAgentName = overrideAgent?.name || routedAgentName;
+  const effectiveResolutionText = overrideAgent ? "Action override" : routedResolutionText;
+  const canShowOverrideControls = compatibleAgents.length > 1;
+
+  useEffect(() => {
+    if (!canDispatchSelectedTask || !workspaceId) {
+      setRoutingStatus(null);
+      setCompatibleAgents([]);
+      setSelectedAgentOverrideId("routed");
+      setAdvancedOpen(false);
+      setAgentSelectionError(null);
+      setAgentSelectionLoading(false);
+      return;
+    }
+    let active = true;
+    setAgentSelectionLoading(true);
+    setAgentSelectionError(null);
+    void Promise.all([
+      getAiRoutingStatus(),
+      listAiAgents({ purpose: dispatchPurpose, enabled: true }),
+    ])
+      .then(([nextRouting, agentsResponse]) => {
+        if (!active) return;
+        setRoutingStatus(nextRouting);
+        setCompatibleAgents(agentsResponse.agents || []);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setAgentSelectionError(err instanceof Error ? err.message : "Failed to load routed agent context.");
+        setRoutingStatus(null);
+        setCompatibleAgents([]);
+      })
+      .finally(() => {
+        if (!active) return;
+        setAgentSelectionLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [canDispatchSelectedTask, dispatchPurpose, workspaceId, workItemId]);
+
+  useEffect(() => {
+    if (!canShowOverrideControls && selectedAgentOverrideId !== "routed") {
+      setSelectedAgentOverrideId("routed");
+      return;
+    }
+    if (selectedAgentOverrideId === "routed") return;
+    if (!compatibleAgents.some((agent) => agent.id === selectedAgentOverrideId)) {
+      setSelectedAgentOverrideId("routed");
+    }
+  }, [canShowOverrideControls, compatibleAgents, selectedAgentOverrideId]);
+
   async function handleBriefAction(action: "mark_ready" | "approve" | "reject" | "regenerate") {
     try {
       setActionState({ status: "submitting", message: null });
@@ -1977,12 +2069,19 @@ function WorkItemDetailPanel({
     if (!workspaceId) return;
     try {
       setActionState({ status: "submitting", message: null });
-      const response = await dispatchWorkItem(workItemId, workspaceId);
+      const overrideId = selectedAgentOverrideId !== "routed" && selectedAgentOverrideId !== routedAgentId
+        ? selectedAgentOverrideId
+        : "";
+      const response = overrideId
+        ? await dispatchWorkItem(workItemId, workspaceId, { agent_override_id: overrideId })
+        : await dispatchWorkItem(workItemId, workspaceId);
       setPayload(response.work_item || (await getWorkItem(workItemId)));
       setActionState({
         status: "idle",
         message: response.status === "dispatched" ? `Dispatched ${String(response.queue_item?.work_item_id || payload?.work_item_id || workItemId)}.` : response.status,
       });
+      setSelectedAgentOverrideId("routed");
+      setAdvancedOpen(false);
     } catch (err) {
       setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to dispatch work item" });
     }
@@ -2036,12 +2135,10 @@ function WorkItemDetailPanel({
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Work item not found.</p>;
   const review = payload.execution_brief_review;
-  const queue = payload.execution_queue;
   const execution = payload.execution_run;
   const recovery = payload.execution_recovery;
   const changeSet = payload.change_set;
   const publish = payload.publish_state;
-  const canDispatchSelectedTask = Boolean(queue?.dispatchable && !queue?.dispatched && (queue?.selected_for_dispatch ?? true));
 
   return (
     <div className="ems-panel-body">
@@ -2080,6 +2177,39 @@ function WorkItemDetailPanel({
           ) : null}
           {canDispatchSelectedTask ? (
             <div className="inline-action-row" style={{ marginTop: 12 }}>
+              <div style={{ width: "100%" }}>
+                <div className="detail-grid" style={{ marginBottom: 10 }}>
+                  <div><div className="field-label">Purpose</div><div className="field-value">{titleCaseLabel(dispatchPurpose)}</div></div>
+                  <div><div className="field-label">Routed Agent</div><div className="field-value">{routedAgentName}</div></div>
+                  <div><div className="field-label">Resolution</div><div className="field-value">{routedResolutionText}</div></div>
+                  <div><div className="field-label">Effective Agent</div><div className="field-value">{effectiveAgentName}</div></div>
+                  <div><div className="field-label">Source</div><div className="field-value">{effectiveResolutionText}</div></div>
+                </div>
+                {agentSelectionLoading ? <p className="muted small" style={{ marginTop: 0 }}>Loading routed agent context…</p> : null}
+                {agentSelectionError ? <p className="danger-text small" style={{ marginTop: 0 }}>{agentSelectionError}</p> : null}
+                {canShowOverrideControls ? (
+                  <details open={advancedOpen} onToggle={(event) => setAdvancedOpen((event.currentTarget as HTMLDetailsElement).open)}>
+                    <summary><strong>Advanced</strong></summary>
+                    <div style={{ marginTop: 8 }}>
+                      <label className="field-label" htmlFor={`agent-override-${workItemId}`}>Agent override</label>
+                      <select
+                        id={`agent-override-${workItemId}`}
+                        value={selectedAgentOverrideId}
+                        onChange={(event) => setSelectedAgentOverrideId(event.target.value)}
+                        style={{ maxWidth: 360 }}
+                      >
+                        <option value="routed">Use routed agent</option>
+                        {compatibleAgents.map((agent) => (
+                          <option key={agent.id} value={agent.id}>{agent.name}</option>
+                        ))}
+                      </select>
+                      <p className="muted small" style={{ marginTop: 6 }}>
+                        This override applies only to this dispatch and does not change Platform Settings.
+                      </p>
+                    </div>
+                  </details>
+                ) : null}
+              </div>
               <button type="button" className="ghost sm" disabled={actionState.status === "submitting" || !workspaceId} onClick={handleDispatchTask}>
                 Dispatch Task
               </button>
@@ -2153,6 +2283,22 @@ function WorkItemDetailPanel({
           <div><div className="field-label">Finished</div><div className="field-value">{execution?.finished_at || "—"}</div></div>
         </div>
         <p className="muted" style={{ marginTop: 12 }}>{execution?.message || "No execution run has been dispatched yet."}</p>
+        {execution?.agent_selection ? (
+          <div style={{ marginTop: 12 }}>
+            <div className="field-label">Agent Selection</div>
+            <div className="field-value">
+              {execution.agent_selection.effective_agent_name || "—"}
+              {execution.agent_selection.override_applied ? (
+                <span style={{ marginLeft: 8, fontSize: 12, padding: "2px 8px", borderRadius: 999, background: "#fff3d9", color: "#8a5a00" }}>
+                  Override Used
+                </span>
+              ) : null}
+            </div>
+            <div className="muted small" style={{ marginTop: 4 }}>
+              Purpose: {titleCaseLabel(execution.agent_selection.purpose || "coding")} · Routed: {execution.agent_selection.routed_agent_name || "—"} ({execution.agent_selection.routed_resolution_label || "Unknown"}) · Source: {execution.agent_selection.effective_resolution_label || "Unknown"}
+            </div>
+          </div>
+        ) : null}
         {execution?.summary ? (
           <div style={{ marginTop: 12 }}>
             <div className="field-label">Result Summary</div>
@@ -2915,6 +3061,7 @@ type PlatformSettingsSurface =
   | "identity_configuration"
   | "secrets"
   | "activity"
+  | "ai_routing"
   | "ai_agents"
   | "rendering_settings"
   | "deploy_settings"
@@ -2942,6 +3089,8 @@ function platformSettingsSurfaceLabel(surface: PlatformSettingsSurface): string 
       return "Secrets";
     case "activity":
       return "Activity";
+    case "ai_routing":
+      return "AI Agent Routing";
     case "ai_agents":
       return "AI Agents";
     case "rendering_settings":
@@ -2961,6 +3110,7 @@ function mapPlatformSettingsRouteToSurface(route: string): PlatformSettingsSurfa
   if (path.endsWith("/platform/identity-configuration")) return "identity_configuration";
   if (path.endsWith("/platform/secrets")) return "secrets";
   if (path.endsWith("/platform/activity")) return "activity";
+  if (path.endsWith("/platform/ai-routing")) return "ai_routing";
   if (path.endsWith("/platform/ai-agents")) return "ai_agents";
   if (path.endsWith("/platform/rendering-settings")) return "rendering_settings";
   if (path.endsWith("/platform/deploy")) return "deploy_settings";
@@ -2988,6 +3138,7 @@ const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
     "identity_configuration",
     "secrets",
     "activity",
+    "ai_routing",
     "ai_agents",
     "rendering_settings",
     "deploy_settings",
@@ -3096,6 +3247,7 @@ const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
       {activeSurface === "identity_configuration" ? <IdentityConfigurationPage /> : null}
       {activeSurface === "secrets" ? <SecretConfigurationPage /> : null}
       {activeSurface === "activity" ? <ActivityPage workspaceId="" /> : null}
+      {activeSurface === "ai_routing" ? <AIAgentRoutingPage /> : null}
       {activeSurface === "ai_agents" ? <AIConfigPage /> : null}
       {activeSurface === "rendering_settings" ? <PlatformRenderingSettingsPage /> : null}
       {activeSurface === "deploy_settings" ? <PlatformDeploySettingsPage /> : null}

@@ -570,6 +570,23 @@ def resolve_agent_routing(*, purpose_slug: Optional[str] = None, agent_slug: Opt
             reason=f"purpose '{purpose}' has an explicit default agent assignment",
         )
 
+    if purpose in {"planning", "coding"}:
+        if fallback_default:
+            return _build_resolution_payload(
+                purpose=purpose,
+                resolved=fallback_default,
+                fallback_agent=fallback_default,
+                source="default_fallback",
+                reason=f"no explicit agent for purpose '{purpose}'; using default assistant",
+            )
+        return _build_resolution_payload(
+            purpose=purpose,
+            resolved=None,
+            fallback_agent=fallback_default,
+            source="default_fallback",
+            reason=f"no enabled agent available for purpose '{purpose}'",
+        )
+
     purpose_specific = (
         AgentDefinition.objects.select_related("model_config__provider", "model_config__credential")
         .filter(enabled=True, purposes__slug=purpose, is_default=False)

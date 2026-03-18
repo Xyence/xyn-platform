@@ -50,9 +50,16 @@ const SURFACES: SurfaceCard[] = [
     section: "security",
   },
   {
+    id: "ai-agent-routing",
+    title: "AI Agent Routing",
+    description: "Assign default, planning, and coding agents with explicit fallback visibility.",
+    route: "/app/platform/ai-routing",
+    section: "integrations",
+  },
+  {
     id: "ai-agents",
     title: "AI Agents",
-    description: "Manage agents, credentials, model configs, and purposes.",
+    description: "Manage agents, credentials, model configs, and purposes inventory.",
     route: "/app/platform/ai-agents?tab=agents",
     section: "integrations",
   },

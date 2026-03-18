@@ -4267,6 +4267,21 @@ export async function getAiRoutingStatus(): Promise<AiRoutingStatusResponse> {
   return handle<AiRoutingStatusResponse>(response);
 }
 
+export async function updateAiRouting(payload: {
+  default_agent_id?: string;
+  planning_agent_id?: string | null;
+  coding_agent_id?: string | null;
+}): Promise<AiRoutingStatusResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/ai/routing`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<AiRoutingStatusResponse>(response);
+}
+
 export async function getContextualCapabilities(params?: {
   context?: string;
   artifact_id?: string;
@@ -4604,14 +4619,21 @@ export async function dispatchNextWorkQueueItem(workspaceId: string): Promise<{ 
 
 export async function dispatchWorkItem(
   id: string,
-  workspaceId: string
+  workspaceId: string,
+  options?: {
+    agent_override_id?: string;
+  },
 ): Promise<{ status: string; queue_item?: Record<string, unknown>; run_id?: string; work_item?: WorkItemDetail }> {
   const apiBaseUrl = resolveApiBaseUrl();
+  const payload: { workspace_id: string; agent_override_id?: string } = { workspace_id: workspaceId };
+  if (options?.agent_override_id) {
+    payload.agent_override_id = options.agent_override_id;
+  }
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/dispatch`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",
-    body: JSON.stringify({ workspace_id: workspaceId }),
+    body: JSON.stringify(payload),
   });
   return handle<{ status: string; queue_item?: Record<string, unknown>; run_id?: string; work_item?: WorkItemDetail }>(response);
 }

@@ -5,7 +5,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from xyn_orchestrator.models import AgentPurpose, AuditLog, ModelConfig, ModelProvider, RoleBinding, UserIdentity
+from xyn_orchestrator.models import AgentDefinitionPurpose, AgentPurpose, AuditLog, ModelConfig, ModelProvider, RoleBinding, UserIdentity
 
 
 class AiConfigApiTests(TestCase):
@@ -171,6 +171,67 @@ class AiConfigApiTests(TestCase):
         self.assertEqual(planning.get("resolution_source"), "explicit")
         self.assertEqual(coding.get("resolved_agent_name"), "Xyn Coding Assistant")
         self.assertEqual(coding.get("resolution_source"), "explicit")
+
+    def test_ai_routing_patch_updates_and_clears_planning_assignment(self):
+        self._set_identity(self.admin_identity)
+        provider = self._ensure_provider()
+        model_config = ModelConfig.objects.create(provider=provider, model_name="gpt-4o-mini", enabled=True)
+        create_agent = self.client.post(
+            "/xyn/api/ai/agents",
+            data=json.dumps(
+                {
+                    "slug": "planner-explicit",
+                    "name": "Planner Explicit",
+                    "model_config_id": str(model_config.id),
+                    "purposes": ["planning"],
+                    "enabled": True,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(create_agent.status_code, 200)
+        planning_agent = create_agent.json()["agent"]
+
+        assign_response = self.client.patch(
+            "/xyn/api/ai/routing",
+            data=json.dumps({"planning_agent_id": planning_agent["id"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(assign_response.status_code, 200)
+        planning = next(item for item in assign_response.json().get("routing") or [] if item.get("purpose") == "planning")
+        self.assertEqual(planning.get("resolved_agent_id"), planning_agent["id"])
+        self.assertEqual(planning.get("resolution_type"), "explicit")
+        self.assertTrue(
+            AgentDefinitionPurpose.objects.filter(
+                purpose__slug="planning",
+                agent_definition_id=planning_agent["id"],
+                is_default_for_purpose=True,
+            ).exists()
+        )
+
+        clear_response = self.client.patch(
+            "/xyn/api/ai/routing",
+            data=json.dumps({"planning_agent_id": None}),
+            content_type="application/json",
+        )
+        self.assertEqual(clear_response.status_code, 200)
+        routing = clear_response.json().get("routing") or []
+        default_route = next(item for item in routing if item.get("purpose") == "default")
+        planning = next(item for item in routing if item.get("purpose") == "planning")
+        self.assertEqual(planning.get("resolution_type"), "falls_back_to_default")
+        self.assertEqual(planning.get("resolved_agent_id"), default_route.get("resolved_agent_id"))
+        self.assertFalse(
+            AgentDefinitionPurpose.objects.filter(purpose__slug="planning", is_default_for_purpose=True).exists()
+        )
+
+    def test_non_admin_cannot_patch_ai_routing(self):
+        self._set_identity(self.user_identity)
+        response = self.client.patch(
+            "/xyn/api/ai/routing",
+            data=json.dumps({"planning_agent_id": None}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
 
     @patch("xyn_orchestrator.xyn_api.invoke_model")
     def test_ai_invoke_uses_agent_and_returns_content(self, invoke_mock):

@@ -16121,19 +16121,71 @@ def ai_routing_status(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
-    if request.method != "GET":
-        return JsonResponse({"error": "method not allowed"}, status=405)
     if not _can_manage_ai(identity):
         return JsonResponse({"error": "forbidden"}, status=403)
     _ensure_default_agent_purposes()
+    if request.method == "GET":
+        return JsonResponse(_serialize_ai_routing_status())
+    if request.method != "PATCH":
+        return JsonResponse({"error": "method not allowed"}, status=405)
 
+    payload = _parse_json(request)
+    updated = False
+    with transaction.atomic():
+        if "default_agent_id" in payload:
+            updated = True
+            default_agent_id = str(payload.get("default_agent_id") or "").strip()
+            if not default_agent_id:
+                return JsonResponse({"error": "default_agent_id is required"}, status=400)
+            default_agent = AgentDefinition.objects.filter(id=default_agent_id, enabled=True).first()
+            if not default_agent:
+                return JsonResponse({"error": "default_agent_id not found or disabled"}, status=400)
+            AgentDefinition.objects.exclude(id=default_agent.id).filter(is_default=True).update(is_default=False)
+            if not default_agent.is_default:
+                default_agent.is_default = True
+                default_agent.save(update_fields=["is_default", "updated_at"])
+
+        if "planning_agent_id" in payload:
+            updated = True
+            err = _update_purpose_routing_assignment("planning", payload.get("planning_agent_id"))
+            if err:
+                return JsonResponse({"error": err}, status=400)
+        if "coding_agent_id" in payload:
+            updated = True
+            err = _update_purpose_routing_assignment("coding", payload.get("coding_agent_id"))
+            if err:
+                return JsonResponse({"error": err}, status=400)
+    if not updated:
+        return JsonResponse({"error": "at least one routing field is required"}, status=400)
+    return JsonResponse(_serialize_ai_routing_status())
+
+
+def _resolve_explicit_purpose_assignment(purpose_slug: str) -> Optional[AgentDefinitionPurpose]:
+    purpose = str(purpose_slug or "").strip().lower()
+    if not purpose:
+        return None
+    return (
+        AgentDefinitionPurpose.objects.select_related("agent_definition")
+        .filter(purpose__slug=purpose, is_default_for_purpose=True, agent_definition__enabled=True)
+        .first()
+    )
+
+
+def _serialize_ai_routing_status() -> Dict[str, Any]:
     default_routing = dict(resolve_agent_routing(purpose_slug=""))
     default_routing["purpose"] = "default"
-    routing = [
-        default_routing,
-        resolve_agent_routing(purpose_slug="planning"),
-        resolve_agent_routing(purpose_slug="coding"),
-    ]
+    default_routing["resolution_type"] = "required_default"
+
+    routing: List[Dict[str, Any]] = [default_routing]
+    for purpose_slug in ["planning", "coding"]:
+        purpose_routing = dict(resolve_agent_routing(purpose_slug=purpose_slug))
+        explicit_assignment = _resolve_explicit_purpose_assignment(purpose_slug)
+        purpose_routing["resolution_type"] = "explicit" if explicit_assignment else "falls_back_to_default"
+        purpose_routing["explicit_agent_id"] = str(explicit_assignment.agent_definition_id) if explicit_assignment else None
+        purpose_routing["explicit_agent_name"] = (
+            str(explicit_assignment.agent_definition.name or "") if explicit_assignment else None
+        )
+        routing.append(purpose_routing)
 
     recent: List[Dict[str, Any]] = []
     audit_rows = AuditLog.objects.filter(message__in=["ai_invocation", "intent.resolve"]).order_by("-created_at")[:80]
@@ -16159,7 +16211,31 @@ def ai_routing_status(request: HttpRequest) -> JsonResponse:
         )
         if len(recent) >= 20:
             break
-    return JsonResponse({"routing": routing, "recent_resolutions": recent})
+    return {"routing": routing, "recent_resolutions": recent}
+
+
+def _update_purpose_routing_assignment(purpose_slug: str, agent_id_raw: Any) -> Optional[str]:
+    purpose = AgentPurpose.objects.filter(slug=str(purpose_slug or "").strip().lower()).first()
+    if not purpose:
+        return f"purpose '{purpose_slug}' not found"
+
+    desired_agent_id = str(agent_id_raw or "").strip()
+    if not desired_agent_id:
+        AgentDefinitionPurpose.objects.filter(purpose=purpose, is_default_for_purpose=True).update(is_default_for_purpose=False)
+        return None
+
+    agent = AgentDefinition.objects.filter(id=desired_agent_id, enabled=True).first()
+    if not agent:
+        return f"agent '{desired_agent_id}' not found or disabled"
+
+    link, _ = AgentDefinitionPurpose.objects.get_or_create(agent_definition=agent, purpose=purpose)
+    if not link.is_default_for_purpose:
+        link.is_default_for_purpose = True
+        link.save(update_fields=["is_default_for_purpose"])
+    AgentDefinitionPurpose.objects.filter(purpose=purpose, is_default_for_purpose=True).exclude(id=link.id).update(
+        is_default_for_purpose=False
+    )
+    return None
 
 
 @csrf_exempt
@@ -18350,6 +18426,28 @@ def _runtime_run_belongs_to_workspace(run_payload: Dict[str, Any], workspace: Wo
     return workspace_id == str(workspace.id)
 
 
+def _runtime_run_agent_selection_payload(metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    selection = metadata.get("ai_agent_selection") if isinstance(metadata.get("ai_agent_selection"), dict) else {}
+    if not selection:
+        return None
+    purpose = str(selection.get("purpose") or "").strip().lower()
+    if not purpose:
+        return None
+    return {
+        "purpose": purpose,
+        "routed_agent_id": str(selection.get("routed_agent_id") or "").strip() or None,
+        "routed_agent_name": str(selection.get("routed_agent_name") or "").strip() or None,
+        "routed_resolution_source": str(selection.get("routed_resolution_source") or "").strip() or None,
+        "routed_resolution_label": str(selection.get("routed_resolution_label") or "").strip() or None,
+        "effective_agent_id": str(selection.get("effective_agent_id") or "").strip() or None,
+        "effective_agent_name": str(selection.get("effective_agent_name") or "").strip() or None,
+        "effective_resolution_source": str(selection.get("effective_resolution_source") or "").strip() or None,
+        "effective_resolution_label": str(selection.get("effective_resolution_label") or "").strip() or None,
+        "override_agent_id": str(selection.get("override_agent_id") or "").strip() or None,
+        "override_applied": bool(selection.get("override_applied")),
+    }
+
+
 def _runtime_run_summary_payload(run_payload: Dict[str, Any], *, now: Optional[dt.datetime] = None) -> Dict[str, Any]:
     prompt_payload = run_payload.get("prompt_payload") if isinstance(run_payload.get("prompt_payload"), dict) else {}
     target = prompt_payload.get("target") if isinstance(prompt_payload.get("target"), dict) else {}
@@ -18379,6 +18477,7 @@ def _runtime_run_summary_payload(run_payload: Dict[str, Any], *, now: Optional[d
         },
         "failure_reason": run_payload.get("failure_reason"),
         "escalation_reason": run_payload.get("escalation_reason"),
+        "agent_selection": _runtime_run_agent_selection_payload(metadata),
     }
 
 
@@ -26747,7 +26846,83 @@ def _build_dev_task_runtime_prompt(task: DevTask, work_item: Dict[str, Any]) -> 
     return {"title": title, "body": "\n".join(body_lines).strip()}
 
 
-def _build_dev_task_runtime_payload(task: DevTask, workspace: Workspace) -> Dict[str, Any]:
+def _dev_task_dispatch_purpose(task: DevTask) -> str:
+    task_type = str(task.task_type or "").strip().lower()
+    intent_type = str(task.intent_type or "").strip().lower()
+    context_purpose = str(task.context_purpose or "").strip().lower()
+    if "plan" in task_type or "plan" in intent_type or context_purpose == "planning":
+        return "planning"
+    return "coding"
+
+
+def _agent_resolution_label(*, purpose: str, resolution_source: str) -> str:
+    source = str(resolution_source or "").strip().lower()
+    if source == "explicit":
+        return f"Explicit {purpose} assignment"
+    if source == "default_fallback":
+        return "Default fallback"
+    if not source:
+        return "Unresolved routing"
+    return source.replace("_", " ").strip().title()
+
+
+def _resolve_dev_task_agent_selection(task: DevTask, *, agent_override_id: Optional[str] = None) -> Dict[str, Any]:
+    purpose = _dev_task_dispatch_purpose(task)
+    routed = resolve_agent_routing(purpose_slug=purpose)
+    routed_agent_id = str(routed.get("resolved_agent_id") or "").strip()
+    routed_agent_name = str(routed.get("resolved_agent_name") or "").strip()
+    routed_resolution_source = str(routed.get("resolution_source") or "").strip().lower()
+    effective_agent_id = routed_agent_id or None
+    effective_agent_name = routed_agent_name or None
+    effective_resolution_source = routed_resolution_source
+    override_id = str(agent_override_id or "").strip()
+    override_applied = False
+    if override_id:
+        _ensure_default_agent_purposes()
+        override_agent = (
+            AgentDefinition.objects.prefetch_related("purposes")
+            .filter(id=override_id, enabled=True)
+            .first()
+        )
+        if not override_agent:
+            raise ValueError("agent override is invalid or disabled")
+        purpose_slugs = {str(item.slug or "").strip().lower() for item in override_agent.purposes.all()}
+        if purpose not in purpose_slugs:
+            raise ValueError(f"agent override is not compatible with purpose '{purpose}'")
+        effective_agent_id = str(override_agent.id)
+        effective_agent_name = str(override_agent.name or "").strip()
+        override_applied = effective_agent_id != (routed_agent_id or None)
+        if override_applied:
+            effective_resolution_source = "action_override"
+    return {
+        "purpose": purpose,
+        "routed_agent_id": routed_agent_id,
+        "routed_agent_name": routed_agent_name,
+        "routed_resolution_source": routed_resolution_source,
+        "routed_resolution_label": _agent_resolution_label(
+            purpose=purpose,
+            resolution_source=routed_resolution_source,
+        ),
+        "effective_agent_id": effective_agent_id,
+        "effective_agent_name": effective_agent_name,
+        "effective_resolution_source": effective_resolution_source,
+        "effective_resolution_label": "Action override"
+        if effective_resolution_source == "action_override"
+        else _agent_resolution_label(
+            purpose=purpose,
+            resolution_source=effective_resolution_source,
+        ),
+        "override_agent_id": override_id or None,
+        "override_applied": override_applied,
+    }
+
+
+def _build_dev_task_runtime_payload(
+    task: DevTask,
+    workspace: Workspace,
+    *,
+    agent_selection: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     source = _load_dev_task_runtime_source(task)
     work_item = source["work_item"]
     handoff = resolve_execution_brief(task, work_item=work_item)
@@ -26792,6 +26967,7 @@ def _build_dev_task_runtime_payload(task: DevTask, workspace: Workspace) -> Dict
                 "source_entity_id": str(task.source_entity_id or ""),
                 "execution_brief": handoff.brief,
                 "execution_brief_source": handoff.source_kind,
+                "ai_agent_selection": agent_selection if isinstance(agent_selection, dict) else {},
             },
         },
         "policy": {
@@ -26901,6 +27077,7 @@ def _serialize_runtime_run_for_dev_task(detail: Dict[str, Any]) -> Dict[str, Any
         "finished_at": detail.get("completed_at"),
         "failure_reason": detail.get("failure_reason"),
         "escalation_reason": detail.get("escalation_reason"),
+        "agent_selection": detail.get("agent_selection") if isinstance(detail.get("agent_selection"), dict) else None,
     }
 
 
@@ -27106,6 +27283,7 @@ def _resolve_dev_task_execution_payload(
             for item in artifacts_payload[:3]
             if isinstance(item, dict)
         ],
+        "agent_selection": (run_payload or {}).get("agent_selection") if isinstance((run_payload or {}).get("agent_selection"), dict) else None,
         "message": _execution_run_message(
             execution_state=execution_state,
             summary=run_summary,
@@ -29085,10 +29263,17 @@ def _execute_conversation_action(
     )
 
 
-def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -> Dict[str, Any]:
+def _submit_dev_task_runtime_run(
+    task: DevTask,
+    *,
+    workspace: Workspace,
+    user,
+    agent_override_id: Optional[str] = None,
+) -> Dict[str, Any]:
     source = _load_dev_task_runtime_source(task)
     ensure_execution_brief_ready(task, work_item=source["work_item"])
-    payload = _build_dev_task_runtime_payload(task, workspace)
+    agent_selection = _resolve_dev_task_agent_selection(task, agent_override_id=agent_override_id)
+    payload = _build_dev_task_runtime_payload(task, workspace, agent_selection=agent_selection)
     response = _seed_api_request(method="POST", path="/api/v1/runtime/runs", payload=payload, timeout=30)
     content_type = str(response.headers.get("content-type") or "").lower()
     if "application/json" not in content_type:
@@ -29125,7 +29310,7 @@ def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -
             "updated_at",
         ]
     )
-    return {"run_id": str(task.runtime_run_id), "status": task.status}
+    return {"run_id": str(task.runtime_run_id), "status": task.status, "agent_selection": agent_selection}
 
 
 def _conversation_default_repo(prompt: str) -> str:
@@ -30832,7 +31017,14 @@ def _dispatch_next_queue_item(*, workspace: Workspace, user, identity: UserIdent
     }
 
 
-def _dispatch_selected_queue_item(*, workspace: Workspace, task: DevTask, user, identity: UserIdentity) -> Dict[str, Any]:
+def _dispatch_selected_queue_item(
+    *,
+    workspace: Workspace,
+    task: DevTask,
+    user,
+    identity: UserIdentity,
+    agent_override_id: Optional[str] = None,
+) -> Dict[str, Any]:
     _, qs = _coordination_thread_queryset(identity, str(workspace.id))
     task_lookup = _coordination_task_lookup_factory(str(workspace.id))
     queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
@@ -30854,7 +31046,12 @@ def _dispatch_selected_queue_item(*, workspace: Workspace, task: DevTask, user, 
     if thread:
         record_thread_event(thread=thread, event_type="work_item_promoted", work_item=selected_task, payload={"work_item_id": selected_task.work_item_id or str(selected_task.id)})
     try:
-        result = _submit_dev_task_runtime_run(selected_task, workspace=workspace, user=user)
+        result = _submit_dev_task_runtime_run(
+            selected_task,
+            workspace=workspace,
+            user=user,
+            agent_override_id=agent_override_id,
+        )
     except ValueError as exc:
         selected_task.status = "awaiting_review"
         selected_task.last_error = str(exc)
@@ -30881,6 +31078,7 @@ def _dispatch_selected_queue_item(*, workspace: Workspace, task: DevTask, user, 
         "work_item_id": entry.work_item_id,
         "task_id": entry.task_id,
         "run_id": result.get("run_id"),
+        "agent_selection": result.get("agent_selection") if isinstance(result.get("agent_selection"), dict) else None,
     }
 
 
@@ -30918,12 +31116,19 @@ def dev_task_dispatch(request: HttpRequest, task_id: str) -> JsonResponse:
     workspace_id = str(payload.get("workspace_id") or "").strip()
     if not workspace_id:
         return JsonResponse({"error": "workspace_id is required"}, status=400)
+    agent_override_id = str(payload.get("agent_override_id") or "").strip() or None
     workspace, _ = _coordination_thread_queryset(identity, workspace_id)
     task = get_object_or_404(DevTask, id=task_id)
     if not task.coordination_thread_id or str(task.coordination_thread.workspace_id) != str(workspace.id):
         return JsonResponse({"error": "work item is not part of the selected workspace queue"}, status=404)
     try:
-        result = _dispatch_selected_queue_item(workspace=workspace, task=task, user=request.user, identity=identity)
+        result = _dispatch_selected_queue_item(
+            workspace=workspace,
+            task=task,
+            user=request.user,
+            identity=identity,
+            agent_override_id=agent_override_id,
+        )
     except RuntimeError as exc:
         task.refresh_from_db()
         detail_payload = _serialize_work_item_detail(task)
