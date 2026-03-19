@@ -1,5 +1,9 @@
 import uuid
+from datetime import timedelta
+
+from django.core.exceptions import ValidationError
 from django.test import TestCase
+from django.utils import timezone
 
 from xyn_orchestrator.models import (
     OrchestrationJobDefinition,
@@ -61,10 +65,11 @@ class OrchestrationLifecycleTests(TestCase):
         OrchestrationJobSchedule.objects.create(
             job_definition=self.job_a,
             schedule_key="hourly",
-            schedule_kind="cron",
-            cron_expression="0 * * * *",
+            schedule_kind="interval",
+            interval_seconds=3600,
             timezone_name="UTC",
             enabled=True,
+            next_fire_at=timezone.now() + timedelta(hours=1),
         )
         self.repository = DjangoOrchestrationRepository()
         self.lifecycle = OrchestrationLifecycleService(repository=self.repository)
@@ -216,3 +221,15 @@ class OrchestrationLifecycleTests(TestCase):
         self.assertEqual(rerun.scope_source, original.scope_source)
         self.assertTrue(str(rerun.chain_id or "").strip())
         self.assertEqual(OrchestrationJobRun.objects.filter(run=rerun).count(), 2)
+
+    def test_model_rejects_cron_schedule_kind_in_v1(self):
+        with self.assertRaises(ValidationError):
+            OrchestrationJobSchedule.objects.create(
+                job_definition=self.job_a,
+                schedule_key="legacy-cron",
+                schedule_kind="cron",
+                cron_expression="0 * * * *",
+                timezone_name="UTC",
+                enabled=True,
+                next_fire_at=timezone.now() + timedelta(hours=1),
+            )

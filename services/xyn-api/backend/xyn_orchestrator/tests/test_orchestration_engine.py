@@ -133,6 +133,26 @@ class OrchestrationEngineTests(TestCase):
             2,
         )
 
+    def test_due_scanner_ignores_legacy_cron_rows(self):
+        now = timezone.now()
+        # Use bulk_create to emulate legacy persisted cron rows from pre-v1 constraints.
+        OrchestrationJobSchedule.objects.bulk_create(
+            [
+                OrchestrationJobSchedule(
+                    job_definition=self.job_a,
+                    schedule_key="legacy-cron",
+                    schedule_kind="cron",
+                    cron_expression="0 * * * *",
+                    enabled=True,
+                    next_fire_at=now - timedelta(minutes=1),
+                    timezone_name="UTC",
+                )
+            ]
+        )
+        scanner = DueJobScanner()
+        due = scanner.scan_due_schedules(now=now)
+        self.assertEqual(due, [])
+
     def test_dependency_ordering_and_dispatch(self):
         run = self._create_manual_run()
         resolver = DependencyResolver(lifecycle=self.lifecycle, repository=self.repository)

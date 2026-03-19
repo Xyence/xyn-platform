@@ -36,6 +36,10 @@ refresh = define_job(
 )
 ```
 
+v1 schedule support:
+- `interval` and `manual` are supported.
+- `cron` definitions are rejected until v2 cron semantics are implemented.
+
 ## How to define a dependency chain
 
 Use `compose_pipeline(...)` and add jobs in sequence with `depends_on`.

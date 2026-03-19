@@ -19,6 +19,7 @@ New module: `xyn_orchestrator/orchestration/`
   - stage constants for common orchestration phases
 - `scheduling.py`
   - trigger representation (`manual`, `interval`, `cron`, `event`)
+  - v1 validation explicitly rejects `cron` (reserved for future implementation)
 - `graph.py`
   - dependency graph representation
   - topological ordering and ready-job resolution
@@ -59,6 +60,7 @@ New ORM models in `models.py` and migrations `0125_orchestration_scaffolding.py`
   - job-level retry/backoff, concurrency, scope flags, output/artifact declaration
 - `OrchestrationJobSchedule`
   - durable schedule rows per job definition (`manual`/`interval`/`cron`/`event`)
+  - v1 runtime support is intentionally limited to `manual` and `interval`
   - poll-friendly `enabled + next_fire_at` index
 - `OrchestrationJobDependency`
   - explicit upstream/downstream edges
@@ -119,7 +121,7 @@ The lifecycle service writes attempt rows and output rows, and recomputes parent
 Future apps (including Deal Finder) should only provide pipeline definitions + handlers, not custom orchestration infrastructure.
 
 ## Current TODOs
-- TODO: replace cron placeholder advancement logic with a robust cron iterator.
+- TODO: implement production-safe cron scheduling (parser + timezone semantics) before enabling `cron` in v2.
 - TODO: add optional automatic stale-retry/failure escalation policy hooks.
 - TODO: integrate engine tick with the platform worker/queue cadence.
 - TODO: add API endpoints/UI surfaces for run status visibility, manual rerun, and scoped rerun.

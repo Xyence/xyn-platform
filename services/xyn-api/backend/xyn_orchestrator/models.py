@@ -3061,6 +3061,32 @@ class OrchestrationJobSchedule(models.Model):
     def __str__(self) -> str:
         return f"{self.job_definition_id}:{self.schedule_key}"
 
+    def clean(self) -> None:
+        super().clean()
+        kind = str(self.schedule_kind or "").strip()
+        if kind == "cron":
+            raise ValidationError(
+                {
+                    "schedule_kind": "cron is not supported in orchestration v1. Use interval or manual schedules."
+                }
+            )
+        if kind == "interval":
+            if int(self.interval_seconds or 0) <= 0:
+                raise ValidationError({"interval_seconds": "interval_seconds must be > 0 for interval schedules."})
+            if not self.next_fire_at and bool(self.enabled):
+                raise ValidationError({"next_fire_at": "next_fire_at is required for enabled interval schedules."})
+            if str(self.cron_expression or "").strip():
+                raise ValidationError({"cron_expression": "cron_expression must be empty for interval schedules."})
+        elif kind in {"manual", "event"}:
+            if int(self.interval_seconds or 0) > 0:
+                raise ValidationError({"interval_seconds": "interval_seconds is only valid for interval schedules."})
+            if str(self.cron_expression or "").strip():
+                raise ValidationError({"cron_expression": "cron_expression is not supported in orchestration v1."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
 
 class OrchestrationJobDependency(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

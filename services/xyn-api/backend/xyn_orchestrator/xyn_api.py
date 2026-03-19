@@ -30704,11 +30704,13 @@ def _serialize_orchestration_job_definition(job: OrchestrationJobDefinition) -> 
 
 
 def _serialize_orchestration_schedule(schedule: OrchestrationJobSchedule) -> Dict[str, Any]:
+    supported_schedule_kinds = {"manual", "interval"}
     return {
         "id": str(schedule.id),
         "job_definition_id": str(schedule.job_definition_id),
         "schedule_key": schedule.schedule_key,
         "schedule_kind": schedule.schedule_kind,
+        "supported_in_v1": schedule.schedule_kind in supported_schedule_kinds,
         "enabled": bool(schedule.enabled),
         "cron_expression": schedule.cron_expression or "",
         "interval_seconds": int(schedule.interval_seconds or 0),
@@ -30959,7 +30961,14 @@ def orchestration_schedules_collection(request: HttpRequest) -> JsonResponse:
         }
         for item in qs.order_by("job_definition__pipeline__key", "job_definition__job_key", "schedule_key")
     ]
-    return JsonResponse({"workspace_id": str(workspace.id), "schedules": rows})
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "supported_schedule_kinds": ["manual", "interval"],
+            "unsupported_schedule_kinds": ["cron"],
+            "schedules": rows,
+        }
+    )
 
 
 @login_required

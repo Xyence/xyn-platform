@@ -21,7 +21,7 @@ class ScheduledTrigger:
     def validate(self) -> None:
         if not self.key.strip():
             raise ValueError("trigger key is required")
-        if self.kind == "cron" and not self.cron_expression.strip():
-            raise ValueError("cron trigger requires cron_expression")
+        if self.kind == "cron":
+            raise ValueError("cron trigger is not supported in orchestration v1; use interval or manual triggers")
         if self.kind == "interval" and int(self.interval_seconds or 0) <= 0:
             raise ValueError("interval trigger requires interval_seconds > 0")

@@ -21,6 +21,10 @@ This document describes the first production-ready baseline for the platform sch
   - retry with exponential backoff and max attempts
   - stale detection
   - manual rerun
+- Schedule support in v1:
+  - `interval` (poll-driven)
+  - `manual` (API/operator initiated)
+  - `cron` is explicitly unsupported and rejected in v1
 - App-facing authoring API:
   - typed job/pipeline DSL
   - registry and validation
@@ -39,6 +43,10 @@ This document describes the first production-ready baseline for the platform sch
 4. `RunDispatcher` claims jobs, enforces concurrency, invokes executor handlers, records attempts/outputs.
 5. Retryable failures move to `waiting_retry` with `next_attempt_at` using exponential backoff.
 6. `StaleRunDetector` marks stale queued/running jobs when deadlines are truly exceeded.
+
+Timezone note:
+- v1 scheduler timing uses persisted UTC timestamps (`next_fire_at`) for polling/advancement.
+- Cron timezone semantics are not enabled in v1.
 
 ## Idempotency expectations
 
@@ -101,7 +109,7 @@ These indexes support scheduler polling, status visibility, and dependency-drive
 
 ## v2 items (not in v1)
 
-- Robust cron parser and timezone-aware cron next-fire calculation.
+- Robust cron parser and timezone-aware cron next-fire calculation (required before enabling `cron` schedule kind).
 - Automatic stale escalation policy (auto-retry vs terminal failure policy hooks).
 - Push-based trigger/event integration beyond polling.
 - Multi-worker fairness and throughput tuning under very high queue pressure.

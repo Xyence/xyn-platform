@@ -58,7 +58,7 @@ class DueJobScanner:
         horizon = ts + timedelta(seconds=self._default_lookahead_seconds)
         rows = (
             OrchestrationJobSchedule.objects.select_related("job_definition", "job_definition__pipeline", "job_definition__pipeline__workspace")
-            .filter(enabled=True)
+            .filter(enabled=True, schedule_kind="interval")
             .filter(job_definition__enabled=True, job_definition__pipeline__enabled=True)
             .filter(next_fire_at__isnull=False, next_fire_at__lte=horizon)
             .order_by("next_fire_at", "created_at")[: max(1, int(limit or 1))]
@@ -113,6 +113,17 @@ class RunPlanner:
             return []
         if schedule.next_fire_at and schedule.next_fire_at > ts:
             return []
+        if schedule.schedule_kind != "interval":
+            logger.warning(
+                "orchestration.schedule.unsupported_kind",
+                extra={
+                    "schedule_id": str(schedule.id),
+                    "schedule_kind": str(schedule.schedule_kind),
+                    "pipeline_key": str(schedule.job_definition.pipeline.key),
+                    "job_key": str(schedule.job_definition.job_key),
+                },
+            )
+            return []
 
         job_def = schedule.job_definition
         created_runs: list[OrchestrationRun] = []
@@ -140,11 +151,8 @@ class RunPlanner:
             created_runs.append(run)
 
         schedule.last_fired_at = ts
-        if schedule.schedule_kind == "interval" and int(schedule.interval_seconds or 0) > 0:
+        if int(schedule.interval_seconds or 0) > 0:
             schedule.next_fire_at = ts + timedelta(seconds=int(schedule.interval_seconds))
-        elif schedule.schedule_kind == "cron":
-            # TODO: add robust cron parser; current behavior advances by one hour for scaffold runtime.
-            schedule.next_fire_at = ts + timedelta(hours=1)
         else:
             schedule.next_fire_at = None
         schedule.save(update_fields=["last_fired_at", "next_fire_at", "updated_at"])

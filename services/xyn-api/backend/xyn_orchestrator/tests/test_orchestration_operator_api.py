@@ -153,6 +153,9 @@ class OrchestrationOperatorApiTests(TestCase):
         self.assertEqual(graph_response.status_code, 200)
         self.assertEqual(len(jobs_payload["job_definitions"]), 2)
         self.assertEqual(len(schedules_payload["schedules"]), 1)
+        self.assertEqual(schedules_payload["supported_schedule_kinds"], ["manual", "interval"])
+        self.assertEqual(schedules_payload["unsupported_schedule_kinds"], ["cron"])
+        self.assertTrue(schedules_payload["schedules"][0]["supported_in_v1"])
         self.assertEqual(len(graph_payload["edges"]), 1)
         self.assertEqual(graph_payload["edges"][0]["upstream_job_key"], "refresh_source")
 

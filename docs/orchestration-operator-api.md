@@ -18,6 +18,10 @@ All endpoints require authenticated user context and workspace membership.
 `GET /xyn/api/orchestration/schedules?workspace_id=<uuid>&pipeline_key=<key?>&job_key=<key?>`
 
 - Returns schedule rows with interval/cron settings, next/last fire timestamps, and metadata.
+- Response includes:
+  - `supported_schedule_kinds` (`manual`, `interval`)
+  - `unsupported_schedule_kinds` (`cron`)
+  - per-row `supported_in_v1` boolean
 
 ## Inspect dependency graph
 

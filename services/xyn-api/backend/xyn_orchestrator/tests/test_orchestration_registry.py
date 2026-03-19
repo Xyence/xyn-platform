@@ -135,6 +135,22 @@ class OrchestrationRegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_pipeline_registration(pipeline=composer.compose(), handler_keys=registry.handler_keys())
 
+    def test_validation_rejects_cron_schedule_in_v1(self):
+        registry = OrchestrationRegistry()
+        registry.register_handler(handler_key="h.refresh", executor=_NoopExecutor())
+        composer = compose_pipeline(key="cron_not_supported", display_name="Cron Not Supported")
+        composer.add_job(
+            define_job(
+                key="refresh",
+                stage_key="source_refresh",
+                display_name="Refresh",
+                handler_key="h.refresh",
+                schedules=(ScheduledTrigger(key="hourly", kind="cron", cron_expression="0 * * * *"),),
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "not supported"):
+            validate_pipeline_registration(pipeline=composer.compose(), handler_keys=registry.handler_keys())
+
     def test_sample_pipeline_is_generic_and_valid(self):
         registry = OrchestrationRegistry()
         self._register_standard_handlers(registry)
