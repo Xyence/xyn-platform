@@ -5,6 +5,7 @@ from typing import Any
 from django.db import transaction
 
 from xyn_orchestrator.models import OrchestrationRun, RecordMatchEvaluation, Workspace
+from xyn_orchestrator.provenance import AuditWithProvenanceInput, AuditEventInput, ProvenanceLinkInput, ProvenanceService, object_ref
 
 from .interfaces import MatchEvaluation
 
@@ -67,5 +68,67 @@ class DjangoMatchResultRepository:
             candidate_a_ref_json=_serialize_ref(evaluation.candidate_a),
             candidate_b_ref_json=_serialize_ref(evaluation.candidate_b),
             extra_json=metadata if isinstance(metadata, dict) else {},
+        )
+        provenance = ProvenanceService()
+        result_ref = object_ref(
+            object_family="record_match_evaluation",
+            object_id=str(row.id),
+            workspace_id=str(workspace.id),
+            attributes={"decision": row.decision, "score": float(row.score)},
+        )
+        candidate_a_ref = object_ref(
+            object_family=str(row.candidate_a_type or "record"),
+            object_id=str(row.candidate_a_id),
+            workspace_id=str(workspace.id),
+            namespace=str(row.candidate_a_namespace or ""),
+        )
+        candidate_b_ref = object_ref(
+            object_family=str(row.candidate_b_type or "record"),
+            object_id=str(row.candidate_b_id),
+            workspace_id=str(workspace.id),
+            namespace=str(row.candidate_b_namespace or ""),
+        )
+        provenance.record_audit_with_provenance(
+            AuditWithProvenanceInput(
+                event=AuditEventInput(
+                    workspace_id=str(workspace.id),
+                    event_type="record_matching.evaluated",
+                    subject_ref=result_ref,
+                    summary=f"Record match evaluated via {row.strategy_key}",
+                    reason=f"decision={row.decision}",
+                    metadata={
+                        "strategy_key": row.strategy_key,
+                        "score": float(row.score),
+                        "confidence": row.confidence,
+                    },
+                    run_id=str(run.id) if run else "",
+                    correlation_id=str(correlation_id or "").strip(),
+                    chain_id=str(chain_id or "").strip(),
+                ),
+                provenance_links=(
+                    ProvenanceLinkInput(
+                        workspace_id=str(workspace.id),
+                        relationship_type="match_evaluated_from",
+                        source_ref=candidate_a_ref,
+                        target_ref=result_ref,
+                        reason="candidate_a contributed to match evaluation",
+                        explanation={"candidate_role": "a"},
+                        run_id=str(run.id) if run else "",
+                        correlation_id=str(correlation_id or "").strip(),
+                        chain_id=str(chain_id or "").strip(),
+                    ),
+                    ProvenanceLinkInput(
+                        workspace_id=str(workspace.id),
+                        relationship_type="match_evaluated_from",
+                        source_ref=candidate_b_ref,
+                        target_ref=result_ref,
+                        reason="candidate_b contributed to match evaluation",
+                        explanation={"candidate_role": "b"},
+                        run_id=str(run.id) if run else "",
+                        correlation_id=str(correlation_id or "").strip(),
+                        chain_id=str(chain_id or "").strip(),
+                    ),
+                ),
+            )
         )
         return row

@@ -2385,6 +2385,88 @@ class AuditLog(models.Model):
         return self.message[:120]
 
 
+class PlatformAuditEvent(models.Model):
+    """Canonical platform audit event for reusable actor/action/object history."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="platform_audit_events")
+    event_type = models.CharField(max_length=160, db_index=True)
+    subject_type = models.CharField(max_length=120, db_index=True)
+    subject_id = models.CharField(max_length=255, db_index=True)
+    subject_namespace = models.CharField(max_length=120, blank=True, default="")
+    subject_ref_json = models.JSONField(default=dict, blank=True)
+    actor_type = models.CharField(max_length=120, blank=True, default="")
+    actor_id = models.CharField(max_length=255, blank=True, default="")
+    actor_namespace = models.CharField(max_length=120, blank=True, default="")
+    actor_ref_json = models.JSONField(default=dict, blank=True)
+    cause_type = models.CharField(max_length=120, blank=True, default="")
+    cause_id = models.CharField(max_length=255, blank=True, default="")
+    cause_namespace = models.CharField(max_length=120, blank=True, default="")
+    cause_ref_json = models.JSONField(default=dict, blank=True)
+    summary = models.CharField(max_length=280, blank=True, default="")
+    reason = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="platform_audit_events"
+    )
+    correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "event_type", "created_at"], name="ix_platform_audit_type_time"),
+            models.Index(fields=["workspace", "subject_type", "subject_id", "created_at"], name="ix_platform_audit_subject"),
+            models.Index(fields=["workspace", "correlation_id", "created_at"], name="ix_platform_audit_corr"),
+            models.Index(fields=["workspace", "chain_id", "created_at"], name="ix_platform_audit_chain"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.event_type}:{self.subject_type}:{self.subject_id}"
+
+
+class ProvenanceLink(models.Model):
+    """Thin source->target provenance linkage for reusable object derivation tracking."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="provenance_links")
+    relationship_type = models.CharField(max_length=160, db_index=True)
+    source_type = models.CharField(max_length=120, db_index=True)
+    source_id = models.CharField(max_length=255, db_index=True)
+    source_namespace = models.CharField(max_length=120, blank=True, default="")
+    source_ref_json = models.JSONField(default=dict, blank=True)
+    target_type = models.CharField(max_length=120, db_index=True)
+    target_id = models.CharField(max_length=255, db_index=True)
+    target_namespace = models.CharField(max_length=120, blank=True, default="")
+    target_ref_json = models.JSONField(default=dict, blank=True)
+    reason = models.TextField(blank=True, default="")
+    explanation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    origin_event = models.ForeignKey(
+        PlatformAuditEvent, null=True, blank=True, on_delete=models.SET_NULL, related_name="provenance_links"
+    )
+    run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="provenance_links"
+    )
+    correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "source_type", "source_id", "created_at"], name="ix_prov_source_time"),
+            models.Index(fields=["workspace", "target_type", "target_id", "created_at"], name="ix_prov_target_time"),
+            models.Index(fields=["workspace", "relationship_type", "created_at"], name="ix_prov_relationship_time"),
+            models.Index(fields=["workspace", "correlation_id", "created_at"], name="ix_prov_corr_time"),
+            models.Index(fields=["workspace", "chain_id", "created_at"], name="ix_prov_chain_time"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.relationship_type}:{self.source_type}->{self.target_type}"
+
+
 class PlatformConfigDocument(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     version = models.PositiveIntegerField(default=1)
@@ -2975,6 +3057,115 @@ class Campaign(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class WatchDefinition(models.Model):
+    LIFECYCLE_CHOICES = [
+        ("draft", "Draft"),
+        ("active", "Active"),
+        ("paused", "Paused"),
+        ("archived", "Archived"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="watches")
+    key = models.CharField(max_length=120)
+    name = models.CharField(max_length=240)
+    target_kind = models.CharField(max_length=120, default="generic")
+    target_ref_json = models.JSONField(default=dict, blank=True)
+    filter_criteria_json = models.JSONField(default=dict, blank=True)
+    lifecycle_state = models.CharField(max_length=20, choices=LIFECYCLE_CHOICES, default="draft", db_index=True)
+    linked_campaign = models.ForeignKey(
+        Campaign, null=True, blank=True, on_delete=models.SET_NULL, related_name="linked_watches"
+    )
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_watches"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="uniq_watch_workspace_key"),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "lifecycle_state"], name="ix_watch_workspace_state"),
+            models.Index(fields=["workspace", "target_kind"], name="ix_watch_workspace_target"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.key}"
+
+
+class WatchSubscriber(models.Model):
+    SUBSCRIBER_TYPE_CHOICES = [
+        ("user_identity", "User Identity"),
+        ("delivery_target", "Delivery Target"),
+        ("external_endpoint", "External Endpoint"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    watch = models.ForeignKey(WatchDefinition, on_delete=models.CASCADE, related_name="subscribers")
+    subscriber_type = models.CharField(max_length=40, choices=SUBSCRIBER_TYPE_CHOICES, default="user_identity")
+    subscriber_ref = models.CharField(max_length=255)
+    destination_json = models.JSONField(default=dict, blank=True)
+    preferences_json = models.JSONField(default=dict, blank=True)
+    enabled = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_watch_subscribers"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["watch", "subscriber_type", "subscriber_ref"],
+                name="uniq_watch_subscriber_ref",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["watch", "enabled"], name="ix_watch_subscriber_enabled"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.watch_id}:{self.subscriber_type}:{self.subscriber_ref}"
+
+
+class WatchMatchEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="watch_match_events")
+    watch = models.ForeignKey(WatchDefinition, on_delete=models.CASCADE, related_name="match_events")
+    event_key = models.CharField(max_length=120, blank=True, default="")
+    matched = models.BooleanField(default=False, db_index=True)
+    score = models.FloatField(default=0.0)
+    reason = models.TextField(blank=True, default="")
+    explanation_json = models.JSONField(default=dict, blank=True)
+    event_ref_json = models.JSONField(default=dict, blank=True)
+    filter_snapshot_json = models.JSONField(default=dict, blank=True)
+    notification_intent_json = models.JSONField(default=dict, blank=True)
+    run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="watch_match_events"
+    )
+    correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "watch", "created_at"], name="ix_watch_match_timeline"),
+            models.Index(fields=["workspace", "matched", "created_at"], name="ix_watch_match_workspace_state"),
+            models.Index(fields=["workspace", "correlation_id"], name="ix_watch_match_correlation"),
+            models.Index(fields=["workspace", "chain_id"], name="ix_watch_match_chain"),
+            models.Index(fields=["workspace", "event_key", "created_at"], name="ix_watch_match_event"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.watch_id}:{self.matched}:{self.id}"
 
 
 class LifecycleTransition(models.Model):

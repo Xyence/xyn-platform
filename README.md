@@ -77,6 +77,13 @@ This repo includes `.githooks/pre-push`, and local Git is configured with `core.
 - If the local checks fail, the push is blocked.
 - Emergency bypass: `SKIP_XYN_PUBLISH=1 git push`
 
+Backend boundary drift guard (manual/CI-friendly):
+
+```bash
+cd services/xyn-api/backend
+python scripts/check_canonical_boundaries.py
+```
+
 ## CI publishing
 
 GitHub Actions workflow: `.github/workflows/publish.yml`

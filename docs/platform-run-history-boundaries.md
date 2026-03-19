@@ -60,3 +60,9 @@ For object state/lifecycle transitions (not execution-run history), use the cano
 - `xyn_orchestrator.models.LifecycleTransition`
 
 `xyn/core` lifecycle code is compatibility/integration only and is not the canonical platform seam.
+
+## Drift Guard
+
+For a concise multi-primitive boundary summary and lightweight automated drift checks, see:
+
+- `docs/platform-architecture-boundaries.md`

@@ -143,3 +143,11 @@ Future apps (including Deal Finder) should only provide pipeline definitions + h
 ## Lifecycle Primitive TODOs
 - TODO: migrate additional object adapters (campaign/source connector/workflow-like entities) onto the canonical lifecycle primitive contract and durable `LifecycleTransition` history rows.
 - TODO: add a shared API/serializer seam for transition history visibility across object families without duplicating object-specific endpoints.
+
+## Audit/Provenance TODOs
+- TODO: align orchestration operator actions with canonical `PlatformAuditEvent` emission patterns for trigger/rerun/cancel/ack paths.
+- TODO: add first-party provenance links from orchestration job outputs/artifacts to downstream records and notifications.
+
+## Canonical-Boundary Guardrail TODOs
+- TODO: wire `scripts/check_canonical_boundaries.py` into CI default backend validation (not only targeted/manual runs).
+- TODO: add cross-repo guard checks that assert `xyn/core` compatibility seams do not regain canonical platform-primitive ownership.

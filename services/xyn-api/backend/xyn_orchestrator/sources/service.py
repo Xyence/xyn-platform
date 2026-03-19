@@ -7,6 +7,7 @@ from typing import Any
 from django.utils import timezone
 
 from xyn_orchestrator.models import SourceConnector, SourceInspectionProfile, SourceMapping
+from xyn_orchestrator.provenance import AuditEventInput, ProvenanceService, object_ref
 
 from .interfaces import (
     SOURCE_HEALTH_STATES,
@@ -139,17 +140,49 @@ class SourceConnectorService:
         source.lifecycle_state = "active"
         source.health_status = "healthy" if source.health_status == "unknown" else source.health_status
         source.last_failure_reason = ""
-        return self._repository.update_source(
+        updated = self._repository.update_source(
             source=source,
             update_fields=["is_active", "lifecycle_state", "health_status", "last_failure_reason"],
         )
+        ProvenanceService().record_audit_event(
+            AuditEventInput(
+                workspace_id=str(updated.workspace_id),
+                event_type="source_connector.activated",
+                subject_ref=object_ref(
+                    object_family="source_connector",
+                    object_id=str(updated.id),
+                    workspace_id=str(updated.workspace_id),
+                    attributes={"key": str(updated.key), "source_type": str(updated.source_type)},
+                ),
+                summary=f"Source connector {updated.key} activated",
+                reason="readiness checks passed",
+                metadata={"lifecycle_state": str(updated.lifecycle_state), "health_status": str(updated.health_status)},
+            )
+        )
+        return updated
 
     def pause_source(self, *, source_id: str) -> SourceConnector:
         source = self._repository.get_source(source_id=source_id)
         source.is_active = False
         source.lifecycle_state = "paused"
         source.health_status = "paused"
-        return self._repository.update_source(source=source, update_fields=["is_active", "lifecycle_state", "health_status"])
+        updated = self._repository.update_source(source=source, update_fields=["is_active", "lifecycle_state", "health_status"])
+        ProvenanceService().record_audit_event(
+            AuditEventInput(
+                workspace_id=str(updated.workspace_id),
+                event_type="source_connector.paused",
+                subject_ref=object_ref(
+                    object_family="source_connector",
+                    object_id=str(updated.id),
+                    workspace_id=str(updated.workspace_id),
+                    attributes={"key": str(updated.key), "source_type": str(updated.source_type)},
+                ),
+                summary=f"Source connector {updated.key} paused",
+                reason="paused by platform/operator flow",
+                metadata={"lifecycle_state": str(updated.lifecycle_state), "health_status": str(updated.health_status)},
+            )
+        )
+        return updated
 
     def update_health(self, payload: SourceHealthUpdate) -> SourceConnector:
         source = self._repository.get_source(source_id=payload.source_id)
@@ -178,7 +211,28 @@ class SourceConnectorService:
             if run is not None:
                 source.last_run = run
                 update_fields.append("last_run")
-        return self._repository.update_source(source=source, update_fields=update_fields)
+        updated = self._repository.update_source(source=source, update_fields=update_fields)
+        ProvenanceService().record_audit_event(
+            AuditEventInput(
+                workspace_id=str(updated.workspace_id),
+                event_type="source_connector.health_updated",
+                subject_ref=object_ref(
+                    object_family="source_connector",
+                    object_id=str(updated.id),
+                    workspace_id=str(updated.workspace_id),
+                    attributes={"key": str(updated.key), "source_type": str(updated.source_type)},
+                ),
+                summary=f"Health updated for source connector {updated.key}",
+                reason=str(payload.failure_reason or "health state change"),
+                metadata={
+                    "health_status": str(updated.health_status),
+                    "lifecycle_state": str(updated.lifecycle_state),
+                    "success": bool(payload.success),
+                },
+                run_id=str(payload.run_id or ""),
+            )
+        )
+        return updated
 
     def build_execution_contract(self, *, source_id: str) -> SourceExecutionContract:
         source = self._repository.get_source(source_id=source_id)

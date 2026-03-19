@@ -68,6 +68,10 @@ from .models import (
     DevTask,
     Campaign,
     CampaignType,
+    WatchDefinition,
+    WatchMatchEvent,
+    PlatformAuditEvent,
+    ProvenanceLink,
     SourceConnector,
     RecordMatchEvaluation,
     OrchestrationPipeline,
@@ -165,6 +169,24 @@ from .sources import (
     serialize_source_connector,
     serialize_source_inspection,
     serialize_source_mapping,
+)
+from .watching import (
+    WATCH_LIFECYCLE_STATES,
+    WATCH_SUBSCRIBER_TYPES,
+    WatchEvaluationInput,
+    WatchRegistration,
+    WatchService,
+    WatchSubscriberInput,
+    serialize_watch,
+    serialize_watch_evaluation,
+    serialize_watch_match,
+    serialize_watch_subscriber,
+)
+from .provenance import (
+    PROVENANCE_DIRECTIONS,
+    ProvenanceService,
+    serialize_audit_event,
+    serialize_provenance_link,
 )
 from .orchestration import AppNotificationFailureNotifier
 from .orchestration.schedule_policy import supported_schedule_kinds, unsupported_schedule_kinds
@@ -30679,6 +30701,418 @@ def campaign_detail(request: HttpRequest, campaign_id: str) -> JsonResponse:
     if update_fields:
         campaign.save(update_fields=[*update_fields, "updated_at"])
     return JsonResponse(_serialize_campaign_detail(campaign, workspace=campaign.workspace))
+
+
+def _watch_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[WatchDefinition]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = WatchDefinition.objects.filter(workspace=workspace).select_related("linked_campaign", "created_by").order_by("-updated_at", "-created_at")
+    return workspace, qs
+
+
+@csrf_exempt
+@login_required
+def watches_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    service = WatchService()
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        try:
+            workspace, _ = _watch_queryset(identity, workspace_id)
+        except PermissionDenied:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        try:
+            row = service.register_watch(
+                WatchRegistration(
+                    workspace_id=str(workspace.id),
+                    key=str(payload.get("key") or "").strip(),
+                    name=str(payload.get("name") or "").strip(),
+                    target_kind=str(payload.get("target_kind") or "generic").strip() or "generic",
+                    target_ref=payload.get("target_ref") if isinstance(payload.get("target_ref"), dict) else {},
+                    filter_criteria=payload.get("filter_criteria") if isinstance(payload.get("filter_criteria"), dict) else {},
+                    lifecycle_state=str(payload.get("lifecycle_state") or "draft").strip() or "draft",
+                    linked_campaign_id=str(payload.get("linked_campaign_id") or "").strip(),
+                    metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+                    created_by_id=str(identity.id),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        except Exception:
+            return JsonResponse({"error": "watch key already exists in workspace or linked campaign is invalid"}, status=409)
+        return JsonResponse(serialize_watch(row), status=201)
+
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _watch_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    lifecycle_state = str(request.GET.get("lifecycle_state") or "").strip().lower()
+    if lifecycle_state:
+        qs = qs.filter(lifecycle_state=lifecycle_state)
+    target_kind = str(request.GET.get("target_kind") or "").strip().lower()
+    if target_kind:
+        qs = qs.filter(target_kind=target_kind)
+    rows = [serialize_watch(item) for item in qs]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "lifecycle_states": list(WATCH_LIFECYCLE_STATES),
+            "subscriber_types": list(WATCH_SUBSCRIBER_TYPES),
+            "watches": rows,
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def watch_detail(request: HttpRequest, watch_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    watch = get_object_or_404(WatchDefinition.objects.select_related("workspace", "linked_campaign", "created_by"), id=watch_id)
+    if not _workspace_membership(identity, str(watch.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not context_workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        if context_workspace_id != str(watch.workspace_id):
+            return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+        return JsonResponse(serialize_watch(watch))
+    if request.method not in {"PATCH", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(watch.workspace_id):
+        return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+    update_fields: List[str] = []
+    if "name" in payload:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return JsonResponse({"error": "name cannot be empty"}, status=400)
+        watch.name = name[:240]
+        update_fields.append("name")
+    if "target_kind" in payload:
+        watch.target_kind = str(payload.get("target_kind") or "generic").strip().lower() or "generic"
+        update_fields.append("target_kind")
+    if "target_ref" in payload:
+        target_ref = payload.get("target_ref")
+        if target_ref is not None and not isinstance(target_ref, dict):
+            return JsonResponse({"error": "target_ref must be an object"}, status=400)
+        watch.target_ref_json = target_ref or {}
+        update_fields.append("target_ref_json")
+    if "filter_criteria" in payload:
+        filter_criteria = payload.get("filter_criteria")
+        if filter_criteria is not None and not isinstance(filter_criteria, dict):
+            return JsonResponse({"error": "filter_criteria must be an object"}, status=400)
+        watch.filter_criteria_json = filter_criteria or {}
+        update_fields.append("filter_criteria_json")
+    if "metadata" in payload:
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return JsonResponse({"error": "metadata must be an object"}, status=400)
+        watch.metadata_json = metadata or {}
+        update_fields.append("metadata_json")
+    if "lifecycle_state" in payload:
+        lifecycle_state = str(payload.get("lifecycle_state") or "").strip().lower()
+        if lifecycle_state not in WATCH_LIFECYCLE_STATES:
+            return JsonResponse({"error": f"lifecycle_state must be one of {', '.join(WATCH_LIFECYCLE_STATES)}"}, status=400)
+        watch.lifecycle_state = lifecycle_state
+        update_fields.append("lifecycle_state")
+    if "linked_campaign_id" in payload:
+        campaign_id = str(payload.get("linked_campaign_id") or "").strip()
+        if campaign_id:
+            campaign = Campaign.objects.filter(id=campaign_id, workspace_id=watch.workspace_id).first()
+            if campaign is None:
+                return JsonResponse({"error": "linked campaign not found in workspace context"}, status=404)
+            watch.linked_campaign = campaign
+        else:
+            watch.linked_campaign = None
+        update_fields.append("linked_campaign")
+    if update_fields:
+        watch.save(update_fields=[*update_fields, "updated_at"])
+    return JsonResponse(serialize_watch(watch))
+
+
+@csrf_exempt
+@login_required
+def watch_activate(request: HttpRequest, watch_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    watch = get_object_or_404(WatchDefinition.objects.select_related("workspace"), id=watch_id)
+    if not _workspace_membership(identity, str(watch.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(watch.workspace_id):
+        return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+    service = WatchService()
+    watch = service.update_watch_lifecycle(watch_id=str(watch.id), lifecycle_state="active")
+    return JsonResponse(serialize_watch(watch))
+
+
+@csrf_exempt
+@login_required
+def watch_pause(request: HttpRequest, watch_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    watch = get_object_or_404(WatchDefinition.objects.select_related("workspace"), id=watch_id)
+    if not _workspace_membership(identity, str(watch.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(watch.workspace_id):
+        return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+    service = WatchService()
+    watch = service.update_watch_lifecycle(watch_id=str(watch.id), lifecycle_state="paused")
+    return JsonResponse(serialize_watch(watch))
+
+
+@csrf_exempt
+@login_required
+def watch_subscribers_collection(request: HttpRequest, watch_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    watch = get_object_or_404(WatchDefinition.objects.select_related("workspace"), id=watch_id)
+    if not _workspace_membership(identity, str(watch.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = WatchService()
+    if request.method == "POST":
+        payload = _parse_json(request)
+        if str(payload.get("workspace_id") or "").strip() != str(watch.workspace_id):
+            return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+        try:
+            row = service.add_subscriber(
+                WatchSubscriberInput(
+                    watch_id=str(watch.id),
+                    subscriber_type=str(payload.get("subscriber_type") or "").strip(),
+                    subscriber_ref=str(payload.get("subscriber_ref") or "").strip(),
+                    destination=payload.get("destination") if isinstance(payload.get("destination"), dict) else {},
+                    preferences=payload.get("preferences") if isinstance(payload.get("preferences"), dict) else {},
+                    enabled=bool(payload.get("enabled", True)),
+                    created_by_id=str(identity.id),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        return JsonResponse(serialize_watch_subscriber(row), status=201)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if context_workspace_id != str(watch.workspace_id):
+        return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+    rows = [serialize_watch_subscriber(item) for item in service.list_subscribers(watch_id=str(watch.id))]
+    return JsonResponse(
+        {
+            "watch_id": str(watch.id),
+            "workspace_id": str(watch.workspace_id),
+            "subscriber_types": list(WATCH_SUBSCRIBER_TYPES),
+            "subscribers": rows,
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _watch_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    watch_ids = payload.get("watch_ids") if isinstance(payload.get("watch_ids"), list) else []
+    service = WatchService()
+    try:
+        rows = service.evaluate(
+            WatchEvaluationInput(
+                workspace_id=str(workspace.id),
+                event_key=str(payload.get("event_key") or "").strip(),
+                event_ref=payload.get("event_ref") if isinstance(payload.get("event_ref"), dict) else {},
+                watch_ids=tuple(str(item).strip() for item in watch_ids if str(item).strip()),
+                run_id=str(payload.get("run_id") or "").strip(),
+                correlation_id=str(payload.get("correlation_id") or "").strip(),
+                chain_id=str(payload.get("chain_id") or "").strip(),
+                metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            ),
+            persist=bool(payload.get("persist", True)),
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "persisted": bool(payload.get("persist", True)),
+            "results": [serialize_watch_evaluation(item) for item in rows],
+        },
+        status=201 if bool(payload.get("persist", True)) else 200,
+    )
+
+
+@login_required
+def watch_matches_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _watch_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    qs = WatchMatchEvent.objects.filter(workspace=workspace).select_related("watch", "run").order_by("-created_at", "-id")
+    watch_id = str(request.GET.get("watch_id") or "").strip()
+    if watch_id:
+        qs = qs.filter(watch_id=watch_id)
+    event_key = str(request.GET.get("event_key") or "").strip()
+    if event_key:
+        qs = qs.filter(event_key=event_key)
+    matched = str(request.GET.get("matched") or "").strip().lower()
+    if matched in {"true", "1", "yes"}:
+        qs = qs.filter(matched=True)
+    elif matched in {"false", "0", "no"}:
+        qs = qs.filter(matched=False)
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
+    rows = [serialize_watch_match(item) for item in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "matches": rows})
+
+
+def _provenance_workspace(identity: UserIdentity, workspace_id: str) -> Workspace:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    return workspace
+
+
+@login_required
+def audit_events_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _provenance_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = ProvenanceService()
+    object_type = str(request.GET.get("object_type") or "").strip().lower()
+    object_id = str(request.GET.get("object_id") or "").strip()
+    event_type = str(request.GET.get("event_type") or "").strip().lower()
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    run_id = str(request.GET.get("run_id") or "").strip()
+    limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
+    if object_type and object_id:
+        qs = service.audit_history(workspace_id=str(workspace.id), object_type=object_type, object_id=object_id)
+    else:
+        qs = PlatformAuditEvent.objects.filter(workspace=workspace).select_related("run").order_by("-created_at", "-id")
+    if event_type:
+        qs = qs.filter(event_type=event_type)
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    rows = [serialize_audit_event(item) for item in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "events": rows})
+
+
+@login_required
+def provenance_links_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _provenance_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    object_type = str(request.GET.get("object_type") or "").strip().lower()
+    object_id = str(request.GET.get("object_id") or "").strip()
+    direction = str(request.GET.get("direction") or "both").strip().lower() or "both"
+    if direction not in PROVENANCE_DIRECTIONS:
+        return JsonResponse({"error": f"direction must be one of {', '.join(PROVENANCE_DIRECTIONS)}"}, status=400)
+    service = ProvenanceService()
+    if object_type and object_id:
+        qs = service.provenance_for_object(
+            workspace_id=str(workspace.id),
+            object_type=object_type,
+            object_id=object_id,
+            direction=direction,
+        )
+    else:
+        qs = ProvenanceLink.objects.filter(workspace=workspace).select_related("origin_event", "run").order_by("-created_at", "-id")
+    relationship_type = str(request.GET.get("relationship_type") or "").strip().lower()
+    if relationship_type:
+        qs = qs.filter(relationship_type=relationship_type)
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
+    rows = [serialize_provenance_link(item) for item in qs[:limit]]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "direction": direction,
+            "links": rows,
+        }
+    )
 
 
 def _source_connector_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[SourceConnector]]:
