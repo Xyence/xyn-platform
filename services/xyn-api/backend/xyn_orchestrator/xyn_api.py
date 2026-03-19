@@ -68,6 +68,7 @@ from .models import (
     DevTask,
     Campaign,
     CampaignType,
+    SourceConnector,
     RecordMatchEvaluation,
     OrchestrationPipeline,
     OrchestrationJobDefinition,
@@ -153,6 +154,17 @@ from .matching import (
     RecordMatchingService,
     StrategyContext,
     evaluation_as_dict,
+)
+from .sources import (
+    SOURCE_MODES,
+    SourceConnectorService,
+    SourceHealthUpdate,
+    SourceInspectionInput,
+    SourceMappingInput,
+    SourceRegistration,
+    serialize_source_connector,
+    serialize_source_inspection,
+    serialize_source_mapping,
 )
 from .orchestration import AppNotificationFailureNotifier
 from .orchestration.schedule_policy import supported_schedule_kinds, unsupported_schedule_kinds
@@ -30667,6 +30679,316 @@ def campaign_detail(request: HttpRequest, campaign_id: str) -> JsonResponse:
     if update_fields:
         campaign.save(update_fields=[*update_fields, "updated_at"])
     return JsonResponse(_serialize_campaign_detail(campaign, workspace=campaign.workspace))
+
+
+def _source_connector_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[SourceConnector]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = SourceConnector.objects.filter(workspace=workspace).select_related("last_run", "created_by").order_by("-updated_at", "-created_at")
+    return workspace, qs
+
+
+@csrf_exempt
+@login_required
+def source_connectors_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    service = SourceConnectorService()
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        try:
+            workspace, _ = _source_connector_queryset(identity, workspace_id)
+        except PermissionDenied:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        try:
+            source = service.register_source(
+                SourceRegistration(
+                    workspace_id=str(workspace.id),
+                    key=str(payload.get("key") or "").strip(),
+                    name=str(payload.get("name") or "").strip(),
+                    source_type=str(payload.get("source_type") or "generic").strip() or "generic",
+                    source_mode=str(payload.get("source_mode") or "manual").strip() or "manual",
+                    refresh_cadence_seconds=int(payload.get("refresh_cadence_seconds") or 0),
+                    orchestration_pipeline_key=str(payload.get("orchestration_pipeline_key") or "").strip(),
+                    configuration=payload.get("configuration") if isinstance(payload.get("configuration"), dict) else {},
+                    provenance=payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {},
+                    metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+                    created_by_id=str(identity.id),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        except Exception:
+            return JsonResponse({"error": "source key already exists in workspace"}, status=409)
+        readiness = service.validate_readiness(source_id=str(source.id))
+        return JsonResponse(serialize_source_connector(source, readiness=readiness), status=201)
+
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _source_connector_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    source_mode = str(request.GET.get("source_mode") or "").strip().lower()
+    if source_mode:
+        qs = qs.filter(source_mode=source_mode)
+    lifecycle_state = str(request.GET.get("lifecycle_state") or "").strip().lower()
+    if lifecycle_state:
+        qs = qs.filter(lifecycle_state=lifecycle_state)
+    health_status = str(request.GET.get("health_status") or "").strip().lower()
+    if health_status:
+        qs = qs.filter(health_status=health_status)
+    is_active = str(request.GET.get("is_active") or "").strip().lower()
+    if is_active in {"true", "1", "yes"}:
+        qs = qs.filter(is_active=True)
+    elif is_active in {"false", "0", "no"}:
+        qs = qs.filter(is_active=False)
+    rows = [serialize_source_connector(item) for item in qs]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source_modes": list(SOURCE_MODES),
+            "sources": rows,
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def source_connector_detail(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace", "last_run", "created_by"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = SourceConnectorService()
+    if request.method == "GET":
+        context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not context_workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        if context_workspace_id != str(source.workspace_id):
+            return JsonResponse({"error": "source not found in workspace context"}, status=404)
+        readiness = service.validate_readiness(source_id=str(source.id))
+        return JsonResponse(serialize_source_connector(source, readiness=readiness))
+    if request.method not in {"PATCH", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+
+    update_fields: List[str] = []
+    if "name" in payload:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return JsonResponse({"error": "name cannot be empty"}, status=400)
+        source.name = name[:240]
+        update_fields.append("name")
+    if "source_type" in payload:
+        source.source_type = str(payload.get("source_type") or "generic").strip().lower() or "generic"
+        update_fields.append("source_type")
+    if "source_mode" in payload:
+        mode = str(payload.get("source_mode") or "").strip().lower()
+        if mode not in SOURCE_MODES:
+            return JsonResponse({"error": f"source_mode must be one of {', '.join(SOURCE_MODES)}"}, status=400)
+        source.source_mode = mode
+        update_fields.append("source_mode")
+    if "refresh_cadence_seconds" in payload:
+        try:
+            source.refresh_cadence_seconds = max(0, int(payload.get("refresh_cadence_seconds") or 0))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "refresh_cadence_seconds must be an integer"}, status=400)
+        update_fields.append("refresh_cadence_seconds")
+    if "orchestration_pipeline_key" in payload:
+        source.orchestration_pipeline_key = str(payload.get("orchestration_pipeline_key") or "").strip()
+        update_fields.append("orchestration_pipeline_key")
+    if "configuration" in payload:
+        cfg = payload.get("configuration")
+        if cfg is not None and not isinstance(cfg, dict):
+            return JsonResponse({"error": "configuration must be an object"}, status=400)
+        source.configuration_json = cfg or {}
+        update_fields.append("configuration_json")
+    if "provenance" in payload:
+        provenance = payload.get("provenance")
+        if provenance is not None and not isinstance(provenance, dict):
+            return JsonResponse({"error": "provenance must be an object"}, status=400)
+        source.provenance_json = provenance or {}
+        update_fields.append("provenance_json")
+    if "metadata" in payload:
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return JsonResponse({"error": "metadata must be an object"}, status=400)
+        source.metadata_json = metadata or {}
+        update_fields.append("metadata_json")
+    if update_fields:
+        source.save(update_fields=[*update_fields, "updated_at"])
+    readiness = service.validate_readiness(source_id=str(source.id))
+    return JsonResponse(serialize_source_connector(source, readiness=readiness))
+
+
+@csrf_exempt
+@login_required
+def source_connector_inspections_collection(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = SourceConnectorService()
+    if request.method == "POST":
+        payload = _parse_json(request)
+        if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+            return JsonResponse({"error": "source not found in workspace context"}, status=404)
+        try:
+            row = service.record_inspection(
+                SourceInspectionInput(
+                    source_id=str(source.id),
+                    status=str(payload.get("status") or "ok").strip() or "ok",
+                    detected_format=str(payload.get("detected_format") or "").strip(),
+                    discovered_fields=payload.get("discovered_fields") if isinstance(payload.get("discovered_fields"), list) else [],
+                    sample_metadata=payload.get("sample_metadata") if isinstance(payload.get("sample_metadata"), dict) else {},
+                    validation_findings=payload.get("validation_findings") if isinstance(payload.get("validation_findings"), list) else [],
+                    inspected_by_id=str(identity.id),
+                    inspection_run_id=str(payload.get("inspection_run_id") or "").strip(),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        return JsonResponse(serialize_source_inspection(row), status=201)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if context_workspace_id != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    rows = [serialize_source_inspection(item) for item in source.inspections.all().order_by("-inspected_at", "-id")]
+    return JsonResponse({"source_id": str(source.id), "inspections": rows})
+
+
+@csrf_exempt
+@login_required
+def source_connector_mappings_collection(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = SourceConnectorService()
+    if request.method == "POST":
+        payload = _parse_json(request)
+        if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+            return JsonResponse({"error": "source not found in workspace context"}, status=404)
+        try:
+            row = service.update_mapping(
+                SourceMappingInput(
+                    source_id=str(source.id),
+                    status=str(payload.get("status") or "draft").strip() or "draft",
+                    field_mapping=payload.get("field_mapping") if isinstance(payload.get("field_mapping"), dict) else {},
+                    transformation_hints=payload.get("transformation_hints") if isinstance(payload.get("transformation_hints"), dict) else {},
+                    validation_state=payload.get("validation_state") if isinstance(payload.get("validation_state"), dict) else {},
+                    validated_by_id=str(identity.id),
+                    validation_run_id=str(payload.get("validation_run_id") or "").strip(),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        return JsonResponse(serialize_source_mapping(row), status=201)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if context_workspace_id != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    rows = [serialize_source_mapping(item) for item in source.mappings.all().order_by("-version", "-created_at")]
+    return JsonResponse({"source_id": str(source.id), "mappings": rows})
+
+
+@csrf_exempt
+@login_required
+def source_connector_activate(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    service = SourceConnectorService()
+    readiness = service.validate_readiness(source_id=str(source.id))
+    if not readiness.ready:
+        return JsonResponse({"error": "source is not ready for activation", "readiness": {"reasons": list(readiness.reasons)}}, status=409)
+    source = service.activate_source(source_id=str(source.id))
+    readiness = service.validate_readiness(source_id=str(source.id))
+    return JsonResponse(serialize_source_connector(source, readiness=readiness))
+
+
+@csrf_exempt
+@login_required
+def source_connector_pause(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    service = SourceConnectorService()
+    source = service.pause_source(source_id=str(source.id))
+    readiness = service.validate_readiness(source_id=str(source.id))
+    return JsonResponse(serialize_source_connector(source, readiness=readiness))
+
+
+@csrf_exempt
+@login_required
+def source_connector_health_update(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    service = SourceConnectorService()
+    try:
+        source = service.update_health(
+            SourceHealthUpdate(
+                source_id=str(source.id),
+                health_status=str(payload.get("health_status") or "unknown").strip() or "unknown",
+                lifecycle_state=str(payload.get("lifecycle_state") or "").strip() or None,
+                success=bool(payload.get("success")),
+                failure_reason=str(payload.get("failure_reason") or "").strip(),
+                run_id=str(payload.get("run_id") or "").strip(),
+            )
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    readiness = service.validate_readiness(source_id=str(source.id))
+    return JsonResponse(serialize_source_connector(source, readiness=readiness))
 
 
 def _record_matching_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[RecordMatchEvaluation]]:

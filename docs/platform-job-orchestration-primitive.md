@@ -138,3 +138,4 @@ Future apps (including Deal Finder) should only provide pipeline definitions + h
 - TODO: add operator/API cross-links so runtime proxy run views and orchestration run views can be navigated without seam ambiguity.
 - TODO: define provenance alignment conventions between `target_ref_json`, orchestration outputs, and downstream derived artifacts.
 - TODO: align orchestration run identifiers with record-matching evaluation provenance conventions (`run_id`, `correlation_id`, `chain_id`) for cross-primitive operator debugging.
+- TODO: align source connector execution contracts (`SourceConnector` run_type/target_ref/scope_source) with orchestration trigger templates so source activation can safely schedule refresh runs without app-local glue.

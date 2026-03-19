@@ -2977,6 +2977,154 @@ class Campaign(models.Model):
         return self.name
 
 
+class SourceConnector(models.Model):
+    """Workspace-scoped source registration and import lifecycle primitive."""
+
+    SOURCE_MODE_CHOICES = [
+        ("file_upload", "File Upload"),
+        ("remote_url", "Remote URL/File"),
+        ("api_polling", "API Polling"),
+        ("manual", "Manual"),
+    ]
+    LIFECYCLE_CHOICES = [
+        ("registered", "Registered"),
+        ("inspected", "Inspected"),
+        ("mapped", "Mapped"),
+        ("validated", "Validated"),
+        ("active", "Active"),
+        ("failing", "Failing"),
+        ("paused", "Paused"),
+    ]
+    HEALTH_CHOICES = [
+        ("unknown", "Unknown"),
+        ("healthy", "Healthy"),
+        ("warning", "Warning"),
+        ("failing", "Failing"),
+        ("paused", "Paused"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="source_connectors")
+    key = models.CharField(max_length=120)
+    name = models.CharField(max_length=240)
+    source_type = models.CharField(max_length=120, default="generic")
+    source_mode = models.CharField(max_length=20, choices=SOURCE_MODE_CHOICES, default="manual")
+    lifecycle_state = models.CharField(max_length=20, choices=LIFECYCLE_CHOICES, default="registered", db_index=True)
+    health_status = models.CharField(max_length=20, choices=HEALTH_CHOICES, default="unknown", db_index=True)
+    is_active = models.BooleanField(default=False, db_index=True)
+    refresh_cadence_seconds = models.PositiveIntegerField(default=0)
+    orchestration_pipeline_key = models.CharField(max_length=120, blank=True, default="")
+    configuration_json = models.JSONField(default=dict, blank=True)
+    provenance_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    last_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_connectors"
+    )
+    last_inspected_at = models.DateTimeField(null=True, blank=True)
+    last_validated_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_failure_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_failure_reason = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_source_connectors"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="uniq_source_connector_workspace_key"),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "lifecycle_state"], name="ix_source_connector_state"),
+            models.Index(fields=["workspace", "health_status"], name="ix_source_connector_health"),
+            models.Index(fields=["workspace", "source_type", "source_mode"], name="ix_source_connector_type_mode"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.key}"
+
+
+class SourceInspectionProfile(models.Model):
+    STATUS_CHOICES = [
+        ("ok", "OK"),
+        ("warning", "Warning"),
+        ("error", "Error"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_connector = models.ForeignKey(SourceConnector, on_delete=models.CASCADE, related_name="inspections")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="ok")
+    detected_format = models.CharField(max_length=80, blank=True, default="")
+    discovered_fields_json = models.JSONField(default=list, blank=True)
+    sample_metadata_json = models.JSONField(default=dict, blank=True)
+    validation_findings_json = models.JSONField(default=list, blank=True)
+    inspected_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_inspections"
+    )
+    inspection_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_inspections"
+    )
+    inspected_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-inspected_at", "-id"]
+        indexes = [
+            models.Index(fields=["source_connector", "inspected_at"], name="ix_source_inspection_time"),
+            models.Index(fields=["source_connector", "status"], name="ix_source_inspection_status"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.source_connector_id}:{self.status}:{self.id}"
+
+
+class SourceMapping(models.Model):
+    STATUS_CHOICES = [
+        ("draft", "Draft"),
+        ("validated", "Validated"),
+        ("active", "Active"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_connector = models.ForeignKey(SourceConnector, on_delete=models.CASCADE, related_name="mappings")
+    version = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft", db_index=True)
+    is_current = models.BooleanField(default=True, db_index=True)
+    field_mapping_json = models.JSONField(default=dict, blank=True)
+    transformation_hints_json = models.JSONField(default=dict, blank=True)
+    validation_state_json = models.JSONField(default=dict, blank=True)
+    validated_at = models.DateTimeField(null=True, blank=True)
+    validated_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="validated_source_mappings"
+    )
+    validation_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_mapping_validations"
+    )
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_source_mappings"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-version", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["source_connector", "version"], name="uniq_source_mapping_version"),
+            models.UniqueConstraint(
+                fields=["source_connector"],
+                condition=Q(is_current=True),
+                name="uniq_source_mapping_current",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["source_connector", "status"], name="ix_source_mapping_status"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.source_connector_id}:v{self.version}:{self.status}"
+
+
 class OrchestrationPipeline(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="orchestration_pipelines")
