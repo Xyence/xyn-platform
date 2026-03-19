@@ -139,6 +139,8 @@ class DjangoOrchestrationRepository:
         run = OrchestrationRun.objects.create(
             workspace=workspace,
             pipeline=pipeline,
+            run_type=str(request.run_type or "").strip() or "data_pipeline",
+            target_ref_json=request.target_ref if isinstance(request.target_ref, dict) else {},
             status="pending",
             trigger_cause=request.trigger.trigger_cause,
             trigger_key=str(request.trigger.trigger_key or "").strip(),

@@ -16,9 +16,11 @@ No work should exist only in conversation history, transient runtime memory, or 
 Xyn reuses existing durable models instead of duplicating them:
 
 - `DevTask` is the current WorkItem backing store.
-- `xyn-core Run` is the canonical execution attempt.
-- `xyn-core Step` is the canonical RunStep.
-- `xyn-core Artifact` with `run_id` is the canonical RunArtifact.
+- `xyn-core Run` is the canonical execution attempt for the work-coordination/runtime seam in this document.
+- `xyn-core Step` is the canonical RunStep for that seam.
+- `xyn-core Artifact` with `run_id` is the canonical RunArtifact for that seam.
+
+For new platform data-processing ingest/import/normalize/reconcile/rule-evaluation/dispatch workflows, use orchestration run history (`OrchestrationRun` and related models) as the canonical substrate.
 
 The platform exposes WorkItem-focused aliases so conversation and panels can use work-coordination terminology without creating a parallel persistence model.
 

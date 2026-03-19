@@ -29,6 +29,8 @@ class RunCreateRequest:
     workspace_id: str
     pipeline_key: str
     trigger: RunTrigger
+    run_type: str = "data_pipeline"
+    target_ref: dict[str, Any] = field(default_factory=dict)
     initiated_by_id: str = ""
     rerun_of_run_id: str = ""
     scope: ExecutionScope = field(default_factory=ExecutionScope)

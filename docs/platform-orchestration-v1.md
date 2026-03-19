@@ -5,6 +5,9 @@ This document describes the first production-ready baseline for the platform sch
 Cron scheduling is intentionally unsupported in orchestration v1.
 Do not use or imply cron scheduling until platform cron support is explicitly implemented and accepted.
 
+For new platform data-processing run history, orchestration run models are the canonical substrate.
+See [Platform Run History Boundaries](./platform-run-history-boundaries.md).
+
 ## What this ships
 
 - Workspace-scoped orchestration persistence:

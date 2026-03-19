@@ -30760,6 +30760,8 @@ def _serialize_orchestration_run_summary(run: OrchestrationRun) -> Dict[str, Any
         "workspace_id": str(run.workspace_id),
         "pipeline_id": str(run.pipeline_id),
         "pipeline_key": str(run.pipeline.key),
+        "run_type": str(run.run_type or "data_pipeline"),
+        "target_ref": run.target_ref_json if isinstance(run.target_ref_json, dict) else {},
         "status": str(run.status),
         "trigger_cause": str(run.trigger_cause),
         "trigger_key": str(run.trigger_key or ""),
@@ -31052,6 +31054,8 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
                 workspace_id=str(workspace.id),
                 pipeline_key=str(pipeline.key),
                 trigger=RunTrigger(trigger_cause="manual", trigger_key=trigger_key),
+                run_type=str(payload.get("run_type") or "data_pipeline").strip() or "data_pipeline",
+                target_ref=payload.get("target_ref") if isinstance(payload.get("target_ref"), dict) else {},
                 initiated_by_id=str(identity.id),
                 scope=ExecutionScope(
                     jurisdiction=str(payload.get("jurisdiction") or "").strip(),
@@ -31098,6 +31102,9 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
     trigger_cause = str(request.GET.get("trigger_cause") or "").strip().lower()
     if trigger_cause:
         qs = qs.filter(trigger_cause=trigger_cause)
+    run_type = str(request.GET.get("run_type") or "").strip()
+    if run_type:
+        qs = qs.filter(run_type=run_type)
     job_key = str(request.GET.get("job_key") or "").strip()
     if job_key:
         qs = qs.filter(job_runs__job_definition__job_key=job_key).distinct()

@@ -42,6 +42,7 @@ Required:
 Optional filters:
 - `pipeline_key`
 - `job_key`
+- `run_type`
 - `status`
 - `trigger_cause`
 - `created_after`
@@ -59,6 +60,7 @@ Optional filters:
 
 Includes:
 - run summary/status/timestamps/metrics/errors
+- `run_type` and `target_ref`
 - dependency context map
 - per-job run rows
 - attempts

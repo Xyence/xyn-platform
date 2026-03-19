@@ -81,6 +81,8 @@ class OrchestrationLifecycleTests(TestCase):
                 workspace_id=str(self.workspace.id),
                 pipeline_key=self.pipeline.key,
                 trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
+                run_type="ingest.import",
+                target_ref={"target_type": "source", "target_id": "mls:tx"},
                 initiated_by_id=str(self.identity.id),
                 scope=ExecutionScope(jurisdiction="tx", source="mls"),
                 metadata={
@@ -97,6 +99,8 @@ class OrchestrationLifecycleTests(TestCase):
         self.assertEqual(run.trigger_cause, "manual")
         self.assertEqual(run.scope_jurisdiction, "tx")
         self.assertEqual(run.scope_source, "mls")
+        self.assertEqual(run.run_type, "ingest.import")
+        self.assertEqual(run.target_ref_json, {"target_type": "source", "target_id": "mls:tx"})
         self.assertEqual(run.correlation_id, "corr-1")
         self.assertEqual(run.chain_id, "chain-1")
 

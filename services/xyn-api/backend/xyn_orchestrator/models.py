@@ -3143,6 +3143,8 @@ class OrchestrationRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="orchestration_runs")
     pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="runs")
+    run_type = models.CharField(max_length=80, default="data_pipeline", db_index=True)
+    target_ref_json = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True)
     trigger_cause = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default="manual", db_index=True)
     trigger_key = models.CharField(max_length=120, blank=True, default="")
@@ -3186,6 +3188,7 @@ class OrchestrationRun(models.Model):
             models.Index(fields=["workspace", "pipeline", "status"], name="ix_orch_run_ws_pipeline_status"),
             models.Index(fields=["workspace", "created_at"], name="ix_orch_run_ws_created"),
             models.Index(fields=["workspace", "status", "queued_at"], name="ix_orch_run_scheduler_poll"),
+            models.Index(fields=["workspace", "run_type", "created_at"], name="ix_orch_run_type_time"),
             models.Index(fields=["workspace", "trigger_cause", "created_at"], name="ix_orch_run_trigger_time"),
             models.Index(fields=["workspace", "correlation_id", "created_at"], name="ix_orch_run_corr_time"),
             models.Index(fields=["workspace", "chain_id", "created_at"], name="ix_orch_run_chain_time"),

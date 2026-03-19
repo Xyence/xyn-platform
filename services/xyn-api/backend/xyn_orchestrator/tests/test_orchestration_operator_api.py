@@ -163,6 +163,8 @@ class OrchestrationOperatorApiTests(TestCase):
         create_payload = {
             "workspace_id": str(self.workspace.id),
             "pipeline_key": self.pipeline.key,
+            "run_type": "ingest.import",
+            "target_ref": {"target_type": "source", "target_id": "mls:tx"},
             "jurisdiction": "tx",
             "source": "mls",
             "trigger_key": "manual_operator",
@@ -176,6 +178,8 @@ class OrchestrationOperatorApiTests(TestCase):
         self.assertEqual(create_response.status_code, 201)
         created = json.loads(create_response.content)
         run_id = created["id"]
+        self.assertEqual(created["run_type"], "ingest.import")
+        self.assertEqual(created["target_ref"], {"target_type": "source", "target_id": "mls:tx"})
 
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             list_response = orchestration_runs_collection(
@@ -183,6 +187,7 @@ class OrchestrationOperatorApiTests(TestCase):
                     "/xyn/api/orchestration/runs",
                     data={
                         "workspace_id": str(self.workspace.id),
+                        "run_type": "ingest.import",
                         "job_key": "refresh_source",
                         "trigger_cause": "manual",
                         "jurisdiction": "tx",

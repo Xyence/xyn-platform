@@ -68,6 +68,9 @@ New ORM models in `models.py` and migrations `0125_orchestration_scaffolding.py`
 - `OrchestrationJobDependency`
   - explicit upstream/downstream edges
 - `OrchestrationRun`
+  - normalized run contract fields for platform reuse:
+    - `run_type`
+    - `target_ref_json`
   - run trigger cause (`scheduled`/`upstream_change`/`manual`/`retry`/`backfill`/`system`)
   - scope partitions (`jurisdiction`, `source`)
   - correlation and chain ids
