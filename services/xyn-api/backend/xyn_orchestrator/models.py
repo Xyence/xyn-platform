@@ -2977,6 +2977,35 @@ class Campaign(models.Model):
         return self.name
 
 
+class LifecycleTransition(models.Model):
+    """Generic lifecycle transition history for platform-owned objects."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", null=True, blank=True, on_delete=models.SET_NULL, related_name="lifecycle_transitions")
+    lifecycle_name = models.CharField(max_length=128, db_index=True)
+    object_type = models.CharField(max_length=128, db_index=True)
+    object_id = models.CharField(max_length=255, db_index=True)
+    from_state = models.CharField(max_length=64, blank=True, default="")
+    to_state = models.CharField(max_length=64)
+    actor = models.CharField(max_length=255, blank=True, default="")
+    reason = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    run = models.ForeignKey("Run", null=True, blank=True, on_delete=models.SET_NULL, related_name="lifecycle_transitions")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "lifecycle_name"], name="ix_lifecycle_workspace_name"),
+            models.Index(fields=["workspace", "object_type", "object_id"], name="ix_lifecycle_object_lookup"),
+            models.Index(fields=["lifecycle_name", "object_type", "created_at"], name="ix_lifecycle_timeline"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.lifecycle_name}:{self.object_type}:{self.object_id}:{self.to_state}"
+
+
 class SourceConnector(models.Model):
     """Workspace-scoped source registration and import lifecycle primitive."""
 

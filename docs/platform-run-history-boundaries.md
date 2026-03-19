@@ -51,3 +51,12 @@ Do not treat `WorkflowRun` as the canonical platform run-history substrate for n
 
 These proxy xyn-core runtime run views for operational runtime surfaces.
 They are not a replacement for orchestration run history for new data-processing primitives.
+
+## Related lifecycle primitive boundary
+
+For object state/lifecycle transitions (not execution-run history), use the canonical lifecycle primitive in:
+
+- `xyn_orchestrator.lifecycle_primitive`
+- `xyn_orchestrator.models.LifecycleTransition`
+
+`xyn/core` lifecycle code is compatibility/integration only and is not the canonical platform seam.

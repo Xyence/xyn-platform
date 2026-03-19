@@ -139,3 +139,7 @@ Future apps (including Deal Finder) should only provide pipeline definitions + h
 - TODO: define provenance alignment conventions between `target_ref_json`, orchestration outputs, and downstream derived artifacts.
 - TODO: align orchestration run identifiers with record-matching evaluation provenance conventions (`run_id`, `correlation_id`, `chain_id`) for cross-primitive operator debugging.
 - TODO: align source connector execution contracts (`SourceConnector` run_type/target_ref/scope_source) with orchestration trigger templates so source activation can safely schedule refresh runs without app-local glue.
+
+## Lifecycle Primitive TODOs
+- TODO: migrate additional object adapters (campaign/source connector/workflow-like entities) onto the canonical lifecycle primitive contract and durable `LifecycleTransition` history rows.
+- TODO: add a shared API/serializer seam for transition history visibility across object families without duplicating object-specific endpoints.
