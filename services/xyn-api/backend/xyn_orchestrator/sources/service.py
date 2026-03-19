@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -80,6 +81,7 @@ class SourceConnectorService:
             validation_findings=payload.validation_findings if isinstance(payload.validation_findings, list) else [],
             inspected_by_id=str(payload.inspected_by_id or "").strip(),
             inspection_run_id=str(payload.inspection_run_id or "").strip(),
+            idempotency_key=str(payload.idempotency_key or "").strip(),
         )
         source.last_inspected_at = row.inspected_at
         source.lifecycle_state = "inspected"
@@ -101,6 +103,7 @@ class SourceConnectorService:
             validated_by_id=str(payload.validated_by_id or "").strip(),
             validation_run_id=str(payload.validation_run_id or "").strip(),
             now=now,
+            idempotency_key=str(payload.idempotency_key or "").strip(),
         )
         if status in {"validated", "active"}:
             source.last_validated_at = now
@@ -157,6 +160,9 @@ class SourceConnectorService:
                 summary=f"Source connector {updated.key} activated",
                 reason="readiness checks passed",
                 metadata={"lifecycle_state": str(updated.lifecycle_state), "health_status": str(updated.health_status)},
+                idempotency_key=hashlib.sha256(
+                    f"source.activate|{updated.workspace_id}|{updated.id}|{updated.lifecycle_state}".encode("utf-8")
+                ).hexdigest(),
             )
         )
         return updated
@@ -180,6 +186,9 @@ class SourceConnectorService:
                 summary=f"Source connector {updated.key} paused",
                 reason="paused by platform/operator flow",
                 metadata={"lifecycle_state": str(updated.lifecycle_state), "health_status": str(updated.health_status)},
+                idempotency_key=hashlib.sha256(
+                    f"source.pause|{updated.workspace_id}|{updated.id}|{updated.lifecycle_state}".encode("utf-8")
+                ).hexdigest(),
             )
         )
         return updated
@@ -230,6 +239,20 @@ class SourceConnectorService:
                     "success": bool(payload.success),
                 },
                 run_id=str(payload.run_id or ""),
+                idempotency_key=hashlib.sha256(
+                    "|".join(
+                        [
+                            "source.health",
+                            str(updated.workspace_id),
+                            str(updated.id),
+                            str(updated.health_status),
+                            str(updated.lifecycle_state),
+                            str(bool(payload.success)),
+                            str(payload.failure_reason or ""),
+                            str(payload.run_id or ""),
+                        ]
+                    ).encode("utf-8")
+                ).hexdigest(),
             )
         )
         return updated
@@ -312,6 +335,8 @@ def serialize_source_inspection(row: SourceInspectionProfile) -> dict[str, Any]:
         "discovered_fields": row.discovered_fields_json if isinstance(row.discovered_fields_json, list) else [],
         "sample_metadata": row.sample_metadata_json if isinstance(row.sample_metadata_json, dict) else {},
         "validation_findings": row.validation_findings_json if isinstance(row.validation_findings_json, list) else [],
+        "inspection_fingerprint": str(row.inspection_fingerprint or ""),
+        "idempotency_key": str(row.idempotency_key or ""),
         "inspection_run_id": str(row.inspection_run_id) if row.inspection_run_id else None,
         "inspected_by_id": str(row.inspected_by_id) if row.inspected_by_id else None,
         "inspected_at": row.inspected_at.isoformat() if row.inspected_at else None,
@@ -328,6 +353,8 @@ def serialize_source_mapping(row: SourceMapping) -> dict[str, Any]:
         "field_mapping": row.field_mapping_json if isinstance(row.field_mapping_json, dict) else {},
         "transformation_hints": row.transformation_hints_json if isinstance(row.transformation_hints_json, dict) else {},
         "validation_state": row.validation_state_json if isinstance(row.validation_state_json, dict) else {},
+        "mapping_hash": str(row.mapping_hash or ""),
+        "idempotency_key": str(row.idempotency_key or ""),
         "validated_at": row.validated_at.isoformat() if row.validated_at else None,
         "validated_by_id": str(row.validated_by_id) if row.validated_by_id else None,
         "validation_run_id": str(row.validation_run_id) if row.validation_run_id else None,

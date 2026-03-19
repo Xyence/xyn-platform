@@ -189,6 +189,34 @@ class WatchingPrimitiveApiTests(TestCase):
         self.assertEqual(pause_response.status_code, 200)
         self.assertEqual(json.loads(pause_response.content)["lifecycle_state"], "paused")
 
+    def test_evaluate_replay_with_idempotency_key_dedupes_match_events(self):
+        watch = self._create_watch(lifecycle_state="active")
+        evaluate_payload = {
+            "workspace_id": str(self.workspace.id),
+            "event_key": "parcel_change",
+            "event_ref": {"target_kind": "area", "region": "north", "event_type": "change"},
+            "persist": True,
+            "idempotency_key": "watch-eval-idem-1",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            first = watch_matches_evaluate(
+                self._request(
+                    "/xyn/api/watches/matches/evaluate",
+                    method="post",
+                    data=json.dumps(evaluate_payload),
+                )
+            )
+            second = watch_matches_evaluate(
+                self._request(
+                    "/xyn/api/watches/matches/evaluate",
+                    method="post",
+                    data=json.dumps(evaluate_payload),
+                )
+            )
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(WatchMatchEvent.objects.filter(workspace=self.workspace).count(), 1)
+
     def test_workspace_isolation_and_campaign_link_validation(self):
         campaign = Campaign.objects.create(
             workspace=self.workspace,

@@ -16,6 +16,8 @@ from xyn_orchestrator.matching import (
 )
 from xyn_orchestrator.models import (
     OrchestrationPipeline,
+    PlatformAuditEvent,
+    ProvenanceLink,
     RecordMatchEvaluation,
     UserIdentity,
     Workspace,
@@ -282,3 +284,66 @@ class RecordMatchingPrimitiveTests(TestCase):
                 str(row.id),
             )
         self.assertEqual(forbidden.status_code, 404)
+
+    def test_replay_dedupes_result_and_provenance(self):
+        payload = {
+            "workspace_id": str(self.workspace.id),
+            "strategy_key": "weighted_composite",
+            "run_id": str(self.run.id),
+            "correlation_id": "corr-replay",
+            "chain_id": "chain-replay",
+            "candidate_a": {
+                "source_namespace": "crm",
+                "source_record_type": "contact",
+                "source_record_id": "left-replay",
+                "attributes": {"name": "Jane Doe", "external_id": "jane-1"},
+            },
+            "candidate_b": {
+                "source_namespace": "billing",
+                "source_record_type": "account_contact",
+                "source_record_id": "right-replay",
+                "attributes": {"name": "Jane Doe", "external_id": "JANE1"},
+            },
+            "persist": True,
+            "idempotency_key": "match-idem-1",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            first = record_matching_evaluate(
+                self._request("/xyn/api/record-matching/evaluate", method="post", data=json.dumps(payload))
+            )
+            second = record_matching_evaluate(
+                self._request("/xyn/api/record-matching/evaluate", method="post", data=json.dumps(payload))
+            )
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(RecordMatchEvaluation.objects.filter(workspace=self.workspace).count(), 1)
+        self.assertEqual(PlatformAuditEvent.objects.filter(workspace=self.workspace, event_type="record_matching.evaluated").count(), 1)
+        self.assertEqual(ProvenanceLink.objects.filter(workspace=self.workspace, relationship_type="match_evaluated_from").count(), 2)
+
+    def test_pair_fingerprint_is_order_independent(self):
+        left = self._candidate(source_id="left-order", name="Acme Corp", external_id="acme-001")
+        right = self._candidate(source_id="right-order", name="Acme Corporation", external_id="ACME001")
+        service = RecordMatchingService(repository=DjangoMatchResultRepository())
+        context = StrategyContext(
+            workspace_id=str(self.workspace.id),
+            run_id=str(self.run.id),
+            correlation_id="corr-order",
+            chain_id="chain-order",
+        )
+        service.evaluate_pair(
+            workspace_id=str(self.workspace.id),
+            candidate_a=left,
+            candidate_b=right,
+            strategy_key="weighted_composite",
+            context=context,
+            persist=True,
+        )
+        service.evaluate_pair(
+            workspace_id=str(self.workspace.id),
+            candidate_a=right,
+            candidate_b=left,
+            strategy_key="weighted_composite",
+            context=context,
+            persist=True,
+        )
+        self.assertEqual(RecordMatchEvaluation.objects.filter(workspace=self.workspace).count(), 1)

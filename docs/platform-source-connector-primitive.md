@@ -23,10 +23,12 @@ It provides durable source lifecycle, inspection/profile storage, mapping metada
 - `SourceInspectionProfile`
   - durable inspection/profile result
   - detected format, discovered fields, sample metadata, validation findings
+  - `inspection_fingerprint` + optional `idempotency_key` for replay-safe inspection persistence
   - optional orchestration run linkage
 - `SourceMapping`
   - versioned mapping metadata
   - field mapping, transformation hints, validation state
+  - `mapping_hash` + optional `idempotency_key` for replay-safe mapping persistence
   - current mapping pointer and validation metadata
 
 ## API Surface (v1)
@@ -49,6 +51,13 @@ A source is activation-ready when:
 - remote/API sources have `refresh_cadence_seconds > 0`
 
 Activation does not create a scheduler loop; it marks the source as ready/active for orchestration-driven refresh execution.
+
+## Replay/idempotency behavior
+
+- inspection and mapping POST flows accept optional `idempotency_key`.
+- repeated requests with the same key return/reuse the existing row.
+- mapping updates compute a deterministic `mapping_hash`; replay with unchanged semantics avoids creating a duplicate new version.
+- version allocation is lock-safe (`max(version)+1` under transaction) to reduce replay/concurrency collisions.
 
 ## Source Dataset Boundary
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from xyn_orchestrator.models import PlatformAuditEvent, ProvenanceLink
@@ -45,6 +46,7 @@ class ProvenanceService:
             run_id=str(payload.run_id or "").strip(),
             correlation_id=str(payload.correlation_id or "").strip(),
             chain_id=str(payload.chain_id or "").strip(),
+            idempotency_key=str(payload.idempotency_key or "").strip(),
         )
 
     def record_provenance_link(self, payload: ProvenanceLinkInput) -> ProvenanceLink:
@@ -72,12 +74,27 @@ class ProvenanceService:
             run_id=str(payload.run_id or "").strip(),
             correlation_id=str(payload.correlation_id or "").strip(),
             chain_id=str(payload.chain_id or "").strip(),
+            idempotency_key=str(payload.idempotency_key or "").strip(),
         )
 
     def record_audit_with_provenance(self, payload: AuditWithProvenanceInput) -> tuple[PlatformAuditEvent, list[ProvenanceLink]]:
         event = self.record_audit_event(payload.event)
         links: list[ProvenanceLink] = []
+        scope = str(payload.idempotency_scope or "").strip()
         for link in payload.provenance_links:
+            link_idempotency_key = str(link.idempotency_key or "").strip()
+            if not link_idempotency_key and scope:
+                raw = "|".join(
+                    [
+                        scope,
+                        str(link.relationship_type or "").strip().lower(),
+                        str(link.source_ref.object_family or "").strip().lower(),
+                        str(link.source_ref.object_id or "").strip(),
+                        str(link.target_ref.object_family or "").strip().lower(),
+                        str(link.target_ref.object_id or "").strip(),
+                    ]
+                )
+                link_idempotency_key = hashlib.sha256(raw.encode("utf-8")).hexdigest()
             links.append(
                 self.record_provenance_link(
                     ProvenanceLinkInput(
@@ -92,6 +109,7 @@ class ProvenanceService:
                         run_id=link.run_id,
                         correlation_id=link.correlation_id,
                         chain_id=link.chain_id,
+                        idempotency_key=link_idempotency_key,
                     )
                 )
             )
@@ -141,6 +159,7 @@ def serialize_audit_event(row: PlatformAuditEvent) -> dict[str, Any]:
         "run_id": str(row.run_id) if row.run_id else None,
         "correlation_id": row.correlation_id or "",
         "chain_id": row.chain_id or "",
+        "idempotency_key": str(row.idempotency_key or ""),
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
 
@@ -159,6 +178,7 @@ def serialize_provenance_link(row: ProvenanceLink) -> dict[str, Any]:
         "run_id": str(row.run_id) if row.run_id else None,
         "correlation_id": row.correlation_id or "",
         "chain_id": row.chain_id or "",
+        "idempotency_key": str(row.idempotency_key or ""),
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from django.db import transaction
@@ -20,6 +22,14 @@ def _serialize_ref(ref: Any) -> dict[str, Any]:
     }
 
 
+def _pair_fingerprint(evaluation: MatchEvaluation) -> str:
+    left = evaluation.candidate_a.normalized_identity()
+    right = evaluation.candidate_b.normalized_identity()
+    ordered = sorted([left, right])
+    encoded = json.dumps(ordered, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 class DjangoMatchResultRepository:
     @transaction.atomic
     def persist_evaluation(
@@ -30,10 +40,32 @@ class DjangoMatchResultRepository:
         run_id: str = "",
         correlation_id: str = "",
         chain_id: str = "",
+        idempotency_key: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> RecordMatchEvaluation:
         workspace = Workspace.objects.get(id=workspace_id)
         run = OrchestrationRun.objects.filter(id=run_id, workspace=workspace).first() if run_id else None
+        pair_fingerprint = _pair_fingerprint(evaluation)
+        normalized_idempotency_key = str(idempotency_key or "").strip()
+        if not normalized_idempotency_key:
+            normalized_idempotency_key = hashlib.sha256(
+                "|".join(
+                    [
+                        str(workspace_id),
+                        str(evaluation.strategy_key or "").strip().lower(),
+                        pair_fingerprint,
+                        str(run_id or "").strip(),
+                        str(correlation_id or "").strip(),
+                        str(chain_id or "").strip(),
+                    ]
+                ).encode("utf-8")
+            ).hexdigest()
+        existing = RecordMatchEvaluation.objects.filter(
+            workspace=workspace,
+            idempotency_key=normalized_idempotency_key,
+        ).first()
+        if existing is not None:
+            return existing
         row = RecordMatchEvaluation.objects.create(
             workspace=workspace,
             candidate_a_namespace=str(evaluation.candidate_a.source_namespace or "").strip(),
@@ -43,6 +75,8 @@ class DjangoMatchResultRepository:
             candidate_b_type=str(evaluation.candidate_b.source_record_type or "").strip(),
             candidate_b_id=str(evaluation.candidate_b.source_record_id or "").strip(),
             strategy_key=str(evaluation.strategy_key or "").strip(),
+            pair_fingerprint=pair_fingerprint,
+            idempotency_key=normalized_idempotency_key,
             score=float(evaluation.score or 0.0),
             decision=str(evaluation.decision or "non_match").strip(),
             confidence=str(evaluation.confidence or "none").strip(),
@@ -104,6 +138,7 @@ class DjangoMatchResultRepository:
                     run_id=str(run.id) if run else "",
                     correlation_id=str(correlation_id or "").strip(),
                     chain_id=str(chain_id or "").strip(),
+                    idempotency_key=f"match.audit:{normalized_idempotency_key}",
                 ),
                 provenance_links=(
                     ProvenanceLinkInput(
@@ -116,6 +151,7 @@ class DjangoMatchResultRepository:
                         run_id=str(run.id) if run else "",
                         correlation_id=str(correlation_id or "").strip(),
                         chain_id=str(chain_id or "").strip(),
+                        idempotency_key=f"match.link:{normalized_idempotency_key}:a",
                     ),
                     ProvenanceLinkInput(
                         workspace_id=str(workspace.id),
@@ -127,8 +163,10 @@ class DjangoMatchResultRepository:
                         run_id=str(run.id) if run else "",
                         correlation_id=str(correlation_id or "").strip(),
                         chain_id=str(chain_id or "").strip(),
+                        idempotency_key=f"match.link:{normalized_idempotency_key}:b",
                     ),
                 ),
+                idempotency_scope=f"match.eval:{normalized_idempotency_key}",
             )
         )
         return row

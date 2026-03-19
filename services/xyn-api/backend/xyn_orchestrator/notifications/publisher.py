@@ -60,6 +60,7 @@ def publish_application_notification(
     workspace_id: Optional[str] = None,
     created_by_id: Optional[str] = None,
     request_delivery: bool = False,
+    idempotency_key: str = "",
 ) -> PublishApplicationNotificationResult:
     normalized_recipient_ids = _normalize_identity_ids(recipient_ids)
     if not normalized_recipient_ids:
@@ -93,6 +94,7 @@ def publish_application_notification(
         created_by=created_by,
         recipients=recipients,
         enqueue_email_delivery=False,
+        idempotency_key=str(idempotency_key or "").strip(),
     )
 
     delivery_result = None

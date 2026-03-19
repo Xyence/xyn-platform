@@ -34,6 +34,7 @@ class AuditEventInput:
     run_id: str = ""
     correlation_id: str = ""
     chain_id: str = ""
+    idempotency_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -49,12 +50,14 @@ class ProvenanceLinkInput:
     run_id: str = ""
     correlation_id: str = ""
     chain_id: str = ""
+    idempotency_key: str = ""
 
 
 @dataclass(frozen=True)
 class AuditWithProvenanceInput:
     event: AuditEventInput
     provenance_links: tuple[ProvenanceLinkInput, ...] = tuple()
+    idempotency_scope: str = ""
 
 
 def normalize_object_ref(ref: ObjectRef) -> ObjectRef:

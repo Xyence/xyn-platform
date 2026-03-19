@@ -24,11 +24,13 @@ It is built for cross-primitive reuse by orchestration, matching, watches, sourc
   - optional actor and cause references
   - summary/reason/metadata
   - optional `run_id`, `correlation_id`, `chain_id`
+  - optional `idempotency_key` for replay-safe event dedupe
 - `ProvenanceLink`:
   - workspace-scoped source -> target relationship
   - `relationship_type`
   - optional reason/explanation/metadata
   - optional `origin_event_id`, `run_id`, `correlation_id`, `chain_id`
+  - optional `idempotency_key` for replay-safe link dedupe
 
 ## Normalized object reference contract
 
@@ -51,6 +53,12 @@ The canonical service is `xyn_orchestrator.provenance.ProvenanceService`:
 - `record_audit_with_provenance(...)`
 - `audit_history(workspace_id, object_type, object_id)`
 - `provenance_for_object(workspace_id, object_type, object_id, direction)`
+
+Replay/dedupe support:
+
+- recording calls may include explicit `idempotency_key` for event/link create-or-return semantics.
+- `record_audit_with_provenance(...)` also supports an `idempotency_scope` that derives stable link idempotency keys when explicit link keys are omitted.
+- this suppresses duplicate fan-out rows when upstream flows replay the same logical action.
 
 ## API visibility
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from xyn_orchestrator.models import WatchDefinition, WatchMatchEvent, WatchSubscriber
@@ -133,6 +135,12 @@ def _evaluate_watch_match(
     )
 
 
+def _json_fingerprint(payload: dict[str, Any]) -> str:
+    body = payload if isinstance(payload, dict) else {}
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 class WatchService:
     def __init__(self, *, repository: WatchRepository | None = None):
         self._repository = repository or WatchRepository()
@@ -216,6 +224,21 @@ class WatchService:
                 event_ref=event_ref,
             )
             if persist:
+                event_fingerprint = _json_fingerprint(event_ref)
+                explicit_idempotency_key = str(payload.idempotency_key or "").strip()
+                resolved_idempotency_key = explicit_idempotency_key or hashlib.sha256(
+                    "|".join(
+                        [
+                            str(workspace_id),
+                            str(watch.id),
+                            str(payload.event_key or "").strip(),
+                            event_fingerprint,
+                            str(payload.run_id or "").strip(),
+                            str(payload.correlation_id or "").strip(),
+                            str(payload.chain_id or "").strip(),
+                        ]
+                    ).encode("utf-8")
+                ).hexdigest()
                 row = self._repository.create_match_event(
                     watch=watch,
                     workspace_id=workspace_id,
@@ -227,6 +250,8 @@ class WatchService:
                     event_ref=event_ref,
                     filter_snapshot=_as_dict(watch.filter_criteria_json),
                     notification_intent=result.notification_intent,
+                    event_fingerprint=event_fingerprint,
+                    idempotency_key=resolved_idempotency_key,
                     run_id=str(payload.run_id or ""),
                     correlation_id=str(payload.correlation_id or ""),
                     chain_id=str(payload.chain_id or ""),
@@ -297,8 +322,10 @@ class WatchService:
                             run_id=str(payload.run_id or ""),
                             correlation_id=str(payload.correlation_id or ""),
                             chain_id=str(payload.chain_id or ""),
+                            idempotency_key=f"watch.audit:{resolved_idempotency_key}",
                         ),
                         provenance_links=tuple(links),
+                        idempotency_scope=f"watch.eval:{resolved_idempotency_key}",
                     )
                 )
             results.append(result)
@@ -354,6 +381,8 @@ def serialize_watch_match(row: WatchMatchEvent) -> dict[str, Any]:
         "event_ref": _as_dict(row.event_ref_json),
         "filter_snapshot": _as_dict(row.filter_snapshot_json),
         "notification_intent": _as_dict(row.notification_intent_json),
+        "event_fingerprint": str(row.event_fingerprint or ""),
+        "idempotency_key": str(row.idempotency_key or ""),
         "run_id": str(row.run_id) if row.run_id else None,
         "correlation_id": str(row.correlation_id or ""),
         "chain_id": str(row.chain_id or ""),

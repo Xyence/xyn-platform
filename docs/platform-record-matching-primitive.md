@@ -28,6 +28,8 @@ Out of scope in v1:
   - `source_namespace`, `source_record_type`, `source_record_id`, optional `attributes`
 - `RecordMatchEvaluation`: durable result row for one evaluated record pair
   - candidate refs, strategy, score, decision, confidence
+  - `pair_fingerprint` (order-independent candidate identity fingerprint)
+  - `idempotency_key` for replay-safe persistence
   - explanation signals and metadata
   - optional linkage to `OrchestrationRun` (`run_id`, `correlation_id`, `chain_id`)
 
@@ -60,12 +62,20 @@ Thresholds are explicit in `DecisionThresholds` and can be overridden by callers
 - `POST /xyn/api/record-matching/evaluate`
   - evaluates candidate A/B
   - optionally persists result (default true)
+  - optional `idempotency_key` for explicit replay-safe writes
 - `GET /xyn/api/record-matching/results`
   - list/filter persisted results by workspace
 - `GET /xyn/api/record-matching/results/{result_id}`
   - inspect one persisted result
 
 All endpoints are workspace-scoped and use existing membership/auth checks.
+
+Replay/idempotency behavior in v1 hardening:
+
+- Replayed evaluate requests with the same logical idempotency scope return the existing `RecordMatchEvaluation`.
+- If callers omit explicit `idempotency_key`, service/repository derive one from workspace + strategy + order-independent pair fingerprint + run/correlation scope.
+- A/B and B/A evaluate to the same `pair_fingerprint` and dedupe as one logical evaluation in the same replay scope.
+- Matching audit/provenance fan-out is deduped for replayed evaluations.
 
 ## How Apps Should Consume It
 

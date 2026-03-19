@@ -126,6 +126,12 @@ The lifecycle service writes attempt rows and output rows, and recomputes parent
 6. `StaleRunDetector` marks long-stuck queued/running jobs as `stale`.
 7. Run status is recomputed from job-run state at each lifecycle transition.
 
+## Manual trigger replay contract (v1 hardening)
+
+- `POST /xyn/api/orchestration/runs` accepts optional top-level `idempotency_key`.
+- when present, this key is forwarded into run metadata and enforced by run idempotency constraints (`workspace + pipeline + idempotency_key`).
+- replaying the same manual trigger key returns the existing run instead of creating duplicate runs.
+
 Future apps (including Deal Finder) should only provide pipeline definitions + handlers, not custom orchestration infrastructure.
 
 ## Current TODOs

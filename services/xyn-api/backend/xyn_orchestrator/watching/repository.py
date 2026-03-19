@@ -131,11 +131,22 @@ class WatchRepository:
         event_ref: dict[str, Any],
         filter_snapshot: dict[str, Any],
         notification_intent: dict[str, Any],
+        event_fingerprint: str = "",
+        idempotency_key: str = "",
         run_id: str = "",
         correlation_id: str = "",
         chain_id: str = "",
     ) -> WatchMatchEvent:
         run = OrchestrationRun.objects.filter(id=run_id, workspace_id=workspace_id).first() if run_id else None
+        normalized_idempotency_key = str(idempotency_key or "").strip()
+        if normalized_idempotency_key:
+            existing = WatchMatchEvent.objects.filter(
+                workspace_id=workspace_id,
+                watch=watch,
+                idempotency_key=normalized_idempotency_key,
+            ).first()
+            if existing is not None:
+                return existing
         return WatchMatchEvent.objects.create(
             workspace_id=workspace_id,
             watch=watch,
@@ -147,6 +158,8 @@ class WatchRepository:
             event_ref_json=event_ref,
             filter_snapshot_json=filter_snapshot,
             notification_intent_json=notification_intent,
+            event_fingerprint=str(event_fingerprint or "").strip(),
+            idempotency_key=normalized_idempotency_key,
             run=run,
             correlation_id=str(correlation_id or ""),
             chain_id=str(chain_id or ""),

@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from xyn_orchestrator.models import AppNotification, DeliveryAttempt, DeliveryTarget, NotificationRecipient
 
-from .service import record_delivery_attempt, resolve_delivery_targets_and_preference
+from .service import record_delivery_attempt_once, resolve_delivery_targets_and_preference
 
 logger = logging.getLogger(__name__)
 
@@ -168,15 +168,31 @@ def enqueue_notification_email_delivery(
             skipped += 1
             continue
         for target in targets:
-            attempt = record_delivery_attempt(
+            dispatch_key = ":".join(
+                [
+                    str(notification.id),
+                    str(row.id),
+                    str(target.id),
+                    "email",
+                ]
+            )
+            attempt, created = record_delivery_attempt_once(
                 notification=notification,
                 recipient_row=row,
                 target=target,
                 channel="email",
+                dispatch_key=dispatch_key,
                 status="pending",
                 retry_count=0,
                 provider_name=_email_provider_name(),
             )
+            if not created:
+                if attempt.status == "delivered":
+                    skipped += 1
+                    continue
+                if attempt.status in {"pending", "failed"}:
+                    skipped += 1
+                    continue
             try:
                 _enqueue_delivery_attempt(str(attempt.id))
                 queued += 1

@@ -144,6 +144,7 @@ class RecordMatchingService:
                 run_id=resolved_context.run_id,
                 correlation_id=resolved_context.correlation_id,
                 chain_id=resolved_context.chain_id,
+                idempotency_key=resolved_context.idempotency_key or str((metadata or {}).get("idempotency_key") or ""),
                 metadata=metadata,
             )
         return evaluation

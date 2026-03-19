@@ -67,6 +67,7 @@ class StrategyContext:
     run_id: str = ""
     correlation_id: str = ""
     chain_id: str = ""
+    idempotency_key: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -113,6 +114,7 @@ class MatchResultRepository(Protocol):
         run_id: str = "",
         correlation_id: str = "",
         chain_id: str = "",
+        idempotency_key: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> Any:
         ...

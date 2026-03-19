@@ -138,3 +138,36 @@ class NotificationPublisherTests(TestCase):
                 recipient_ids=["missing-id"],
                 title="Invalid recipient",
             )
+
+    @mock.patch("xyn_orchestrator.notifications.delivery._enqueue_delivery_attempt", return_value="job-1")
+    def test_publish_replay_with_idempotency_key_returns_existing_notification(self, _enqueue_mock):
+        DeliveryTarget.objects.create(
+            owner=self.recipient_a,
+            channel="email",
+            address="a@example.com",
+            enabled=True,
+            verification_status="verified",
+            is_primary=True,
+        )
+        first = publish_application_notification(
+            source_app="portfolio-ops",
+            notification_type="status_update",
+            recipient_ids=[str(self.recipient_a.id)],
+            title="Status updated",
+            workspace_id=str(self.workspace.id),
+            request_delivery=True,
+            idempotency_key="idem-123",
+        )
+        second = publish_application_notification(
+            source_app="portfolio-ops",
+            notification_type="status_update",
+            recipient_ids=[str(self.recipient_a.id)],
+            title="Status updated",
+            workspace_id=str(self.workspace.id),
+            request_delivery=True,
+            idempotency_key="idem-123",
+        )
+        self.assertEqual(first.notification_id, second.notification_id)
+        self.assertEqual(AppNotification.objects.count(), 1)
+        self.assertEqual(NotificationRecipient.objects.count(), 1)
+        self.assertEqual(DeliveryAttempt.objects.count(), 1)

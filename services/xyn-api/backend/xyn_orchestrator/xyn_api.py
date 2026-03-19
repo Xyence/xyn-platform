@@ -30960,6 +30960,7 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
                 run_id=str(payload.get("run_id") or "").strip(),
                 correlation_id=str(payload.get("correlation_id") or "").strip(),
                 chain_id=str(payload.get("chain_id") or "").strip(),
+                idempotency_key=str(payload.get("idempotency_key") or "").strip(),
                 metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
             ),
             persist=bool(payload.get("persist", True)),
@@ -31298,6 +31299,7 @@ def source_connector_inspections_collection(request: HttpRequest, source_id: str
                     validation_findings=payload.get("validation_findings") if isinstance(payload.get("validation_findings"), list) else [],
                     inspected_by_id=str(identity.id),
                     inspection_run_id=str(payload.get("inspection_run_id") or "").strip(),
+                    idempotency_key=str(payload.get("idempotency_key") or "").strip(),
                 )
             )
         except ValueError as exc:
@@ -31336,6 +31338,7 @@ def source_connector_mappings_collection(request: HttpRequest, source_id: str) -
                     validation_state=payload.get("validation_state") if isinstance(payload.get("validation_state"), dict) else {},
                     validated_by_id=str(identity.id),
                     validation_run_id=str(payload.get("validation_run_id") or "").strip(),
+                    idempotency_key=str(payload.get("idempotency_key") or "").strip(),
                 )
             )
         except ValueError as exc:
@@ -31440,6 +31443,8 @@ def _serialize_record_match_result(row: RecordMatchEvaluation) -> Dict[str, Any]
         "id": str(row.id),
         "workspace_id": str(row.workspace_id),
         "strategy_key": row.strategy_key,
+        "pair_fingerprint": str(row.pair_fingerprint or ""),
+        "idempotency_key": str(row.idempotency_key or ""),
         "score": float(row.score),
         "decision": row.decision,
         "confidence": row.confidence,
@@ -31499,6 +31504,7 @@ def record_matching_evaluate(request: HttpRequest) -> JsonResponse:
     run_id = str(payload.get("run_id") or "").strip()
     correlation_id = str(payload.get("correlation_id") or "").strip()
     chain_id = str(payload.get("chain_id") or "").strip()
+    idempotency_key = str(payload.get("idempotency_key") or "").strip()
     service = RecordMatchingService(repository=None)
     available_strategy_keys = service.registry.keys()
     if strategy_key and strategy_key not in available_strategy_keys:
@@ -31508,6 +31514,7 @@ def record_matching_evaluate(request: HttpRequest) -> JsonResponse:
         run_id=run_id,
         correlation_id=correlation_id,
         chain_id=chain_id,
+        idempotency_key=idempotency_key,
         metadata=metadata,
     )
     evaluation = service.evaluate_pair(
@@ -31533,6 +31540,7 @@ def record_matching_evaluate(request: HttpRequest) -> JsonResponse:
             run_id=run_id,
             correlation_id=correlation_id,
             chain_id=chain_id,
+            idempotency_key=idempotency_key,
             metadata=metadata,
         )
         response_payload["persisted"] = True
@@ -32002,6 +32010,7 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
             return JsonResponse({"error": "pipeline not found"}, status=404)
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         manual_params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+        explicit_idempotency_key = str(payload.get("idempotency_key") or "").strip()
         trigger_key = str(payload.get("trigger_key") or "manual_api").strip() or "manual_api"
         lifecycle = OrchestrationLifecycleService()
         run = lifecycle.create_run(
@@ -32018,6 +32027,7 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
                 ),
                 metadata={
                     **metadata,
+                    **({"idempotency_key": explicit_idempotency_key} if explicit_idempotency_key else {}),
                     "manual_parameters": manual_params,
                 },
             )

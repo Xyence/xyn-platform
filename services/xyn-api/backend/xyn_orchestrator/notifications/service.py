@@ -72,6 +72,26 @@ def _serialize_notification_recipient(row: NotificationRecipient) -> Dict[str, A
     }
 
 
+def _resolve_existing_notification(
+    *,
+    workspace: Optional[Workspace],
+    source_app_key: str,
+    notification_type_key: str,
+    idempotency_key: str,
+) -> Optional[AppNotification]:
+    normalized_key = str(idempotency_key or "").strip()
+    if not normalized_key:
+        return None
+    base = AppNotification.objects.filter(
+        source_app_key=str(source_app_key or "").strip(),
+        notification_type_key=str(notification_type_key or "").strip(),
+        idempotency_key=normalized_key,
+    )
+    if workspace is None:
+        return base.filter(workspace__isnull=True).order_by("-created_at").first()
+    return base.filter(workspace=workspace).order_by("-created_at").first()
+
+
 @transaction.atomic
 def create_app_notification(
     *,
@@ -89,6 +109,7 @@ def create_app_notification(
     source_metadata: Optional[Dict[str, Any]] = None,
     created_by: Optional[UserIdentity] = None,
     enqueue_email_delivery: bool = False,
+    idempotency_key: str = "",
 ) -> Tuple[AppNotification, List[NotificationRecipient]]:
     deduped_recipients = {
         str(identity.id): identity
@@ -104,6 +125,28 @@ def create_app_notification(
     if not str(title or "").strip():
         raise ValueError("title is required")
 
+    normalized_idempotency_key = str(idempotency_key or "").strip()
+    existing = _resolve_existing_notification(
+        workspace=workspace,
+        source_app_key=source_app_key,
+        notification_type_key=notification_type_key,
+        idempotency_key=normalized_idempotency_key,
+    )
+    if existing is not None:
+        recipient_rows: list[NotificationRecipient] = []
+        for identity in deduped_recipients.values():
+            row, _created = NotificationRecipient.objects.get_or_create(
+                notification=existing,
+                recipient=identity,
+                defaults={"unread": True},
+            )
+            recipient_rows.append(row)
+        if enqueue_email_delivery:
+            from .delivery import enqueue_notification_email_delivery
+
+            enqueue_notification_email_delivery(notification=existing, recipient_rows=recipient_rows)
+        return existing, recipient_rows
+
     notification = AppNotification.objects.create(
         workspace=workspace,
         source_app_key=str(source_app_key).strip(),
@@ -116,6 +159,7 @@ def create_app_notification(
         source_entity_type=str(source_entity_type or "").strip(),
         source_entity_id=str(source_entity_id or "").strip(),
         source_metadata_json=source_metadata if isinstance(source_metadata, dict) else {},
+        idempotency_key=normalized_idempotency_key,
         created_by=created_by,
     )
 
@@ -427,3 +471,48 @@ def record_delivery_attempt(
         attempted_at=attempted_at or timezone.now(),
         delivered_at=delivered_at,
     )
+
+
+@transaction.atomic
+def record_delivery_attempt_once(
+    *,
+    notification: AppNotification,
+    channel: str,
+    dispatch_key: str,
+    status: str = "pending",
+    retry_count: int = 0,
+    recipient_row: Optional[NotificationRecipient] = None,
+    target: Optional[DeliveryTarget] = None,
+    provider_name: str = "",
+) -> tuple[DeliveryAttempt, bool]:
+    normalized_dispatch_key = str(dispatch_key or "").strip()
+    if not normalized_dispatch_key:
+        return (
+            record_delivery_attempt(
+                notification=notification,
+                channel=channel,
+                status=status,
+                retry_count=retry_count,
+                recipient_row=recipient_row,
+                target=target,
+                provider_name=provider_name,
+            ),
+            True,
+        )
+    if recipient_row and recipient_row.notification_id != notification.id:
+        raise ValueError("recipient_row must belong to notification")
+    if target and recipient_row and target.owner_id != recipient_row.recipient_id:
+        raise ValueError("target owner must match recipient owner")
+    row, created = DeliveryAttempt.objects.get_or_create(
+        dispatch_key=normalized_dispatch_key,
+        defaults={
+            "notification": notification,
+            "recipient": recipient_row,
+            "target": target,
+            "channel": str(channel or "").strip() or "email",
+            "status": str(status or "").strip() or "pending",
+            "retry_count": max(0, int(retry_count or 0)),
+            "provider_name": str(provider_name or "").strip(),
+        },
+    )
+    return row, created

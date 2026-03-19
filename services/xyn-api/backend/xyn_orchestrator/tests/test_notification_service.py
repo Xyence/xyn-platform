@@ -200,3 +200,24 @@ class NotificationServiceTests(TestCase):
         self.assertEqual(attempt.recipient_id, rows[0].id)
         self.assertEqual(attempt.target_id, target.id)
         self.assertEqual(attempt.retry_count, 1)
+
+    def test_create_notification_replay_with_idempotency_key(self):
+        first, first_rows = create_app_notification(
+            source_app_key="deal-finder",
+            notification_type_key="daily_result",
+            title="Replay-safe",
+            workspace=self.workspace_a,
+            recipients=[self.user_a],
+            idempotency_key="notif-idem-1",
+        )
+        second, second_rows = create_app_notification(
+            source_app_key="deal-finder",
+            notification_type_key="daily_result",
+            title="Replay-safe",
+            workspace=self.workspace_a,
+            recipients=[self.user_a],
+            idempotency_key="notif-idem-1",
+        )
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(len(first_rows), 1)
+        self.assertEqual(len(second_rows), 1)

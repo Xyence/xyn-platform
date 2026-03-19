@@ -2411,10 +2411,18 @@ class PlatformAuditEvent(models.Model):
     )
     correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
     chain_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_platform_audit_idempotency",
+            ),
+        ]
         indexes = [
             models.Index(fields=["workspace", "event_type", "created_at"], name="ix_platform_audit_type_time"),
             models.Index(fields=["workspace", "subject_type", "subject_id", "created_at"], name="ix_platform_audit_subject"),
@@ -2451,10 +2459,18 @@ class ProvenanceLink(models.Model):
     )
     correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
     chain_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_provenance_link_idempotency",
+            ),
+        ]
         indexes = [
             models.Index(fields=["workspace", "source_type", "source_id", "created_at"], name="ix_prov_source_time"),
             models.Index(fields=["workspace", "target_type", "target_id", "created_at"], name="ix_prov_target_time"),
@@ -2785,6 +2801,7 @@ class AppNotification(models.Model):
     source_entity_type = models.CharField(max_length=120, blank=True, default="")
     source_entity_id = models.CharField(max_length=160, blank=True, default="")
     source_metadata_json = models.JSONField(default=dict, blank=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
     created_by = models.ForeignKey(
         UserIdentity, null=True, blank=True, on_delete=models.SET_NULL, related_name="app_notifications_created"
     )
@@ -2792,6 +2809,18 @@ class AppNotification(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "source_app_key", "notification_type_key", "idempotency_key"],
+                condition=Q(workspace__isnull=False, idempotency_key__gt=""),
+                name="uniq_app_notif_workspace_idempotency",
+            ),
+            models.UniqueConstraint(
+                fields=["source_app_key", "notification_type_key", "idempotency_key"],
+                condition=Q(workspace__isnull=True, idempotency_key__gt=""),
+                name="uniq_app_notif_global_idempotency",
+            ),
+        ]
         indexes = [
             models.Index(fields=["workspace", "created_at"], name="ix_app_notif_workspace_created"),
             models.Index(fields=["source_app_key", "notification_type_key"], name="ix_app_notif_source_type"),
@@ -2923,6 +2952,7 @@ class DeliveryAttempt(models.Model):
     channel = models.CharField(max_length=40, choices=DeliveryTarget.CHANNEL_CHOICES, default="email", db_index=True)
     status = models.CharField(max_length=40, choices=STATUS_CHOICES, default="pending", db_index=True)
     retry_count = models.PositiveIntegerField(default=0)
+    dispatch_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
     provider_name = models.CharField(max_length=120, blank=True, default="")
     provider_message_id = models.CharField(max_length=240, blank=True, default="")
     error_text = models.TextField(blank=True, default="")
@@ -2934,6 +2964,13 @@ class DeliveryAttempt(models.Model):
 
     class Meta:
         ordering = ["-attempted_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dispatch_key"],
+                condition=Q(dispatch_key__gt=""),
+                name="uniq_delivery_attempt_dispatch_key",
+            ),
+        ]
         indexes = [
             models.Index(fields=["notification", "status", "attempted_at"], name="ix_dlv_attempt_notif_st"),
             models.Index(fields=["target", "status", "attempted_at"], name="ix_dlv_attempt_tgt_st"),
@@ -3147,6 +3184,8 @@ class WatchMatchEvent(models.Model):
     event_ref_json = models.JSONField(default=dict, blank=True)
     filter_snapshot_json = models.JSONField(default=dict, blank=True)
     notification_intent_json = models.JSONField(default=dict, blank=True)
+    event_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
     run = models.ForeignKey(
         "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="watch_match_events"
     )
@@ -3156,6 +3195,13 @@ class WatchMatchEvent(models.Model):
 
     class Meta:
         ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "watch", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_watch_match_idempotency",
+            ),
+        ]
         indexes = [
             models.Index(fields=["workspace", "watch", "created_at"], name="ix_watch_match_timeline"),
             models.Index(fields=["workspace", "matched", "created_at"], name="ix_watch_match_workspace_state"),
@@ -3280,6 +3326,8 @@ class SourceInspectionProfile(models.Model):
     discovered_fields_json = models.JSONField(default=list, blank=True)
     sample_metadata_json = models.JSONField(default=dict, blank=True)
     validation_findings_json = models.JSONField(default=list, blank=True)
+    inspection_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
     inspected_by = models.ForeignKey(
         "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_inspections"
     )
@@ -3290,6 +3338,13 @@ class SourceInspectionProfile(models.Model):
 
     class Meta:
         ordering = ["-inspected_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source_connector", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_source_inspection_idempotency",
+            ),
+        ]
         indexes = [
             models.Index(fields=["source_connector", "inspected_at"], name="ix_source_inspection_time"),
             models.Index(fields=["source_connector", "status"], name="ix_source_inspection_status"),
@@ -3314,6 +3369,8 @@ class SourceMapping(models.Model):
     field_mapping_json = models.JSONField(default=dict, blank=True)
     transformation_hints_json = models.JSONField(default=dict, blank=True)
     validation_state_json = models.JSONField(default=dict, blank=True)
+    mapping_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
     validated_at = models.DateTimeField(null=True, blank=True)
     validated_by = models.ForeignKey(
         "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="validated_source_mappings"
@@ -3335,6 +3392,11 @@ class SourceMapping(models.Model):
                 fields=["source_connector"],
                 condition=Q(is_current=True),
                 name="uniq_source_mapping_current",
+            ),
+            models.UniqueConstraint(
+                fields=["source_connector", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_source_mapping_idempotency",
             ),
         ]
         indexes = [
@@ -3778,6 +3840,8 @@ class RecordMatchEvaluation(models.Model):
     candidate_a_ref_json = models.JSONField(default=dict, blank=True)
     candidate_b_ref_json = models.JSONField(default=dict, blank=True)
     strategy_key = models.CharField(max_length=120, db_index=True)
+    pair_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
     score = models.FloatField(default=0.0)
     decision = models.CharField(max_length=24, choices=DECISION_CHOICES, default="non_match", db_index=True)
     confidence = models.CharField(max_length=24, default="none", db_index=True)
@@ -3798,6 +3862,13 @@ class RecordMatchEvaluation(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_record_match_idempotency",
+            ),
+        ]
         indexes = [
             models.Index(
                 fields=["workspace", "decision", "created_at"],

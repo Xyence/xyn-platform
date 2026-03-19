@@ -62,6 +62,13 @@ Evaluation is explainable and deterministic:
 
 When a match succeeds, a `notification_intent` payload is attached for downstream delivery handling.
 
+Replay/idempotency behavior in v1 hardening:
+
+- `POST /xyn/api/watches/matches/evaluate` accepts optional `idempotency_key`.
+- If omitted, the service derives a deterministic replay key from workspace/watch/event payload scope.
+- Replayed evaluations return/reuse the existing `WatchMatchEvent` row instead of appending duplicates.
+- Provenance/audit fan-out for replayed match events is deduped using the same logical replay scope.
+
 ## Relationship to other primitives
 
 - campaigns: watches may optionally link to a campaign (`linked_campaign`) as a light integration seam
@@ -72,7 +79,7 @@ When a match succeeds, a `notification_intent` payload is attached for downstrea
 ## Current TODOs
 
 - TODO: add richer subscriber preference policy (digest windows, per-event-type settings, and quiet hours).
-- TODO: add dedupe/throttling policy controls for repeated matches on noisy event streams.
+- TODO: add configurable throttling windows on top of deterministic idempotency for intentionally noisy event streams.
 - TODO: define retention policy and archival/compaction strategy for `WatchMatchEvent` rows.
 - TODO: provide campaign-on-watch adapter helpers for progressive campaign simplification.
 - TODO: add operator UI surfaces for watch inspection and match drill-down beyond API-first visibility.

@@ -55,6 +55,7 @@ class SourceInspectionInput:
     validation_findings: list[dict[str, Any]] = field(default_factory=list)
     inspected_by_id: str = ""
     inspection_run_id: str = ""
+    idempotency_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ class SourceMappingInput:
     validation_state: dict[str, Any] = field(default_factory=dict)
     validated_by_id: str = ""
     validation_run_id: str = ""
+    idempotency_key: str = ""
 
 
 @dataclass(frozen=True)

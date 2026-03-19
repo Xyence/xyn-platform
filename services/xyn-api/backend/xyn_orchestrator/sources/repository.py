@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Any
 
 from django.db import transaction
-from django.db.models import QuerySet
+from django.db.models import Max, QuerySet
 
 from xyn_orchestrator.models import (
     OrchestrationRun,
@@ -17,6 +19,10 @@ from xyn_orchestrator.models import (
 
 
 class SourceConnectorRepository:
+    def _fingerprint(self, payload: dict[str, Any]) -> str:
+        encoded = json.dumps(payload if isinstance(payload, dict) else {}, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
     def list_sources(self, *, workspace_id: str) -> QuerySet[SourceConnector]:
         return SourceConnector.objects.filter(workspace_id=workspace_id).select_related("last_run", "created_by").order_by("-updated_at", "-created_at")
 
@@ -75,9 +81,25 @@ class SourceConnectorRepository:
         validation_findings: list[dict[str, Any]],
         inspected_by_id: str = "",
         inspection_run_id: str = "",
+        idempotency_key: str = "",
     ) -> SourceInspectionProfile:
+        normalized_idempotency_key = str(idempotency_key or "").strip()
+        if normalized_idempotency_key:
+            existing = source.inspections.filter(idempotency_key=normalized_idempotency_key).first()
+            if existing is not None:
+                return existing
         inspected_by = UserIdentity.objects.filter(id=inspected_by_id).first() if inspected_by_id else None
         inspection_run = OrchestrationRun.objects.filter(id=inspection_run_id, workspace=source.workspace).first() if inspection_run_id else None
+        inspection_fingerprint = self._fingerprint(
+            {
+                "status": str(status or "").strip(),
+                "detected_format": str(detected_format or "").strip(),
+                "discovered_fields": discovered_fields if isinstance(discovered_fields, list) else [],
+                "sample_metadata": sample_metadata if isinstance(sample_metadata, dict) else {},
+                "validation_findings": validation_findings if isinstance(validation_findings, list) else [],
+                "inspection_run_id": str(inspection_run_id or "").strip(),
+            }
+        )
         row = SourceInspectionProfile.objects.create(
             source_connector=source,
             status=status,
@@ -85,6 +107,8 @@ class SourceConnectorRepository:
             discovered_fields_json=discovered_fields,
             sample_metadata_json=sample_metadata,
             validation_findings_json=validation_findings,
+            inspection_fingerprint=inspection_fingerprint,
+            idempotency_key=normalized_idempotency_key,
             inspected_by=inspected_by,
             inspection_run=inspection_run,
         )
@@ -106,12 +130,32 @@ class SourceConnectorRepository:
         validated_by_id: str = "",
         validation_run_id: str = "",
         now: datetime | None = None,
+        idempotency_key: str = "",
     ) -> SourceMapping:
-        current = source.mappings.filter(is_current=True)
-        for row in current:
-            row.is_current = False
-            row.save(update_fields=["is_current", "updated_at"])
-        next_version = int(source.mappings.count()) + 1
+        normalized_idempotency_key = str(idempotency_key or "").strip()
+        if normalized_idempotency_key:
+            existing = source.mappings.filter(idempotency_key=normalized_idempotency_key).first()
+            if existing is not None:
+                return existing
+        mapping_hash = self._fingerprint(
+            {
+                "status": str(status or "").strip(),
+                "field_mapping": field_mapping if isinstance(field_mapping, dict) else {},
+                "transformation_hints": transformation_hints if isinstance(transformation_hints, dict) else {},
+                "validation_state": validation_state if isinstance(validation_state, dict) else {},
+            }
+        )
+        SourceConnector.objects.select_for_update().filter(id=source.id).exists()
+        current = source.mappings.select_for_update().filter(is_current=True).order_by("-version", "-created_at").first()
+        if current is not None and current.mapping_hash == mapping_hash and current.status == status:
+            if normalized_idempotency_key and not str(current.idempotency_key or "").strip():
+                current.idempotency_key = normalized_idempotency_key
+                current.save(update_fields=["idempotency_key", "updated_at"])
+            return current
+        if current is not None:
+            current.is_current = False
+            current.save(update_fields=["is_current", "updated_at"])
+        next_version = int(source.mappings.aggregate(max_version=Max("version")).get("max_version") or 0) + 1
         validated_by = UserIdentity.objects.filter(id=validated_by_id).first() if validated_by_id else None
         validation_run = OrchestrationRun.objects.filter(id=validation_run_id, workspace=source.workspace).first() if validation_run_id else None
         mapping = SourceMapping.objects.create(
@@ -122,6 +166,8 @@ class SourceConnectorRepository:
             field_mapping_json=field_mapping,
             transformation_hints_json=transformation_hints,
             validation_state_json=validation_state,
+            mapping_hash=mapping_hash,
+            idempotency_key=normalized_idempotency_key,
             validated_at=now if status in {"validated", "active"} else None,
             validated_by=validated_by,
             validation_run=validation_run,

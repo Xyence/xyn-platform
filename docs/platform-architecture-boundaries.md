@@ -67,6 +67,7 @@ Machine-readable object schemas for canonical primitives live in:
 
 ## Current TODOs
 
-- TODO: Add schema coverage for canonical watch/source/matching/audit objects in `services/xyn-api/backend/schemas`.
 - TODO: Keep cross-doc wording synchronized when legacy `Run`/`WorkflowRun` docs are updated.
 - TODO: Add stronger UI terminology parity for watch/subscriber/notification-target surfaces when those pages are introduced.
+- TODO: add CI checks that require idempotency-key coverage tests for externally triggerable write endpoints in canonical primitives.
+- TODO: define a shared docs matrix for replay semantics (`idempotency_key`, deterministic fingerprint, uniqueness backstop) across watch/matching/source/notification flows.

@@ -74,6 +74,16 @@ class NotificationDeliveryTests(TestCase):
         self.assertEqual(result["skipped"], 1)
         self.assertEqual(DeliveryAttempt.objects.count(), 0)
 
+    @mock.patch("xyn_orchestrator.notifications.delivery._enqueue_delivery_attempt", return_value="job-1")
+    def test_enqueue_replay_does_not_duplicate_dispatch_attempts(self, _enqueue_mock):
+        first = enqueue_notification_email_delivery(notification=self.notification, recipient_rows=self.rows)
+        second = enqueue_notification_email_delivery(notification=self.notification, recipient_rows=self.rows)
+        self.assertEqual(first["queued"], 1)
+        self.assertEqual(second["queued"], 0)
+        self.assertEqual(second["skipped"], 1)
+        self.assertEqual(DeliveryAttempt.objects.count(), 1)
+        _enqueue_mock.assert_called_once()
+
     @mock.patch("xyn_orchestrator.notifications.delivery.resolve_email_sender", return_value=_FakeSender(fail=False))
     def test_delivery_attempt_success_updates_status(self, _resolve_sender):
         attempt = record_delivery_attempt(

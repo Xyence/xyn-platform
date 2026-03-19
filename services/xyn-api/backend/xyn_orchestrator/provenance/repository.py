@@ -40,8 +40,17 @@ class ProvenanceRepository:
         run_id: str = "",
         correlation_id: str = "",
         chain_id: str = "",
+        idempotency_key: str = "",
     ) -> PlatformAuditEvent:
         workspace = Workspace.objects.get(id=workspace_id)
+        normalized_idempotency_key = str(idempotency_key or "").strip()
+        if normalized_idempotency_key:
+            existing = PlatformAuditEvent.objects.filter(
+                workspace=workspace,
+                idempotency_key=normalized_idempotency_key,
+            ).first()
+            if existing is not None:
+                return existing
         run = OrchestrationRun.objects.filter(id=run_id, workspace=workspace).first() if run_id else None
         normalized_subject = normalize_object_ref(subject_ref)
         payload_subject = _ref_payload(normalized_subject)
@@ -68,6 +77,7 @@ class ProvenanceRepository:
             run=run,
             correlation_id=str(correlation_id or "").strip(),
             chain_id=str(chain_id or "").strip(),
+            idempotency_key=normalized_idempotency_key,
         )
 
     @transaction.atomic
@@ -85,8 +95,17 @@ class ProvenanceRepository:
         run_id: str = "",
         correlation_id: str = "",
         chain_id: str = "",
+        idempotency_key: str = "",
     ) -> ProvenanceLink:
         workspace = Workspace.objects.get(id=workspace_id)
+        normalized_idempotency_key = str(idempotency_key or "").strip()
+        if normalized_idempotency_key:
+            existing = ProvenanceLink.objects.filter(
+                workspace=workspace,
+                idempotency_key=normalized_idempotency_key,
+            ).first()
+            if existing is not None:
+                return existing
         run = OrchestrationRun.objects.filter(id=run_id, workspace=workspace).first() if run_id else None
         origin_event = PlatformAuditEvent.objects.filter(id=origin_event_id, workspace=workspace).first() if origin_event_id else None
         normalized_source = normalize_object_ref(source_ref)
@@ -109,6 +128,7 @@ class ProvenanceRepository:
             run=run,
             correlation_id=str(correlation_id or "").strip(),
             chain_id=str(chain_id or "").strip(),
+            idempotency_key=normalized_idempotency_key,
         )
 
     def audit_history(

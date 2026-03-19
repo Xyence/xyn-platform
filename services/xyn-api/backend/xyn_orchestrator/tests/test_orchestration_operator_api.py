@@ -203,6 +203,27 @@ class OrchestrationOperatorApiTests(TestCase):
         self.assertEqual(list_response.status_code, 200)
         self.assertTrue(any(item["id"] == run_id for item in payload["runs"]))
 
+    def test_manual_trigger_replay_with_idempotency_key_returns_same_run(self):
+        create_payload = {
+            "workspace_id": str(self.workspace.id),
+            "pipeline_key": self.pipeline.key,
+            "idempotency_key": "manual-run-idem-1",
+            "metadata": {"correlation_id": "corr-replay", "chain_id": "chain-replay"},
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            first = orchestration_runs_collection(
+                self._request("/xyn/api/orchestration/runs", method="post", data=json.dumps(create_payload))
+            )
+            second = orchestration_runs_collection(
+                self._request("/xyn/api/orchestration/runs", method="post", data=json.dumps(create_payload))
+            )
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        first_payload = json.loads(first.content)
+        second_payload = json.loads(second.content)
+        self.assertEqual(first_payload["id"], second_payload["id"])
+        self.assertEqual(OrchestrationRun.objects.filter(workspace=self.workspace, pipeline=self.pipeline).count(), 1)
+
     def test_operator_can_inspect_run_detail_with_attempts_outputs_and_dependency_context(self):
         run = self._create_run()
         refresh_job_run = OrchestrationJobRun.objects.get(run=run, job_definition=self.job_refresh)

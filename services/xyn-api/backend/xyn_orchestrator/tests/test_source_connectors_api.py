@@ -222,3 +222,63 @@ class SourceConnectorApiTests(TestCase):
     def test_models_exist(self):
         self._create_source(mode="manual")
         self.assertEqual(SourceConnector.objects.filter(workspace=self.workspace).count(), 1)
+
+    def test_inspection_and_mapping_replay_with_idempotency_key(self):
+        source = self._create_source(mode="remote_url")
+        inspection_payload = {
+            "workspace_id": str(self.workspace.id),
+            "status": "ok",
+            "detected_format": "csv",
+            "discovered_fields": [{"name": "parcel_id", "type": "string"}],
+            "idempotency_key": "source-inspection-idem-1",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            first_inspect = source_connector_inspections_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/inspections",
+                    method="post",
+                    data=json.dumps(inspection_payload),
+                ),
+                source["id"],
+            )
+            second_inspect = source_connector_inspections_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/inspections",
+                    method="post",
+                    data=json.dumps(inspection_payload),
+                ),
+                source["id"],
+            )
+        self.assertEqual(first_inspect.status_code, 201)
+        self.assertEqual(second_inspect.status_code, 201)
+
+        mapping_payload = {
+            "workspace_id": str(self.workspace.id),
+            "status": "validated",
+            "field_mapping": {"parcel_id": "source.parcel_id"},
+            "transformation_hints": {"coerce_types": True},
+            "validation_state": {"ok": True},
+            "idempotency_key": "source-mapping-idem-1",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            first_mapping = source_connector_mappings_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/mappings",
+                    method="post",
+                    data=json.dumps(mapping_payload),
+                ),
+                source["id"],
+            )
+            second_mapping = source_connector_mappings_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/mappings",
+                    method="post",
+                    data=json.dumps(mapping_payload),
+                ),
+                source["id"],
+            )
+        self.assertEqual(first_mapping.status_code, 201)
+        self.assertEqual(second_mapping.status_code, 201)
+        source_row = SourceConnector.objects.get(id=source["id"])
+        self.assertEqual(source_row.inspections.count(), 1)
+        self.assertEqual(source_row.mappings.count(), 1)
