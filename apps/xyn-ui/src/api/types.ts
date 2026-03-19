@@ -2854,6 +2854,220 @@ export type CampaignListResponse = {
   campaign_types: CampaignTypeDefinition[];
 };
 
+export type WatchSummary = {
+  id: string;
+  workspace_id: string;
+  key: string;
+  name: string;
+  target_kind: string;
+  target_ref: Record<string, unknown>;
+  filter_criteria: Record<string, unknown>;
+  lifecycle_state: "draft" | "active" | "paused" | "archived" | string;
+  linked_campaign_id?: string | null;
+  metadata: Record<string, unknown>;
+  active_subscriber_count: number;
+  created_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WatchSubscriber = {
+  id: string;
+  watch_id: string;
+  subscriber_type: "user_identity" | "delivery_target" | "external_endpoint" | string;
+  subscriber_ref: string;
+  destination: Record<string, unknown>;
+  preferences: Record<string, unknown>;
+  enabled: boolean;
+  created_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WatchMatchEvent = {
+  id: string;
+  workspace_id: string;
+  watch_id: string;
+  watch_key: string;
+  event_key: string;
+  matched: boolean;
+  score: number;
+  reason: string;
+  explanation: Record<string, unknown>;
+  event_ref: Record<string, unknown>;
+  filter_snapshot: Record<string, unknown>;
+  notification_intent: Record<string, unknown>;
+  run_id?: string | null;
+  correlation_id: string;
+  chain_id: string;
+  created_at: string;
+};
+
+export type WatchListResponse = {
+  workspace_id: string;
+  lifecycle_states: string[];
+  subscriber_types: string[];
+  watches: WatchSummary[];
+};
+
+export type WatchSubscribersResponse = {
+  watch_id: string;
+  workspace_id?: string;
+  subscriber_types?: string[];
+  subscribers: WatchSubscriber[];
+};
+
+export type WatchMatchesResponse = {
+  workspace_id: string;
+  matches: WatchMatchEvent[];
+};
+
+export type WatchEvaluateResponse = {
+  workspace_id: string;
+  persisted: boolean;
+  results: Array<{
+    watch_id: string;
+    watch_key: string;
+    matched: boolean;
+    score: number;
+    reason: string;
+    explanation: string[];
+    notification_intent: Record<string, unknown>;
+  }>;
+};
+
+export type SourceConnectorSummary = {
+  id: string;
+  workspace_id: string;
+  key: string;
+  name: string;
+  source_type: string;
+  source_mode: "file_upload" | "remote_url" | "api_polling" | "manual" | string;
+  lifecycle_state: "registered" | "inspected" | "mapped" | "validated" | "active" | "failing" | "paused" | string;
+  health_status: "unknown" | "healthy" | "warning" | "failing" | "paused" | string;
+  is_active: boolean;
+  refresh_cadence_seconds: number;
+  orchestration_pipeline_key: string;
+  configuration: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  last_run_id?: string | null;
+  last_inspected_at?: string | null;
+  last_validated_at?: string | null;
+  last_success_at?: string | null;
+  last_failure_at?: string | null;
+  last_failure_reason: string;
+  current_mapping?: {
+    id: string;
+    version: number;
+    status: string;
+  } | null;
+  latest_inspection?: {
+    id: string;
+    status: string;
+    detected_format: string;
+    inspected_at?: string | null;
+  } | null;
+  readiness?: {
+    ready: boolean;
+    reasons: string[];
+    checked_at?: string | null;
+  } | null;
+  created_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SourceConnectorListResponse = {
+  workspace_id: string;
+  lifecycle_states: string[];
+  health_states: string[];
+  source_modes: string[];
+  sources: SourceConnectorSummary[];
+};
+
+export type SourceInspectionProfile = {
+  id: string;
+  source_id: string;
+  status: "ok" | "warning" | "error" | string;
+  detected_format: string;
+  discovered_fields: Array<Record<string, unknown>>;
+  sample_metadata: Record<string, unknown>;
+  validation_findings: Array<Record<string, unknown>>;
+  inspection_run_id?: string | null;
+  inspected_by_id?: string | null;
+  inspected_at: string;
+};
+
+export type SourceInspectionsResponse = {
+  source_id: string;
+  inspections: SourceInspectionProfile[];
+};
+
+export type SourceMappingRecord = {
+  id: string;
+  source_id: string;
+  version: number;
+  status: "draft" | "validated" | "active" | string;
+  is_current: boolean;
+  field_mapping: Record<string, unknown>;
+  transformation_hints: Record<string, unknown>;
+  validation_state: Record<string, unknown>;
+  validated_at?: string | null;
+  validated_by_id?: string | null;
+  validation_run_id?: string | null;
+  created_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SourceMappingsResponse = {
+  source_id: string;
+  mappings: SourceMappingRecord[];
+};
+
+export type RecordMatchResult = {
+  id: string;
+  workspace_id: string;
+  strategy_key: string;
+  score: number;
+  decision: "exact_match" | "probable_match" | "possible_match" | "non_match" | "needs_review" | string;
+  confidence: string;
+  candidate_a: Record<string, unknown>;
+  candidate_b: Record<string, unknown>;
+  explanation: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  extra: Record<string, unknown>;
+  run_id?: string | null;
+  correlation_id: string;
+  chain_id: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RecordMatchResultsResponse = {
+  workspace_id: string;
+  results: RecordMatchResult[];
+};
+
+export type RecordMatchEvaluateResponse = {
+  workspace_id: string;
+  evaluation: {
+    candidate_a: Record<string, unknown>;
+    candidate_b: Record<string, unknown>;
+    strategy_key: string;
+    score: number;
+    decision: string;
+    confidence: string;
+    explanation: string[];
+    signals: Array<Record<string, unknown>>;
+    metadata: Record<string, unknown>;
+  };
+  persisted: boolean;
+  available_strategy_keys: string[];
+  result?: RecordMatchResult;
+};
+
 export type ComposerAction = {
   type: string;
   label: string;

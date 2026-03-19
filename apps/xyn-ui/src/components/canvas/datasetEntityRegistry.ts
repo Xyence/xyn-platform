@@ -4,6 +4,8 @@ export type OpenDetailTarget = {
   dataset?: string;
 };
 
+// Dataset names in canvas payloads are read-model/output identifiers.
+// They are not canonical source-definition objects (for example SourceConnector).
 const DATASET_ENTITY_MAP: Record<string, string> = {
   artifacts: "artifact",
   ems_devices: "device",
@@ -36,6 +38,7 @@ export function getOpenDetailTarget(
       entity_id: String(rawId),
     };
   }
+  // Unknown dataset names still open in a generic record view to preserve behavior.
   return {
     entity_type: "record",
     entity_id: String(rawId),

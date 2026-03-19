@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xyence.io/schemas/watch_definition.v1.schema.json",
+  "title": "Watch Definition",
+  "type": "object",
+  "required": ["id", "workspace_id", "key", "name", "target_kind", "lifecycle_state"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "workspace_id": { "type": "string", "format": "uuid" },
+    "key": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "target_kind": { "type": "string" },
+    "target_ref": { "type": "object", "additionalProperties": true },
+    "filter_criteria": { "type": "object", "additionalProperties": true },
+    "lifecycle_state": { "type": "string", "enum": ["draft", "active", "paused", "archived"] },
+    "linked_campaign_id": { "type": ["string", "null"], "format": "uuid" },
+    "metadata": { "type": "object", "additionalProperties": true },
+    "active_subscriber_count": { "type": "integer", "minimum": 0 },
+    "created_by_id": { "type": ["string", "null"], "format": "uuid" },
+    "created_at": { "type": ["string", "null"], "format": "date-time" },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": false
+}

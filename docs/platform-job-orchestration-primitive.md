@@ -9,9 +9,11 @@ Do not use or imply cron scheduling until platform cron support is explicitly im
 
 ## Why this location
 The primitive lives in `services/xyn-api/backend/xyn_orchestrator` because that package already owns:
-- workspace-scoped durable platform models (`Campaign`, `Goal`, `Run`, notifications)
+- workspace-scoped durable platform models (`Campaign`, `Goal`, notifications, and orchestration run history)
 - orchestration-adjacent queue/recovery logic (`execution_queue.py`, `execution_recovery.py`, `xco.py`)
 - API/worker integration points used by platform primitives
+
+`Run` in legacy/runtime seams remains compatibility scope; `OrchestrationRun` is the canonical run-history model for new data-processing orchestration flows.
 
 New module: `xyn_orchestrator/orchestration/`
 

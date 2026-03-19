@@ -53,6 +53,18 @@ import type {
   CampaignTypeDefinition,
   CampaignListResponse,
   CampaignDetail,
+  WatchListResponse,
+  WatchSummary,
+  WatchSubscribersResponse,
+  WatchMatchesResponse,
+  WatchEvaluateResponse,
+  SourceConnectorListResponse,
+  SourceConnectorSummary,
+  SourceInspectionsResponse,
+  SourceMappingsResponse,
+  RecordMatchEvaluateResponse,
+  RecordMatchResult,
+  RecordMatchResultsResponse,
   WorkQueueResponse,
   ContextPackCreatePayload,
   ContextPackDetail,
@@ -4605,6 +4617,195 @@ export async function updateCampaign(id: string, payload: Record<string, unknown
     body: JSON.stringify(payload),
   });
   return handle<CampaignDetail>(response);
+}
+
+export async function listWatches(
+  workspaceId: string,
+  options?: { lifecycle_state?: string; target_kind?: string },
+): Promise<WatchListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/watches`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.lifecycle_state) url.searchParams.set("lifecycle_state", options.lifecycle_state);
+  if (options?.target_kind) url.searchParams.set("target_kind", options.target_kind);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<WatchListResponse>(response);
+}
+
+export async function createWatch(payload: {
+  workspace_id: string;
+  key: string;
+  name: string;
+  target_kind?: string;
+  target_ref?: Record<string, unknown>;
+  filter_criteria?: Record<string, unknown>;
+  lifecycle_state?: string;
+  linked_campaign_id?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<WatchSummary> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/watches`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<WatchSummary>(response);
+}
+
+export async function listWatchSubscribers(watchId: string, workspaceId: string): Promise<WatchSubscribersResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/watches/${encodeURIComponent(watchId)}/subscribers`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<WatchSubscribersResponse>(response);
+}
+
+export async function listWatchMatches(
+  workspaceId: string,
+  options?: { watch_id?: string; event_key?: string; matched?: boolean; limit?: number },
+): Promise<WatchMatchesResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/watches/matches`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.watch_id) url.searchParams.set("watch_id", options.watch_id);
+  if (options?.event_key) url.searchParams.set("event_key", options.event_key);
+  if (typeof options?.matched === "boolean") url.searchParams.set("matched", options.matched ? "1" : "0");
+  if (typeof options?.limit === "number") url.searchParams.set("limit", String(options.limit));
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<WatchMatchesResponse>(response);
+}
+
+export async function evaluateWatchMatches(payload: {
+  workspace_id: string;
+  event_key?: string;
+  event_ref?: Record<string, unknown>;
+  watch_ids?: string[];
+  run_id?: string;
+  correlation_id?: string;
+  chain_id?: string;
+  metadata?: Record<string, unknown>;
+  persist?: boolean;
+}): Promise<WatchEvaluateResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/watches/matches/evaluate`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<WatchEvaluateResponse>(response);
+}
+
+export async function listSourceConnectors(
+  workspaceId: string,
+  options?: { lifecycle_state?: string; health_status?: string; source_mode?: string; source_type?: string; active_only?: boolean },
+): Promise<SourceConnectorListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/source-connectors`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.lifecycle_state) url.searchParams.set("lifecycle_state", options.lifecycle_state);
+  if (options?.health_status) url.searchParams.set("health_status", options.health_status);
+  if (options?.source_mode) url.searchParams.set("source_mode", options.source_mode);
+  if (options?.source_type) url.searchParams.set("source_type", options.source_type);
+  if (options?.active_only) url.searchParams.set("active_only", "1");
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<SourceConnectorListResponse>(response);
+}
+
+export async function createSourceConnector(payload: {
+  workspace_id: string;
+  key: string;
+  name: string;
+  source_type?: string;
+  source_mode?: string;
+  refresh_cadence_seconds?: number;
+  orchestration_pipeline_key?: string;
+  configuration?: Record<string, unknown>;
+  provenance?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}): Promise<SourceConnectorSummary> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/source-connectors`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<SourceConnectorSummary>(response);
+}
+
+export async function listSourceInspections(sourceId: string, workspaceId: string): Promise<SourceInspectionsResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/source-connectors/${encodeURIComponent(sourceId)}/inspections`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<SourceInspectionsResponse>(response);
+}
+
+export async function listSourceMappings(sourceId: string, workspaceId: string): Promise<SourceMappingsResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/source-connectors/${encodeURIComponent(sourceId)}/mappings`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<SourceMappingsResponse>(response);
+}
+
+export async function evaluateRecordMatch(payload: {
+  workspace_id: string;
+  candidate_a: Record<string, unknown>;
+  candidate_b: Record<string, unknown>;
+  strategy_key?: string;
+  persist?: boolean;
+  metadata?: Record<string, unknown>;
+  run_id?: string;
+  correlation_id?: string;
+  chain_id?: string;
+}): Promise<RecordMatchEvaluateResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/record-matching/evaluate`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<RecordMatchEvaluateResponse>(response);
+}
+
+export async function listRecordMatchResults(
+  workspaceId: string,
+  options?: {
+    strategy_key?: string;
+    decision?: string;
+    correlation_id?: string;
+    chain_id?: string;
+    run_id?: string;
+    min_score?: number;
+    max_score?: number;
+    limit?: number;
+  },
+): Promise<RecordMatchResultsResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/record-matching/results`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.strategy_key) url.searchParams.set("strategy_key", options.strategy_key);
+  if (options?.decision) url.searchParams.set("decision", options.decision);
+  if (options?.correlation_id) url.searchParams.set("correlation_id", options.correlation_id);
+  if (options?.chain_id) url.searchParams.set("chain_id", options.chain_id);
+  if (options?.run_id) url.searchParams.set("run_id", options.run_id);
+  if (typeof options?.min_score === "number") url.searchParams.set("min_score", String(options.min_score));
+  if (typeof options?.max_score === "number") url.searchParams.set("max_score", String(options.max_score));
+  if (typeof options?.limit === "number") url.searchParams.set("limit", String(options.limit));
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<RecordMatchResultsResponse>(response);
+}
+
+export async function getRecordMatchResult(resultId: string, workspaceId: string): Promise<RecordMatchResult> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/record-matching/results/${encodeURIComponent(resultId)}`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<RecordMatchResult>(response);
 }
 
 export async function listCoordinationThreads(workspaceId: string, status?: string): Promise<CoordinationThreadListResponse> {

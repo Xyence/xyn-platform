@@ -21,6 +21,7 @@ Xyn reuses existing durable models instead of duplicating them:
 - `xyn-core Artifact` with `run_id` is the canonical RunArtifact for that seam.
 
 For new platform data-processing ingest/import/normalize/reconcile/rule-evaluation/dispatch workflows, use orchestration run history (`OrchestrationRun` and related models) as the canonical substrate.
+`OrchestrationRun` is not interchangeable with legacy/runtime `Run` for this purpose.
 
 The platform exposes WorkItem-focused aliases so conversation and panels can use work-coordination terminology without creating a parallel persistence model.
 

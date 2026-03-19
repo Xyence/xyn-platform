@@ -157,8 +157,8 @@ export default function ApplicationNotificationSettingsPage() {
       {error && <InlineMessage tone="error" title="Request failed" body={error} />}
 
       <section className="card">
-        <h3>Email targets</h3>
-        <p className="muted">Add or disable destination addresses for application-notification email delivery.</p>
+        <h3>Notification targets (Email)</h3>
+        <p className="muted">Add or disable email delivery targets for application notifications.</p>
         <form className="inline-actions" onSubmit={onAddTarget}>
           <input
             className="input"
@@ -184,7 +184,7 @@ export default function ApplicationNotificationSettingsPage() {
         </form>
 
         {loading ? <p className="muted">Loading targets…</p> : null}
-        {!loading && targets.length === 0 ? <p className="muted">No email targets configured yet.</p> : null}
+        {!loading && targets.length === 0 ? <p className="muted">No notification targets configured yet.</p> : null}
         {!loading && targets.length > 0 ? (
           <div className="notification-list" data-testid="delivery-target-list">
             {targets.map((target) => (

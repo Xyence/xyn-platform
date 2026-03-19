@@ -50,6 +50,11 @@ A source is activation-ready when:
 
 Activation does not create a scheduler loop; it marks the source as ready/active for orchestration-driven refresh execution.
 
+## Source Dataset Boundary
+
+`SourceConnector` is the source definition and lifecycle object.
+Derived datasets produced by source processing are output/read-model artifacts (for example orchestration outputs and artifacts), not interchangeable source-definition objects in v1.
+
 ## Relationship to Other Platform Primitives
 
 - orchestration: source execution contracts can produce orchestration run requests (`run_type` + `target_ref` + `scope_source`)
@@ -76,3 +81,4 @@ without changing core source lifecycle semantics.
 - add schema drift detection and mapping impact warnings
 - add incremental import cursor/checkpoint tracking
 - add bulk import throughput optimizations and chunk-level diagnostics
+- formalize a first-party source-dataset read-model contract for consumers that need stable dataset semantics beyond generic orchestration outputs

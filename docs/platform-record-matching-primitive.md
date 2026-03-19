@@ -31,6 +31,10 @@ Out of scope in v1:
   - explanation signals and metadata
   - optional linkage to `OrchestrationRun` (`run_id`, `correlation_id`, `chain_id`)
 
+Signal boundary:
+- `MatchSignal` means matching evidence used to justify a score/decision.
+- It is not a generic platform domain-signal entity and should not be conflated with orchestration stage labels such as `match_signals`.
+
 ## Built-In Strategies
 
 - `exact_identifier`

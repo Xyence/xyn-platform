@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xyence.io/schemas/source_connector.v1.schema.json",
+  "title": "Source Connector",
+  "description": "Source definition object. Not a source dataset/output object.",
+  "type": "object",
+  "required": ["id", "workspace_id", "key", "name", "source_type", "source_mode", "lifecycle_state", "health_status"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "workspace_id": { "type": "string", "format": "uuid" },
+    "key": { "type": "string", "minLength": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "source_type": { "type": "string" },
+    "source_mode": { "type": "string", "enum": ["file_upload", "remote_url", "api_polling", "manual"] },
+    "lifecycle_state": {
+      "type": "string",
+      "enum": ["registered", "inspected", "mapped", "validated", "active", "failing", "paused"]
+    },
+    "health_status": { "type": "string", "enum": ["unknown", "healthy", "warning", "failing", "paused"] },
+    "is_active": { "type": "boolean" },
+    "refresh_cadence_seconds": { "type": "integer", "minimum": 0 },
+    "orchestration_pipeline_key": { "type": "string" },
+    "configuration": { "type": "object", "additionalProperties": true },
+    "provenance": { "type": "object", "additionalProperties": true },
+    "metadata": { "type": "object", "additionalProperties": true },
+    "last_run_id": { "type": ["string", "null"], "format": "uuid" },
+    "last_inspected_at": { "type": ["string", "null"], "format": "date-time" },
+    "last_validated_at": { "type": ["string", "null"], "format": "date-time" },
+    "last_success_at": { "type": ["string", "null"], "format": "date-time" },
+    "last_failure_at": { "type": ["string", "null"], "format": "date-time" },
+    "last_failure_reason": { "type": "string" },
+    "created_by_id": { "type": ["string", "null"], "format": "uuid" },
+    "created_at": { "type": ["string", "null"], "format": "date-time" },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": true
+}

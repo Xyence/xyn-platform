@@ -41,11 +41,13 @@ This includes both scheduler-triggered and manually-triggered processing.
 
 These remain for legacy xyn-core/runtime execution tracking and compatibility with existing work-item/runtime seams.
 Do not use this legacy model as the default for new data-processing ingest pipelines.
+`OrchestrationRun` and legacy `Run` are intentionally distinct seams.
 
 ### `WorkflowRun` / `WorkflowRunEvent`
 
 These remain for workflow-artifact-specific execution/event tracking.
 Do not treat `WorkflowRun` as the canonical platform run-history substrate for new ingest/data pipelines.
+`OrchestrationRun` and `WorkflowRun` are intentionally distinct seams.
 
 ### Runtime proxy APIs (`/api/runtime/runs`)
 

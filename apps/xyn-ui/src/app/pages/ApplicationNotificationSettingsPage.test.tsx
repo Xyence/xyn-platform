@@ -149,7 +149,7 @@ describe("ApplicationNotificationSettingsPage", () => {
   it("shows empty state", async () => {
     apiMocks.listNotificationDeliveryTargets.mockResolvedValueOnce({ targets: [] });
     renderPage();
-    expect(await screen.findByText("No email targets configured yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No notification targets configured yet.")).toBeInTheDocument();
   });
 
   it("shows error state", async () => {
