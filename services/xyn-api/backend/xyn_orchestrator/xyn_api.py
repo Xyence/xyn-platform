@@ -15,7 +15,7 @@ import fnmatch
 from functools import wraps
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit, quote, unquote
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, List, Set, Tuple, TypedDict
+from typing import Any, Dict, Iterable, Optional, List, Sequence, Set, Tuple, TypedDict
 
 import requests
 import boto3
@@ -366,6 +366,18 @@ from .access_explorer import (
     user_roles as access_user_roles_data,
     compute_effective_permissions as access_compute_effective_permissions,
     role_detail as access_role_detail_data,
+)
+from .app_authorization import (
+    CAP_APP_READ,
+    CAP_CAMPAIGNS_MANAGE,
+    CAP_MATCH_REVIEW,
+    CAP_SOURCES_MANAGE,
+    CAP_SUBSCRIBERS_MANAGE,
+    CAP_WATCHES_MANAGE,
+    canonical_model_payload as app_access_canonical_model_payload,
+    effective_app_roles as app_access_effective_roles,
+    effective_capabilities_for_roles as app_access_effective_capabilities,
+    has_required_capabilities as app_access_has_required_capabilities,
 )
 from .seeds import (
     apply_seed_packs,
@@ -4190,6 +4202,43 @@ def _workspace_membership(identity: UserIdentity, workspace_id: str) -> Optional
     return WorkspaceMembership.objects.filter(workspace_id=workspace_id, user_identity=identity).first()
 
 
+def _app_roles_for_identity(identity: UserIdentity, workspace_id: str) -> List[str]:
+    membership = _workspace_membership(identity, workspace_id)
+    workspace_role = membership.role if membership else ""
+    explicit_roles = list(
+        RoleBinding.objects.filter(
+            user_identity=identity,
+            scope_kind__in=["workspace", "application"],
+            scope_id=workspace_id,
+        ).values_list("role", flat=True)
+    )
+    platform_roles = _get_roles(identity)
+    return app_access_effective_roles(
+        workspace_role=workspace_role,
+        platform_roles=platform_roles,
+        explicit_roles=explicit_roles,
+    )
+
+
+def _app_capabilities_for_identity(identity: UserIdentity, workspace_id: str) -> List[str]:
+    return app_access_effective_capabilities(_app_roles_for_identity(identity, workspace_id))
+
+
+def _require_workspace_capabilities(
+    identity: UserIdentity,
+    workspace_id: str,
+    required_capabilities: Sequence[str],
+    *,
+    require_all: bool = True,
+) -> bool:
+    capabilities = _app_capabilities_for_identity(identity, workspace_id)
+    return app_access_has_required_capabilities(
+        effective_capabilities=capabilities,
+        required_capabilities=required_capabilities,
+        require_all=require_all,
+    )
+
+
 def _workspace_has_role(identity: UserIdentity, workspace_id: str, minimum_role: str) -> bool:
     membership = _workspace_membership(identity, workspace_id)
     if not membership:
@@ -7943,7 +7992,9 @@ def access_registry(request: HttpRequest) -> JsonResponse:
         metadata={"endpoint": "registry", "actor_id": str(identity.id) if identity else ""},
         request=request,
     )
-    return JsonResponse(access_canonical_registry())
+    payload = dict(access_canonical_registry())
+    payload["applicationAuthorizationModel"] = app_access_canonical_model_payload()
+    return JsonResponse(payload)
 
 
 @csrf_exempt
@@ -30585,6 +30636,8 @@ def campaigns_collection(request: HttpRequest) -> JsonResponse:
             workspace, _ = _campaign_queryset(identity, workspace_id)
         except PermissionDenied:
             return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_CAMPAIGNS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         available_types = _campaign_type_definitions_for_workspace(workspace)
         allowed_types = {str(item.get("key") or "").strip() for item in available_types if isinstance(item, dict)}
         campaign_type = str(payload.get("campaign_type") or "generic").strip() or "generic"
@@ -30613,6 +30666,8 @@ def campaigns_collection(request: HttpRequest) -> JsonResponse:
     try:
         workspace, qs = _campaign_queryset(identity, workspace_id)
     except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ]):
         return JsonResponse({"error": "forbidden"}, status=403)
     status_filter = str(request.GET.get("status") or "").strip().lower()
     if status_filter:
@@ -30643,6 +30698,8 @@ def campaign_detail(request: HttpRequest, campaign_id: str) -> JsonResponse:
     if not _workspace_membership(identity, str(campaign.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method == "GET":
+        if not _require_workspace_capabilities(identity, str(campaign.workspace_id), [CAP_APP_READ]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
         if not context_workspace_id:
             return JsonResponse({"error": "workspace_id is required"}, status=400)
@@ -30652,6 +30709,8 @@ def campaign_detail(request: HttpRequest, campaign_id: str) -> JsonResponse:
     if request.method not in {"PATCH", "POST"}:
         return JsonResponse({"error": "method not allowed"}, status=405)
     payload = _parse_json(request)
+    if not _require_workspace_capabilities(identity, str(campaign.workspace_id), [CAP_CAMPAIGNS_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     context_workspace_id = str(payload.get("workspace_id") or "").strip()
     if not context_workspace_id:
         return JsonResponse({"error": "workspace_id is required"}, status=400)
@@ -30733,6 +30792,8 @@ def watches_collection(request: HttpRequest) -> JsonResponse:
             workspace, _ = _watch_queryset(identity, workspace_id)
         except PermissionDenied:
             return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_WATCHES_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         try:
             row = service.register_watch(
                 WatchRegistration(
@@ -30763,6 +30824,8 @@ def watches_collection(request: HttpRequest) -> JsonResponse:
         workspace, qs = _watch_queryset(identity, workspace_id)
     except PermissionDenied:
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     lifecycle_state = str(request.GET.get("lifecycle_state") or "").strip().lower()
     if lifecycle_state:
         qs = qs.filter(lifecycle_state=lifecycle_state)
@@ -30790,6 +30853,8 @@ def watch_detail(request: HttpRequest, watch_id: str) -> JsonResponse:
     if not _workspace_membership(identity, str(watch.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method == "GET":
+        if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_APP_READ]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
         if not context_workspace_id:
             return JsonResponse({"error": "workspace_id is required"}, status=400)
@@ -30799,6 +30864,8 @@ def watch_detail(request: HttpRequest, watch_id: str) -> JsonResponse:
     if request.method not in {"PATCH", "POST"}:
         return JsonResponse({"error": "method not allowed"}, status=405)
     payload = _parse_json(request)
+    if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_WATCHES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     context_workspace_id = str(payload.get("workspace_id") or "").strip()
     if not context_workspace_id:
         return JsonResponse({"error": "workspace_id is required"}, status=400)
@@ -30864,6 +30931,8 @@ def watch_activate(request: HttpRequest, watch_id: str) -> JsonResponse:
     watch = get_object_or_404(WatchDefinition.objects.select_related("workspace"), id=watch_id)
     if not _workspace_membership(identity, str(watch.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_WATCHES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     payload = _parse_json(request)
     if str(payload.get("workspace_id") or "").strip() != str(watch.workspace_id):
         return JsonResponse({"error": "watch not found in workspace context"}, status=404)
@@ -30882,6 +30951,8 @@ def watch_pause(request: HttpRequest, watch_id: str) -> JsonResponse:
         return JsonResponse({"error": "method not allowed"}, status=405)
     watch = get_object_or_404(WatchDefinition.objects.select_related("workspace"), id=watch_id)
     if not _workspace_membership(identity, str(watch.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_WATCHES_MANAGE]):
         return JsonResponse({"error": "forbidden"}, status=403)
     payload = _parse_json(request)
     if str(payload.get("workspace_id") or "").strip() != str(watch.workspace_id):
@@ -30902,6 +30973,8 @@ def watch_subscribers_collection(request: HttpRequest, watch_id: str) -> JsonRes
         return JsonResponse({"error": "forbidden"}, status=403)
     service = WatchService()
     if request.method == "POST":
+        if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_SUBSCRIBERS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         payload = _parse_json(request)
         if str(payload.get("workspace_id") or "").strip() != str(watch.workspace_id):
             return JsonResponse({"error": "watch not found in workspace context"}, status=404)
@@ -30922,6 +30995,8 @@ def watch_subscribers_collection(request: HttpRequest, watch_id: str) -> JsonRes
         return JsonResponse(serialize_watch_subscriber(row), status=201)
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_APP_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
     if context_workspace_id != str(watch.workspace_id):
         return JsonResponse({"error": "watch not found in workspace context"}, status=404)
@@ -30951,6 +31026,8 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
     try:
         workspace, _ = _watch_queryset(identity, workspace_id)
     except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_WATCHES_MANAGE]):
         return JsonResponse({"error": "forbidden"}, status=403)
     event_ref = payload.get("event_ref") if isinstance(payload.get("event_ref"), dict) else {}
     required_reconciled_state_version = str(
@@ -31177,6 +31254,8 @@ def source_connectors_collection(request: HttpRequest) -> JsonResponse:
             workspace, _ = _source_connector_queryset(identity, workspace_id)
         except PermissionDenied:
             return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_SOURCES_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         try:
             source = service.register_source(
                 SourceRegistration(
@@ -31208,6 +31287,8 @@ def source_connectors_collection(request: HttpRequest) -> JsonResponse:
     try:
         workspace, qs = _source_connector_queryset(identity, workspace_id)
     except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_SOURCES_MANAGE]):
         return JsonResponse({"error": "forbidden"}, status=403)
     source_mode = str(request.GET.get("source_mode") or "").strip().lower()
     if source_mode:
@@ -31241,6 +31322,9 @@ def source_connector_detail(request: HttpRequest, source_id: str) -> JsonRespons
         return JsonResponse({"error": "not authenticated"}, status=401)
     source = get_object_or_404(SourceConnector.objects.select_related("workspace", "last_run", "created_by"), id=source_id)
     if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    required_capabilities = [CAP_APP_READ] if request.method == "GET" else [CAP_SOURCES_MANAGE]
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), required_capabilities):
         return JsonResponse({"error": "forbidden"}, status=403)
     service = SourceConnectorService()
     if request.method == "GET":
@@ -31318,6 +31402,8 @@ def source_connector_inspections_collection(request: HttpRequest, source_id: str
     source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
     if not _workspace_membership(identity, str(source.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     service = SourceConnectorService()
     if request.method == "POST":
         payload = _parse_json(request)
@@ -31357,6 +31443,8 @@ def source_connector_mappings_collection(request: HttpRequest, source_id: str) -
         return JsonResponse({"error": "not authenticated"}, status=401)
     source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
     if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
         return JsonResponse({"error": "forbidden"}, status=403)
     service = SourceConnectorService()
     if request.method == "POST":
@@ -31399,6 +31487,8 @@ def source_connector_activate(request: HttpRequest, source_id: str) -> JsonRespo
     source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
     if not _workspace_membership(identity, str(source.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     payload = _parse_json(request)
     if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
         return JsonResponse({"error": "source not found in workspace context"}, status=404)
@@ -31422,6 +31512,8 @@ def source_connector_pause(request: HttpRequest, source_id: str) -> JsonResponse
     source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
     if not _workspace_membership(identity, str(source.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     payload = _parse_json(request)
     if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
         return JsonResponse({"error": "source not found in workspace context"}, status=404)
@@ -31441,6 +31533,8 @@ def source_connector_health_update(request: HttpRequest, source_id: str) -> Json
         return JsonResponse({"error": "method not allowed"}, status=405)
     source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
     if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
         return JsonResponse({"error": "forbidden"}, status=403)
     payload = _parse_json(request)
     if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
@@ -31511,6 +31605,8 @@ def record_matching_evaluate(request: HttpRequest) -> JsonResponse:
     try:
         workspace, _ = _record_matching_queryset(identity, workspace_id)
     except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_CAMPAIGNS_MANAGE]):
         return JsonResponse({"error": "forbidden"}, status=403)
     candidate_a_payload = payload.get("candidate_a")
     candidate_b_payload = payload.get("candidate_b")
@@ -31597,6 +31693,8 @@ def record_matching_results_collection(request: HttpRequest) -> JsonResponse:
         workspace, qs = _record_matching_queryset(identity, workspace_id)
     except PermissionDenied:
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     strategy_key = str(request.GET.get("strategy_key") or "").strip()
     if strategy_key:
         qs = qs.filter(strategy_key=strategy_key)
@@ -31649,6 +31747,8 @@ def record_matching_result_detail(request: HttpRequest, result_id: str) -> JsonR
     if workspace_id != str(row.workspace_id):
         return JsonResponse({"error": "match result not found in workspace context"}, status=404)
     if not _workspace_membership(identity, str(row.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(row.workspace_id), [CAP_MATCH_REVIEW]):
         return JsonResponse({"error": "forbidden"}, status=403)
     return JsonResponse(_serialize_record_match_result(row))
 

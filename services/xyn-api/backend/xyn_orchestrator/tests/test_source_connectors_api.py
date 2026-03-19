@@ -35,9 +35,16 @@ class SourceConnectorApiTests(TestCase):
             subject=f"source-admin-{suffix}",
             email=f"source-admin-{suffix}@example.com",
         )
+        self.operator_identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example",
+            subject=f"source-operator-{suffix}",
+            email=f"source-operator-{suffix}@example.com",
+        )
         self.workspace = Workspace.objects.create(slug=f"sources-{suffix}", name="Sources Workspace")
         self.other_workspace = Workspace.objects.create(slug=f"sources-other-{suffix}", name="Other Sources Workspace")
         WorkspaceMembership.objects.create(workspace=self.workspace, user_identity=self.identity, role="admin")
+        WorkspaceMembership.objects.create(workspace=self.workspace, user_identity=self.operator_identity, role="contributor")
 
     def _request(self, path: str, *, method: str = "get", data=None):
         request = getattr(self.factory, method.lower())(path, data=data or {}, content_type="application/json")
@@ -218,6 +225,20 @@ class SourceConnectorApiTests(TestCase):
                 self._request("/xyn/api/source-connectors", method="post", data=json.dumps(payload))
             )
         self.assertEqual(response.status_code, 400)
+
+    def test_campaign_operator_cannot_manage_sources(self):
+        payload = {
+            "workspace_id": str(self.workspace.id),
+            "key": "operator-blocked-source",
+            "name": "Blocked Source",
+            "source_type": "records_feed",
+            "source_mode": "manual",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.operator_identity):
+            response = source_connectors_collection(
+                self._request("/xyn/api/source-connectors", method="post", data=json.dumps(payload))
+            )
+        self.assertEqual(response.status_code, 403)
 
     def test_models_exist(self):
         self._create_source(mode="manual")

@@ -13,6 +13,7 @@ This is the concise boundary reference for platform primitives that are most vul
 - Watch/subscription: `xyn_orchestrator.watching` + watch models/APIs.
 - Audit/provenance: `xyn_orchestrator.provenance` + `PlatformAuditEvent` and `ProvenanceLink`.
 - Changed-data domain events: `PlatformDomainEvent` + `xyn_orchestrator.orchestration.domain_events`.
+- DealFinder-era app authorization: `xyn_orchestrator.app_authorization` + capability checks in `xyn_api`.
 
 ## Adjacent seams that still exist
 
@@ -44,6 +45,7 @@ This is the concise boundary reference for platform primitives that are most vul
 - Alternate audit/provenance object-reference shapes that diverge from canonical object refs.
 - Changed-data evaluation paths that bypass Stage C publication readiness checks.
 - Parallel app-local publish-boundary event/outbox tables that bypass `PlatformDomainEvent`.
+- New app-role/capability catalogs outside `xyn_orchestrator.app_authorization` for DealFinder-era primitives.
 
 ## Lightweight automated guard
 
@@ -77,3 +79,4 @@ Machine-readable object schemas for canonical primitives live in:
 - TODO: add CI checks that require idempotency-key coverage tests for externally triggerable write endpoints in canonical primitives.
 - TODO: define a shared docs matrix for replay semantics (`idempotency_key`, deterministic fingerprint, uniqueness backstop) across watch/matching/source/notification flows.
 - TODO: add lightweight operator/event-consumer documentation for polling `PlatformDomainEvent` by partition/version.
+- TODO: add durable app-role assignment management APIs/UI for `application_admin` / `campaign_operator` / `read_only_analyst`.
