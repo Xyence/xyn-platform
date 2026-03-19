@@ -252,13 +252,20 @@ class ConcurrencyGuard:
         if job_running >= max(1, int(job_run.job_definition.concurrency_limit or 1)):
             return DispatchDecision(job_run_id=str(job_run.id), allowed=False, reason="job_limit")
 
+        metadata = job_run.job_definition.metadata_json if isinstance(job_run.job_definition.metadata_json, dict) else {}
+        policy = metadata.get("job_concurrency_policy") if isinstance(metadata.get("job_concurrency_policy"), dict) else {}
+        try:
+            per_partition_limit = max(1, int(policy.get("per_partition_limit") or 1))
+        except (TypeError, ValueError):
+            per_partition_limit = 1
+
         if job_run.job_definition.runs_per_jurisdiction and str(job_run.scope_jurisdiction or "").strip():
             per_jurisdiction_running = OrchestrationJobRun.objects.filter(
                 job_definition=job_run.job_definition,
                 status="running",
                 scope_jurisdiction=job_run.scope_jurisdiction,
             ).count()
-            if per_jurisdiction_running >= 1:
+            if per_jurisdiction_running >= per_partition_limit:
                 return DispatchDecision(job_run_id=str(job_run.id), allowed=False, reason="partition_jurisdiction_limit")
 
         if job_run.job_definition.runs_per_source and str(job_run.scope_source or "").strip():
@@ -267,7 +274,7 @@ class ConcurrencyGuard:
                 status="running",
                 scope_source=job_run.scope_source,
             ).count()
-            if per_source_running >= 1:
+            if per_source_running >= per_partition_limit:
                 return DispatchDecision(job_run_id=str(job_run.id), allowed=False, reason="partition_source_limit")
 
         return DispatchDecision(job_run_id=str(job_run.id), allowed=True, reason="allowed")

@@ -3244,7 +3244,7 @@ class OrchestrationJobRun(models.Model):
             models.Index(fields=["status", "next_attempt_at"], name="ix_orch_job_run_status_retry"),
             models.Index(fields=["job_definition", "status", "created_at"], name="ix_orch_job_run_job_status"),
             models.Index(fields=["workspace", "pipeline", "status", "next_attempt_at"], name="ix_orch_job_run_poll"),
-            models.Index(fields=["workspace", "scope_jurisdiction", "scope_source", "status"], name="ix_orch_job_run_partition_status"),
+            models.Index(fields=["workspace", "scope_jurisdiction", "scope_source", "status"], name="ix_orch_jrun_part_status"),
             models.Index(fields=["workspace", "correlation_id", "created_at"], name="ix_orch_job_run_corr_time"),
             models.Index(fields=["workspace", "chain_id", "created_at"], name="ix_orch_job_run_chain_time"),
             models.Index(fields=["job_definition", "scope_jurisdiction", "scope_source"], name="ix_orch_job_run_job_partition"),
