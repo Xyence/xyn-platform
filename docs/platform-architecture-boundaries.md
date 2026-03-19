@@ -12,6 +12,7 @@ This is the concise boundary reference for platform primitives that are most vul
 - Source/import contracts: `xyn_orchestrator.sources` + source connector models.
 - Watch/subscription: `xyn_orchestrator.watching` + watch models/APIs.
 - Audit/provenance: `xyn_orchestrator.provenance` + `PlatformAuditEvent` and `ProvenanceLink`.
+- Changed-data domain events: `PlatformDomainEvent` + `xyn_orchestrator.orchestration.domain_events`.
 
 ## Adjacent seams that still exist
 
@@ -30,6 +31,8 @@ This is the concise boundary reference for platform primitives that are most vul
 - `OrchestrationRun` != `WorkflowRun`.
 - `MatchSignal` means matching-evidence signal, not a generic domain signal object.
 - `Source dataset` is a derived output/read-model concept (for example orchestration outputs), not a source definition.
+- `normalized_change_token` is not the same as `reconciled_state_version`; Stage C reconciliation publication is the downstream evaluation boundary.
+- `PlatformDomainEvent` (publish-boundary event outbox) != `PlatformAuditEvent` (actor/action audit trail) != `ProvenanceLink` (derived-from linkage).
 
 ## Do not reintroduce
 
@@ -39,6 +42,8 @@ This is the concise boundary reference for platform primitives that are most vul
 - Raw PostGIS query logic outside `xyn_orchestrator.geospatial` repository seams.
 - App-local watch/subscription abstractions that bypass `xyn_orchestrator.watching`.
 - Alternate audit/provenance object-reference shapes that diverge from canonical object refs.
+- Changed-data evaluation paths that bypass Stage C publication readiness checks.
+- Parallel app-local publish-boundary event/outbox tables that bypass `PlatformDomainEvent`.
 
 ## Lightweight automated guard
 
@@ -71,3 +76,4 @@ Machine-readable object schemas for canonical primitives live in:
 - TODO: Add stronger UI terminology parity for watch/subscriber/notification-target surfaces when those pages are introduced.
 - TODO: add CI checks that require idempotency-key coverage tests for externally triggerable write endpoints in canonical primitives.
 - TODO: define a shared docs matrix for replay semantics (`idempotency_key`, deterministic fingerprint, uniqueness backstop) across watch/matching/source/notification flows.
+- TODO: add lightweight operator/event-consumer documentation for polling `PlatformDomainEvent` by partition/version.

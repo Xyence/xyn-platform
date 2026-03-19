@@ -39,6 +39,12 @@ New module: `xyn_orchestrator/orchestration/`
   - Django ORM repository implementation for durable runs, attempts, outputs
 - `lifecycle.py`
   - guarded run/job transitions and attempt/output persistence
+- `publication.py`
+  - durable stage publication markers for changed-data readiness
+  - explicit reconciled-state publication boundary checks for downstream evaluation
+- `domain_events.py`
+  - thin durable outbox-style domain events emitted from stage publication transitions
+  - idempotent event recording/query helpers for downstream consumers
 - `engine.py`
   - scheduler/orchestration runtime components:
     - `DueJobScanner` (due schedule polling)
@@ -88,6 +94,14 @@ New ORM models in `models.py` and migrations `0125_orchestration_scaffolding.py`
   - retryability, structured metrics/error payload
 - `OrchestrationJobRunOutput`
   - generic output records per job run (URI, change token, optional artifact ref, metadata/payload)
+- `OrchestrationStagePublication`
+  - durable stage publication/readiness markers scoped by workspace/pipeline/partition
+  - separates normalization completion from reconciliation publication readiness
+  - stores normalized snapshot markers, reconciled state version, and signal set version
+- `PlatformDomainEvent`
+  - durable outbox-style domain event rows emitted from explicit publication transitions
+  - event types include `source_normalized`, `reconciled_state_published`, `signal_set_published`, `evaluation_ready`
+  - replay-safe idempotency keys and partition/version query indexes
 
 All records are workspace-confined either directly (`OrchestrationPipeline`, `OrchestrationRun`) or transitively through pipeline/run relationships.
 
@@ -102,6 +116,18 @@ Apps should:
 See [Platform Job Authoring Guide](./platform-job-authoring-guide.md) for examples.
 See [Orchestration Operator API](./orchestration-operator-api.md) for runtime visibility and intervention endpoints.
 See [Platform Orchestration v1](./platform-orchestration-v1.md) for production runtime and hardening notes.
+
+## Operator readiness/troubleshooting endpoints
+
+- `GET /xyn/api/orchestration/publication-readiness`
+  - returns latest Stage B/C/D publication markers for workspace/pipeline/partition
+  - returns evaluation readiness (`ready`, `reason`, reconciled/signal versions)
+  - returns recent blocked/deferred gating decisions (`reason_code`)
+- `GET /xyn/api/orchestration/domain-events`
+  - returns recent domain events filtered by workspace/pipeline/partition/version/correlation
+- `GET /xyn/api/orchestration/runs/<run_id>`
+  - includes per-job `skipped_reason`, `gating_decision`, `stage_publication`, and `domain_events`
+  - includes run-scoped `publication_readiness` and `latest_scope_publications`
 
 ## Run lifecycle service
 `xyn_orchestrator/orchestration/lifecycle.py` provides guarded transitions:
@@ -125,6 +151,18 @@ The lifecycle service writes attempt rows and output rows, and recomputes parent
 5. Retryable failures move to `waiting_retry` with exponential backoff; dispatch re-queues them when `next_attempt_at` is due.
 6. `StaleRunDetector` marks long-stuck queued/running jobs as `stale`.
 7. Run status is recomputed from job-run state at each lifecycle transition.
+8. Stage publication markers are recorded on successful stage jobs; Stage E evaluation paths require Stage C publication readiness.
+
+## Changed Data Triggering Contract
+
+See [Changed Data Triggering Contract](./changed-data-triggering-contract.md).
+See [Platform Domain Events Primitive](./platform-domain-events-primitive.md).
+
+Key enforced rule in v1:
+- `rule_evaluation` (Stage E) is skipped when no reconciled publication (`property_graph_rebuild`) exists for the same workspace/pipeline/partition.
+- `rule_evaluation` (Stage E) is skipped when signal publication references a reconciled version that is not published for the same workspace/pipeline/partition.
+- `notification_emission` (Stage F) is skipped when Stage E produced no durable outputs.
+- API-driven watch evaluation is deferred (409) when reconciled publication readiness is absent.
 
 ## Manual trigger replay contract (v1 hardening)
 
@@ -147,6 +185,11 @@ Future apps (including Deal Finder) should only provide pipeline definitions + h
 - TODO: define provenance alignment conventions between `target_ref_json`, orchestration outputs, and downstream derived artifacts.
 - TODO: align orchestration run identifiers with record-matching evaluation provenance conventions (`run_id`, `correlation_id`, `chain_id`) for cross-primitive operator debugging.
 - TODO: align source connector execution contracts (`SourceConnector` run_type/target_ref/scope_source) with orchestration trigger templates so source activation can safely schedule refresh runs without app-local glue.
+- TODO: extend real handler integrations so Stage B/C/D publication markers are populated from domain payloads beyond fallback tokens.
+- TODO: add operator API index/list endpoint for partition-scoped stage publication readiness snapshots.
+- TODO: add operator/API list endpoint for partition/version-scoped domain event outbox browsing.
+- TODO: add optional deferred replay queue for Stage E requests that fail readiness with `reconciled_state_not_published` / `reconciled_state_version_not_published`.
+- TODO: add schema-validated Stage E output contract checks before Stage F dispatch (beyond presence checks).
 
 ## Lifecycle Primitive TODOs
 - TODO: migrate additional object adapters (campaign/source connector/workflow-like entities) onto the canonical lifecycle primitive contract and durable `LifecycleTransition` history rows.

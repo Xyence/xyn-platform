@@ -182,6 +182,10 @@ class OrchestrationLifecycleService:
                 payload=output.payload,
             )
 
+        # Record domain-level stage publication metadata used for downstream readiness.
+        from .publication import StagePublicationService
+
+        StagePublicationService().record_stage_publication(job_run=job_run)
         self._repository.recompute_run_status(run=job_run.run, now=ts)
         return job_run
 

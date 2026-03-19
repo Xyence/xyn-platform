@@ -14,15 +14,24 @@ from xyn_orchestrator.models import (
     OrchestrationJobSchedule,
     OrchestrationPipeline,
     OrchestrationRun,
+    PlatformDomainEvent,
     UserIdentity,
     Workspace,
     WorkspaceMembership,
 )
+from xyn_orchestrator.orchestration.definitions import (
+    STAGE_NOTIFICATION_EMISSION,
+    STAGE_PROPERTY_GRAPH_REBUILD,
+    STAGE_RULE_EVALUATION,
+    STAGE_SIGNAL_MATCHING,
+)
 from xyn_orchestrator.orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
 from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService, OutputRecord
 from xyn_orchestrator.xyn_api import (
+    orchestration_domain_events_collection,
     orchestration_dependency_graph,
     orchestration_job_definitions_collection,
+    orchestration_publication_readiness,
     orchestration_run_cancel,
     orchestration_run_detail,
     orchestration_run_failure_ack,
@@ -252,11 +261,17 @@ class OrchestrationOperatorApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["id"], str(run.id))
         self.assertIn("dependency_context", payload)
+        self.assertIn("publication_readiness", payload)
+        self.assertIn("latest_scope_publications", payload)
         self.assertEqual(payload["dependency_context"]["normalize_source"], ["refresh_source"])
         refresh_row = next(item for item in payload["jobs"] if item["job_key"] == "refresh_source")
+        normalize_row = next(item for item in payload["jobs"] if item["job_key"] == "normalize_source")
         self.assertEqual(refresh_row["status"], "succeeded")
         self.assertEqual(len(refresh_row["attempts"]), 1)
         self.assertEqual(len(refresh_row["outputs"]), 1)
+        self.assertIn("domain_events", refresh_row)
+        self.assertEqual(normalize_row["skipped_reason"], "upstream_unchanged")
+        self.assertTrue(normalize_row["gating_decision"]["blocked"])
 
     def test_operator_can_request_rerun_and_cancel_pending_run(self):
         run = self._create_run(status="queued")
@@ -330,6 +345,160 @@ class OrchestrationOperatorApiTests(TestCase):
         self.assertEqual(schedules_response.status_code, 200)
         cron_row = next(item for item in payload["schedules"] if item["schedule_key"] == "legacy-cron")
         self.assertFalse(cron_row["supported_in_v1"])
+
+    def test_operator_can_inspect_publication_readiness_and_gating_decisions(self):
+        pipeline = OrchestrationPipeline.objects.create(
+            workspace=self.workspace,
+            key=f"pub-ready-{uuid.uuid4().hex[:6]}",
+            name="Publication Ready",
+            created_by=self.identity,
+        )
+        rebuild = OrchestrationJobDefinition.objects.create(
+            pipeline=pipeline,
+            job_key="rebuild_entities",
+            stage_key=STAGE_PROPERTY_GRAPH_REBUILD,
+            name="Rebuild",
+            handler_key="handler.rebuild",
+        )
+        signal = OrchestrationJobDefinition.objects.create(
+            pipeline=pipeline,
+            job_key="match_signals",
+            stage_key=STAGE_SIGNAL_MATCHING,
+            name="Signals",
+            handler_key="handler.signals",
+        )
+        evaluate = OrchestrationJobDefinition.objects.create(
+            pipeline=pipeline,
+            job_key="evaluate_rules",
+            stage_key=STAGE_RULE_EVALUATION,
+            name="Eval",
+            handler_key="handler.eval",
+        )
+        notify = OrchestrationJobDefinition.objects.create(
+            pipeline=pipeline,
+            job_key="emit_notifications",
+            stage_key=STAGE_NOTIFICATION_EMISSION,
+            name="Notify",
+            handler_key="handler.notify",
+        )
+        OrchestrationJobDependency.objects.create(pipeline=pipeline, upstream_job=rebuild, downstream_job=signal)
+        OrchestrationJobDependency.objects.create(pipeline=pipeline, upstream_job=signal, downstream_job=evaluate)
+        OrchestrationJobDependency.objects.create(pipeline=pipeline, upstream_job=evaluate, downstream_job=notify)
+
+        run = self.lifecycle.create_run(
+            RunCreateRequest(
+                workspace_id=str(self.workspace.id),
+                pipeline_key=pipeline.key,
+                trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
+                initiated_by_id=str(self.identity.id),
+                scope=ExecutionScope(jurisdiction="tx", source="mls"),
+            )
+        )
+        rebuild_run = OrchestrationJobRun.objects.get(run=run, job_definition=rebuild)
+        signal_run = OrchestrationJobRun.objects.get(run=run, job_definition=signal)
+        evaluate_run = OrchestrationJobRun.objects.get(run=run, job_definition=evaluate)
+        notify_run = OrchestrationJobRun.objects.get(run=run, job_definition=notify)
+
+        self.lifecycle.mark_job_running(job_run_id=str(rebuild_run.id), now=timezone.now())
+        self.lifecycle.mark_job_succeeded(
+            job_run_id=str(rebuild_run.id),
+            now=timezone.now(),
+            output_change_token="recon-v-ready",
+        )
+        self.lifecycle.mark_job_running(job_run_id=str(signal_run.id), now=timezone.now())
+        self.lifecycle.mark_job_succeeded(
+            job_run_id=str(signal_run.id),
+            now=timezone.now(),
+            output_change_token="signal-v-ready",
+            outputs=[
+                OutputRecord(
+                    output_key="signal_set",
+                    output_type="signal_matches",
+                    output_change_token="signal-v-ready",
+                    payload={
+                        "reconciled_state_version": "recon-v-missing",
+                        "signal_set_version": "signal-v-ready",
+                    },
+                )
+            ],
+        )
+        self.lifecycle.mark_job_skipped(
+            job_run_id=str(evaluate_run.id),
+            now=timezone.now(),
+            reason="reconciled_state_version_not_published",
+            summary="blocked until reconciled version is published",
+        )
+        self.lifecycle.mark_job_skipped(
+            job_run_id=str(notify_run.id),
+            now=timezone.now(),
+            reason="evaluation_output_missing",
+            summary="blocked until stage e outputs exist",
+        )
+
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = orchestration_publication_readiness(
+                self._request(
+                    "/xyn/api/orchestration/publication-readiness",
+                    data={
+                        "workspace_id": str(self.workspace.id),
+                        "pipeline_key": pipeline.key,
+                        "jurisdiction": "tx",
+                        "source": "mls",
+                        "reconciled_state_version": "recon-v-missing",
+                    },
+                )
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertFalse(payload["evaluation_readiness"]["ready"])
+        self.assertEqual(payload["evaluation_readiness"]["reason"], "reconciled_state_version_not_published")
+        self.assertEqual(
+            payload["latest_publications"]["property_graph_rebuild"]["reconciled_state_version"],
+            "recon-v-ready",
+        )
+        reason_codes = {item["reason_code"] for item in payload["recent_gating_decisions"]}
+        self.assertIn("reconciled_state_version_not_published", reason_codes)
+        self.assertIn("evaluation_output_missing", reason_codes)
+
+    def test_operator_can_filter_domain_events_by_partition_and_version(self):
+        run = self._create_run()
+        refresh_job_run = OrchestrationJobRun.objects.get(run=run, job_definition=self.job_refresh)
+        PlatformDomainEvent.objects.create(
+            workspace=self.workspace,
+            pipeline=self.pipeline,
+            run=run,
+            job_run=refresh_job_run,
+            event_type="reconciled_state_published",
+            stage_key=STAGE_PROPERTY_GRAPH_REBUILD,
+            scope_jurisdiction="tx",
+            scope_source="mls",
+            reconciled_state_version="recon-filter",
+            correlation_id="corr-filter",
+            chain_id="chain-filter",
+            idempotency_key=f"test-domain-event-{uuid.uuid4().hex[:6]}",
+        )
+
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = orchestration_domain_events_collection(
+                self._request(
+                    "/xyn/api/orchestration/domain-events",
+                    data={
+                        "workspace_id": str(self.workspace.id),
+                        "pipeline_key": self.pipeline.key,
+                        "event_type": "reconciled_state_published",
+                        "jurisdiction": "tx",
+                        "source": "mls",
+                        "reconciled_state_version": "recon-filter",
+                        "correlation_id": "corr-filter",
+                    },
+                )
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertGreaterEqual(len(payload["events"]), 1)
+        first = payload["events"][0]
+        self.assertEqual(first["event_type"], "reconciled_state_published")
+        self.assertEqual(first["reconciled_state_version"], "recon-filter")
 
 
 if __name__ == "__main__":

@@ -14,13 +14,16 @@ from xyn_orchestrator.models import (
     OrchestrationJobDependency,
     OrchestrationJobDefinition,
     OrchestrationJobRun,
+    OrchestrationJobRunOutput,
     OrchestrationJobSchedule,
     OrchestrationPipeline,
     OrchestrationRun,
 )
 
+from .definitions import STAGE_NOTIFICATION_EMISSION, STAGE_RULE_EVALUATION, STAGE_SIGNAL_MATCHING
 from .interfaces import ExecutionScope, JobExecutionContext, JobExecutionResult, JobExecutor, RunCreateRequest, RunTrigger
 from .lifecycle import OrchestrationLifecycleService, OutputRecord
+from .publication import StagePublicationService
 from .repository import DjangoOrchestrationRepository
 from .schedule_policy import CRON_UNSUPPORTED_MESSAGE, is_polled_schedule_kind, polled_schedule_kinds
 
@@ -192,6 +195,7 @@ class DependencyResolver:
     @transaction.atomic
     def queue_ready_jobs(self, *, run: OrchestrationRun, now: datetime | None = None) -> list[str]:
         ts = now or datetime.now(timezone.utc)
+        publication_service = StagePublicationService()
         job_runs = list(
             OrchestrationJobRun.objects.select_for_update()
             .select_related("job_definition")
@@ -240,6 +244,59 @@ class DependencyResolver:
                         now=ts,
                         reason="upstream_unchanged",
                         summary="Skipped because upstream did not report changes.",
+                    )
+                    continue
+
+            if str(row.job_definition.stage_key or "").strip() == STAGE_RULE_EVALUATION:
+                required_reconciled_state_version = ""
+                signal_upstream = [
+                    item for item in upstream_rows if str(item.job_definition.stage_key or "").strip() == STAGE_SIGNAL_MATCHING
+                ]
+                for signal_row in signal_upstream:
+                    publication = getattr(signal_row, "stage_publication", None)
+                    if publication is None:
+                        continue
+                    value = str(publication.reconciled_state_version or "").strip()
+                    if value:
+                        required_reconciled_state_version = value
+                        break
+                readiness = publication_service.evaluation_readiness(
+                    workspace_id=str(row.workspace_id),
+                    pipeline_id=str(row.pipeline_id),
+                    jurisdiction=str(row.scope_jurisdiction or ""),
+                    source=str(row.scope_source or ""),
+                    required_reconciled_state_version=required_reconciled_state_version,
+                )
+                if not readiness.ready:
+                    self._lifecycle.mark_job_skipped(
+                        job_run_id=str(row.id),
+                        now=ts,
+                        reason=str(readiness.reason or "reconciliation_not_published"),
+                        summary="Skipped because reconciled state publication is not available.",
+                    )
+                    continue
+
+            if str(row.job_definition.stage_key or "").strip() == STAGE_NOTIFICATION_EMISSION:
+                eval_upstream = [
+                    item for item in upstream_rows if str(item.job_definition.stage_key or "").strip() == STAGE_RULE_EVALUATION
+                ]
+                if not eval_upstream:
+                    self._lifecycle.mark_job_skipped(
+                        job_run_id=str(row.id),
+                        now=ts,
+                        reason="evaluation_output_missing",
+                        summary="Skipped because no rule evaluation upstream output is available.",
+                    )
+                    continue
+                eval_outputs_exist = OrchestrationJobRunOutput.objects.filter(
+                    job_run_id__in=[item.id for item in eval_upstream],
+                ).exists()
+                if not eval_outputs_exist:
+                    self._lifecycle.mark_job_skipped(
+                        job_run_id=str(row.id),
+                        now=ts,
+                        reason="evaluation_output_missing",
+                        summary="Skipped because notification emission requires Stage E evaluation outputs.",
                     )
                     continue
 

@@ -89,3 +89,10 @@ When introducing a new work-producing flow:
 5. expose the same durable IDs through conversation activity and workbench panels
 
 Do not add a second ad hoc work tracker in conversation or UI state.
+
+## Follow-up TODOs
+
+- TODO: expose partition-scoped Stage C publication readiness in operator surfaces to make deferred Stage E/watch evaluation states directly inspectable.
+- TODO: add operator/event-consumer polling guidance for `PlatformDomainEvent` (`reconciled_state_published` and `evaluation_ready`) so downstream integrations do not infer readiness from raw job status.
+- TODO: add operator visibility for Stage F skips caused by missing Stage E outputs (`evaluation_output_missing`) so notification suppression is diagnosable.
+- TODO: add dedicated workbench panel for publication readiness and gating decisions (current support is API-first).

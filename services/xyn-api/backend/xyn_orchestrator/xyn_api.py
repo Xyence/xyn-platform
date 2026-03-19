@@ -82,6 +82,8 @@ from .models import (
     OrchestrationJobRun,
     OrchestrationJobRunAttempt,
     OrchestrationJobRunOutput,
+    OrchestrationStagePublication,
+    PlatformDomainEvent,
     Goal,
     Application,
     ApplicationPlan,
@@ -189,6 +191,8 @@ from .provenance import (
     serialize_provenance_link,
 )
 from .orchestration import AppNotificationFailureNotifier
+from .orchestration.domain_events import DomainEventQuery, DomainEventService
+from .orchestration.publication import StagePublicationService
 from .orchestration.schedule_policy import supported_schedule_kinds, unsupported_schedule_kinds
 from .orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
 from .orchestration.lifecycle import OrchestrationLifecycleService
@@ -30948,6 +30952,36 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
         workspace, _ = _watch_queryset(identity, workspace_id)
     except PermissionDenied:
         return JsonResponse({"error": "forbidden"}, status=403)
+    event_ref = payload.get("event_ref") if isinstance(payload.get("event_ref"), dict) else {}
+    required_reconciled_state_version = str(
+        payload.get("reconciled_state_version")
+        or event_ref.get("reconciled_state_version")
+        or ""
+    ).strip()
+    readiness = StagePublicationService().evaluation_readiness(
+        workspace_id=str(workspace.id),
+        pipeline_key=str(payload.get("pipeline_key") or event_ref.get("pipeline_key") or "").strip(),
+        jurisdiction=str(payload.get("jurisdiction") or event_ref.get("jurisdiction") or "").strip(),
+        source=str(payload.get("source") or event_ref.get("source") or "").strip(),
+        required_reconciled_state_version=required_reconciled_state_version,
+    )
+    if not readiness.ready:
+        return JsonResponse(
+            {
+                "error": "evaluation deferred: reconciled state publication is required",
+                "reason": readiness.reason,
+                "readiness": {
+                    "ready": False,
+                    "publication_id": readiness.publication_id or None,
+                    "reconciled_state_version": readiness.reconciled_state_version or "",
+                    "signal_set_version": readiness.signal_set_version or "",
+                },
+            },
+            status=409,
+        )
+    evaluated_event_ref = dict(event_ref)
+    if readiness.reconciled_state_version:
+        evaluated_event_ref["reconciled_state_version"] = readiness.reconciled_state_version
     watch_ids = payload.get("watch_ids") if isinstance(payload.get("watch_ids"), list) else []
     service = WatchService()
     try:
@@ -30955,7 +30989,7 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
             WatchEvaluationInput(
                 workspace_id=str(workspace.id),
                 event_key=str(payload.get("event_key") or "").strip(),
-                event_ref=payload.get("event_ref") if isinstance(payload.get("event_ref"), dict) else {},
+                event_ref=evaluated_event_ref,
                 watch_ids=tuple(str(item).strip() for item in watch_ids if str(item).strip()),
                 run_id=str(payload.get("run_id") or "").strip(),
                 correlation_id=str(payload.get("correlation_id") or "").strip(),
@@ -30971,6 +31005,7 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
         {
             "workspace_id": str(workspace.id),
             "persisted": bool(payload.get("persist", True)),
+            "reconciled_state_version": readiness.reconciled_state_version or "",
             "results": [serialize_watch_evaluation(item) for item in rows],
         },
         status=201 if bool(payload.get("persist", True)) else 200,
@@ -31685,13 +31720,70 @@ def _serialize_orchestration_schedule(schedule: OrchestrationJobSchedule) -> Dic
     }
 
 
+def _serialize_stage_publication(publication: Optional[OrchestrationStagePublication]) -> Optional[Dict[str, Any]]:
+    if publication is None:
+        return None
+    return {
+        "id": str(publication.id),
+        "stage_key": str(publication.stage_key or ""),
+        "stage_state": str(publication.stage_state or ""),
+        "scope_jurisdiction": str(publication.scope_jurisdiction or ""),
+        "scope_source": str(publication.scope_source or ""),
+        "normalized_snapshot_ref": str(publication.normalized_snapshot_ref or ""),
+        "normalized_change_token": str(publication.normalized_change_token or ""),
+        "reconciled_state_version": str(publication.reconciled_state_version or ""),
+        "signal_set_version": str(publication.signal_set_version or ""),
+        "pipeline_id": str(publication.pipeline_id),
+        "run_id": str(publication.run_id),
+        "job_run_id": str(publication.job_run_id),
+        "publication_metadata": publication.publication_metadata_json if isinstance(publication.publication_metadata_json, dict) else {},
+        "published_at": publication.published_at.isoformat() if publication.published_at else None,
+        "updated_at": publication.updated_at.isoformat() if publication.updated_at else None,
+    }
+
+
+def _serialize_domain_event(event: PlatformDomainEvent) -> Dict[str, Any]:
+    return {
+        "id": str(event.id),
+        "workspace_id": str(event.workspace_id),
+        "pipeline_id": str(event.pipeline_id) if event.pipeline_id else None,
+        "run_id": str(event.run_id) if event.run_id else None,
+        "job_run_id": str(event.job_run_id) if event.job_run_id else None,
+        "publication_id": str(event.publication_id) if event.publication_id else None,
+        "event_type": str(event.event_type or ""),
+        "event_status": str(event.event_status or ""),
+        "stage_key": str(event.stage_key or ""),
+        "scope_jurisdiction": str(event.scope_jurisdiction or ""),
+        "scope_source": str(event.scope_source or ""),
+        "normalized_snapshot_ref": str(event.normalized_snapshot_ref or ""),
+        "normalized_change_token": str(event.normalized_change_token or ""),
+        "reconciled_state_version": str(event.reconciled_state_version or ""),
+        "signal_set_version": str(event.signal_set_version or ""),
+        "subject_ref": event.subject_ref_json if isinstance(event.subject_ref_json, dict) else {},
+        "payload": event.payload_json if isinstance(event.payload_json, dict) else {},
+        "metadata": event.metadata_json if isinstance(event.metadata_json, dict) else {},
+        "correlation_id": str(event.correlation_id or ""),
+        "chain_id": str(event.chain_id or ""),
+        "created_at": event.created_at.isoformat() if event.created_at else None,
+    }
+
+
 def _serialize_orchestration_job_run_summary(job_run: OrchestrationJobRun) -> Dict[str, Any]:
+    stage_key = str(job_run.job_definition.stage_key or "")
+    skipped_reason = str(job_run.skipped_reason or "")
+    gating_reason = skipped_reason if job_run.status == "skipped" and skipped_reason else ""
     return {
         "id": str(job_run.id),
         "job_definition_id": str(job_run.job_definition_id),
         "job_key": str(job_run.job_definition.job_key),
-        "stage_key": str(job_run.job_definition.stage_key),
+        "stage_key": stage_key,
         "status": str(job_run.status),
+        "skipped_reason": skipped_reason,
+        "gating_decision": {
+            "blocked": bool(gating_reason),
+            "reason_code": gating_reason,
+            "stage_key": stage_key,
+        },
         "attempt_count": int(job_run.attempt_count or 0),
         "max_attempts": int(job_run.max_attempts or 1),
         "next_attempt_at": job_run.next_attempt_at.isoformat() if job_run.next_attempt_at else None,
@@ -31764,6 +31856,8 @@ def _serialize_orchestration_run_detail(run: OrchestrationRun) -> Dict[str, Any]
     job_run_ids = [row.id for row in job_runs]
     attempts_by_job_run: Dict[str, List[Dict[str, Any]]] = {}
     outputs_by_job_run: Dict[str, List[Dict[str, Any]]] = {}
+    publications_by_job_run: Dict[str, Dict[str, Any]] = {}
+    domain_events_by_job_run: Dict[str, List[Dict[str, Any]]] = {}
 
     attempt_rows = list(
         OrchestrationJobRunAttempt.objects.filter(job_run_id__in=job_run_ids)
@@ -31814,15 +31908,44 @@ def _serialize_orchestration_run_detail(run: OrchestrationRun) -> Dict[str, Any]
             }
         )
 
+    publication_rows = list(
+        OrchestrationStagePublication.objects.filter(job_run_id__in=job_run_ids)
+        .order_by("job_run_id", "-published_at")
+    )
+    for publication in publication_rows:
+        publications_by_job_run[str(publication.job_run_id)] = _serialize_stage_publication(publication) or {}
+
+    domain_event_rows = list(
+        PlatformDomainEvent.objects.filter(job_run_id__in=job_run_ids)
+        .order_by("job_run_id", "-created_at", "-id")
+    )
+    for event in domain_event_rows:
+        domain_events_by_job_run.setdefault(str(event.job_run_id), []).append(_serialize_domain_event(event))
+
     jobs_payload: List[Dict[str, Any]] = []
     for row in job_runs:
         item = _serialize_orchestration_job_run_summary(row)
         item["dependencies"] = dependency_map.get(str(row.job_definition.job_key), [])
         item["attempts"] = attempts_by_job_run.get(str(row.id), [])
         item["outputs"] = outputs_by_job_run.get(str(row.id), [])
+        item["stage_publication"] = publications_by_job_run.get(str(row.id))
+        item["domain_events"] = domain_events_by_job_run.get(str(row.id), [])
         jobs_payload.append(item)
 
     metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+    publication_service = StagePublicationService()
+    readiness = publication_service.evaluation_readiness(
+        workspace_id=str(run.workspace_id),
+        pipeline_id=str(run.pipeline_id),
+        jurisdiction=str(run.scope_jurisdiction or ""),
+        source=str(run.scope_source or ""),
+    )
+    scope_publications_qs = OrchestrationStagePublication.objects.filter(
+        workspace_id=run.workspace_id,
+        pipeline_id=run.pipeline_id,
+        scope_jurisdiction=str(run.scope_jurisdiction or ""),
+        scope_source=str(run.scope_source or ""),
+    )
     return {
         **_serialize_orchestration_run_summary(run),
         "metrics": run.metrics_json if isinstance(run.metrics_json, dict) else {},
@@ -31833,6 +31956,30 @@ def _serialize_orchestration_run_detail(run: OrchestrationRun) -> Dict[str, Any]
         "initiated_by_id": str(run.initiated_by_id) if run.initiated_by_id else None,
         "metadata": metadata,
         "dependency_context": dependency_map,
+        "publication_readiness": {
+            "ready": bool(readiness.ready),
+            "reason": str(readiness.reason),
+            "publication_id": readiness.publication_id or None,
+            "reconciled_state_version": readiness.reconciled_state_version or "",
+            "signal_set_version": readiness.signal_set_version or "",
+        },
+        "latest_scope_publications": {
+            "source_normalization": _serialize_stage_publication(
+                scope_publications_qs.filter(stage_key="source_normalization").order_by("-published_at", "-updated_at").first()
+            ),
+            "property_graph_rebuild": _serialize_stage_publication(
+                scope_publications_qs.filter(stage_key="property_graph_rebuild", stage_state="published")
+                .exclude(reconciled_state_version="")
+                .order_by("-published_at", "-updated_at")
+                .first()
+            ),
+            "signal_matching": _serialize_stage_publication(
+                scope_publications_qs.filter(stage_key="signal_matching", stage_state="published")
+                .exclude(signal_set_version="")
+                .order_by("-published_at", "-updated_at")
+                .first()
+            ),
+        },
         "jobs": jobs_payload,
     }
 
@@ -31983,6 +32130,169 @@ def orchestration_dependency_graph(request: HttpRequest) -> JsonResponse:
             "pipeline_key": str(pipeline.key),
             "nodes": nodes,
             "edges": edge_rows,
+        }
+    )
+
+
+@login_required
+def orchestration_publication_readiness(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key) if pipeline_key else None
+    if pipeline_key and pipeline is None:
+        return JsonResponse({"error": "pipeline not found"}, status=404)
+
+    jurisdiction = str(request.GET.get("jurisdiction") or "").strip()
+    source = str(request.GET.get("source") or "").strip()
+    required_reconciled_state_version = str(request.GET.get("reconciled_state_version") or "").strip()
+
+    base = OrchestrationStagePublication.objects.filter(workspace=workspace)
+    if pipeline is not None:
+        base = base.filter(pipeline=pipeline)
+    if jurisdiction:
+        base = base.filter(scope_jurisdiction=jurisdiction)
+    if source:
+        base = base.filter(scope_source=source)
+
+    normalized = base.filter(stage_key="source_normalization").order_by("-published_at", "-updated_at").first()
+    reconciled = (
+        base.filter(stage_key="property_graph_rebuild", stage_state="published")
+        .exclude(reconciled_state_version="")
+        .order_by("-published_at", "-updated_at")
+        .first()
+    )
+    signal = (
+        base.filter(stage_key="signal_matching", stage_state="published")
+        .exclude(signal_set_version="")
+        .order_by("-published_at", "-updated_at")
+        .first()
+    )
+
+    readiness = StagePublicationService().evaluation_readiness(
+        workspace_id=str(workspace.id),
+        pipeline_id=str(pipeline.id) if pipeline else "",
+        jurisdiction=jurisdiction,
+        source=source,
+        required_reconciled_state_version=required_reconciled_state_version,
+    )
+
+    gating_qs = OrchestrationJobRun.objects.filter(
+        workspace=workspace,
+        status="skipped",
+        skipped_reason__in=[
+            "reconciled_state_not_published",
+            "reconciled_state_version_not_published",
+            "evaluation_output_missing",
+        ],
+    ).select_related("run", "pipeline", "job_definition")
+    if pipeline is not None:
+        gating_qs = gating_qs.filter(pipeline=pipeline)
+    if jurisdiction:
+        gating_qs = gating_qs.filter(scope_jurisdiction=jurisdiction)
+    if source:
+        gating_qs = gating_qs.filter(scope_source=source)
+    limit = max(1, min(100, int(str(request.GET.get("decision_limit") or "20"))))
+    gating_rows = [
+        {
+            "job_run_id": str(row.id),
+            "run_id": str(row.run_id),
+            "pipeline_id": str(row.pipeline_id),
+            "pipeline_key": str(row.pipeline.key),
+            "job_key": str(row.job_definition.job_key),
+            "stage_key": str(row.job_definition.stage_key),
+            "status": str(row.status),
+            "reason_code": str(row.skipped_reason or ""),
+            "summary": str(row.summary or ""),
+            "scope_jurisdiction": str(row.scope_jurisdiction or ""),
+            "scope_source": str(row.scope_source or ""),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+        for row in gating_qs.order_by("-updated_at", "-created_at")[:limit]
+    ]
+
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "pipeline_id": str(pipeline.id) if pipeline else None,
+            "pipeline_key": str(pipeline.key) if pipeline else "",
+            "scope": {"jurisdiction": jurisdiction, "source": source},
+            "required_reconciled_state_version": required_reconciled_state_version,
+            "evaluation_readiness": {
+                "ready": bool(readiness.ready),
+                "reason": str(readiness.reason),
+                "publication_id": readiness.publication_id or None,
+                "reconciled_state_version": readiness.reconciled_state_version or "",
+                "signal_set_version": readiness.signal_set_version or "",
+            },
+            "latest_publications": {
+                "source_normalization": _serialize_stage_publication(normalized),
+                "property_graph_rebuild": _serialize_stage_publication(reconciled),
+                "signal_matching": _serialize_stage_publication(signal),
+            },
+            "recent_gating_decisions": gating_rows,
+        }
+    )
+
+
+@login_required
+def orchestration_domain_events_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key) if pipeline_key else None
+    if pipeline_key and pipeline is None:
+        return JsonResponse({"error": "pipeline not found"}, status=404)
+
+    try:
+        limit = int(request.GET.get("limit") or "100")
+    except ValueError:
+        limit = 100
+    query = DomainEventQuery(
+        workspace_id=str(workspace.id),
+        event_type=str(request.GET.get("event_type") or "").strip(),
+        stage_key=str(request.GET.get("stage_key") or "").strip(),
+        pipeline_id=str(pipeline.id) if pipeline else "",
+        jurisdiction=str(request.GET.get("jurisdiction") or "").strip(),
+        source=str(request.GET.get("source") or "").strip(),
+        reconciled_state_version=str(request.GET.get("reconciled_state_version") or "").strip(),
+        signal_set_version=str(request.GET.get("signal_set_version") or "").strip(),
+        run_id=str(request.GET.get("run_id") or "").strip(),
+        publication_id=str(request.GET.get("publication_id") or "").strip(),
+        chain_id=str(request.GET.get("chain_id") or "").strip(),
+        correlation_id=str(request.GET.get("correlation_id") or "").strip(),
+        limit=max(1, min(limit, 500)),
+    )
+    rows = DomainEventService().list_events(query)
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "pipeline_id": str(pipeline.id) if pipeline else None,
+            "pipeline_key": str(pipeline.key) if pipeline else "",
+            "events": [_serialize_domain_event(item) for item in rows],
         }
     )
 

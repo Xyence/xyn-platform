@@ -19,6 +19,8 @@ See [Platform Run History Boundaries](./platform-run-history-boundaries.md).
   - job runs
   - attempts
   - outputs/artifacts metadata
+  - stage publication/readiness markers (`OrchestrationStagePublication`)
+  - domain event outbox rows (`PlatformDomainEvent`) emitted from publication transitions
 - Scheduler/runtime engine:
   - due schedule polling
   - partition-aware run materialization (`jurisdiction`, `source`)
@@ -46,9 +48,14 @@ See [Platform Run History Boundaries](./platform-run-history-boundaries.md).
 1. `DueJobScanner` finds due schedules by `enabled + next_fire_at` horizon.
 2. `RunPlanner` creates runs idempotently from schedule metadata and advances schedule fire time.
 3. `DependencyResolver` transitions ready jobs to `queued` when upstream jobs are terminal and valid.
+   - Stage E (`rule_evaluation`) additionally requires Stage C (`property_graph_rebuild`) reconciled publication readiness for the same workspace/pipeline/partition.
 4. `RunDispatcher` claims jobs, enforces concurrency, invokes executor handlers, records attempts/outputs.
 5. Retryable failures move to `waiting_retry` with `next_attempt_at` using exponential backoff.
 6. `StaleRunDetector` marks stale queued/running jobs when deadlines are truly exceeded.
+7. Publication transitions emit durable domain events:
+   - Stage B: `source_normalized`
+   - Stage C: `reconciled_state_published`, `evaluation_ready`
+   - Stage D: `signal_set_published`
 
 Timezone note:
 - v1 scheduler timing uses persisted UTC timestamps (`next_fire_at`) for polling/advancement.
@@ -96,12 +103,19 @@ The built-in sample pipeline (`sample_data_sync`) demonstrates:
   - per jurisdiction
 - Dependency chain from refresh through notification emission.
 - `only_if_upstream_changed` gating on downstream stages.
+- explicit publication/readiness boundary:
+  - Stage B normalization writes change markers but does not make evaluation ready.
+  - Stage C reconciliation/publish is the required boundary for Stage E.
 - Retry/backoff demonstration via `simulate_retry_once` manual parameter.
 - Stage outputs with artifacts/metrics metadata per execution.
 - Manual rerun support through run API.
 
 Reference code:
 - `xyn_orchestrator/orchestration/examples.py`
+- `xyn_orchestrator/orchestration/publication.py`
+
+See [Changed Data Triggering Contract](./changed-data-triggering-contract.md).
+See [Platform Domain Events Primitive](./platform-domain-events-primitive.md).
 
 ## Performance/indexing
 

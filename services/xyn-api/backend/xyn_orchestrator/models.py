@@ -3818,6 +3818,140 @@ class OrchestrationJobRunOutput(models.Model):
         return f"{self.job_run_id}:{self.output_key}"
 
 
+class OrchestrationStagePublication(models.Model):
+    """Durable domain-stage publication marker for changed-data workflows."""
+
+    STAGE_STATE_CHOICES = [
+        ("completed", "Completed"),
+        ("published", "Published"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="orchestration_stage_publications")
+    pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="stage_publications")
+    run = models.ForeignKey(OrchestrationRun, on_delete=models.CASCADE, related_name="stage_publications")
+    job_run = models.OneToOneField(
+        OrchestrationJobRun,
+        on_delete=models.CASCADE,
+        related_name="stage_publication",
+    )
+    stage_key = models.CharField(max_length=80, db_index=True)
+    stage_state = models.CharField(max_length=20, choices=STAGE_STATE_CHOICES, default="completed", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    normalized_snapshot_ref = models.TextField(blank=True, default="")
+    normalized_change_token = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    signal_set_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    publication_metadata_json = models.JSONField(default=dict, blank=True)
+    published_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-published_at", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "pipeline", "stage_key", "run", "scope_jurisdiction", "scope_source", "job_run"],
+                name="uniq_orch_stage_pub_job",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["workspace", "pipeline", "stage_key", "scope_jurisdiction", "scope_source", "published_at"],
+                name="ix_orch_stage_pub_partition",
+            ),
+            models.Index(
+                fields=["workspace", "stage_key", "published_at"],
+                name="ix_orch_stage_pub_ws_stage",
+            ),
+            models.Index(
+                fields=["workspace", "reconciled_state_version", "published_at"],
+                name="ix_orch_stage_pub_reconciled",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pipeline_id}:{self.stage_key}:{self.job_run_id}"
+
+
+class PlatformDomainEvent(models.Model):
+    """Thin durable outbox-style domain event emitted from publication boundaries."""
+
+    EVENT_STATUS_CHOICES = [
+        ("recorded", "Recorded"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="platform_domain_events")
+    pipeline = models.ForeignKey(
+        OrchestrationPipeline,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="domain_events",
+    )
+    run = models.ForeignKey(
+        OrchestrationRun,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="domain_events",
+    )
+    job_run = models.ForeignKey(
+        OrchestrationJobRun,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="domain_events",
+    )
+    publication = models.ForeignKey(
+        OrchestrationStagePublication,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="domain_events",
+    )
+    event_type = models.CharField(max_length=120, db_index=True)
+    event_status = models.CharField(max_length=20, choices=EVENT_STATUS_CHOICES, default="recorded", db_index=True)
+    stage_key = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    subject_ref_json = models.JSONField(default=dict, blank=True)
+    payload_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    normalized_snapshot_ref = models.TextField(blank=True, default="")
+    normalized_change_token = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    signal_set_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    correlation_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_platform_domain_event_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "event_type", "created_at"], name="ix_domain_event_type_time"),
+            models.Index(
+                fields=["workspace", "stage_key", "scope_jurisdiction", "scope_source", "created_at"],
+                name="ix_domain_event_scope_time",
+            ),
+            models.Index(fields=["workspace", "pipeline", "created_at"], name="ix_domain_event_pipeline_time"),
+            models.Index(fields=["workspace", "reconciled_state_version", "created_at"], name="ix_domain_event_reconciled"),
+            models.Index(fields=["workspace", "signal_set_version", "created_at"], name="ix_domain_event_signal"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.event_type}:{self.stage_key}"
+
+
 class RecordMatchEvaluation(models.Model):
     """Durable, explainable record matching result for platform-level reuse."""
 

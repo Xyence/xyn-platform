@@ -63,8 +63,47 @@ Includes:
 - `run_type` and `target_ref`
 - dependency context map
 - per-job run rows
+- per-job gating visibility (`skipped_reason`, `gating_decision`)
 - attempts
 - output/artifact metadata
+- stage publication markers
+- domain events linked to job runs
+- run-scope publication readiness snapshot
+
+## Inspect publication readiness
+
+`GET /xyn/api/orchestration/publication-readiness?workspace_id=<uuid>&pipeline_key=<key?>&jurisdiction=<opt>&source=<opt>&reconciled_state_version=<opt>`
+
+Returns:
+- latest Stage B/C/D publication markers for the requested scope
+- evaluation readiness (`ready`, `reason`, reconciled/signal versions)
+- recent gating decisions for skipped Stage E/Stage F rows
+
+Common reason codes:
+- `reconciled_state_not_published`
+- `reconciled_state_version_not_published`
+- `evaluation_output_missing`
+
+## Inspect domain events
+
+`GET /xyn/api/orchestration/domain-events?...`
+
+Required:
+- `workspace_id`
+
+Optional filters:
+- `pipeline_key`
+- `jurisdiction`
+- `source`
+- `event_type`
+- `stage_key`
+- `reconciled_state_version`
+- `signal_set_version`
+- `run_id`
+- `publication_id`
+- `correlation_id`
+- `chain_id`
+- `limit` (default 100, max 500)
 
 ## Manual trigger
 
