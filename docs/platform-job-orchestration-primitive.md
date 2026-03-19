@@ -133,3 +133,7 @@ Future apps (including Deal Finder) should only provide pipeline definitions + h
 - TODO: add API endpoints/UI surfaces for run status visibility, manual rerun, and scoped rerun.
 - TODO: add richer change-detection policy helpers for upstream diff semantics beyond output tokens.
 - TODO: add workspace-level recipient resolution for failure notifications.
+- TODO: publish a unified platform-facing run-history contract that maps orchestration vs legacy/runtime seams unambiguously.
+- TODO: define a staged retirement/migration plan for legacy `Run` usage where orchestration run history is now the default for new data-processing work.
+- TODO: add operator/API cross-links so runtime proxy run views and orchestration run views can be navigated without seam ambiguity.
+- TODO: define provenance alignment conventions between `target_ref_json`, orchestration outputs, and downstream derived artifacts.

@@ -1223,6 +1223,13 @@ class VideoRender(models.Model):
 
 
 class WorkflowRun(models.Model):
+    """Workflow-artifact-specific execution history.
+
+    Boundary:
+    - Intended for workflow artifact execution/event timelines.
+    - Not the canonical platform run-history substrate for new ingest/data
+      processing pipelines.
+    """
     STATUS_CHOICES = [
         ("running", "Running"),
         ("completed", "Completed"),
@@ -1804,6 +1811,13 @@ class Registry(models.Model):
 
 
 class Run(models.Model):
+    """Legacy runtime/work-item execution history model.
+
+    Boundary:
+    - Retained for existing xyn-core runtime + work-item compatibility flows.
+    - Not the default substrate for new data-processing ingest/import/reconcile
+      platform work; use OrchestrationRun for those flows.
+    """
     STATUS_CHOICES = [
         ("pending", "Pending"),
         ("running", "Running"),
@@ -3121,6 +3135,14 @@ class OrchestrationJobDependency(models.Model):
 
 
 class OrchestrationRun(models.Model):
+    """Canonical durable run-history record for new data-processing workflows.
+
+    Boundary:
+    - Use for new platform/app ingest, import, normalize, reconcile,
+      rule-evaluation, and notification-dispatch orchestration flows.
+    - Complements (does not replace) legacy runtime/work-item and workflow
+      subsystem run-history models.
+    """
     STATUS_CHOICES = [
         ("pending", "Pending"),
         ("queued", "Queued"),

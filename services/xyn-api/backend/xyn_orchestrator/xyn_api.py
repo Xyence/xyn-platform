@@ -26614,6 +26614,8 @@ def run_commands(request: HttpRequest, run_id: str) -> JsonResponse:
 
 @login_required
 def runtime_runs_collection(request: HttpRequest) -> JsonResponse:
+    # Boundary: this endpoint proxies the legacy/runtime execution seam.
+    # For new data-processing run history, use orchestration run APIs.
     identity = _require_authenticated(request)
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
@@ -26649,6 +26651,8 @@ def runtime_runs_collection(request: HttpRequest) -> JsonResponse:
 
 @login_required
 def runtime_run_detail(request: HttpRequest, run_id: uuid.UUID) -> JsonResponse:
+    # Boundary: runtime run detail is a proxy view for the runtime seam, not
+    # the canonical platform run-history API for new ingest/data pipelines.
     identity = _require_authenticated(request)
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
@@ -31029,6 +31033,8 @@ def orchestration_dependency_graph(request: HttpRequest) -> JsonResponse:
 @csrf_exempt
 @login_required
 def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
+    # Boundary: canonical run-history API for new orchestrated data-processing
+    # workflows (ingest/import/normalize/reconcile/rules/dispatch).
     identity = _require_authenticated(request)
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)

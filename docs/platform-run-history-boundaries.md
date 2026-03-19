@@ -24,6 +24,19 @@ This includes both scheduler-triggered and manually-triggered processing.
 
 ## Legacy model boundaries
 
+## Seam classification
+
+- canonical for new orchestrated data-processing work:
+  - `OrchestrationRun` + related orchestration job/attempt/output models
+- legacy compatibility:
+  - `Run` + `RunArtifact` + `RunCommandExecution`
+- workflow-specific:
+  - `WorkflowRun` + `WorkflowRunEvent`
+- subsystem-specific execution history:
+  - models such as `VideoRender` and notification `DeliveryAttempt`
+- operational proxy seam:
+  - `/api/runtime/runs` and related runtime run proxy endpoints
+
 ### `Run` / `RunArtifact` / `RunCommandExecution`
 
 These remain for legacy xyn-core/runtime execution tracking and compatibility with existing work-item/runtime seams.
@@ -38,4 +51,3 @@ Do not treat `WorkflowRun` as the canonical platform run-history substrate for n
 
 These proxy xyn-core runtime run views for operational runtime surfaces.
 They are not a replacement for orchestration run history for new data-processing primitives.
-

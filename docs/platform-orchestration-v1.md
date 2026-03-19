@@ -121,3 +121,7 @@ These indexes support scheduler polling, status visibility, and dependency-drive
 - Multi-worker fairness and throughput tuning under very high queue pressure.
 - UI-level operator screens beyond API surfaces.
 - Policy-driven notification routing (on-call rotation, escalation rules).
+- Unified platform-facing run-history contract across orchestration, legacy runtime `Run`, and workflow-specific seams.
+- Legacy seam migration/deprecation plan for run-history usage where orchestration is now the default for new data-processing work.
+- Operator/API navigation unification across runtime proxy runs and orchestration runs.
+- Provenance alignment guidance for `run_type`/`target_ref_json` and downstream artifact lineage.
