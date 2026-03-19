@@ -39,6 +39,8 @@ refresh = define_job(
 v1 schedule support:
 - `interval` and `manual` are supported.
 - `cron` definitions are rejected until v2 cron semantics are implemented.
+- Cron scheduling is intentionally unsupported in orchestration v1.
+- Do not use or imply cron scheduling until platform cron support is explicitly implemented and accepted.
 
 ## How to define a dependency chain
 

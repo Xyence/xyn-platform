@@ -1,6 +1,7 @@
 import unittest
 
 from xyn_orchestrator.orchestration import (
+    CRON_UNSUPPORTED_MESSAGE,
     ConcurrencyPolicy,
     OrchestrationRegistry,
     PartitionStrategy,
@@ -10,6 +11,8 @@ from xyn_orchestrator.orchestration import (
     build_sample_data_pipeline_demo_executors,
     compose_pipeline,
     define_job,
+    supported_schedule_kinds,
+    unsupported_schedule_kinds,
     validate_pipeline_registration,
 )
 from xyn_orchestrator.orchestration.interfaces import ExecutionScope, JobExecutionContext, JobExecutionResult
@@ -148,8 +151,13 @@ class OrchestrationRegistryTests(unittest.TestCase):
                 schedules=(ScheduledTrigger(key="hourly", kind="cron", cron_expression="0 * * * *"),),
             )
         )
-        with self.assertRaisesRegex(ValueError, "not supported"):
+        with self.assertRaisesRegex(ValueError, "intentionally unsupported"):
             validate_pipeline_registration(pipeline=composer.compose(), handler_keys=registry.handler_keys())
+
+    def test_schedule_policy_constants_are_canonical(self):
+        self.assertEqual(supported_schedule_kinds(), ("manual", "interval"))
+        self.assertEqual(unsupported_schedule_kinds(), ("cron",))
+        self.assertIn("intentionally unsupported", CRON_UNSUPPORTED_MESSAGE)
 
     def test_sample_pipeline_is_generic_and_valid(self):
         registry = OrchestrationRegistry()

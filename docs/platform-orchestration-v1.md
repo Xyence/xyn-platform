@@ -2,6 +2,9 @@
 
 This document describes the first production-ready baseline for the platform scheduler/job orchestration primitive.
 
+Cron scheduling is intentionally unsupported in orchestration v1.
+Do not use or imply cron scheduling until platform cron support is explicitly implemented and accepted.
+
 ## What this ships
 
 - Workspace-scoped orchestration persistence:

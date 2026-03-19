@@ -20,6 +20,7 @@ from xyn_orchestrator.models import (
 from xyn_orchestrator.orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
 from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService, OutputRecord
 from xyn_orchestrator.orchestration.repository import DjangoOrchestrationRepository
+from xyn_orchestrator.orchestration.service import JobOrchestrationService
 
 
 class OrchestrationLifecycleTests(TestCase):
@@ -232,4 +233,32 @@ class OrchestrationLifecycleTests(TestCase):
                 timezone_name="UTC",
                 enabled=True,
                 next_fire_at=timezone.now() + timedelta(hours=1),
+            )
+
+    def test_service_layer_rejects_legacy_cron_rows_loudly(self):
+        # Emulate legacy persisted data created before v1 schedule constraints.
+        OrchestrationJobSchedule.objects.bulk_create(
+            [
+                OrchestrationJobSchedule(
+                    job_definition=self.job_a,
+                    schedule_key="legacy-cron",
+                    schedule_kind="cron",
+                    cron_expression="0 * * * *",
+                    timezone_name="UTC",
+                    enabled=True,
+                    next_fire_at=timezone.now() + timedelta(minutes=5),
+                )
+            ]
+        )
+        service = JobOrchestrationService(repository=self.repository)
+        with self.assertRaisesRegex(ValueError, "intentionally unsupported"):
+            service.create_run(
+                RunCreateRequest(
+                    workspace_id=str(self.workspace.id),
+                    pipeline_key=self.pipeline.key,
+                    trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
+                    initiated_by_id=str(self.identity.id),
+                    scope=ExecutionScope(jurisdiction="tx", source="mls"),
+                    metadata={"correlation_id": "corr-2", "chain_id": "chain-2"},
+                )
             )

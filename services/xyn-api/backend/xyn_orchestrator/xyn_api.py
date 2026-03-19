@@ -147,6 +147,7 @@ from .models import (
     ReportAttachment,
 )
 from .orchestration import AppNotificationFailureNotifier
+from .orchestration.schedule_policy import supported_schedule_kinds, unsupported_schedule_kinds
 from .orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
 from .orchestration.lifecycle import OrchestrationLifecycleService
 from .xco import (
@@ -30704,13 +30705,13 @@ def _serialize_orchestration_job_definition(job: OrchestrationJobDefinition) -> 
 
 
 def _serialize_orchestration_schedule(schedule: OrchestrationJobSchedule) -> Dict[str, Any]:
-    supported_schedule_kinds = {"manual", "interval"}
+    supported_kinds = set(supported_schedule_kinds())
     return {
         "id": str(schedule.id),
         "job_definition_id": str(schedule.job_definition_id),
         "schedule_key": schedule.schedule_key,
         "schedule_kind": schedule.schedule_kind,
-        "supported_in_v1": schedule.schedule_kind in supported_schedule_kinds,
+        "supported_in_v1": schedule.schedule_kind in supported_kinds,
         "enabled": bool(schedule.enabled),
         "cron_expression": schedule.cron_expression or "",
         "interval_seconds": int(schedule.interval_seconds or 0),
@@ -30964,8 +30965,8 @@ def orchestration_schedules_collection(request: HttpRequest) -> JsonResponse:
     return JsonResponse(
         {
             "workspace_id": str(workspace.id),
-            "supported_schedule_kinds": ["manual", "interval"],
-            "unsupported_schedule_kinds": ["cron"],
+            "supported_schedule_kinds": list(supported_schedule_kinds()),
+            "unsupported_schedule_kinds": list(unsupported_schedule_kinds()),
             "schedules": rows,
         }
     )

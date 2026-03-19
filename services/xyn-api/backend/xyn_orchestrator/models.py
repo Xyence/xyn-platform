@@ -8,6 +8,8 @@ from django.utils import timezone
 from django.utils.text import slugify
 from django_ckeditor_5.fields import CKEditor5Field
 
+from .orchestration.schedule_policy import CRON_UNSUPPORTED_MESSAGE, is_supported_schedule_kind
+
 
 class Article(models.Model):
     STATUS_CHOICES = [
@@ -3064,12 +3066,10 @@ class OrchestrationJobSchedule(models.Model):
     def clean(self) -> None:
         super().clean()
         kind = str(self.schedule_kind or "").strip()
-        if kind == "cron":
-            raise ValidationError(
-                {
-                    "schedule_kind": "cron is not supported in orchestration v1. Use interval or manual schedules."
-                }
-            )
+        if not is_supported_schedule_kind(kind):
+            if kind == "cron":
+                raise ValidationError({"schedule_kind": CRON_UNSUPPORTED_MESSAGE})
+            raise ValidationError({"schedule_kind": f"Unsupported schedule_kind '{kind}' in orchestration v1."})
         if kind == "interval":
             if int(self.interval_seconds or 0) <= 0:
                 raise ValidationError({"interval_seconds": "interval_seconds must be > 0 for interval schedules."})

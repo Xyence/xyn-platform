@@ -2,6 +2,9 @@
 
 This API provides operational visibility and intervention controls for platform operators.
 
+Cron scheduling is intentionally unsupported in orchestration v1.
+Do not use or imply cron scheduling until platform cron support is explicitly implemented and accepted.
+
 Base path: `/xyn/api/orchestration`
 
 All endpoints require authenticated user context and workspace membership.

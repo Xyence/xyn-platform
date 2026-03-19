@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from .schedule_policy import CRON_UNSUPPORTED_MESSAGE
+
 TriggerKind = Literal["manual", "interval", "cron", "event"]
 
 
@@ -22,6 +24,6 @@ class ScheduledTrigger:
         if not self.key.strip():
             raise ValueError("trigger key is required")
         if self.kind == "cron":
-            raise ValueError("cron trigger is not supported in orchestration v1; use interval or manual triggers")
+            raise ValueError(CRON_UNSUPPORTED_MESSAGE)
         if self.kind == "interval" and int(self.interval_seconds or 0) <= 0:
             raise ValueError("interval trigger requires interval_seconds > 0")

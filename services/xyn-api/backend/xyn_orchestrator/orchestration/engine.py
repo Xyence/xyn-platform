@@ -22,6 +22,7 @@ from xyn_orchestrator.models import (
 from .interfaces import ExecutionScope, JobExecutionContext, JobExecutionResult, JobExecutor, RunCreateRequest, RunTrigger
 from .lifecycle import OrchestrationLifecycleService, OutputRecord
 from .repository import DjangoOrchestrationRepository
+from .schedule_policy import CRON_UNSUPPORTED_MESSAGE, is_polled_schedule_kind, polled_schedule_kinds
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ class DueJobScanner:
         horizon = ts + timedelta(seconds=self._default_lookahead_seconds)
         rows = (
             OrchestrationJobSchedule.objects.select_related("job_definition", "job_definition__pipeline", "job_definition__pipeline__workspace")
-            .filter(enabled=True, schedule_kind="interval")
+            .filter(enabled=True, schedule_kind__in=polled_schedule_kinds())
             .filter(job_definition__enabled=True, job_definition__pipeline__enabled=True)
             .filter(next_fire_at__isnull=False, next_fire_at__lte=horizon)
             .order_by("next_fire_at", "created_at")[: max(1, int(limit or 1))]
@@ -113,7 +114,7 @@ class RunPlanner:
             return []
         if schedule.next_fire_at and schedule.next_fire_at > ts:
             return []
-        if schedule.schedule_kind != "interval":
+        if not is_polled_schedule_kind(schedule.schedule_kind):
             logger.warning(
                 "orchestration.schedule.unsupported_kind",
                 extra={
@@ -121,6 +122,7 @@ class RunPlanner:
                     "schedule_kind": str(schedule.schedule_kind),
                     "pipeline_key": str(schedule.job_definition.pipeline.key),
                     "job_key": str(schedule.job_definition.job_key),
+                    "message": CRON_UNSUPPORTED_MESSAGE if str(schedule.schedule_kind) == "cron" else "Unsupported schedule kind",
                 },
             )
             return []

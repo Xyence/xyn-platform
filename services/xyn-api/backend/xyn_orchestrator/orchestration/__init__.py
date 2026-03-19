@@ -44,6 +44,14 @@ from .examples import (
     register_sample_data_pipeline_with_demo_handlers,
 )
 from .scheduling import ScheduledTrigger, TriggerKind
+from .schedule_policy import (
+    CRON_UNSUPPORTED_MESSAGE,
+    is_polled_schedule_kind,
+    is_supported_schedule_kind,
+    polled_schedule_kinds,
+    supported_schedule_kinds,
+    unsupported_schedule_kinds,
+)
 from .service import JobOrchestrationService, exponential_backoff_seconds
 
 try:
@@ -80,6 +88,12 @@ __all__ = [
     "ScheduledTrigger",
     "StaleRunRecord",
     "TriggerKind",
+    "CRON_UNSUPPORTED_MESSAGE",
+    "supported_schedule_kinds",
+    "unsupported_schedule_kinds",
+    "polled_schedule_kinds",
+    "is_supported_schedule_kind",
+    "is_polled_schedule_kind",
     "DependencySnapshot",
     "AppNotificationFailureNotifier",
     "ArtifactDeclaration",

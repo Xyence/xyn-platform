@@ -4,6 +4,9 @@
 This introduces a platform-level, workspace-scoped orchestration primitive for reusable scheduled pipelines.
 It is intentionally lightweight and composable, and is not an Airflow replacement.
 
+Cron scheduling is intentionally unsupported in orchestration v1.
+Do not use or imply cron scheduling until platform cron support is explicitly implemented and accepted.
+
 ## Why this location
 The primitive lives in `services/xyn-api/backend/xyn_orchestrator` because that package already owns:
 - workspace-scoped durable platform models (`Campaign`, `Goal`, `Run`, notifications)

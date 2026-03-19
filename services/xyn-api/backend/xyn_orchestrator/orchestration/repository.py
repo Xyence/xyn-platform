@@ -18,6 +18,7 @@ from xyn_orchestrator.models import (
 
 from .definitions import JobDefinition, JobOutputSpec, PipelineDefinition, RetryPolicy
 from .interfaces import ExecutionScope, RunCreateRequest, RunTrigger
+from .schedule_policy import CRON_UNSUPPORTED_MESSAGE, is_supported_schedule_kind
 from .scheduling import ScheduledTrigger
 
 
@@ -46,6 +47,12 @@ class DjangoOrchestrationRepository:
         for job in pipeline.job_definitions.all():
             if not job.enabled:
                 continue
+            for schedule_row in job.schedules.all():
+                kind = str(schedule_row.schedule_kind or "").strip()
+                if not is_supported_schedule_kind(kind):
+                    if kind == "cron":
+                        raise ValueError(CRON_UNSUPPORTED_MESSAGE)
+                    raise ValueError(f"Unsupported schedule_kind '{kind}' in orchestration v1.")
             schedules = tuple(
                 ScheduledTrigger(
                     key=str(schedule.schedule_key or "").strip(),

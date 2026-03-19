@@ -279,6 +279,32 @@ class OrchestrationOperatorApiTests(TestCase):
         self.assertIn("operator_ack", payload["metadata"])
         notify_mock.assert_called_once()
 
+    def test_operator_schedule_listing_marks_legacy_cron_rows_unsupported(self):
+        OrchestrationJobSchedule.objects.bulk_create(
+            [
+                OrchestrationJobSchedule(
+                    job_definition=self.job_refresh,
+                    schedule_key="legacy-cron",
+                    schedule_kind="cron",
+                    cron_expression="0 * * * *",
+                    timezone_name="UTC",
+                    enabled=True,
+                    next_fire_at=timezone.now() + timedelta(minutes=5),
+                )
+            ]
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            schedules_response = orchestration_schedules_collection(
+                self._request(
+                    "/xyn/api/orchestration/schedules",
+                    data={"workspace_id": str(self.workspace.id), "pipeline_key": self.pipeline.key},
+                )
+            )
+        payload = json.loads(schedules_response.content)
+        self.assertEqual(schedules_response.status_code, 200)
+        cron_row = next(item for item in payload["schedules"] if item["schedule_key"] == "legacy-cron")
+        self.assertFalse(cron_row["supported_in_v1"])
+
 
 if __name__ == "__main__":
     import unittest
