@@ -256,7 +256,8 @@ class OrchestrationEngineTests(TestCase):
 
     def test_concurrency_guard_respects_configured_partition_limit(self):
         self.job_a.metadata_json = {"job_concurrency_policy": {"per_partition_limit": 2}}
-        self.job_a.save(update_fields=["metadata_json", "updated_at"])
+        self.job_a.concurrency_limit = 2
+        self.job_a.save(update_fields=["metadata_json", "concurrency_limit", "updated_at"])
 
         run_1 = self._create_manual_run()
         first = OrchestrationJobRun.objects.get(run=run_1, job_definition=self.job_a)

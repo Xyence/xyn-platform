@@ -26,8 +26,8 @@ RUN_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 
 JOB_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "pending": {"queued", "running", "skipped", "cancelled", "stale"},
-    "queued": {"running", "skipped", "cancelled", "stale"},
-    "running": {"succeeded", "failed", "skipped", "cancelled", "stale"},
+    "queued": {"running", "waiting_retry", "skipped", "cancelled", "stale"},
+    "running": {"succeeded", "failed", "waiting_retry", "skipped", "cancelled", "stale"},
     "failed": {"waiting_retry", "queued", "cancelled", "stale"},
     "waiting_retry": {"queued", "running", "cancelled", "stale"},
     "succeeded": set(),

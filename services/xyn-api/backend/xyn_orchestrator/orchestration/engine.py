@@ -201,6 +201,9 @@ class DependencyResolver:
                 self._lifecycle.mark_job_queued(job_run_id=str(row.id), now=ts, summary="ready: no dependencies")
                 queued_ids.append(str(row.id))
                 continue
+            if not dependencies and row.status == "waiting_retry":
+                # Retry readiness is time-gated by next_attempt_at and handled by the dispatcher.
+                continue
 
             upstream_rows = [by_key.get(dep) for dep in dependencies if by_key.get(dep) is not None]
             if len(upstream_rows) != len(dependencies):
