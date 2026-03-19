@@ -3388,6 +3388,79 @@ class OrchestrationJobRunOutput(models.Model):
         return f"{self.job_run_id}:{self.output_key}"
 
 
+class RecordMatchEvaluation(models.Model):
+    """Durable, explainable record matching result for platform-level reuse."""
+
+    DECISION_CHOICES = [
+        ("exact_match", "Exact Match"),
+        ("probable_match", "Probable Match"),
+        ("possible_match", "Possible Match"),
+        ("non_match", "Non Match"),
+        ("needs_review", "Needs Review"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="record_match_evaluations")
+    candidate_a_namespace = models.CharField(max_length=120)
+    candidate_a_type = models.CharField(max_length=120)
+    candidate_a_id = models.CharField(max_length=200)
+    candidate_b_namespace = models.CharField(max_length=120)
+    candidate_b_type = models.CharField(max_length=120)
+    candidate_b_id = models.CharField(max_length=200)
+    candidate_a_ref_json = models.JSONField(default=dict, blank=True)
+    candidate_b_ref_json = models.JSONField(default=dict, blank=True)
+    strategy_key = models.CharField(max_length=120, db_index=True)
+    score = models.FloatField(default=0.0)
+    decision = models.CharField(max_length=24, choices=DECISION_CHOICES, default="non_match", db_index=True)
+    confidence = models.CharField(max_length=24, default="none", db_index=True)
+    explanation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    run = models.ForeignKey(
+        "OrchestrationRun",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="record_match_evaluations",
+    )
+    correlation_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    extra_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["workspace", "decision", "created_at"],
+                name="ix_rec_match_ws_decision_time",
+            ),
+            models.Index(
+                fields=["workspace", "strategy_key", "created_at"],
+                name="ix_rec_match_ws_strategy_time",
+            ),
+            models.Index(
+                fields=["workspace", "correlation_id", "created_at"],
+                name="ix_rec_match_ws_corr_time",
+            ),
+            models.Index(
+                fields=["workspace", "chain_id", "created_at"],
+                name="ix_rec_match_ws_chain_time",
+            ),
+            models.Index(
+                fields=["workspace", "candidate_a_namespace", "candidate_a_type", "candidate_a_id"],
+                name="ix_rec_match_ws_a_ref",
+            ),
+            models.Index(
+                fields=["workspace", "candidate_b_namespace", "candidate_b_type", "candidate_b_id"],
+                name="ix_rec_match_ws_b_ref",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.strategy_key}:{self.decision}:{self.id}"
+
+
 class Goal(models.Model):
     STATUS_CHOICES = [
         ("proposed", "Proposed"),

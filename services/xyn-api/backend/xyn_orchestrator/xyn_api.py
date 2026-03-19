@@ -68,6 +68,7 @@ from .models import (
     DevTask,
     Campaign,
     CampaignType,
+    RecordMatchEvaluation,
     OrchestrationPipeline,
     OrchestrationJobDefinition,
     OrchestrationJobSchedule,
@@ -145,6 +146,13 @@ from .models import (
     PlatformConfigDocument,
     Report,
     ReportAttachment,
+)
+from .matching import (
+    DjangoMatchResultRepository,
+    MatchableRecordRef,
+    RecordMatchingService,
+    StrategyContext,
+    evaluation_as_dict,
 )
 from .orchestration import AppNotificationFailureNotifier
 from .orchestration.schedule_policy import supported_schedule_kinds, unsupported_schedule_kinds
@@ -30659,6 +30667,191 @@ def campaign_detail(request: HttpRequest, campaign_id: str) -> JsonResponse:
     if update_fields:
         campaign.save(update_fields=[*update_fields, "updated_at"])
     return JsonResponse(_serialize_campaign_detail(campaign, workspace=campaign.workspace))
+
+
+def _record_matching_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[RecordMatchEvaluation]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = RecordMatchEvaluation.objects.filter(workspace=workspace).select_related("run").order_by("-created_at")
+    return workspace, qs
+
+
+def _serialize_record_match_result(row: RecordMatchEvaluation) -> Dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "workspace_id": str(row.workspace_id),
+        "strategy_key": row.strategy_key,
+        "score": float(row.score),
+        "decision": row.decision,
+        "confidence": row.confidence,
+        "candidate_a": row.candidate_a_ref_json if isinstance(row.candidate_a_ref_json, dict) else {},
+        "candidate_b": row.candidate_b_ref_json if isinstance(row.candidate_b_ref_json, dict) else {},
+        "explanation": row.explanation_json if isinstance(row.explanation_json, dict) else {},
+        "metadata": row.metadata_json if isinstance(row.metadata_json, dict) else {},
+        "extra": row.extra_json if isinstance(row.extra_json, dict) else {},
+        "run_id": str(row.run_id) if row.run_id else None,
+        "correlation_id": row.correlation_id or "",
+        "chain_id": row.chain_id or "",
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@csrf_exempt
+@login_required
+def record_matching_evaluate(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _record_matching_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    candidate_a_payload = payload.get("candidate_a")
+    candidate_b_payload = payload.get("candidate_b")
+    if not isinstance(candidate_a_payload, dict) or not isinstance(candidate_b_payload, dict):
+        return JsonResponse({"error": "candidate_a and candidate_b are required objects"}, status=400)
+
+    def _to_ref(raw: Dict[str, Any]) -> MatchableRecordRef:
+        return MatchableRecordRef(
+            source_namespace=str(raw.get("source_namespace") or "").strip(),
+            source_record_type=str(raw.get("source_record_type") or "").strip(),
+            source_record_id=str(raw.get("source_record_id") or "").strip(),
+            workspace_id=str(raw.get("workspace_id") or workspace_id).strip(),
+            attributes=raw.get("attributes") if isinstance(raw.get("attributes"), dict) else {},
+        )
+
+    candidate_a = _to_ref(candidate_a_payload)
+    candidate_b = _to_ref(candidate_b_payload)
+    if not candidate_a.source_namespace or not candidate_a.source_record_type or not candidate_a.source_record_id:
+        return JsonResponse({"error": "candidate_a requires source_namespace, source_record_type, and source_record_id"}, status=400)
+    if not candidate_b.source_namespace or not candidate_b.source_record_type or not candidate_b.source_record_id:
+        return JsonResponse({"error": "candidate_b requires source_namespace, source_record_type, and source_record_id"}, status=400)
+
+    strategy_key = str(payload.get("strategy_key") or "").strip()
+    persist = bool(payload.get("persist", True))
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    run_id = str(payload.get("run_id") or "").strip()
+    correlation_id = str(payload.get("correlation_id") or "").strip()
+    chain_id = str(payload.get("chain_id") or "").strip()
+    service = RecordMatchingService(repository=None)
+    available_strategy_keys = service.registry.keys()
+    if strategy_key and strategy_key not in available_strategy_keys:
+        return JsonResponse({"error": "unknown strategy_key", "available_strategy_keys": available_strategy_keys}, status=400)
+    context = StrategyContext(
+        workspace_id=str(workspace.id),
+        run_id=run_id,
+        correlation_id=correlation_id,
+        chain_id=chain_id,
+        metadata=metadata,
+    )
+    evaluation = service.evaluate_pair(
+        workspace_id=str(workspace.id),
+        candidate_a=candidate_a,
+        candidate_b=candidate_b,
+        strategy_key=strategy_key,
+        context=context,
+        persist=False,
+        metadata=metadata,
+    )
+    response_payload: Dict[str, Any] = {
+        "workspace_id": str(workspace.id),
+        "evaluation": evaluation_as_dict(evaluation),
+        "persisted": False,
+        "available_strategy_keys": available_strategy_keys,
+    }
+    if persist:
+        repository = DjangoMatchResultRepository()
+        row = repository.persist_evaluation(
+            workspace_id=str(workspace.id),
+            evaluation=evaluation,
+            run_id=run_id,
+            correlation_id=correlation_id,
+            chain_id=chain_id,
+            metadata=metadata,
+        )
+        response_payload["persisted"] = True
+        response_payload["result"] = _serialize_record_match_result(row)
+    return JsonResponse(response_payload, status=201 if persist else 200)
+
+
+@login_required
+def record_matching_results_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _record_matching_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    strategy_key = str(request.GET.get("strategy_key") or "").strip()
+    if strategy_key:
+        qs = qs.filter(strategy_key=strategy_key)
+    decision = str(request.GET.get("decision") or "").strip().lower()
+    if decision:
+        qs = qs.filter(decision=decision)
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    created_after = parse_datetime(str(request.GET.get("created_after") or "").strip())
+    if created_after:
+        qs = qs.filter(created_at__gte=created_after)
+    created_before = parse_datetime(str(request.GET.get("created_before") or "").strip())
+    if created_before:
+        qs = qs.filter(created_at__lte=created_before)
+    min_score = request.GET.get("min_score")
+    if min_score not in {None, ""}:
+        try:
+            qs = qs.filter(score__gte=float(min_score))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "min_score must be numeric"}, status=400)
+    max_score = request.GET.get("max_score")
+    if max_score not in {None, ""}:
+        try:
+            qs = qs.filter(score__lte=float(max_score))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "max_score must be numeric"}, status=400)
+    limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
+    rows = [_serialize_record_match_result(item) for item in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "results": rows})
+
+
+@login_required
+def record_matching_result_detail(request: HttpRequest, result_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    row = get_object_or_404(RecordMatchEvaluation.objects.select_related("workspace", "run"), id=result_id)
+    if workspace_id != str(row.workspace_id):
+        return JsonResponse({"error": "match result not found in workspace context"}, status=404)
+    if not _workspace_membership(identity, str(row.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse(_serialize_record_match_result(row))
 
 
 def _orchestration_workspace(identity: UserIdentity, workspace_id: str) -> Workspace:
