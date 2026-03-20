@@ -96,3 +96,29 @@ Do not add a second ad hoc work tracker in conversation or UI state.
 - TODO: add operator/event-consumer polling guidance for `PlatformDomainEvent` (`reconciled_state_published` and `evaluation_ready`) so downstream integrations do not infer readiness from raw job status.
 - TODO: add operator visibility for Stage F skips caused by missing Stage E outputs (`evaluation_output_missing`) so notification suppression is diagnosable.
 - TODO: add dedicated workbench panel for publication readiness and gating decisions (current support is API-first).
+
+## Outstanding Platform Follow-ups — Data Preview & Versioning
+
+Required hardening:
+- Enforce immutability of published versions
+  Add DB-level or model-level immutability guards for `OrchestrationStagePublication`.
+  Current behavior relies on convention/tests; prefer a hard guard (admin restriction, model validation, or DB constraint where practical).
+- Sample rows default contract hardening
+  Ensure `sample_metadata.sample_rows` always defaults to `[]` when omitted.
+  Keep backend test coverage for this behavior explicit.
+- UI test stability (act warnings)
+  Eliminate remaining React `act(...)` warnings in Source Inspection review tests by awaiting async state updates.
+  Keep tests resilient to async fetch timing.
+
+Optional improvements:
+- Router future-flag warnings (non-blocking)
+  Address React Router future warnings globally when convenient.
+- Extended publication history access
+  Add optional API support for querying publication history beyond the last N (currently 10).
+  Full history is retained; surface for deeper inspection when needed.
+- Geometry summary robustness
+  Expand validation/normalization for geometry detection in sample metadata.
+  Keep malformed geometry handling non-fatal and consistent.
+- Documentation alignment
+  Standardize terminology across docs: “current published reconciled version”, “published pointer”, “publication history”.
+  Remove ambiguous “latest” language when it could conflict with pointer semantics.
