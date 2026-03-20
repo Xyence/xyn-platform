@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
 
 from django.utils import timezone
 
 from xyn_orchestrator.models import SourceConnector, SourceInspectionProfile, SourceMapping
 from xyn_orchestrator.provenance import AuditEventInput, ProvenanceService, object_ref
+from xyn_orchestrator.geospatial.utils import compute_centroid, extract_bbox, normalize_geometry
 
 from .interfaces import (
     SOURCE_HEALTH_STATES,
@@ -327,13 +328,32 @@ def serialize_source_connector(source: SourceConnector, *, readiness: SourceRead
 
 
 def serialize_source_inspection(row: SourceInspectionProfile) -> dict[str, Any]:
+    sample_metadata = row.sample_metadata_json if isinstance(row.sample_metadata_json, dict) else {}
+    discovered_fields = row.discovered_fields_json if isinstance(row.discovered_fields_json, list) else []
+    sample_rows = sample_metadata.get("sample_rows")
+    if not isinstance(sample_rows, list):
+        sample_rows = []
+    geometry_summary, geometry_errors = _summarize_geometry(sample_metadata, sample_rows)
+    profile_summary = {
+        "row_count": _as_int(sample_metadata.get("row_count"))
+        or _as_int(sample_metadata.get("total_rows"))
+        or _as_int(sample_metadata.get("sample_row_count")),
+        "discovered_fields_count": len(discovered_fields),
+        "has_sample_rows": bool(sample_rows),
+        "has_geometry": bool(geometry_summary and geometry_summary.get("present")),
+    }
+    enriched_metadata = {**sample_metadata, "sample_rows": sample_rows, "profile_summary": profile_summary}
+    if geometry_summary or geometry_errors:
+        enriched_metadata["geometry_summary"] = geometry_summary or {"present": False, "errors": geometry_errors}
+    elif "geometry_summary" in enriched_metadata:
+        enriched_metadata["geometry_summary"] = None
     return {
         "id": str(row.id),
         "source_id": str(row.source_connector_id),
         "status": row.status,
         "detected_format": row.detected_format,
-        "discovered_fields": row.discovered_fields_json if isinstance(row.discovered_fields_json, list) else [],
-        "sample_metadata": row.sample_metadata_json if isinstance(row.sample_metadata_json, dict) else {},
+        "discovered_fields": discovered_fields,
+        "sample_metadata": enriched_metadata,
         "validation_findings": row.validation_findings_json if isinstance(row.validation_findings_json, list) else [],
         "inspection_fingerprint": str(row.inspection_fingerprint or ""),
         "idempotency_key": str(row.idempotency_key or ""),
@@ -341,6 +361,84 @@ def serialize_source_inspection(row: SourceInspectionProfile) -> dict[str, Any]:
         "inspected_by_id": str(row.inspected_by_id) if row.inspected_by_id else None,
         "inspected_at": row.inspected_at.isoformat() if row.inspected_at else None,
     }
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _summarize_geometry(sample_metadata: dict[str, Any], sample_rows: list[dict[str, Any]]):
+    geometries: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    def add_geometry(candidate: Any) -> None:
+        if not candidate:
+            return
+        if isinstance(candidate, dict) and "type" in candidate and "coordinates" in candidate:
+            geometries.append(candidate)
+            return
+        if isinstance(candidate, Iterable) and not isinstance(candidate, (str, bytes, dict)):
+            for item in candidate:
+                add_geometry(item)
+
+    add_geometry(sample_metadata.get("geometry"))
+    add_geometry(sample_metadata.get("geometry_geojson"))
+
+    for row in sample_rows:
+        if not isinstance(row, dict):
+            continue
+        add_geometry(row.get("geometry"))
+        add_geometry(row.get("geometry_geojson"))
+        add_geometry(row.get("geom"))
+        add_geometry(row.get("geom_geojson"))
+
+    if not geometries:
+        return None, []
+
+    bbox_values: list[float] = []
+    centroid_lons: list[float] = []
+    centroid_lats: list[float] = []
+    geometry_types: set[str] = set()
+    for geometry in geometries:
+        try:
+            normalized = normalize_geometry(geometry)
+            geometry_types.add(normalized.get("type", ""))
+            bbox = extract_bbox(normalized)
+            bbox_values.append(bbox.west)
+            bbox_values.append(bbox.south)
+            bbox_values.append(bbox.east)
+            bbox_values.append(bbox.north)
+            centroid = compute_centroid(normalized)
+            centroid_lons.append(centroid.lon)
+            centroid_lats.append(centroid.lat)
+        except Exception as exc:
+            errors.append(str(exc))
+
+    if not geometry_types:
+        return {"present": False, "errors": errors}, errors
+
+    minx = min(bbox_values[0::4]) if bbox_values else None
+    miny = min(bbox_values[1::4]) if bbox_values else None
+    maxx = max(bbox_values[2::4]) if bbox_values else None
+    maxy = max(bbox_values[3::4]) if bbox_values else None
+    centroid = None
+    if centroid_lons and centroid_lats:
+        centroid = {
+            "x": sum(centroid_lons) / len(centroid_lons),
+            "y": sum(centroid_lats) / len(centroid_lats),
+        }
+    summary = {
+        "present": True,
+        "geometry_types": sorted({item for item in geometry_types if item}),
+        "bbox": [minx, miny, maxx, maxy] if None not in (minx, miny, maxx, maxy) else None,
+        "centroid": centroid,
+    }
+    if errors:
+        summary["errors"] = errors
+    return summary, errors
 
 
 def serialize_source_mapping(row: SourceMapping) -> dict[str, Any]:
