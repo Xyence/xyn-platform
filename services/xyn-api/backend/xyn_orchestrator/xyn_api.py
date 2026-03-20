@@ -11066,6 +11066,7 @@ def _parse_optional_bool_filter(raw: Optional[str]) -> Optional[bool]:
 @csrf_exempt
 @login_required
 def rules_collection(request: HttpRequest) -> JsonResponse:
+    # Rules are for business policy visibility/inspection, not app invariants or orchestration behavior.
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     identity = _require_authenticated(request)

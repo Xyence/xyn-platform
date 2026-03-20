@@ -214,6 +214,7 @@ def build_sample_data_pipeline() -> PipelineRegistration:
         partition_strategy=PartitionStrategy(per_jurisdiction=True, per_source=True),
         only_if_upstream_changed=True,
     )
+    # Rules here represent business policy evaluation, not app invariants or orchestration behavior.
     evaluate_rules = define_job(
         key="evaluate_rules",
         stage_key=STAGE_RULE_EVALUATION,

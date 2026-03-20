@@ -35,6 +35,61 @@ This is the concise boundary reference for platform primitives that are most vul
 - `normalized_change_token` is not the same as `reconciled_state_version`; Stage C reconciliation publication is the downstream evaluation boundary.
 - `PlatformDomainEvent` (publish-boundary event outbox) != `PlatformAuditEvent` (actor/action audit trail) != `ProvenanceLink` (derived-from linkage).
 
+## Rules Boundary (Platform Contract)
+
+This platform separates **fixed logic**, **business rules**, and **orchestration/config**. The goal is to prevent app invariants or execution behavior from leaking into policy bundles and to keep rules focused on tunable decision logic.
+
+### A. Fixed Logic (App Invariants)
+
+Use **fixed logic** for constraints that must always be true:
+- Required fields and validation
+- Enablement constraints (e.g., campaign must have name + area before enable)
+- Authorization / permissions
+- Referential integrity / immutable relationships
+- Lifecycle constraints (e.g., publish must be atomic)
+
+**Rule:** These MUST NOT be implemented using policy bundles or rule evaluation stages.
+
+### B. Business Rules (Policy / Tunable Logic)
+
+Use **business rules** for decisions that can be tuned without changing code:
+- Scoring logic
+- Classification thresholds
+- Alert/notification triggers
+- Tunable weighting or prioritization
+
+**Rule:** These MAY be implemented using policy bundles and evaluated in Stage E (`rule_evaluation`).
+
+### C. Orchestration / Config
+
+Use **orchestration/config** for how work runs:
+- Scheduling (refresh cadence)
+- Retry policies
+- Pipeline sequencing
+- Execution gating and readiness
+- Queue/concurrency behavior
+
+**Rule:** These MUST NOT be implemented as business rules.
+
+### Anti-patterns (Do Not Do)
+
+- “campaign must have name before enable” implemented as a rule → ❌
+- scheduling or retry logic implemented as rules → ❌
+- scoring logic hardcoded in services when intended to be tunable → ❌
+
+### Platform seams and where they belong
+
+- **Policy bundles**: visibility + optional enforcement for business rules
+- **Stage E (`rule_evaluation`)**: execution point for business rules
+- **Service/domain logic**: invariants
+- **Orchestration config**: execution behavior
+
+### Decision guide
+
+- “Does this always have to be true?” → Fixed logic  
+- “Could a product owner tune this?” → Business rule  
+- “Is this about when/how something runs?” → Orchestration/config  
+
 ## Do not reintroduce
 
 - New app-local lifecycle engines or parallel transition tables.
