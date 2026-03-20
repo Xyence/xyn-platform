@@ -45,6 +45,24 @@ Signal boundary:
 - `fuzzy_text_similarity`
 - `weighted_composite` (aggregates component scores with explicit weights)
 
+## Address/Owner/Parcel Normalization Expectations
+
+Matching and reconciliation should consume normalized fields, not raw strings.
+
+- **Addresses**
+  - Normalize to a deterministic string with common suffix/directional standardization.
+  - Extract house number, directional, street name, suffix, and unit when possible.
+  - Persist `address_normalized` alongside the raw address.
+- **Owner names**
+  - Normalize entity suffixes (LLC/INC/TRUST/etc) and strip punctuation.
+  - Normalize comma‑style names into a stable order.
+  - Persist `owner_name_normalized` alongside the raw owner name.
+- **Parcel identifiers**
+  - Normalize by stripping punctuation/whitespace into `parcel_id_normalized`.
+  - Allow jurisdiction‑specific adapters to emit alternate forms.
+
+Normalization helpers live in `xyn_orchestrator.matching.normalization` and are deterministic and non‑external (no USPS/CASS).
+
 ## Confidence/Decision Model
 
 By default:

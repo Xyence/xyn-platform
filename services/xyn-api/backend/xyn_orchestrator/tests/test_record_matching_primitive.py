@@ -1,4 +1,6 @@
 import json
+import os
+import tempfile
 import uuid
 from unittest import mock
 
@@ -34,6 +36,11 @@ from xyn_orchestrator.xyn_api import (
 
 class RecordMatchingPrimitiveTests(TestCase):
     def setUp(self):
+        self._workspace_root = tempfile.TemporaryDirectory()
+        self._prior_workspace_root = os.environ.get("XYN_WORKSPACE_ROOT")
+        os.environ["XYN_WORKSPACE_ROOT"] = self._workspace_root.name
+        self.addCleanup(self._workspace_root.cleanup)
+        self.addCleanup(self._restore_workspace_root)
         self.factory = RequestFactory()
         suffix = uuid.uuid4().hex[:8]
         user_model = get_user_model()
@@ -71,6 +78,12 @@ class RecordMatchingPrimitiveTests(TestCase):
                 metadata={"correlation_id": "corr-match", "chain_id": "chain-match"},
             )
         )
+
+    def _restore_workspace_root(self) -> None:
+        if self._prior_workspace_root is None:
+            os.environ.pop("XYN_WORKSPACE_ROOT", None)
+        else:
+            os.environ["XYN_WORKSPACE_ROOT"] = self._prior_workspace_root
 
     def _request(self, path: str, *, method: str = "get", data=None):
         request = getattr(self.factory, method.lower())(path, data=data or {}, content_type="application/json")

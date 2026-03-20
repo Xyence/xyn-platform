@@ -6,7 +6,16 @@ from .interfaces import (
     MatchableRecordRef,
     StrategyContext,
 )
-from .normalization import normalize_address, normalize_identifier, normalize_text
+from .normalization import (
+    normalize_address,
+    normalize_address_record,
+    normalize_identifier,
+    normalize_owner_name,
+    normalize_parcel_id,
+    normalize_text,
+    register_address_adapter,
+    register_parcel_adapter,
+)
 from .registry import MatchStrategyRegistry
 from .repository import DjangoMatchResultRepository
 from .service import MatchServiceConfig, RecordMatchingService, evaluation_as_dict
@@ -29,6 +38,11 @@ __all__ = [
     "normalize_text",
     "normalize_identifier",
     "normalize_address",
+    "normalize_address_record",
+    "normalize_owner_name",
+    "normalize_parcel_id",
+    "register_address_adapter",
+    "register_parcel_adapter",
     "MatchStrategyRegistry",
     "DjangoMatchResultRepository",
     "MatchServiceConfig",
