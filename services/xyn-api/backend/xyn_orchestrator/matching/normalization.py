@@ -92,7 +92,22 @@ def normalize_address(value: Any) -> str:
     return normalized
 
 
-def normalize_record_attributes(attributes: dict[str, Any] | None) -> dict[str, str]:
+def normalize_field_value(field: str, value: Any, *, jurisdiction: Optional[str] = None) -> str:
+    token = str(field or "").strip().lower()
+    if not token:
+        return normalize_text(value)
+    if "address" in token:
+        return normalize_address_record(value, jurisdiction=jurisdiction).get("normalized", "")
+    if "parcel" in token or "apn" in token:
+        return normalize_parcel_id(value, jurisdiction=jurisdiction).get("normalized", "")
+    if "owner" in token or token in {"name", "owner_name", "owner_full_name"}:
+        return normalize_owner_name(value).get("normalized", "")
+    if token in {"external_id", "id", "identifier"}:
+        return normalize_identifier(value)
+    return normalize_text(value)
+
+
+def normalize_record_attributes(attributes: dict[str, Any] | None, *, jurisdiction: Optional[str] = None) -> dict[str, str]:
     if not isinstance(attributes, dict):
         return {}
     normalized: dict[str, str] = {}
@@ -100,12 +115,7 @@ def normalize_record_attributes(attributes: dict[str, Any] | None) -> dict[str, 
         k = str(key or "").strip().lower()
         if not k:
             continue
-        if "address" in k:
-            normalized[k] = normalize_address(value)
-        elif k in {"external_id", "id", "identifier"}:
-            normalized[k] = normalize_identifier(value)
-        else:
-            normalized[k] = normalize_text(value)
+        normalized[k] = normalize_field_value(k, value, jurisdiction=jurisdiction)
     return normalized
 
 

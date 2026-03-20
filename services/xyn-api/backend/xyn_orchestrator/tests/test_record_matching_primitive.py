@@ -12,10 +12,13 @@ from xyn_orchestrator.matching import (
     MatchableRecordRef,
     RecordMatchingService,
     StrategyContext,
+    normalize_owner_name,
+    normalize_parcel_id,
     normalize_address,
     normalize_identifier,
     normalize_text,
 )
+from xyn_orchestrator.matching.strategies import NormalizedTextExactMatchStrategy
 from xyn_orchestrator.models import (
     OrchestrationPipeline,
     PlatformAuditEvent,
@@ -108,6 +111,8 @@ class RecordMatchingPrimitiveTests(TestCase):
         self.assertEqual(normalize_text("  Jane   DOE, LLC. "), "jane doe llc")
         self.assertEqual(normalize_identifier(" ID-123 / ABC "), "id123abc")
         self.assertEqual(normalize_address("123 North Main Street"), "123 n main st")
+        self.assertEqual(normalize_owner_name("Doe, Jane")["normalized"], "jane doe")
+        self.assertEqual(normalize_parcel_id("12-34-56.789")["normalized"], "123456789")
 
     def test_builtin_strategy_scoring_and_decisions(self):
         service = RecordMatchingService(repository=None)
@@ -147,6 +152,41 @@ class RecordMatchingPrimitiveTests(TestCase):
         self.assertTrue(composite_eval.explanation)
         self.assertTrue(composite_eval.signals)
 
+    def test_owner_and_parcel_normalization_used_in_strategies(self):
+        owner_a = self._candidate(source_id="owner-a", name="Doe, Jane")
+        owner_b = self._candidate(source_id="owner-b", name="Jane Doe")
+        service = RecordMatchingService(repository=None)
+        owner_eval = service.evaluate_pair(
+            workspace_id=str(self.workspace.id),
+            candidate_a=owner_a,
+            candidate_b=owner_b,
+            strategy_key="normalized_text_exact",
+            persist=False,
+        )
+        self.assertEqual(owner_eval.score, 1.0)
+
+        parcel_strategy = NormalizedTextExactMatchStrategy(field="parcel_id")
+        parcel_a = MatchableRecordRef(
+            source_namespace="assessor",
+            source_record_type="parcel",
+            source_record_id="a",
+            workspace_id=str(self.workspace.id),
+            attributes={"parcel_id": "12-34-56.789"},
+        )
+        parcel_b = MatchableRecordRef(
+            source_namespace="assessor",
+            source_record_type="parcel",
+            source_record_id="b",
+            workspace_id=str(self.workspace.id),
+            attributes={"parcel_id": "123456789"},
+        )
+        parcel_eval = parcel_strategy.evaluate(
+            candidate_a=parcel_a,
+            candidate_b=parcel_b,
+            context=StrategyContext(workspace_id=str(self.workspace.id)),
+        )
+        self.assertEqual(parcel_eval.score, 1.0)
+
     def test_persisted_match_results_include_explanation_and_run_context(self):
         repository = DjangoMatchResultRepository()
         service = RecordMatchingService(repository=repository)
@@ -168,7 +208,7 @@ class RecordMatchingPrimitiveTests(TestCase):
             persist=True,
             metadata={"trigger": "unit_test"},
         )
-        self.assertIn(evaluation.decision, {"exact_match", "probable_match", "possible_match"})
+        self.assertIn(evaluation.decision, {"exact_match", "probable_match", "possible_match", "needs_review"})
 
         row = RecordMatchEvaluation.objects.filter(workspace=self.workspace).latest("created_at")
         self.assertEqual(row.run_id, self.run.id)

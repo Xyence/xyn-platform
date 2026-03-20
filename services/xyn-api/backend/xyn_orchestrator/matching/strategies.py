@@ -5,7 +5,13 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from .interfaces import MatchSignal, MatchableRecordRef, StrategyContext, StrategyOutcome
-from .normalization import normalize_address, normalize_identifier, normalize_text
+from .normalization import normalize_address_record, normalize_field_value
+
+
+def _context_jurisdiction(context: StrategyContext) -> str:
+    if not isinstance(context.metadata, dict):
+        return ""
+    return str(context.metadata.get("scope_jurisdiction") or context.metadata.get("jurisdiction") or "").strip()
 
 
 @dataclass(frozen=True)
@@ -21,11 +27,12 @@ class ExactIdentifierMatchStrategy:
         candidate_b: MatchableRecordRef,
         context: StrategyContext,
     ) -> StrategyOutcome:
+        jurisdiction = _context_jurisdiction(context)
         a_attrs = candidate_a.attributes if isinstance(candidate_a.attributes, dict) else {}
         b_attrs = candidate_b.attributes if isinstance(candidate_b.attributes, dict) else {}
         for field in self.identifier_fields:
-            left = normalize_identifier(a_attrs.get(field))
-            right = normalize_identifier(b_attrs.get(field))
+            left = normalize_field_value(field, a_attrs.get(field), jurisdiction=jurisdiction)
+            right = normalize_field_value(field, b_attrs.get(field), jurisdiction=jurisdiction)
             if left and right and left == right:
                 return StrategyOutcome(
                     score=self.score_on_match,
@@ -77,8 +84,9 @@ class NormalizedTextExactMatchStrategy:
         candidate_b: MatchableRecordRef,
         context: StrategyContext,
     ) -> StrategyOutcome:
-        a_value = normalize_text((candidate_a.attributes or {}).get(self.field))
-        b_value = normalize_text((candidate_b.attributes or {}).get(self.field))
+        jurisdiction = _context_jurisdiction(context)
+        a_value = normalize_field_value(self.field, (candidate_a.attributes or {}).get(self.field), jurisdiction=jurisdiction)
+        b_value = normalize_field_value(self.field, (candidate_b.attributes or {}).get(self.field), jurisdiction=jurisdiction)
         matched = bool(a_value and b_value and a_value == b_value)
         score = 1.0 if matched else 0.0
         return StrategyOutcome(
@@ -111,8 +119,9 @@ class AddressNormalizedExactMatchStrategy:
         candidate_b: MatchableRecordRef,
         context: StrategyContext,
     ) -> StrategyOutcome:
-        left = normalize_address((candidate_a.attributes or {}).get(self.field))
-        right = normalize_address((candidate_b.attributes or {}).get(self.field))
+        jurisdiction = _context_jurisdiction(context)
+        left = normalize_address_record((candidate_a.attributes or {}).get(self.field), jurisdiction=jurisdiction).get("normalized", "")
+        right = normalize_address_record((candidate_b.attributes or {}).get(self.field), jurisdiction=jurisdiction).get("normalized", "")
         matched = bool(left and right and left == right)
         score = 1.0 if matched else 0.0
         return StrategyOutcome(
@@ -146,8 +155,9 @@ class FuzzyTextSimilarityStrategy:
         candidate_b: MatchableRecordRef,
         context: StrategyContext,
     ) -> StrategyOutcome:
-        a_value = normalize_text((candidate_a.attributes or {}).get(self.field))
-        b_value = normalize_text((candidate_b.attributes or {}).get(self.field))
+        jurisdiction = _context_jurisdiction(context)
+        a_value = normalize_field_value(self.field, (candidate_a.attributes or {}).get(self.field), jurisdiction=jurisdiction)
+        b_value = normalize_field_value(self.field, (candidate_b.attributes or {}).get(self.field), jurisdiction=jurisdiction)
         if not a_value or not b_value:
             ratio = 0.0
         else:

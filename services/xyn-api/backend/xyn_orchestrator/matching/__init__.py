@@ -9,6 +9,7 @@ from .interfaces import (
 from .normalization import (
     normalize_address,
     normalize_address_record,
+    normalize_field_value,
     normalize_identifier,
     normalize_owner_name,
     normalize_parcel_id,
@@ -39,6 +40,7 @@ __all__ = [
     "normalize_identifier",
     "normalize_address",
     "normalize_address_record",
+    "normalize_field_value",
     "normalize_owner_name",
     "normalize_parcel_id",
     "register_address_adapter",
