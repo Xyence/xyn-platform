@@ -45,6 +45,8 @@ If orchestration should automatically clean up a workspace on run completion, in
 
 Retention classes other than `ephemeral` skip automatic cleanup.
 
+Use the canonical helper `prepare_ingest_run_metadata(...)` to attach this metadata. It will create the ingest workspace and return the metadata payload expected by the cleanup hooks.
+
 ## Metadata Contract
 
 Every ingest artifact persisted through the storage service records:

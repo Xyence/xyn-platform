@@ -18,6 +18,7 @@ from xyn_orchestrator.models import (
 
 from .definitions import JobDefinition, JobOutputSpec, PipelineDefinition, RetryPolicy
 from .interfaces import ExecutionScope, RunCreateRequest, RunTrigger
+from ..storage.ingest import prepare_ingest_run_metadata
 from .schedule_policy import CRON_UNSUPPORTED_MESSAGE, is_supported_schedule_kind
 from .scheduling import ScheduledTrigger
 
@@ -136,6 +137,7 @@ class DjangoOrchestrationRepository:
         correlation_id = str(request.metadata.get("correlation_id") or "").strip() if isinstance(request.metadata, dict) else ""
         chain_id = str(request.metadata.get("chain_id") or "").strip() if isinstance(request.metadata, dict) else ""
         dedupe_key = str(request.metadata.get("dedupe_key") or "").strip() if isinstance(request.metadata, dict) else ""
+        metadata_payload = request.metadata if isinstance(request.metadata, dict) else {}
         run = OrchestrationRun.objects.create(
             workspace=workspace,
             pipeline=pipeline,
@@ -152,8 +154,28 @@ class DjangoOrchestrationRepository:
             rerun_of=rerun_of,
             scope_jurisdiction=str(request.scope.jurisdiction or "").strip(),
             scope_source=str(request.scope.source or "").strip(),
-            metadata_json=request.metadata if isinstance(request.metadata, dict) else {},
+            metadata_json=metadata_payload,
         )
+
+        if "ingest_workspace" not in metadata_payload:
+            run_type = str(run.run_type or "").strip().lower()
+            target_ref = request.target_ref if isinstance(request.target_ref, dict) else {}
+            target_kind = str(target_ref.get("target_type") or "").strip().lower()
+            if run_type.startswith("ingest.") or target_kind in {"source_connector", "source"}:
+                source_key = str(
+                    target_ref.get("source_key")
+                    or target_ref.get("source_id")
+                    or request.scope.source
+                    or "default"
+                ).strip()
+                ingest_metadata = prepare_ingest_run_metadata(
+                    workspace_id=str(workspace.id),
+                    source_key=source_key,
+                    run_key=str(run.id),
+                    retention_class=str(metadata_payload.get("retention_class") or "ephemeral").strip() or "ephemeral",
+                )
+                run.metadata_json = {**metadata_payload, "ingest_workspace": ingest_metadata}
+                run.save(update_fields=["metadata_json", "updated_at"])
 
         job_defs = list(pipeline.job_definitions.filter(enabled=True).order_by("stage_key", "job_key", "created_at"))
         OrchestrationJobRun.objects.bulk_create(

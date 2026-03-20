@@ -103,6 +103,11 @@ class OrchestrationLifecycleTests(TestCase):
         self.assertEqual(run.target_ref_json, {"target_type": "source", "target_id": "mls:tx"})
         self.assertEqual(run.correlation_id, "corr-1")
         self.assertEqual(run.chain_id, "chain-1")
+        self.assertIn("ingest_workspace", run.metadata_json)
+        ingest_meta = run.metadata_json.get("ingest_workspace")
+        self.assertEqual(ingest_meta.get("source_key"), "mls")
+        self.assertEqual(ingest_meta.get("run_key"), str(run.id))
+        self.assertEqual(ingest_meta.get("retention_class"), "ephemeral")
 
         job_rows = list(OrchestrationJobRun.objects.filter(run=run).order_by("job_definition__job_key"))
         self.assertEqual(len(job_rows), 2)
@@ -120,6 +125,23 @@ class OrchestrationLifecycleTests(TestCase):
             chain_id="chain-1",
         )
         self.assertEqual(filtered.count(), 1)
+
+    def test_non_ingest_run_does_not_stamp_workspace_metadata(self):
+        run = self.lifecycle.create_run(
+            RunCreateRequest(
+                workspace_id=str(self.workspace.id),
+                pipeline_key=self.pipeline.key,
+                trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
+                run_type="analysis.debug",
+                target_ref={"target_type": "goal", "target_id": "test"},
+                initiated_by_id=str(self.identity.id),
+                scope=ExecutionScope(jurisdiction="", source=""),
+                metadata={
+                    "correlation_id": "corr-2",
+                },
+            )
+        )
+        self.assertNotIn("ingest_workspace", run.metadata_json)
 
     def test_illegal_transition_is_rejected(self):
         run = self._create_run()

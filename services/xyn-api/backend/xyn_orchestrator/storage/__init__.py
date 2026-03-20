@@ -1,6 +1,6 @@
 from .contract import IngestArtifactMetadata, RetentionClass, SnapshotType, StoredArtifact
 from .durable import LocalDurableArtifactStore, RuntimeArtifactStoreClient, get_durable_artifact_store
-from .ingest import IngestStorageService
+from .ingest import IngestStorageService, prepare_ingest_run_metadata
 from .staging import IngestWorkspace, IngestWorkspaceManager
 
 __all__ = [
@@ -12,6 +12,7 @@ __all__ = [
     "RuntimeArtifactStoreClient",
     "get_durable_artifact_store",
     "IngestStorageService",
+    "prepare_ingest_run_metadata",
     "IngestWorkspace",
     "IngestWorkspaceManager",
 ]

@@ -209,3 +209,26 @@ class IngestStorageService:
             created_at=created_at,
         )
         return IngestStoreResult(artifact=metadata_out, record=record)
+
+
+def prepare_ingest_run_metadata(
+    *,
+    workspace_id: str,
+    source_key: str,
+    run_key: str,
+    retention_class: str = RetentionClass.EPHEMERAL.value,
+) -> dict[str, Any]:
+    manager = IngestWorkspaceManager()
+    workspace = manager.create(
+        workspace_id=workspace_id,
+        source_key=source_key,
+        run_key=run_key,
+        retention_class=retention_class,
+    )
+    return {
+        "source_key": workspace.source_key,
+        "run_key": workspace.run_key,
+        "retention_class": workspace.retention_class,
+        "workspace_path": str(workspace.path),
+        "created_at": workspace.created_at.isoformat(),
+    }
