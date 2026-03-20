@@ -105,7 +105,7 @@ class OrchestrationEngineTests(TestCase):
                 pipeline_key=self.pipeline.key,
                 trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
                 initiated_by_id=str(self.identity.id),
-                scope=ExecutionScope(jurisdiction="tx", source="mls"),
+                scope=ExecutionScope(jurisdiction="tx-travis-county", source="mls"),
                 metadata={"correlation_id": "corr-engine", "chain_id": "chain-engine"},
             )
         )
@@ -118,7 +118,7 @@ class OrchestrationEngineTests(TestCase):
             schedule_kind="interval",
             interval_seconds=300,
             next_fire_at=now - timedelta(seconds=5),
-            metadata_json={"jurisdictions": ["tx"], "sources": ["mls", "county"]},
+            metadata_json={"jurisdictions": ["tx-travis-county"], "sources": ["mls", "county"]},
         )
         scanner = DueJobScanner()
         due = scanner.scan_due_schedules(now=now)

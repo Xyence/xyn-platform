@@ -17,6 +17,14 @@ class ExecutionScope:
     jurisdiction: str = ""
     source: str = ""
 
+    def normalized(self) -> "ExecutionScope":
+        from xyn_orchestrator.jurisdiction import require_canonical_jurisdiction
+
+        return ExecutionScope(
+            jurisdiction=require_canonical_jurisdiction(self.jurisdiction, context="jurisdiction"),
+            source=str(self.source or "").strip(),
+        )
+
 
 @dataclass(frozen=True)
 class RunTrigger:
@@ -110,6 +118,10 @@ class OrchestrationRepository(Protocol):
 
 class JobExecutor(Protocol):
     def execute(self, context: JobExecutionContext) -> JobExecutionResult: ...
+
+
+def normalize_execution_scope(scope: ExecutionScope) -> ExecutionScope:
+    return scope.normalized()
 
 
 class FailureNotifier(Protocol):

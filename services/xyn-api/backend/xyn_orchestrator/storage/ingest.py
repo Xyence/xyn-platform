@@ -6,6 +6,8 @@ from typing import Any, BinaryIO, Optional
 
 from django.db import transaction
 
+from xyn_orchestrator.jurisdiction import require_canonical_jurisdiction
+
 from .contract import IngestArtifactMetadata, RetentionClass, SnapshotType
 from .durable import DurableArtifactStore, get_durable_artifact_store
 from .staging import IngestWorkspaceManager
@@ -146,6 +148,9 @@ class IngestStorageService:
         retention_value = str(getattr(retention_class, "value", retention_class) or "").strip() or "snapshot"
         record_metadata = metadata or {}
         with transaction.atomic():
+            scope_jurisdiction = require_canonical_jurisdiction(
+                scope_jurisdiction, context="scope_jurisdiction"
+            )
             record = models.IngestArtifactRecord.objects.create(
                 workspace=workspace,
                 source_connector=source_connector,

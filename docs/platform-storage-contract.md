@@ -59,6 +59,11 @@ Every ingest artifact persisted through the storage service records:
 - snapshot type (`raw`, `normalized`, `reconciled`, `signals`, `derived`)
 - retention class (`ephemeral`, `snapshot`, `published`)
 - partition scope (`jurisdiction`, `source`)
+
+Jurisdiction keys must use canonical, collision-safe format:
+- lowercase, hyphen-separated
+- explicit city vs county suffix (`-city`, `-county`)
+- examples: `mo-stl-city`, `mo-stl-county`, `tx-travis-county`
 - metadata/provenance payload
 
 The durable metadata record is stored in `IngestArtifactRecord` and linked to provenance where possible.

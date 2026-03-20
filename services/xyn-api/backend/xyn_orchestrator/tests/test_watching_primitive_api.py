@@ -360,11 +360,13 @@ class WatchingPrimitiveApiTests(TestCase):
             )
         self.assertEqual(before.status_code, 409)
 
-        pipeline_key = self._publish_reconciled_state(jurisdiction="tx", source="mls", reconciled_state_version="recon-allow")
+        pipeline_key = self._publish_reconciled_state(
+            jurisdiction="tx-travis-county", source="mls", reconciled_state_version="recon-allow"
+        )
         payload_with_partition = {
             **payload,
             "pipeline_key": pipeline_key,
-            "jurisdiction": "tx",
+            "jurisdiction": "tx-travis-county",
             "source": "mls",
         }
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
@@ -383,7 +385,7 @@ class WatchingPrimitiveApiTests(TestCase):
     def test_evaluate_rejects_when_requested_reconciled_version_is_not_published(self):
         watch = self._create_watch(lifecycle_state="active")
         pipeline_key = self._publish_reconciled_state(
-            jurisdiction="tx",
+            jurisdiction="tx-travis-county",
             source="mls",
             reconciled_state_version="recon-published",
         )
@@ -391,7 +393,7 @@ class WatchingPrimitiveApiTests(TestCase):
             "workspace_id": str(self.workspace.id),
             "watch_ids": [watch["id"]],
             "pipeline_key": pipeline_key,
-            "jurisdiction": "tx",
+            "jurisdiction": "tx-travis-county",
             "source": "mls",
             "reconciled_state_version": "recon-missing",
             "event_ref": {"target_kind": "area", "reconciled_state_version": "recon-missing"},

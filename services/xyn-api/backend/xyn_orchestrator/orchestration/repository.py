@@ -6,6 +6,7 @@ from typing import Any
 from django.db import transaction
 from django.db.models import Max
 
+from xyn_orchestrator.jurisdiction import require_canonical_jurisdiction
 from xyn_orchestrator.models import (
     OrchestrationJobRun,
     OrchestrationJobRunAttempt,
@@ -138,6 +139,9 @@ class DjangoOrchestrationRepository:
         chain_id = str(request.metadata.get("chain_id") or "").strip() if isinstance(request.metadata, dict) else ""
         dedupe_key = str(request.metadata.get("dedupe_key") or "").strip() if isinstance(request.metadata, dict) else ""
         metadata_payload = request.metadata if isinstance(request.metadata, dict) else {}
+        scope_jurisdiction = require_canonical_jurisdiction(
+            request.scope.jurisdiction, context="scope_jurisdiction"
+        )
         run = OrchestrationRun.objects.create(
             workspace=workspace,
             pipeline=pipeline,
@@ -152,7 +156,7 @@ class DjangoOrchestrationRepository:
             dedupe_key=dedupe_key,
             initiated_by=initiated_by,
             rerun_of=rerun_of,
-            scope_jurisdiction=str(request.scope.jurisdiction or "").strip(),
+            scope_jurisdiction=scope_jurisdiction,
             scope_source=str(request.scope.source or "").strip(),
             metadata_json=metadata_payload,
         )
@@ -190,7 +194,7 @@ class DjangoOrchestrationRepository:
                     trigger_key=str(request.trigger.trigger_key or "").strip(),
                     correlation_id=correlation_id,
                     chain_id=chain_id,
-                    scope_jurisdiction=str(request.scope.jurisdiction or "").strip(),
+                    scope_jurisdiction=scope_jurisdiction,
                     scope_source=str(request.scope.source or "").strip(),
                     idempotency_key=(f"{idempotency_key}:{job.job_key}" if idempotency_key else ""),
                     dedupe_key=(f"{dedupe_key}:{job.job_key}" if dedupe_key else ""),

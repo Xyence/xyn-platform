@@ -102,7 +102,13 @@ class RunPlanner:
             metadata = {}
         jurisdictions = metadata.get("jurisdictions") if isinstance(metadata.get("jurisdictions"), list) else []
         sources = metadata.get("sources") if isinstance(metadata.get("sources"), list) else []
-        normalized_jurisdictions = [str(value or "").strip() for value in jurisdictions if str(value or "").strip()]
+        from xyn_orchestrator.jurisdiction import require_canonical_jurisdiction
+
+        normalized_jurisdictions = [
+            require_canonical_jurisdiction(value, context="jurisdictions")
+            for value in jurisdictions
+            if str(value or "").strip()
+        ]
         normalized_sources = [str(value or "").strip() for value in sources if str(value or "").strip()]
 
         jurisdiction_values = normalized_jurisdictions if (job_definition.runs_per_jurisdiction and normalized_jurisdictions) else [""]

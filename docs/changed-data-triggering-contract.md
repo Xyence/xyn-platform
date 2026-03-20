@@ -22,6 +22,15 @@ The platform persists stage publication markers through orchestration stage publ
 
 Markers are partition-aware (`workspace`, `pipeline`, `jurisdiction`, `source`).
 
+### Jurisdiction key format
+
+Jurisdiction values must use canonical keys (lowercase, hyphen-separated, explicitly city vs county):
+- `mo-stl-city`
+- `mo-stl-county`
+- `tx-travis-county`
+
+Do not use ambiguous tokens like `stl` or `tx`; canonical keys are required for partition safety.
+
 Current published reconciled state is anchored by a dedicated pointer:
 
 - `ReconciledStateCurrentPointer` records the single current `reconciled_state_version` per workspace/pipeline/partition.

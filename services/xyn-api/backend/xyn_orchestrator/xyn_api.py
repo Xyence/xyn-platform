@@ -198,6 +198,7 @@ from .orchestration.publication import StagePublicationService
 from .orchestration.schedule_policy import supported_schedule_kinds, unsupported_schedule_kinds
 from .orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
 from .orchestration.lifecycle import OrchestrationLifecycleService
+from .jurisdiction import require_canonical_jurisdiction
 from .xco import (
     THREAD_PRIORITY_ORDER,
     active_run_count,
@@ -31099,10 +31100,17 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
         or event_ref.get("reconciled_state_version")
         or ""
     ).strip()
+    try:
+        jurisdiction = require_canonical_jurisdiction(
+            payload.get("jurisdiction") or event_ref.get("jurisdiction") or "",
+            context="jurisdiction",
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
     readiness = StagePublicationService().evaluation_readiness(
         workspace_id=str(workspace.id),
         pipeline_key=str(payload.get("pipeline_key") or event_ref.get("pipeline_key") or "").strip(),
-        jurisdiction=str(payload.get("jurisdiction") or event_ref.get("jurisdiction") or "").strip(),
+        jurisdiction=jurisdiction,
         source=str(payload.get("source") or event_ref.get("source") or "").strip(),
         required_reconciled_state_version=required_reconciled_state_version,
     )
@@ -32350,6 +32358,10 @@ def orchestration_publication_readiness(request: HttpRequest) -> JsonResponse:
     jurisdiction = str(request.GET.get("jurisdiction") or "").strip()
     source = str(request.GET.get("source") or "").strip()
     required_reconciled_state_version = str(request.GET.get("reconciled_state_version") or "").strip()
+    try:
+        jurisdiction = require_canonical_jurisdiction(jurisdiction, context="jurisdiction")
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
 
     base = OrchestrationStagePublication.objects.filter(workspace=workspace)
     if pipeline is not None:
@@ -32482,12 +32494,18 @@ def orchestration_domain_events_collection(request: HttpRequest) -> JsonResponse
         limit = int(request.GET.get("limit") or "100")
     except ValueError:
         limit = 100
+    jurisdiction = str(request.GET.get("jurisdiction") or "").strip()
+    if jurisdiction:
+        try:
+            jurisdiction = require_canonical_jurisdiction(jurisdiction, context="jurisdiction")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
     query = DomainEventQuery(
         workspace_id=str(workspace.id),
         event_type=str(request.GET.get("event_type") or "").strip(),
         stage_key=str(request.GET.get("stage_key") or "").strip(),
         pipeline_id=str(pipeline.id) if pipeline else "",
-        jurisdiction=str(request.GET.get("jurisdiction") or "").strip(),
+        jurisdiction=jurisdiction,
         source=str(request.GET.get("source") or "").strip(),
         reconciled_state_version=str(request.GET.get("reconciled_state_version") or "").strip(),
         signal_set_version=str(request.GET.get("signal_set_version") or "").strip(),
@@ -32640,6 +32658,10 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
         manual_params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
         explicit_idempotency_key = str(payload.get("idempotency_key") or "").strip()
         trigger_key = str(payload.get("trigger_key") or "manual_api").strip() or "manual_api"
+        try:
+            jurisdiction = require_canonical_jurisdiction(payload.get("jurisdiction") or "", context="jurisdiction")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
         lifecycle = OrchestrationLifecycleService()
         run = lifecycle.create_run(
             RunCreateRequest(
@@ -32650,7 +32672,7 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
                 target_ref=payload.get("target_ref") if isinstance(payload.get("target_ref"), dict) else {},
                 initiated_by_id=str(identity.id),
                 scope=ExecutionScope(
-                    jurisdiction=str(payload.get("jurisdiction") or "").strip(),
+                    jurisdiction=jurisdiction,
                     source=str(payload.get("source") or "").strip(),
                 ),
                 metadata={
@@ -32667,7 +32689,7 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
                 "pipeline_key": str(pipeline.key),
                 "run_id": str(run.id),
                 "trigger_key": trigger_key,
-                "jurisdiction": str(payload.get("jurisdiction") or "").strip(),
+                "jurisdiction": jurisdiction,
                 "source": str(payload.get("source") or "").strip(),
             },
             request=request,
@@ -32705,6 +32727,10 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
         qs = qs.filter(job_runs__job_definition__job_key=job_key).distinct()
     jurisdiction = str(request.GET.get("jurisdiction") or "").strip()
     if jurisdiction:
+        try:
+            jurisdiction = require_canonical_jurisdiction(jurisdiction, context="jurisdiction")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
         qs = qs.filter(scope_jurisdiction=jurisdiction)
     source = str(request.GET.get("source") or "").strip()
     if source:

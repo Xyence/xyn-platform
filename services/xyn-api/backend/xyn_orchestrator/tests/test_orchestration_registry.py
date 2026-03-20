@@ -186,7 +186,7 @@ class OrchestrationRegistryTests(unittest.TestCase):
             pipeline_key="sample_data_sync",
             job_key="normalize_source",
             attempt_count=1,
-            scope=ExecutionScope(jurisdiction="tx", source="mls"),
+            scope=ExecutionScope(jurisdiction="tx-travis-county", source="mls"),
             metadata={"run_metadata": {"manual_parameters": {"simulate_retry_once": "true"}}},
         )
         first = executors["platform.jobs.normalize_source"].execute(context_retry_first)
@@ -200,7 +200,7 @@ class OrchestrationRegistryTests(unittest.TestCase):
             pipeline_key="sample_data_sync",
             job_key="normalize_source",
             attempt_count=2,
-            scope=ExecutionScope(jurisdiction="tx", source="mls"),
+            scope=ExecutionScope(jurisdiction="tx-travis-county", source="mls"),
             metadata={"run_metadata": {"manual_parameters": {"simulate_retry_once": "true"}}},
         )
         second = executors["platform.jobs.normalize_source"].execute(context_retry_second)

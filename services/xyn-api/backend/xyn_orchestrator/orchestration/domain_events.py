@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -86,7 +87,7 @@ class DomainEventService:
     @classmethod
     def _idempotency_key_for_publication(cls, *, publication: OrchestrationStagePublication, event_type: str) -> str:
         token = cls._event_token(publication, event_type=event_type)
-        return "|".join(
+        raw = "|".join(
             [
                 "stage-publication-event",
                 str(event_type),
@@ -98,6 +99,10 @@ class DomainEventService:
                 token,
             ]
         )
+        if len(raw) <= 170:
+            return raw
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return f"stage-event:{digest}"
 
     @transaction.atomic
     def record(self, payload: DomainEventInput) -> PlatformDomainEvent:

@@ -1,3 +1,5 @@
+import os
+import tempfile
 import uuid
 from datetime import timedelta
 
@@ -26,6 +28,11 @@ from xyn_orchestrator.orchestration.service import JobOrchestrationService
 
 class OrchestrationLifecycleTests(TestCase):
     def setUp(self):
+        self._workspace_root = tempfile.TemporaryDirectory()
+        self._prior_workspace_root = os.environ.get("XYN_WORKSPACE_ROOT")
+        os.environ["XYN_WORKSPACE_ROOT"] = self._workspace_root.name
+        self.addCleanup(self._workspace_root.cleanup)
+        self.addCleanup(self._restore_workspace_root)
         suffix = uuid.uuid4().hex[:8]
         self.workspace = Workspace.objects.create(slug=f"orch-{suffix}", name="Orchestration Workspace")
         self.identity = UserIdentity.objects.create(
@@ -76,6 +83,12 @@ class OrchestrationLifecycleTests(TestCase):
         self.repository = DjangoOrchestrationRepository()
         self.lifecycle = OrchestrationLifecycleService(repository=self.repository)
 
+    def _restore_workspace_root(self) -> None:
+        if self._prior_workspace_root is None:
+            os.environ.pop("XYN_WORKSPACE_ROOT", None)
+        else:
+            os.environ["XYN_WORKSPACE_ROOT"] = self._prior_workspace_root
+
     def _create_run(self) -> OrchestrationRun:
         return self.lifecycle.create_run(
             RunCreateRequest(
@@ -83,9 +96,9 @@ class OrchestrationLifecycleTests(TestCase):
                 pipeline_key=self.pipeline.key,
                 trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
                 run_type="ingest.import",
-                target_ref={"target_type": "source", "target_id": "mls:tx"},
+                target_ref={"target_type": "source", "target_id": "mls:tx-travis-county"},
                 initiated_by_id=str(self.identity.id),
-                scope=ExecutionScope(jurisdiction="tx", source="mls"),
+                scope=ExecutionScope(jurisdiction="tx-travis-county", source="mls"),
                 metadata={
                     "correlation_id": "corr-1",
                     "chain_id": "chain-1",
@@ -98,10 +111,10 @@ class OrchestrationLifecycleTests(TestCase):
     def test_create_run_persists_partition_trigger_and_job_rows(self):
         run = self._create_run()
         self.assertEqual(run.trigger_cause, "manual")
-        self.assertEqual(run.scope_jurisdiction, "tx")
+        self.assertEqual(run.scope_jurisdiction, "tx-travis-county")
         self.assertEqual(run.scope_source, "mls")
         self.assertEqual(run.run_type, "ingest.import")
-        self.assertEqual(run.target_ref_json, {"target_type": "source", "target_id": "mls:tx"})
+        self.assertEqual(run.target_ref_json, {"target_type": "source", "target_id": "mls:tx-travis-county"})
         self.assertEqual(run.correlation_id, "corr-1")
         self.assertEqual(run.chain_id, "chain-1")
         self.assertIn("ingest_workspace", run.metadata_json)
@@ -113,19 +126,39 @@ class OrchestrationLifecycleTests(TestCase):
         job_rows = list(OrchestrationJobRun.objects.filter(run=run).order_by("job_definition__job_key"))
         self.assertEqual(len(job_rows), 2)
         self.assertEqual({row.status for row in job_rows}, {"pending"})
-        self.assertEqual({row.scope_jurisdiction for row in job_rows}, {"tx"})
+        self.assertEqual({row.scope_jurisdiction for row in job_rows}, {"tx-travis-county"})
         self.assertEqual({row.scope_source for row in job_rows}, {"mls"})
+
+    def test_invalid_jurisdiction_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.lifecycle.create_run(
+                RunCreateRequest(
+                    workspace_id=str(self.workspace.id),
+                    pipeline_key=self.pipeline.key,
+                    trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
+                    run_type="ingest.import",
+                    target_ref={"target_type": "source", "target_id": "mls:tx-travis-county"},
+                    initiated_by_id=str(self.identity.id),
+                    scope=ExecutionScope(jurisdiction="tx", source="mls"),
+                    metadata={
+                        "correlation_id": "corr-2",
+                        "chain_id": "chain-2",
+                        "idempotency_key": f"idem-{uuid.uuid4().hex[:8]}",
+                        "dedupe_key": "deal-sync:tx:mls",
+                    },
+                )
+            )
 
         filtered = OrchestrationJobRun.objects.filter(
             workspace=self.workspace,
             job_definition=self.job_a,
             status="pending",
-            scope_jurisdiction="tx",
+            scope_jurisdiction="tx-travis-county",
             scope_source="mls",
             correlation_id="corr-1",
             chain_id="chain-1",
         )
-        self.assertEqual(filtered.count(), 1)
+        self.assertEqual(filtered.count(), 0)
 
     def test_non_ingest_run_does_not_stamp_workspace_metadata(self):
         run = self.lifecycle.create_run(
@@ -285,7 +318,7 @@ class OrchestrationLifecycleTests(TestCase):
                     pipeline_key=self.pipeline.key,
                     trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
                     initiated_by_id=str(self.identity.id),
-                    scope=ExecutionScope(jurisdiction="tx", source="mls"),
+                    scope=ExecutionScope(jurisdiction="tx-travis-county", source="mls"),
                     metadata={"correlation_id": "corr-2", "chain_id": "chain-2"},
                 )
             )

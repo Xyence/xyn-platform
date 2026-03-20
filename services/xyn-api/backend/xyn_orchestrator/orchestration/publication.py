@@ -6,6 +6,7 @@ from typing import Any
 from django.db import transaction
 from django.utils import timezone
 
+from xyn_orchestrator.jurisdiction import require_canonical_jurisdiction
 from xyn_orchestrator.models import (
     OrchestrationJobRun,
     OrchestrationPipeline,
@@ -88,8 +89,8 @@ class StagePublicationService:
                 return None
             qs = qs.filter(pipeline=pipeline)
         qs = qs.filter(
-            scope_jurisdiction=str(jurisdiction or "").strip(),
-            scope_source=str(source or "").strip(),
+        scope_jurisdiction=require_canonical_jurisdiction(jurisdiction, context="scope_jurisdiction"),
+        scope_source=str(source or "").strip(),
         )
         return qs.order_by("-published_at", "-updated_at").first()
 
@@ -142,7 +143,7 @@ class StagePublicationService:
 
         pointer = ReconciledStateCurrentPointer.objects.filter(
             workspace_id=workspace_id,
-            scope_jurisdiction=str(jurisdiction or "").strip(),
+            scope_jurisdiction=require_canonical_jurisdiction(jurisdiction, context="scope_jurisdiction"),
             scope_source=str(source or "").strip(),
         )
         if pipeline_id:
@@ -214,7 +215,7 @@ class StagePublicationService:
             workspace_id=workspace_id,
             stage_key=STAGE_PROPERTY_GRAPH_REBUILD,
             stage_state="published",
-            scope_jurisdiction=str(jurisdiction or "").strip(),
+            scope_jurisdiction=require_canonical_jurisdiction(jurisdiction, context="scope_jurisdiction"),
             scope_source=str(source or "").strip(),
             reconciled_state_version=version,
         )
@@ -297,7 +298,9 @@ class StagePublicationService:
                 "run_id": job_run.run_id,
                 "stage_key": stage_key,
                 "stage_state": stage_state,
-                "scope_jurisdiction": str(job_run.scope_jurisdiction or "").strip(),
+                "scope_jurisdiction": require_canonical_jurisdiction(
+                    job_run.scope_jurisdiction, context="scope_jurisdiction"
+                ),
                 "scope_source": str(job_run.scope_source or "").strip(),
                 "normalized_snapshot_ref": normalized_snapshot_ref,
                 "normalized_change_token": normalized_change_token,

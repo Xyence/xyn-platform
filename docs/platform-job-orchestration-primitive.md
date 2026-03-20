@@ -80,7 +80,9 @@ New ORM models in `models.py` and migrations `0125_orchestration_scaffolding.py`
     - `run_type`
     - `target_ref_json`
   - run trigger cause (`scheduled`/`upstream_change`/`manual`/`retry`/`backfill`/`system`)
-  - scope partitions (`jurisdiction`, `source`)
+- scope partitions (`jurisdiction`, `source`)
+
+Jurisdiction keys must follow the canonical format (lowercase, hyphen-separated, explicit `-city`/`-county` suffix).
   - correlation and chain ids
   - optional idempotency/dedupe keys
   - status, stale fields, summary, metrics, structured error details

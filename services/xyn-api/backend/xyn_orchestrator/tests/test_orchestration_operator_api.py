@@ -128,7 +128,7 @@ class OrchestrationOperatorApiTests(TestCase):
             interval_seconds=3600,
             enabled=True,
             next_fire_at=timezone.now() + timedelta(minutes=5),
-            metadata_json={"jurisdictions": ["tx"], "sources": ["mls"]},
+            metadata_json={"jurisdictions": ["tx-travis-county"], "sources": ["mls"]},
         )
         self.lifecycle = OrchestrationLifecycleService()
 
@@ -149,7 +149,7 @@ class OrchestrationOperatorApiTests(TestCase):
                 pipeline_key=self.pipeline.key,
                 trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
                 initiated_by_id=str(self.identity.id),
-                scope=ExecutionScope(jurisdiction="tx", source="mls"),
+                scope=ExecutionScope(jurisdiction="tx-travis-county", source="mls"),
                 metadata={"correlation_id": "corr-1", "chain_id": "chain-1"},
             )
         )
@@ -198,8 +198,8 @@ class OrchestrationOperatorApiTests(TestCase):
             "workspace_id": str(self.workspace.id),
             "pipeline_key": self.pipeline.key,
             "run_type": "ingest.import",
-            "target_ref": {"target_type": "source", "target_id": "mls:tx"},
-            "jurisdiction": "tx",
+            "target_ref": {"target_type": "source", "target_id": "mls:tx-travis-county"},
+            "jurisdiction": "tx-travis-county",
             "source": "mls",
             "trigger_key": "manual_operator",
             "metadata": {"correlation_id": "corr-manual", "chain_id": "chain-manual"},
@@ -213,7 +213,7 @@ class OrchestrationOperatorApiTests(TestCase):
         created = json.loads(create_response.content)
         run_id = created["id"]
         self.assertEqual(created["run_type"], "ingest.import")
-        self.assertEqual(created["target_ref"], {"target_type": "source", "target_id": "mls:tx"})
+        self.assertEqual(created["target_ref"], {"target_type": "source", "target_id": "mls:tx-travis-county"})
 
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             list_response = orchestration_runs_collection(
@@ -224,7 +224,7 @@ class OrchestrationOperatorApiTests(TestCase):
                         "run_type": "ingest.import",
                         "job_key": "refresh_source",
                         "trigger_cause": "manual",
-                        "jurisdiction": "tx",
+                        "jurisdiction": "tx-travis-county",
                         "source": "mls",
                         "correlation_id": "corr-manual",
                         "chain_id": "chain-manual",
@@ -416,7 +416,7 @@ class OrchestrationOperatorApiTests(TestCase):
                 pipeline_key=pipeline.key,
                 trigger=RunTrigger(trigger_cause="manual", trigger_key="test"),
                 initiated_by_id=str(self.identity.id),
-                scope=ExecutionScope(jurisdiction="tx", source="mls"),
+                scope=ExecutionScope(jurisdiction="tx-travis-county", source="mls"),
             )
         )
         rebuild_run = OrchestrationJobRun.objects.get(run=run, job_definition=rebuild)
@@ -467,7 +467,7 @@ class OrchestrationOperatorApiTests(TestCase):
                     data={
                         "workspace_id": str(self.workspace.id),
                         "pipeline_key": pipeline.key,
-                        "jurisdiction": "tx",
+                        "jurisdiction": "tx-travis-county",
                         "source": "mls",
                         "reconciled_state_version": "recon-v-missing",
                     },
@@ -504,7 +504,7 @@ class OrchestrationOperatorApiTests(TestCase):
             job_run=refresh_job_run,
             event_type="reconciled_state_published",
             stage_key=STAGE_PROPERTY_GRAPH_REBUILD,
-            scope_jurisdiction="tx",
+            scope_jurisdiction="tx-travis-county",
             scope_source="mls",
             reconciled_state_version="recon-filter",
             correlation_id="corr-filter",
@@ -520,7 +520,7 @@ class OrchestrationOperatorApiTests(TestCase):
                         "workspace_id": str(self.workspace.id),
                         "pipeline_key": self.pipeline.key,
                         "event_type": "reconciled_state_published",
-                        "jurisdiction": "tx",
+                        "jurisdiction": "tx-travis-county",
                         "source": "mls",
                         "reconciled_state_version": "recon-filter",
                         "correlation_id": "corr-filter",

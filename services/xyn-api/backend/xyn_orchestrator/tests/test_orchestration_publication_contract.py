@@ -101,7 +101,7 @@ class OrchestrationPublicationContractTests(TestCase):
         self.publication = StagePublicationService()
         self.domain_events = DomainEventService()
 
-    def _new_run(self, *, jurisdiction: str = "tx", source: str = "mls"):
+    def _new_run(self, *, jurisdiction: str = "tx-travis-county", source: str = "mls"):
         return self.lifecycle.create_run(
             RunCreateRequest(
                 workspace_id=str(self.workspace.id),
@@ -136,7 +136,7 @@ class OrchestrationPublicationContractTests(TestCase):
         readiness = self.publication.evaluation_readiness(
             workspace_id=str(self.workspace.id),
             pipeline_id=str(self.pipeline.id),
-            jurisdiction="tx",
+            jurisdiction="tx-travis-county",
             source="mls",
         )
         self.assertFalse(readiness.ready)
@@ -145,7 +145,7 @@ class OrchestrationPublicationContractTests(TestCase):
             PlatformDomainEvent.objects.filter(
                 workspace=self.workspace,
                 event_type=EVENT_SOURCE_NORMALIZED,
-                scope_jurisdiction="tx",
+                scope_jurisdiction="tx-travis-county",
                 scope_source="mls",
             ).count(),
             1,
@@ -154,7 +154,7 @@ class OrchestrationPublicationContractTests(TestCase):
             PlatformDomainEvent.objects.filter(
                 workspace=self.workspace,
                 event_type=EVENT_EVALUATION_READY,
-                scope_jurisdiction="tx",
+                scope_jurisdiction="tx-travis-county",
                 scope_source="mls",
             ).exists()
         )
@@ -165,7 +165,7 @@ class OrchestrationPublicationContractTests(TestCase):
         readiness = self.publication.evaluation_readiness(
             workspace_id=str(self.workspace.id),
             pipeline_id=str(self.pipeline.id),
-            jurisdiction="tx",
+            jurisdiction="tx-travis-county",
             source="mls",
         )
         self.assertTrue(readiness.ready)
@@ -177,7 +177,7 @@ class OrchestrationPublicationContractTests(TestCase):
         pointer = ReconciledStateCurrentPointer.objects.get(
             workspace=self.workspace,
             pipeline=self.pipeline,
-            scope_jurisdiction="tx",
+            scope_jurisdiction="tx-travis-county",
             scope_source="mls",
         )
         self.assertEqual(pointer.reconciled_state_version, "recon-v1")
@@ -191,7 +191,7 @@ class OrchestrationPublicationContractTests(TestCase):
         pointer = ReconciledStateCurrentPointer.objects.get(
             workspace=self.workspace,
             pipeline=self.pipeline,
-            scope_jurisdiction="tx",
+            scope_jurisdiction="tx-travis-county",
             scope_source="mls",
         )
         self.assertEqual(pointer.reconciled_state_version, "recon-v2")
@@ -217,7 +217,7 @@ class OrchestrationPublicationContractTests(TestCase):
             self.publication.promote_reconciled_state_version(
                 workspace_id=str(self.workspace.id),
                 pipeline_id=str(self.pipeline.id),
-                jurisdiction="tx",
+                jurisdiction="tx-travis-county",
                 source="mls",
                 reconciled_state_version="missing-v1",
             )
@@ -228,13 +228,13 @@ class OrchestrationPublicationContractTests(TestCase):
         ReconciledStateCurrentPointer.objects.filter(
             workspace=self.workspace,
             pipeline=self.pipeline,
-            scope_jurisdiction="tx",
+            scope_jurisdiction="tx-travis-county",
             scope_source="mls",
         ).delete()
         readiness = self.publication.evaluation_readiness(
             workspace_id=str(self.workspace.id),
             pipeline_id=str(self.pipeline.id),
-            jurisdiction="tx",
+            jurisdiction="tx-travis-county",
             source="mls",
         )
         self.assertFalse(readiness.ready)
@@ -247,7 +247,7 @@ class OrchestrationPublicationContractTests(TestCase):
         signal_publication = self.publication.latest_reconciled_publication(
             workspace_id=str(self.workspace.id),
             pipeline_id=str(self.pipeline.id),
-            jurisdiction="tx",
+            jurisdiction="tx-travis-county",
             source="mls",
         )
         self.assertIsNotNone(signal_publication)
@@ -258,7 +258,7 @@ class OrchestrationPublicationContractTests(TestCase):
             DomainEventQuery(
                 workspace_id=str(self.workspace.id),
                 event_type=EVENT_SIGNAL_SET_PUBLISHED,
-                jurisdiction="tx",
+                jurisdiction="tx-travis-county",
                 source="mls",
                 signal_set_version="signal-v2",
             )
@@ -266,18 +266,18 @@ class OrchestrationPublicationContractTests(TestCase):
         self.assertEqual(signal_events.count(), 1)
 
     def test_readiness_is_partition_aware(self):
-        run = self._new_run(jurisdiction="tx", source="mls")
+        run = self._new_run(jurisdiction="tx-travis-county", source="mls")
         self._succeed_job(run_id=str(run.id), job=self.rebuild_job, output_change_token="recon-tx-mls")
         tx_ready = self.publication.evaluation_readiness(
             workspace_id=str(self.workspace.id),
             pipeline_id=str(self.pipeline.id),
-            jurisdiction="tx",
+            jurisdiction="tx-travis-county",
             source="mls",
         )
         county_ready = self.publication.evaluation_readiness(
             workspace_id=str(self.workspace.id),
             pipeline_id=str(self.pipeline.id),
-            jurisdiction="tx",
+            jurisdiction="tx-travis-county",
             source="county",
         )
         self.assertTrue(tx_ready.ready)
@@ -311,7 +311,7 @@ class OrchestrationPublicationContractTests(TestCase):
             PlatformDomainEvent.objects.filter(
                 workspace=self.workspace,
                 event_type=EVENT_RECONCILED_STATE_PUBLISHED,
-                scope_jurisdiction="tx",
+                scope_jurisdiction="tx-travis-county",
                 scope_source="mls",
                 reconciled_state_version="recon-v9",
             ).count(),
@@ -321,7 +321,7 @@ class OrchestrationPublicationContractTests(TestCase):
             PlatformDomainEvent.objects.filter(
                 workspace=self.workspace,
                 event_type=EVENT_EVALUATION_READY,
-                scope_jurisdiction="tx",
+                scope_jurisdiction="tx-travis-county",
                 scope_source="mls",
                 reconciled_state_version="recon-v9",
             ).count(),
@@ -334,7 +334,7 @@ class OrchestrationPublicationContractTests(TestCase):
             event_type="test.domain_event",
             idempotency_key="unit-test-key",
             stage_key=STAGE_SOURCE_NORMALIZATION,
-            scope_jurisdiction="tx",
+            scope_jurisdiction="tx-travis-county",
             scope_source="mls",
             payload={"marker": "v1"},
         )
