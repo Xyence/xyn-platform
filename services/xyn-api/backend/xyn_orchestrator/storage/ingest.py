@@ -33,6 +33,23 @@ class IngestStorageService:
     def workspaces(self) -> IngestWorkspaceManager:
         return self._workspaces
 
+    def create_ingest_workspace(
+        self,
+        *,
+        workspace_id: str,
+        source_key: str,
+        run_key: str,
+        retention_class: str = RetentionClass.EPHEMERAL.value,
+        reset: bool = False,
+    ):
+        return self._workspaces.create(
+            workspace_id=workspace_id,
+            source_key=source_key,
+            run_key=run_key,
+            retention_class=retention_class,
+            reset=reset,
+        )
+
     def store_snapshot_bytes(
         self,
         *,

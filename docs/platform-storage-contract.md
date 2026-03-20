@@ -16,6 +16,8 @@ This is not a full ETL framework or a replacement for orchestration/run history.
 
 Durable ingest artifacts must be stored through the runtime artifact store (xyn-core), with local FS only as a dev fallback.
 
+Uploads are streamed to the artifact store to avoid full-memory buffering for large files.
+
 Implementation entrypoint:
 - `xyn_orchestrator.storage.get_durable_artifact_store`
 - `xyn_orchestrator.storage.IngestStorageService`
@@ -30,6 +32,18 @@ Ingest workspaces are always created under the managed workspace root and are el
 
 Implementation entrypoint:
 - `xyn_orchestrator.storage.IngestWorkspaceManager`
+
+If orchestration should automatically clean up a workspace on run completion, include metadata on the run:
+
+```
+"ingest_workspace": {
+  "source_key": "<source-identifier>",
+  "run_key": "<run-id>",
+  "retention_class": "ephemeral"
+}
+```
+
+Retention classes other than `ephemeral` skip automatic cleanup.
 
 ## Metadata Contract
 

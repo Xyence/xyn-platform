@@ -12,6 +12,7 @@ from .definitions import RetryPolicy
 from .interfaces import RunCreateRequest
 from .repository import DjangoOrchestrationRepository
 from .service import exponential_backoff_seconds
+from ..storage.staging import IngestWorkspaceManager
 
 RUN_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "pending": {"queued", "running", "cancelled", "skipped", "stale"},
@@ -68,6 +69,24 @@ class OrchestrationLifecycleService:
         allowed = JOB_ALLOWED_TRANSITIONS.get(str(current or "").strip().lower(), set())
         if nxt not in allowed:
             raise ValueError(f"illegal job transition: {current} -> {nxt}")
+
+    def _cleanup_ingest_workspace(self, *, run: OrchestrationRun) -> None:
+        metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+        ingest_meta = metadata.get("ingest_workspace") if isinstance(metadata.get("ingest_workspace"), dict) else {}
+        if not ingest_meta:
+            return
+        retention_class = str(ingest_meta.get("retention_class") or "ephemeral").strip().lower()
+        source_key = str(ingest_meta.get("source_key") or run.scope_source or "default").strip()
+        run_key = str(ingest_meta.get("run_key") or run.id)
+        try:
+            IngestWorkspaceManager().cleanup_for_run(
+                workspace_id=str(run.workspace_id),
+                source_key=source_key,
+                run_key=run_key,
+                retention_class=retention_class,
+            )
+        except Exception:
+            return
 
     @transaction.atomic
     def mark_job_queued(self, *, job_run_id: str, now: datetime | None = None, summary: str = "") -> OrchestrationJobRun:
@@ -186,7 +205,9 @@ class OrchestrationLifecycleService:
         from .publication import StagePublicationService
 
         StagePublicationService().record_stage_publication(job_run=job_run)
-        self._repository.recompute_run_status(run=job_run.run, now=ts)
+        status = self._repository.recompute_run_status(run=job_run.run, now=ts)
+        if status in {"succeeded", "failed", "cancelled", "stale", "skipped"}:
+            self._cleanup_ingest_workspace(run=job_run.run)
         return job_run
 
     @transaction.atomic
@@ -242,7 +263,9 @@ class OrchestrationLifecycleService:
                 job_run=job_run,
                 update_fields=["status", "next_attempt_at", "summary", "error_text", "error_details_json", "metrics_json"],
             )
-            self._repository.recompute_run_status(run=job_run.run, now=ts)
+            status = self._repository.recompute_run_status(run=job_run.run, now=ts)
+            if status in {"succeeded", "failed", "cancelled", "stale", "skipped"}:
+                self._cleanup_ingest_workspace(run=job_run.run)
             return job_run
 
         job_run.status = "failed"
@@ -257,7 +280,9 @@ class OrchestrationLifecycleService:
             job_run=job_run,
             update_fields=["status", "completed_at", "summary", "error_text", "error_details_json", "metrics_json"],
         )
-        self._repository.recompute_run_status(run=job_run.run, now=ts)
+        status = self._repository.recompute_run_status(run=job_run.run, now=ts)
+        if status in {"succeeded", "failed", "cancelled", "stale", "skipped"}:
+            self._cleanup_ingest_workspace(run=job_run.run)
         return job_run
 
     @transaction.atomic

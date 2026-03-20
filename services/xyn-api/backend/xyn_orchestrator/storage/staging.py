@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..managed_storage import materialize_managed_workspace, managed_workspace_root
+from ..managed_storage import materialize_managed_workspace, managed_workspace_root, managed_workspace_path
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,10 @@ class IngestWorkspace:
 
 
 class IngestWorkspaceManager:
+    def _normalize_source_key(self, source_key: str) -> str:
+        token = str(source_key or "").strip()
+        return token or "default"
+
     def create(
         self,
         *,
@@ -29,11 +33,12 @@ class IngestWorkspaceManager:
         retention_class: str = "ephemeral",
         reset: bool = False,
     ) -> IngestWorkspace:
-        path = materialize_managed_workspace("ingest", workspace_id, source_key, run_key, reset=reset)
+        normalized_source = self._normalize_source_key(source_key)
+        path = materialize_managed_workspace("ingest", workspace_id, normalized_source, run_key, reset=reset)
         return IngestWorkspace(
             path=path,
             workspace_id=workspace_id,
-            source_key=source_key,
+            source_key=normalized_source,
             run_key=run_key,
             created_at=datetime.now(timezone.utc),
             retention_class=retention_class,
@@ -50,3 +55,28 @@ class IngestWorkspaceManager:
             return False
         shutil.rmtree(workspace.path, ignore_errors=True)
         return True
+
+    def cleanup_for_run(
+        self,
+        *,
+        workspace_id: str,
+        source_key: str,
+        run_key: str,
+        retention_class: str = "ephemeral",
+    ) -> bool:
+        if str(retention_class or "").strip().lower() not in {"ephemeral", "temp", "temporary"}:
+            return False
+        normalized_source = self._normalize_source_key(source_key)
+        path = managed_workspace_path("ingest", workspace_id, normalized_source, run_key)
+        if not path.exists():
+            return False
+        return self.cleanup(
+            IngestWorkspace(
+                path=path,
+                workspace_id=workspace_id,
+                source_key=normalized_source,
+                run_key=run_key,
+                created_at=datetime.now(timezone.utc),
+                retention_class=retention_class,
+            )
+        )

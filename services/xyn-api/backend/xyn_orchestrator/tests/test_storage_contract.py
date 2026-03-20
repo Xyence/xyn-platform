@@ -40,6 +40,26 @@ class StorageContractTests(TestCase):
             self.assertTrue(manager.cleanup(workspace))
             self.assertFalse(workspace.path.exists())
 
+    def test_ingest_workspace_cleanup_for_run(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            os.environ["XYN_WORKSPACE_ROOT"] = temp_root
+            manager = IngestWorkspaceManager()
+            workspace = manager.create(
+                workspace_id=str(self.workspace.id),
+                source_key="county",
+                run_key="run-2",
+                retention_class=RetentionClass.EPHEMERAL.value,
+            )
+            self.assertTrue(workspace.path.exists())
+            removed = manager.cleanup_for_run(
+                workspace_id=str(self.workspace.id),
+                source_key="county",
+                run_key="run-2",
+                retention_class=RetentionClass.EPHEMERAL.value,
+            )
+            self.assertTrue(removed)
+            self.assertFalse(workspace.path.exists())
+
     def test_store_snapshot_records_metadata_and_provenance(self):
         with tempfile.TemporaryDirectory() as temp_root:
             with override_settings(MEDIA_ROOT=temp_root):
