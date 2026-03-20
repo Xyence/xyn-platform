@@ -1159,7 +1159,10 @@ export default function AppShell() {
             <Route path="run/instances" element={<InstancesPage />} />
             <Route path="run/runs" element={<RunsPage />} />
             <Route path="notifications" element={<ApplicationNotificationsPage />} />
-            <Route path="notifications/settings" element={<ApplicationNotificationSettingsPage workspaceId={activeWorkspace?.id || ""} />} />
+            <Route
+              path="notifications/settings"
+              element={<ApplicationNotificationSettingsPage workspaceId={activeWorkspace?.id || ""} workspaceRole={activeWorkspace?.role || ""} />}
+            />
             <Route
               path="run/jobs"
               element={<JobsListPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />}

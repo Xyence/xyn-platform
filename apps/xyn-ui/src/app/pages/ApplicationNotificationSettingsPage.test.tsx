@@ -77,12 +77,16 @@ describe("ApplicationNotificationSettingsPage", () => {
   });
 
   const workspaceId = "ws-1";
+  const workspaceRole = "contributor";
 
   function renderPage(path = "/app/notifications/settings") {
     return render(
       <MemoryRouter initialEntries={[path]}>
         <Routes>
-          <Route path="/app/notifications/settings" element={<ApplicationNotificationSettingsPage workspaceId={workspaceId} />} />
+          <Route
+            path="/app/notifications/settings"
+            element={<ApplicationNotificationSettingsPage workspaceId={workspaceId} workspaceRole={workspaceRole} />}
+          />
         </Routes>
       </MemoryRouter>
     );
@@ -161,5 +165,35 @@ describe("ApplicationNotificationSettingsPage", () => {
     renderPage();
     expect(await screen.findByText("Request failed")).toBeInTheDocument();
     expect(screen.getByText("fetch failed")).toBeInTheDocument();
+  });
+
+  it("shows missing workspace error and disables actions", async () => {
+    render(
+      <MemoryRouter initialEntries={["/app/notifications/settings"]}>
+        <Routes>
+          <Route path="/app/notifications/settings" element={<ApplicationNotificationSettingsPage workspaceId="" workspaceRole="admin" />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    expect(await screen.findByText("Workspace context is required to manage notification settings.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add target" })).toBeDisabled();
+  });
+
+  it("disables mutation controls when read-only", async () => {
+    render(
+      <MemoryRouter initialEntries={["/app/notifications/settings"]}>
+        <Routes>
+          <Route
+            path="/app/notifications/settings"
+            element={<ApplicationNotificationSettingsPage workspaceId={workspaceId} workspaceRole="reader" />}
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+    await screen.findByText("one@example.com");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Refresh" })).not.toBeDisabled());
+    expect(screen.getByRole("button", { name: "Add target" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Disable" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove" })).toBeDisabled();
   });
 });

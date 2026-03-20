@@ -21,9 +21,13 @@ function verificationLabel(value: string): string {
 
 type ApplicationNotificationSettingsPageProps = {
   workspaceId?: string;
+  workspaceRole?: string;
 };
 
-export default function ApplicationNotificationSettingsPage({ workspaceId = "" }: ApplicationNotificationSettingsPageProps) {
+export default function ApplicationNotificationSettingsPage({
+  workspaceId = "",
+  workspaceRole = "",
+}: ApplicationNotificationSettingsPageProps) {
   const [targets, setTargets] = useState<NotificationDeliveryTarget[]>([]);
   const [preference, setPreference] = useState<NotificationDeliveryPreference>({
     source_app_key: "",
@@ -35,6 +39,9 @@ export default function ApplicationNotificationSettingsPage({ workspaceId = "" }
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const normalizedRole = workspaceRole.trim().toLowerCase();
+  const hasWorkspace = workspaceId.trim().length > 0;
+  const canManage = hasWorkspace && (normalizedRole ? normalizedRole !== "reader" : true);
 
   const load = useCallback(async () => {
     try {
@@ -166,6 +173,13 @@ export default function ApplicationNotificationSettingsPage({ workspaceId = "" }
       </div>
 
       {error && <InlineMessage tone="error" title="Request failed" body={error} />}
+      {!error && !canManage ? (
+        <InlineMessage
+          tone="info"
+          title="Read-only access"
+          body="You can view notification settings, but you do not have permission to make changes in this workspace."
+        />
+      ) : null}
 
       <section className="card">
         <h3>Notification targets (Email)</h3>
@@ -178,18 +192,18 @@ export default function ApplicationNotificationSettingsPage({ workspaceId = "" }
             value={newEmail}
             placeholder="name@example.com"
             onChange={(event) => setNewEmail(event.target.value)}
-            disabled={saving}
+            disabled={saving || !canManage}
           />
           <label className="inline-actions">
             <input
               type="checkbox"
               checked={newIsPrimary}
               onChange={(event) => setNewIsPrimary(event.target.checked)}
-              disabled={saving}
+              disabled={saving || !canManage}
             />
             Primary
           </label>
-          <button type="submit" className="ghost" disabled={saving || !newEmail.trim()}>
+          <button type="submit" className="ghost" disabled={saving || !newEmail.trim() || !canManage}>
             Add target
           </button>
         </form>
@@ -209,10 +223,10 @@ export default function ApplicationNotificationSettingsPage({ workspaceId = "" }
                   <p className="muted">Verification: {verificationLabel(target.verification_status)}</p>
                 </div>
                 <div className="inline-actions">
-                  <button type="button" className="ghost sm" onClick={() => void onToggleTarget(target)} disabled={saving}>
+                  <button type="button" className="ghost sm" onClick={() => void onToggleTarget(target)} disabled={saving || !canManage}>
                     {target.enabled ? "Disable" : "Enable"}
                   </button>
-                  <button type="button" className="ghost sm" onClick={() => void onRemoveTarget(target)} disabled={saving}>
+                  <button type="button" className="ghost sm" onClick={() => void onRemoveTarget(target)} disabled={saving || !canManage}>
                     Remove
                   </button>
                 </div>
@@ -231,7 +245,7 @@ export default function ApplicationNotificationSettingsPage({ workspaceId = "" }
               type="checkbox"
               checked={!!preference.in_app_enabled}
               onChange={(event) => void onUpdatePreference({ in_app_enabled: event.target.checked })}
-              disabled={saving}
+              disabled={saving || !canManage}
             />{" "}
             In-app notifications enabled
           </label>
@@ -240,7 +254,7 @@ export default function ApplicationNotificationSettingsPage({ workspaceId = "" }
               type="checkbox"
               checked={!!preference.email_enabled}
               onChange={(event) => void onUpdatePreference({ email_enabled: event.target.checked })}
-              disabled={saving}
+              disabled={saving || !canManage}
             />{" "}
             Email notifications enabled
           </label>
