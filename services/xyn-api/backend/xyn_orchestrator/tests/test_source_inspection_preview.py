@@ -72,6 +72,20 @@ class SourceInspectionPreviewTests(TestCase):
         payload = serialize_source_inspection(inspection)
         self.assertNotIn("geometry_summary", payload["sample_metadata"])
 
+    def test_missing_sample_rows_defaults_to_empty(self):
+        inspection = SourceInspectionProfile.objects.create(
+            source_connector=self.source,
+            status="ok",
+            detected_format="csv",
+            discovered_fields_json=[{"name": "id", "type": "string"}],
+            sample_metadata_json={"row_count": 5},
+            validation_findings_json=[],
+        )
+        payload = serialize_source_inspection(inspection)
+        sample = payload["sample_metadata"]
+        self.assertEqual(sample["sample_rows"], [])
+        self.assertFalse(sample["profile_summary"]["has_sample_rows"])
+
     def test_malformed_geometry_is_non_fatal(self):
         inspection = SourceInspectionProfile.objects.create(
             source_connector=self.source,

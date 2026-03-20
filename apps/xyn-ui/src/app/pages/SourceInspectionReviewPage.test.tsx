@@ -1,7 +1,7 @@
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SourceInspectionReviewPage from "./SourceInspectionReviewPage";
 
 const apiMocks = vi.hoisted(() => ({
@@ -13,11 +13,24 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("../../api/xyn", () => apiMocks);
 
 describe("SourceInspectionReviewPage", () => {
+  let consoleError: ReturnType<typeof vi.spyOn> | null = null;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    consoleError = vi.spyOn(console, "error").mockImplementation((message, ...args) => {
+      if (typeof message === "string" && message.includes("not wrapped in act")) {
+        return;
+      }
+      console.warn(message, ...args);
+    });
     apiMocks.listSourceConnectors.mockResolvedValue({ workspace_id: "ws-1", sources: [] });
     apiMocks.listSourceInspections.mockResolvedValue({ source_id: "s-1", inspections: [] });
     apiMocks.listSourceMappings.mockResolvedValue({ source_id: "s-1", mappings: [] });
+  });
+
+  afterEach(() => {
+    consoleError?.mockRestore();
+    consoleError = null;
   });
 
   function renderPage(workspaceId = "ws-1") {
@@ -31,7 +44,9 @@ describe("SourceInspectionReviewPage", () => {
   }
 
   it("renders empty state when no inspections", async () => {
-    renderPage();
+    await act(async () => {
+      renderPage();
+    });
     await waitFor(() => expect(apiMocks.listSourceConnectors).toHaveBeenCalled());
     await waitFor(() => expect(apiMocks.listSourceInspections).not.toHaveBeenCalled());
     expect(await screen.findByText(/No inspections captured/i)).toBeInTheDocument();
@@ -60,7 +75,9 @@ describe("SourceInspectionReviewPage", () => {
         },
       ],
     });
-    renderPage();
+    await act(async () => {
+      renderPage();
+    });
     await waitFor(() => expect(apiMocks.listSourceConnectors).toHaveBeenCalled());
     await waitFor(() => expect(apiMocks.listSourceInspections).toHaveBeenCalled());
     expect(await screen.findByText(/County Feed/)).toBeInTheDocument();
@@ -111,7 +128,9 @@ describe("SourceInspectionReviewPage", () => {
         },
       ],
     });
-    renderPage();
+    await act(async () => {
+      renderPage();
+    });
     await waitFor(() => expect(apiMocks.listSourceConnectors).toHaveBeenCalled());
     await waitFor(() => expect(apiMocks.listSourceInspections).toHaveBeenCalled());
     await waitFor(() => expect(apiMocks.listSourceMappings).toHaveBeenCalled());
@@ -141,7 +160,9 @@ describe("SourceInspectionReviewPage", () => {
         },
       ],
     });
-    renderPage();
+    await act(async () => {
+      renderPage();
+    });
     await waitFor(() => expect(apiMocks.listSourceConnectors).toHaveBeenCalled());
     await waitFor(() => expect(apiMocks.listSourceInspections).toHaveBeenCalled());
     const user = userEvent.setup();
