@@ -4,6 +4,7 @@ import hashlib
 import json
 from typing import Any
 
+from xyn_orchestrator.jurisdiction import require_canonical_jurisdiction
 from xyn_orchestrator.models import WatchDefinition, WatchMatchEvent, WatchSubscriber
 from xyn_orchestrator.provenance import (
     AuditWithProvenanceInput,
@@ -209,6 +210,12 @@ class WatchService:
         workspace_id = str(payload.workspace_id or "").strip()
         if not workspace_id:
             raise ValueError("workspace_id is required")
+        scope_jurisdiction = require_canonical_jurisdiction(
+            str(payload.scope_jurisdiction or "").strip(),
+            context="jurisdiction",
+        )
+        if not scope_jurisdiction:
+            raise ValueError("jurisdiction is required")
         event_ref = payload.event_ref if isinstance(payload.event_ref, dict) else {}
         reconciled_state_version = str(payload.reconciled_state_version or "").strip()
         qs = self._repository.list_watches(workspace_id=workspace_id)
@@ -253,6 +260,7 @@ class WatchService:
                     notification_intent=result.notification_intent,
                     event_fingerprint=event_fingerprint,
                     idempotency_key=resolved_idempotency_key,
+                    scope_jurisdiction=scope_jurisdiction,
                     reconciled_state_version=reconciled_state_version,
                     run_id=str(payload.run_id or ""),
                     correlation_id=str(payload.correlation_id or ""),
@@ -385,6 +393,7 @@ def serialize_watch_match(row: WatchMatchEvent) -> dict[str, Any]:
         "notification_intent": _as_dict(row.notification_intent_json),
         "event_fingerprint": str(row.event_fingerprint or ""),
         "idempotency_key": str(row.idempotency_key or ""),
+        "scope_jurisdiction": str(row.scope_jurisdiction or ""),
         "reconciled_state_version": str(row.reconciled_state_version or ""),
         "run_id": str(row.run_id) if row.run_id else None,
         "correlation_id": str(row.correlation_id or ""),

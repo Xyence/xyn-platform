@@ -105,12 +105,15 @@ class StagePublicationService:
         required_reconciled_state_version: str = "",
     ) -> EvaluationReadiness:
         required_version = str(required_reconciled_state_version or "").strip()
+        normalized_jurisdiction = require_canonical_jurisdiction(jurisdiction, context="scope_jurisdiction")
+        if not normalized_jurisdiction:
+            return EvaluationReadiness(ready=False, reason="jurisdiction_required")
         if required_version:
             published = OrchestrationStagePublication.objects.filter(
                 workspace_id=workspace_id,
                 stage_key=STAGE_PROPERTY_GRAPH_REBUILD,
                 stage_state="published",
-                scope_jurisdiction=str(jurisdiction or "").strip(),
+                scope_jurisdiction=normalized_jurisdiction,
                 scope_source=str(source or "").strip(),
                 reconciled_state_version=required_version,
             )
@@ -143,7 +146,7 @@ class StagePublicationService:
 
         pointer = ReconciledStateCurrentPointer.objects.filter(
             workspace_id=workspace_id,
-            scope_jurisdiction=require_canonical_jurisdiction(jurisdiction, context="scope_jurisdiction"),
+            scope_jurisdiction=normalized_jurisdiction,
             scope_source=str(source or "").strip(),
         )
         if pipeline_id:

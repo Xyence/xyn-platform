@@ -166,8 +166,16 @@ class AuditProvenancePrimitiveTests(TestCase):
         rows = watch_service.evaluate(
             WatchEvaluationInput(
                 workspace_id=str(self.workspace.id),
+                scope_jurisdiction="tx-travis-county",
                 event_key="event-1",
-                event_ref={"target_kind": "area", "region": "north", "event_type": "change", "object_type": "parcel", "object_id": "p-1"},
+                event_ref={
+                    "target_kind": "area",
+                    "region": "north",
+                    "event_type": "change",
+                    "object_type": "parcel",
+                    "object_id": "p-1",
+                    "jurisdiction": "tx-travis-county",
+                },
                 correlation_id="corr-watch",
                 chain_id="chain-watch",
             ),

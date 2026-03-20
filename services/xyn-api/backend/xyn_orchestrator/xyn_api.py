@@ -31100,6 +31100,17 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
         or event_ref.get("reconciled_state_version")
         or ""
     ).strip()
+    jurisdictions_payload = payload.get("jurisdictions")
+    if isinstance(jurisdictions_payload, list):
+        normalized = [str(item or "").strip() for item in jurisdictions_payload if str(item or "").strip()]
+        if len(normalized) > 1:
+            return JsonResponse({"error": "multi-jurisdiction evaluation is unsupported"}, status=400)
+        if normalized:
+            event_ref = dict(event_ref)
+            event_ref.setdefault("jurisdiction", normalized[0])
+    event_ref_jurisdictions = event_ref.get("jurisdictions")
+    if isinstance(event_ref_jurisdictions, list) and len(event_ref_jurisdictions) > 1:
+        return JsonResponse({"error": "multi-jurisdiction evaluation is unsupported"}, status=400)
     try:
         jurisdiction = require_canonical_jurisdiction(
             payload.get("jurisdiction") or event_ref.get("jurisdiction") or "",
@@ -31107,6 +31118,8 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
         )
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
+    if not jurisdiction:
+        return JsonResponse({"error": "jurisdiction is required"}, status=400)
     readiness = StagePublicationService().evaluation_readiness(
         workspace_id=str(workspace.id),
         pipeline_key=str(payload.get("pipeline_key") or event_ref.get("pipeline_key") or "").strip(),
@@ -31138,6 +31151,7 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
             WatchEvaluationInput(
                 workspace_id=str(workspace.id),
                 event_key=str(payload.get("event_key") or "").strip(),
+                scope_jurisdiction=jurisdiction,
                 event_ref=evaluated_event_ref,
                 watch_ids=tuple(str(item).strip() for item in watch_ids if str(item).strip()),
                 reconciled_state_version=str(readiness.reconciled_state_version or ""),

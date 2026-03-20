@@ -3186,6 +3186,7 @@ class WatchMatchEvent(models.Model):
     notification_intent_json = models.JSONField(default=dict, blank=True)
     event_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
     idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
     reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
     run = models.ForeignKey(
         "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="watch_match_events"

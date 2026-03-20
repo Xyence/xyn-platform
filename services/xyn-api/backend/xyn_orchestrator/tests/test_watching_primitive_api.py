@@ -80,8 +80,8 @@ class WatchingPrimitiveApiTests(TestCase):
     def _publish_reconciled_state(
         self,
         *,
-        jurisdiction: str = "",
-        source: str = "",
+        jurisdiction: str = "tx-travis-county",
+        source: str = "mls",
         pipeline_key: str = "",
         reconciled_state_version: str = "reconciled-v1",
     ) -> str:
@@ -202,7 +202,15 @@ class WatchingPrimitiveApiTests(TestCase):
         evaluate_payload = {
             "workspace_id": str(self.workspace.id),
             "event_key": "parcel_change",
-            "event_ref": {"target_kind": "area", "region": "north", "event_type": "change"},
+            "event_ref": {
+                "target_kind": "area",
+                "region": "north",
+                "event_type": "change",
+                "jurisdiction": "tx-travis-county",
+                "source": "mls",
+            },
+            "jurisdiction": "tx-travis-county",
+            "source": "mls",
             "persist": True,
             "correlation_id": "corr-watch",
             "chain_id": "chain-watch",
@@ -251,7 +259,15 @@ class WatchingPrimitiveApiTests(TestCase):
         evaluate_payload = {
             "workspace_id": str(self.workspace.id),
             "event_key": "parcel_change",
-            "event_ref": {"target_kind": "area", "region": "north", "event_type": "change"},
+            "event_ref": {
+                "target_kind": "area",
+                "region": "north",
+                "event_type": "change",
+                "jurisdiction": "tx-travis-county",
+                "source": "mls",
+            },
+            "jurisdiction": "tx-travis-county",
+            "source": "mls",
             "persist": True,
             "idempotency_key": "watch-eval-idem-1",
         }
@@ -273,6 +289,49 @@ class WatchingPrimitiveApiTests(TestCase):
         self.assertEqual(first.status_code, 201)
         self.assertEqual(second.status_code, 201)
         self.assertEqual(WatchMatchEvent.objects.filter(workspace=self.workspace).count(), 1)
+
+    def test_evaluate_requires_single_jurisdiction(self):
+        watch = self._create_watch(lifecycle_state="active")
+        self._publish_reconciled_state()
+        evaluate_payload = {
+            "workspace_id": str(self.workspace.id),
+            "event_key": "parcel_change",
+            "event_ref": {"target_kind": "area", "region": "north", "event_type": "change"},
+            "jurisdictions": ["tx-travis-county", "mo-stl-city"],
+            "persist": True,
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = watch_matches_evaluate(
+                self._request(
+                    "/xyn/api/watches/matches/evaluate",
+                    method="post",
+                    data=json.dumps(evaluate_payload),
+                )
+            )
+        self.assertEqual(response.status_code, 400)
+        body = json.loads(response.content)
+        self.assertIn("multi-jurisdiction", body.get("error", ""))
+
+    def test_evaluate_requires_jurisdiction(self):
+        watch = self._create_watch(lifecycle_state="active")
+        self._publish_reconciled_state()
+        evaluate_payload = {
+            "workspace_id": str(self.workspace.id),
+            "event_key": "parcel_change",
+            "event_ref": {"target_kind": "area", "region": "north", "event_type": "change"},
+            "persist": True,
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = watch_matches_evaluate(
+                self._request(
+                    "/xyn/api/watches/matches/evaluate",
+                    method="post",
+                    data=json.dumps(evaluate_payload),
+                )
+            )
+        self.assertEqual(response.status_code, 400)
+        body = json.loads(response.content)
+        self.assertIn("jurisdiction is required", body.get("error", ""))
 
     def test_workspace_isolation_and_campaign_link_validation(self):
         campaign = Campaign.objects.create(
@@ -334,7 +393,9 @@ class WatchingPrimitiveApiTests(TestCase):
                         {
                             "workspace_id": str(self.workspace.id),
                             "watch_ids": [watch["id"]],
-                            "event_ref": {"target_kind": "area"},
+                            "event_ref": {"target_kind": "area", "jurisdiction": "tx-travis-county", "source": "mls"},
+                            "jurisdiction": "tx-travis-county",
+                            "source": "mls",
                         }
                     ),
                 )
@@ -347,7 +408,9 @@ class WatchingPrimitiveApiTests(TestCase):
         payload = {
             "workspace_id": str(self.workspace.id),
             "watch_ids": [watch["id"]],
-            "event_ref": {"target_kind": "area"},
+            "event_ref": {"target_kind": "area", "jurisdiction": "tx-travis-county", "source": "mls"},
+            "jurisdiction": "tx-travis-county",
+            "source": "mls",
             "persist": True,
         }
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):

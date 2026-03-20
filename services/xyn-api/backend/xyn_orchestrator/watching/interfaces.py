@@ -45,6 +45,7 @@ class WatchSubscriberInput:
 @dataclass(frozen=True)
 class WatchEvaluationInput:
     workspace_id: str
+    scope_jurisdiction: str = ""
     event_key: str = ""
     event_ref: dict[str, Any] = field(default_factory=dict)
     watch_ids: tuple[str, ...] = tuple()

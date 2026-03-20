@@ -31,6 +31,13 @@ Jurisdiction values must use canonical keys (lowercase, hyphen-separated, explic
 
 Do not use ambiguous tokens like `stl` or `tx`; canonical keys are required for partition safety.
 
+### Jurisdiction Scoping (MVP Rules)
+
+- Evaluation must specify exactly one jurisdiction per request.
+- Cross-jurisdiction evaluation is unsupported unless explicitly enabled by a future multi-jurisdiction mode.
+- Evaluation and publication readiness must resolve against the same jurisdiction + source partition.
+- Downstream evaluation must use the current published reconciled version for that jurisdiction unless explicitly version-scoped.
+
 Current published reconciled state is anchored by a dedicated pointer:
 
 - `ReconciledStateCurrentPointer` records the single current `reconciled_state_version` per workspace/pipeline/partition.
