@@ -70,12 +70,31 @@ When a source connector is present, the storage service records a provenance lin
 - `source_connector -> runtime_artifact` (`relationship_type=ingest_snapshot`)
 
 Downstream orchestration outputs should reference the artifact ID and change token where applicable.
+The canonical snapshot contract is:
+
+- `output_change_token = sha256(raw_snapshot)`
+- `artifact_id` points at the durable runtime artifact
+- output metadata includes `ingest_artifact_id` and `source_connector_id`
+
+The orchestration lifecycle records provenance links for snapshot outputs:
+
+- `runtime_artifact -> orchestration_job_output` (`relationship_type=ingest_snapshot_output`)
+- `source_connector -> orchestration_job_output` when the source connector is known
+
+## Inspectability
+
+The control-plane API exposes ingest artifact metadata for operators:
+
+- `GET /xyn/api/ingest-artifacts?workspace_id=...`
+- `GET /xyn/api/ingest-artifacts/<id>?workspace_id=...`
+
+These endpoints are gated by `app.ingest_runs.read` and return the durable metadata stored in `IngestArtifactRecord`.
 
 ## Follow-ons (Non-blocking)
 
 These are intentionally deferred and tracked here to avoid scope creep:
 
-- Streamed upload support in xyn-core (avoid loading full payload into memory)
+- Multipart upload support for very large artifacts (beyond current streaming support)
 - Explicit retention enforcement policies per retention class
 - Expanded artifact browsing/UI for ingest artifacts
 - Shared/team-level target storage scopes

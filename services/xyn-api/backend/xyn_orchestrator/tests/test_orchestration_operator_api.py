@@ -26,7 +26,8 @@ from xyn_orchestrator.orchestration.definitions import (
     STAGE_SIGNAL_MATCHING,
 )
 from xyn_orchestrator.orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
-from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService, OutputRecord
+from xyn_orchestrator.orchestration.interfaces import OutputRecord
+from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService
 from xyn_orchestrator.xyn_api import (
     orchestration_domain_events_collection,
     orchestration_dependency_graph,

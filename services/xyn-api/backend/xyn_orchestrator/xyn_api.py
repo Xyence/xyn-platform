@@ -153,6 +153,7 @@ from .models import (
     PlatformConfigDocument,
     Report,
     ReportAttachment,
+    IngestArtifactRecord,
 )
 from .matching import (
     DjangoMatchResultRepository,
@@ -32468,6 +32469,111 @@ def orchestration_domain_events_collection(request: HttpRequest) -> JsonResponse
             "pipeline_id": str(pipeline.id) if pipeline else None,
             "pipeline_key": str(pipeline.key) if pipeline else "",
             "events": [_serialize_domain_event(item) for item in rows],
+        }
+    )
+
+
+@login_required
+def ingest_artifacts_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    qs = IngestArtifactRecord.objects.filter(workspace=workspace)
+    source_id = str(request.GET.get("source_id") or "").strip()
+    if source_id:
+        qs = qs.filter(source_connector_id=source_id)
+    snapshot_type = str(request.GET.get("snapshot_type") or "").strip()
+    if snapshot_type:
+        qs = qs.filter(snapshot_type=snapshot_type)
+    retention_class = str(request.GET.get("retention_class") or "").strip()
+    if retention_class:
+        qs = qs.filter(retention_class=retention_class)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(orchestration_run_id=run_id)
+    artifact_id = str(request.GET.get("artifact_id") or "").strip()
+    if artifact_id:
+        qs = qs.filter(artifact_id=artifact_id)
+    try:
+        limit = int(request.GET.get("limit") or "100")
+    except ValueError:
+        limit = 100
+    limit = max(1, min(limit, 500))
+    rows = [
+        {
+            "id": str(row.id),
+            "workspace_id": str(row.workspace_id),
+            "source_connector_id": str(row.source_connector_id) if row.source_connector_id else None,
+            "orchestration_run_id": str(row.orchestration_run_id) if row.orchestration_run_id else None,
+            "job_run_id": str(row.job_run_id) if row.job_run_id else None,
+            "artifact_id": str(row.artifact_id),
+            "artifact_uri": str(row.artifact_uri or ""),
+            "storage_provider": str(row.storage_provider or ""),
+            "storage_key": str(row.storage_key or ""),
+            "content_type": str(row.content_type or ""),
+            "byte_length": int(row.byte_length or 0),
+            "sha256": str(row.sha256 or ""),
+            "snapshot_type": str(row.snapshot_type or ""),
+            "retention_class": str(row.retention_class or ""),
+            "scope_jurisdiction": str(row.scope_jurisdiction or ""),
+            "scope_source": str(row.scope_source or ""),
+            "metadata": row.metadata_json if isinstance(row.metadata_json, dict) else {},
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in qs.order_by("-created_at")[:limit]
+    ]
+    return JsonResponse({"workspace_id": str(workspace.id), "artifacts": rows})
+
+
+@login_required
+def ingest_artifact_detail(request: HttpRequest, artifact_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    row = get_object_or_404(IngestArtifactRecord.objects.filter(workspace=workspace), id=artifact_id)
+    return JsonResponse(
+        {
+            "id": str(row.id),
+            "workspace_id": str(row.workspace_id),
+            "source_connector_id": str(row.source_connector_id) if row.source_connector_id else None,
+            "orchestration_run_id": str(row.orchestration_run_id) if row.orchestration_run_id else None,
+            "job_run_id": str(row.job_run_id) if row.job_run_id else None,
+            "artifact_id": str(row.artifact_id),
+            "artifact_uri": str(row.artifact_uri or ""),
+            "storage_provider": str(row.storage_provider or ""),
+            "storage_key": str(row.storage_key or ""),
+            "content_type": str(row.content_type or ""),
+            "byte_length": int(row.byte_length or 0),
+            "sha256": str(row.sha256 or ""),
+            "snapshot_type": str(row.snapshot_type or ""),
+            "retention_class": str(row.retention_class or ""),
+            "scope_jurisdiction": str(row.scope_jurisdiction or ""),
+            "scope_source": str(row.scope_source or ""),
+            "metadata": row.metadata_json if isinstance(row.metadata_json, dict) else {},
+            "created_at": row.created_at.isoformat() if row.created_at else None,
         }
     )
 

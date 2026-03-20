@@ -9,10 +9,11 @@ from django.db import transaction
 from xyn_orchestrator.models import OrchestrationJobRun, OrchestrationRun
 
 from .definitions import RetryPolicy
-from .interfaces import RunCreateRequest
+from .interfaces import OutputRecord, RunCreateRequest
 from .repository import DjangoOrchestrationRepository
 from .service import exponential_backoff_seconds
 from ..storage.staging import IngestWorkspaceManager
+from ..provenance import ProvenanceLinkInput, ProvenanceService, object_ref
 
 RUN_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "pending": {"queued", "running", "cancelled", "skipped", "stale"},
@@ -36,17 +37,6 @@ JOB_ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "cancelled": set(),
     "stale": set(),
 }
-
-
-@dataclass(frozen=True)
-class OutputRecord:
-    output_key: str
-    output_type: str = "generic"
-    output_uri: str = ""
-    output_change_token: str = ""
-    artifact_id: str = ""
-    metadata: dict[str, Any] | None = None
-    payload: dict[str, Any] | None = None
 
 
 class OrchestrationLifecycleService:
@@ -189,7 +179,7 @@ class OrchestrationLifecycleService:
         )
 
         for output in outputs or []:
-            self._repository.record_output(
+            output_row = self._repository.record_output(
                 job_run=job_run,
                 attempt=attempt,
                 output_key=output.output_key,
@@ -200,6 +190,60 @@ class OrchestrationLifecycleService:
                 metadata=output.metadata,
                 payload=output.payload,
             )
+            metadata = output.metadata if isinstance(output.metadata, dict) else {}
+            ingest_artifact_id = str(metadata.get("ingest_artifact_id") or "").strip()
+            source_connector_id = str(metadata.get("source_connector_id") or "").strip()
+            runtime_artifact_id = str(metadata.get("runtime_artifact_id") or output.artifact_id or "").strip()
+            if ingest_artifact_id and runtime_artifact_id:
+                ProvenanceService().record_provenance_link(
+                    ProvenanceLinkInput(
+                        workspace_id=str(job_run.workspace_id),
+                        relationship_type="ingest_snapshot_output",
+                        source_ref=object_ref(
+                            object_family="runtime_artifact",
+                            object_id=runtime_artifact_id,
+                            workspace_id=str(job_run.workspace_id),
+                        ),
+                        target_ref=object_ref(
+                            object_family="orchestration_job_output",
+                            object_id=str(output_row.id),
+                            workspace_id=str(job_run.workspace_id),
+                        ),
+                        reason="snapshot output recorded",
+                        metadata={
+                            "ingest_artifact_id": ingest_artifact_id,
+                            "output_key": output.output_key,
+                            "output_type": output.output_type,
+                        },
+                        run_id=str(job_run.run_id),
+                        idempotency_key=f"ingest_output:{output_row.id}",
+                    )
+                )
+                if source_connector_id:
+                    ProvenanceService().record_provenance_link(
+                        ProvenanceLinkInput(
+                            workspace_id=str(job_run.workspace_id),
+                            relationship_type="ingest_snapshot_output",
+                            source_ref=object_ref(
+                                object_family="source_connector",
+                                object_id=source_connector_id,
+                                workspace_id=str(job_run.workspace_id),
+                            ),
+                            target_ref=object_ref(
+                                object_family="orchestration_job_output",
+                                object_id=str(output_row.id),
+                                workspace_id=str(job_run.workspace_id),
+                            ),
+                            reason="snapshot output recorded",
+                            metadata={
+                                "ingest_artifact_id": ingest_artifact_id,
+                                "output_key": output.output_key,
+                                "output_type": output.output_type,
+                            },
+                            run_id=str(job_run.run_id),
+                            idempotency_key=f"ingest_output_source:{output_row.id}",
+                        )
+                    )
 
         # Record domain-level stage publication metadata used for downstream readiness.
         from .publication import StagePublicationService

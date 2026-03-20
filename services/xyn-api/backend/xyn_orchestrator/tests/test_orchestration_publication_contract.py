@@ -29,7 +29,8 @@ from xyn_orchestrator.orchestration.domain_events import (
 )
 from xyn_orchestrator.orchestration.engine import DependencyResolver
 from xyn_orchestrator.orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
-from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService, OutputRecord
+from xyn_orchestrator.orchestration.interfaces import OutputRecord
+from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService
 from xyn_orchestrator.orchestration.publication import StagePublicationService
 
 

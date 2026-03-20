@@ -22,7 +22,8 @@ from xyn_orchestrator.models import (
 
 from .definitions import STAGE_NOTIFICATION_EMISSION, STAGE_RULE_EVALUATION, STAGE_SIGNAL_MATCHING
 from .interfaces import ExecutionScope, JobExecutionContext, JobExecutionResult, JobExecutor, RunCreateRequest, RunTrigger
-from .lifecycle import OrchestrationLifecycleService, OutputRecord
+from .lifecycle import OrchestrationLifecycleService
+from .interfaces import OutputRecord
 from .publication import StagePublicationService
 from .repository import DjangoOrchestrationRepository
 from .schedule_policy import CRON_UNSUPPORTED_MESSAGE, is_polled_schedule_kind, polled_schedule_kinds

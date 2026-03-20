@@ -11,6 +11,7 @@ from .durable import DurableArtifactStore, get_durable_artifact_store
 from .staging import IngestWorkspaceManager
 from .. import models
 from ..provenance import ProvenanceLinkInput, ProvenanceService, object_ref
+from ..orchestration.interfaces import OutputRecord
 
 
 @dataclass(frozen=True)
@@ -232,3 +233,27 @@ def prepare_ingest_run_metadata(
         "workspace_path": str(workspace.path),
         "created_at": workspace.created_at.isoformat(),
     }
+
+
+def snapshot_output_record(
+    *,
+    stored: IngestStoreResult,
+    output_key: str = "raw_snapshot",
+    output_type: str = "dataset_snapshot",
+) -> OutputRecord:
+    metadata = {
+        "snapshot_type": stored.record.snapshot_type,
+        "retention_class": stored.record.retention_class,
+        "ingest_artifact_id": str(stored.record.id),
+        "source_connector_id": str(stored.record.source_connector_id or ""),
+        "runtime_artifact_id": str(stored.record.artifact_id),
+        "artifact_sha256": str(stored.record.sha256 or ""),
+    }
+    return OutputRecord(
+        output_key=output_key,
+        output_type=output_type,
+        output_uri=str(stored.record.artifact_uri or ""),
+        output_change_token=str(stored.record.sha256 or ""),
+        artifact_id="",
+        metadata=metadata,
+    )

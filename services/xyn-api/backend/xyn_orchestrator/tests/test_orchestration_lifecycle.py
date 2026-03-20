@@ -18,7 +18,8 @@ from xyn_orchestrator.models import (
     Workspace,
 )
 from xyn_orchestrator.orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
-from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService, OutputRecord
+from xyn_orchestrator.orchestration.interfaces import OutputRecord
+from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService
 from xyn_orchestrator.orchestration.repository import DjangoOrchestrationRepository
 from xyn_orchestrator.orchestration.service import JobOrchestrationService
 

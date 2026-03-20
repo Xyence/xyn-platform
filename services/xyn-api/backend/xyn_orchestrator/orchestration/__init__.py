@@ -56,7 +56,8 @@ from .service import JobOrchestrationService, exponential_backoff_seconds
 
 try:
     from .engine import ConcurrencyGuard, DependencyResolver, DueJobScanner, OrchestrationEngine, RunDispatcher, RunPlanner, StaleRunDetector
-    from .lifecycle import OrchestrationLifecycleService, OutputRecord
+    from .interfaces import OutputRecord
+    from .lifecycle import OrchestrationLifecycleService
     from .repository import DjangoOrchestrationRepository
 except Exception:  # pragma: no cover - allows importing pure orchestration helpers without Django runtime
     ConcurrencyGuard = None  # type: ignore[assignment]

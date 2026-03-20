@@ -61,6 +61,17 @@ class JobExecutionResult:
 
 
 @dataclass(frozen=True)
+class OutputRecord:
+    output_key: str
+    output_type: str = "generic"
+    output_uri: str = ""
+    output_change_token: str = ""
+    artifact_id: str = ""
+    metadata: dict[str, Any] | None = None
+    payload: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class StaleRunRecord:
     job_run_id: str
     run_id: str
