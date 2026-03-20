@@ -57,9 +57,11 @@ Matching and reconciliation should consume normalized fields, not raw strings.
   - Normalize entity suffixes (LLC/INC/TRUST/etc) and strip punctuation.
   - Normalize comma‑style names into a stable order.
   - Persist `owner_name_normalized` alongside the raw owner name.
+  - Helper returns `quality` (`ok|bad`) for quick guardrails.
 - **Parcel identifiers**
   - Normalize by stripping punctuation/whitespace into `parcel_id_normalized`.
   - Allow jurisdiction‑specific adapters to emit alternate forms.
+  - Helper returns `quality` (`ok|bad`) for quick guardrails.
 
 Normalization helpers live in `xyn_orchestrator.matching.normalization` and are deterministic and non‑external (no USPS/CASS). Built-in strategies call `normalize_field_value(...)` so address/owner/parcel fields are normalized consistently at match time even when normalized fields are not persisted yet.
 

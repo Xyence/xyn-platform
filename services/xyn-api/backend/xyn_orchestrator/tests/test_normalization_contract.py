@@ -23,6 +23,11 @@ class NormalizationContractTests(SimpleTestCase):
         self.assertIn("unit 3b", row["normalized"])
         self.assertEqual(row["components"]["unit"], "3b")
 
+    def test_address_hash_unit_normalization(self):
+        row = normalize_address_record("77 Market St #12")
+        self.assertIn("unit 12", row["normalized"])
+        self.assertEqual(row["components"]["unit"], "12")
+
     def test_address_partial_when_missing_house_number(self):
         row = normalize_address_record("Main Street")
         self.assertEqual(row["quality"], "partial")
@@ -31,16 +36,29 @@ class NormalizationContractTests(SimpleTestCase):
         row = normalize_owner_name("Acme Holdings LLC")
         self.assertEqual(row["kind"], "entity")
         self.assertEqual(row["normalized"], "acme holdings")
+        self.assertEqual(row["quality"], "ok")
 
     def test_owner_comma_name_normalization(self):
         row = normalize_owner_name("Smith, Jane")
         self.assertEqual(row["kind"], "person")
         self.assertEqual(row["normalized"], "jane smith")
 
+    def test_owner_empty_normalization(self):
+        row = normalize_owner_name(" , ")
+        self.assertEqual(row["normalized"], "")
+        self.assertEqual(row["kind"], "unknown")
+        self.assertEqual(row["quality"], "bad")
+
     def test_parcel_normalization(self):
         row = normalize_parcel_id("12-34-56.789")
         self.assertEqual(row["normalized"], "123456789")
         self.assertEqual(row["alternate_forms"], ["12-34-56-789"])
+        self.assertEqual(row["quality"], "ok")
+
+    def test_parcel_empty_normalization(self):
+        row = normalize_parcel_id("..--")
+        self.assertEqual(row["normalized"], "")
+        self.assertEqual(row["quality"], "bad")
 
     def test_jurisdiction_adapter_fallback(self):
         row = normalize_address_record("100 Main St", jurisdiction="tx-travis-county")

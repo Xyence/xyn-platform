@@ -151,7 +151,7 @@ def normalize_address_record(raw: Any, *, jurisdiction: Optional[str] = None) ->
     if adapter_key and adapter_key in _ADDRESS_ADAPTERS:
         return _ADDRESS_ADAPTERS[adapter_key](raw_value)
 
-    tokens = _normalize_tokens(raw_value.lower())
+    tokens = _normalize_tokens(raw_value.lower().replace("#", " unit "))
     house_number = tokens[0] if tokens and tokens[0].isdigit() else ""
     idx = 1 if house_number else 0
     predirectional = _DIRECTIONALS.get(tokens[idx], "") if idx < len(tokens) else ""
@@ -202,6 +202,7 @@ def normalize_owner_name(raw: Any) -> dict[str, Any]:
             "display_name": "",
             "kind": "unknown",
             "tokens": [],
+            "quality": "bad",
         }
     lowered = raw_value.lower()
     tokens = _normalize_tokens(lowered)
@@ -218,12 +219,16 @@ def normalize_owner_name(raw: Any) -> dict[str, Any]:
 
     display_tokens = [token.capitalize() for token in tokens_no_suffix] if tokens_no_suffix else []
     display_name = " ".join(display_tokens).strip()
+    quality = "ok" if tokens_no_suffix else "bad"
+    if kind == "person" and not tokens_no_suffix:
+        kind = "unknown"
     return {
         "raw": raw_value,
         "normalized": normalized,
         "display_name": display_name,
         "kind": kind,
         "tokens": tokens_no_suffix,
+        "quality": quality,
     }
 
 
@@ -235,6 +240,7 @@ def normalize_parcel_id(raw: Any, *, jurisdiction: Optional[str] = None) -> dict
             "normalized": "",
             "alternate_forms": [],
             "format": "generic",
+            "quality": "bad",
         }
     adapter_key = normalize_text(jurisdiction).replace(" ", "-") if jurisdiction else ""
     if adapter_key and adapter_key in _PARCEL_ADAPTERS:
@@ -244,9 +250,11 @@ def normalize_parcel_id(raw: Any, *, jurisdiction: Optional[str] = None) -> dict
     groups = [token for token in re.split(r"[^a-z0-9]+", raw_value.lower()) if token]
     alternate = "-".join(groups) if len(groups) > 1 else ""
     alternate_forms = [alternate] if alternate else []
+    quality = "ok" if normalized else "bad"
     return {
         "raw": raw_value,
         "normalized": normalized,
         "alternate_forms": alternate_forms,
         "format": "generic",
+        "quality": quality,
     }
