@@ -170,6 +170,9 @@ export default function SourceInspectionReviewPage({ workspaceId, workspaceName 
       </div>
 
       {error ? <InlineMessage tone="error" title="Source inspection load failed" body={error} /> : null}
+      {loading && !latestInspection ? (
+        <InlineMessage tone="info" title="Loading inspection" body="Fetching source inspection metadata." />
+      ) : null}
 
       <section className="card">
         <div className="detail-grid">
@@ -211,6 +214,11 @@ export default function SourceInspectionReviewPage({ workspaceId, workspaceName 
           </div>
         </div>
       </section>
+      {!loading && sources.length === 0 ? (
+        <section className="card" style={{ marginTop: 16 }}>
+          <p className="muted">No sources are registered in this workspace yet.</p>
+        </section>
+      ) : null}
 
       {!latestInspection ? (
         <section className="card">

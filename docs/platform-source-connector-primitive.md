@@ -69,6 +69,25 @@ Derived datasets produced by source processing are output/read-model artifacts (
 Ingest artifacts (raw snapshots, normalized outputs, retained parser results) must use the canonical storage contract defined in `docs/platform-storage-contract.md`.
 Source connectors should not persist blob/file data directly on the source model.
 
+## Inspection Preview Contract (UI)
+
+The inspection preview UI is metadata-only and read-only. The backend serializes preview-friendly metadata via `sample_metadata`:
+
+- `sample_metadata.sample_rows`: optional list of row objects for preview
+- `sample_metadata.profile_summary`:
+  - `row_count`
+  - `discovered_fields_count`
+  - `has_sample_rows`
+  - `has_geometry`
+- `sample_metadata.geometry_summary` (when geometry is present or errors occur):
+  - `present`
+  - `geometry_types`
+  - `bbox` `[minx, miny, maxx, maxy]`
+  - `centroid` `{ x, y }`
+  - `errors` (non-fatal)
+
+This contract is additive and does not imply an interactive map or data explorer.
+
 ## Relationship to Other Platform Primitives
 
 - orchestration: source execution contracts can produce orchestration run requests (`run_type` + `target_ref` + `scope_source`)

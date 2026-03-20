@@ -85,3 +85,5 @@ class SourceInspectionPreviewTests(TestCase):
         geometry_summary = payload["sample_metadata"]["geometry_summary"]
         self.assertFalse(geometry_summary["present"])
         self.assertTrue(geometry_summary.get("errors"))
+        finding = payload["validation_findings"][-1]
+        self.assertEqual(finding.get("type"), "geometry_summary_error")

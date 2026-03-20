@@ -347,6 +347,16 @@ def serialize_source_inspection(row: SourceInspectionProfile) -> dict[str, Any]:
         enriched_metadata["geometry_summary"] = geometry_summary or {"present": False, "errors": geometry_errors}
     elif "geometry_summary" in enriched_metadata:
         enriched_metadata["geometry_summary"] = None
+    validation_findings = row.validation_findings_json if isinstance(row.validation_findings_json, list) else []
+    if geometry_errors:
+        validation_findings = [
+            *validation_findings,
+            {
+                "type": "geometry_summary_error",
+                "message": "Geometry metadata could not be summarized for preview.",
+                "details": geometry_errors,
+            },
+        ]
     return {
         "id": str(row.id),
         "source_id": str(row.source_connector_id),
@@ -354,7 +364,7 @@ def serialize_source_inspection(row: SourceInspectionProfile) -> dict[str, Any]:
         "detected_format": row.detected_format,
         "discovered_fields": discovered_fields,
         "sample_metadata": enriched_metadata,
-        "validation_findings": row.validation_findings_json if isinstance(row.validation_findings_json, list) else [],
+        "validation_findings": validation_findings,
         "inspection_fingerprint": str(row.inspection_fingerprint or ""),
         "idempotency_key": str(row.idempotency_key or ""),
         "inspection_run_id": str(row.inspection_run_id) if row.inspection_run_id else None,

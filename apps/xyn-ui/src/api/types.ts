@@ -2992,11 +2992,32 @@ export type SourceInspectionProfile = {
   status: "ok" | "warning" | "error" | string;
   detected_format: string;
   discovered_fields: Array<Record<string, unknown>>;
-  sample_metadata: Record<string, unknown>;
+  sample_metadata: SourceInspectionSampleMetadata;
   validation_findings: Array<Record<string, unknown>>;
   inspection_run_id?: string | null;
   inspected_by_id?: string | null;
   inspected_at: string;
+};
+
+export type SourceInspectionGeometrySummary = {
+  present: boolean;
+  geometry_types?: string[];
+  bbox?: [number, number, number, number] | null;
+  centroid?: { x: number; y: number } | null;
+  errors?: string[];
+};
+
+export type SourceInspectionProfileSummary = {
+  row_count?: number | null;
+  discovered_fields_count?: number;
+  has_sample_rows?: boolean;
+  has_geometry?: boolean;
+};
+
+export type SourceInspectionSampleMetadata = Record<string, unknown> & {
+  sample_rows?: Array<Record<string, unknown>>;
+  profile_summary?: SourceInspectionProfileSummary;
+  geometry_summary?: SourceInspectionGeometrySummary | null;
 };
 
 export type SourceInspectionsResponse = {
