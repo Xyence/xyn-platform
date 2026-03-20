@@ -10759,6 +10759,21 @@ _RULE_FAMILY_LABELS: Dict[str, str] = {
     "trigger_policies": "Trigger Policies",
 }
 
+_RULE_BOUNDARY_DISCOURAGED_FAMILIES = {
+    "validation_policies",
+    "transition_policies",
+    "invariant_policies",
+}
+
+_RULE_BOUNDARY_NOTICE = {
+    "title": "Rules Boundary",
+    "body": (
+        "Rules are for business policy (scoring, thresholds, alerts). "
+        "Do not use rules for app invariants or orchestration behavior."
+    ),
+    "doc_ref": "docs/platform-architecture-boundaries.md#rules-boundary-platform-contract",
+}
+
 
 def _humanize_rule_token(value: str) -> str:
     return " ".join(
@@ -10926,6 +10941,7 @@ def _rules_payload_from_candidates(
     bundles: List[Dict[str, Any]] = []
     rules: List[Dict[str, Any]] = []
     filtered_bundle_count = 0
+    boundary_warnings: List[Dict[str, Any]] = []
     for artifact in candidates:
         bundle = _policy_bundle_from_artifact(artifact)
         if not bundle:
@@ -10988,6 +11004,16 @@ def _rules_payload_from_candidates(
             bucket["enforced"] += 1
         else:
             bucket["documented_only"] += 1
+        if family in _RULE_BOUNDARY_DISCOURAGED_FAMILIES:
+            boundary_warnings.append(
+                {
+                    "rule_id": str(row.get("id") or ""),
+                    "family": family,
+                    "message": "This rule family often encodes app invariants. Prefer fixed logic unless this is strictly a tunable business policy.",
+                    "severity": "warning",
+                    "boundary": "rules_boundary",
+                }
+            )
     groups = [
         {
             "family": family,
@@ -10998,11 +11024,18 @@ def _rules_payload_from_candidates(
         }
         for family, counts in sorted(grouped_counts.items(), key=lambda item: item[0])
     ]
+    if boundary_warnings:
+        logging.getLogger(__name__).warning(
+            "rules_boundary_warning",
+            extra={"warning_count": len(boundary_warnings), "families": sorted({w["family"] for w in boundary_warnings})},
+        )
     return {
         "bundles": bundles,
         "rules": rules,
         "groups": groups,
         "access": {"filtered_out_bundles": filtered_bundle_count},
+        "boundary_notice": _RULE_BOUNDARY_NOTICE,
+        "boundary_warnings": boundary_warnings,
     }
 
 

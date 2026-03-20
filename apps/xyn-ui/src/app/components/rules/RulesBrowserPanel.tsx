@@ -101,10 +101,25 @@ export default function RulesBrowserPanel({
   if (loading) return <p className="muted">Loading rules…</p>;
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">No rules available.</p>;
+  const boundaryNotice = payload.boundary_notice;
+  const boundaryWarnings = Array.isArray(payload.boundary_warnings) ? payload.boundary_warnings : [];
 
   return (
     <div className="ems-panel-body" data-testid="rules-browser-panel">
       <h3 style={{ marginTop: 0 }}>Rules Browser</h3>
+      {boundaryNotice ? (
+        <section className="card" style={{ marginTop: 12, background: "rgba(255, 210, 100, 0.1)" }}>
+          <div className="field-label">{boundaryNotice.title || "Rules Boundary"}</div>
+          <p className="small muted" style={{ marginTop: 6 }}>
+            {boundaryNotice.body || "Rules are for business policy. Avoid using rules for app invariants or orchestration behavior."}
+          </p>
+          {boundaryWarnings.length ? (
+            <p className="small" style={{ marginTop: 6 }}>
+              {boundaryWarnings.length} warning{boundaryWarnings.length === 1 ? "" : "s"} detected for invariant-like rule families.
+            </p>
+          ) : null}
+        </section>
+      ) : null}
       <p className="muted small">
         {activeBundle
           ? `${activeBundle.title} · ${activeBundle.app_slug || "app"}`

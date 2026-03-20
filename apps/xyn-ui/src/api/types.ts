@@ -4188,6 +4188,18 @@ export type RuleBrowserRule = {
 };
 
 export type RuleBrowserResponse = {
+  boundary_notice?: {
+    title?: string;
+    body?: string;
+    doc_ref?: string;
+  };
+  boundary_warnings?: Array<{
+    rule_id?: string;
+    family?: string;
+    message?: string;
+    severity?: string;
+    boundary?: string;
+  }>;
   target?: {
     artifact_slug?: string | null;
     app_slug?: string | null;

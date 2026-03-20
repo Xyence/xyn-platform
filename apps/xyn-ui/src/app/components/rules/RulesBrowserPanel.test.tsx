@@ -22,6 +22,18 @@ describe("RulesBrowserPanel", () => {
 
   it("groups rules by family and shows enforcement/access badges", async () => {
     apiMocks.getRulesBrowser.mockResolvedValue({
+      boundary_notice: {
+        title: "Rules Boundary",
+        body: "Rules are for business policy (scoring, thresholds, alerts).",
+      },
+      boundary_warnings: [
+        {
+          rule_id: "policy-1",
+          family: "validation_policies",
+          message: "Invariant-like rule family.",
+          severity: "warning",
+        },
+      ],
       bundles: [
         {
           bundle_id: "policy.team-lunch-poll",
@@ -80,6 +92,7 @@ describe("RulesBrowserPanel", () => {
 
     render(<RulesBrowserPanel workspaceId="ws-1" artifactSlug="app.team-lunch-poll" />);
 
+    expect(await screen.findByText("Rules Boundary")).toBeInTheDocument();
     expect(await screen.findByText("Validation Policies")).toBeInTheDocument();
     expect(screen.getByText("Trigger Policies")).toBeInTheDocument();
     expect(screen.getByText("Enforced")).toBeInTheDocument();

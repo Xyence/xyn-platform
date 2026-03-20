@@ -160,12 +160,14 @@ class RulesApiTests(TestCase):
         response = self.client.get("/xyn/api/rules", {"artifact_slug": "app.team-lunch-poll"})
         self.assertEqual(response.status_code, 200, response.content.decode())
         payload = response.json()
+        self.assertIn("boundary_notice", payload)
         bundles = payload.get("bundles") or []
         self.assertTrue(any(row.get("bundle_id") == "policy.team-lunch-poll" for row in bundles))
         rules = payload.get("rules") or []
         self.assertGreaterEqual(len(rules), 2)
         self.assertTrue(any(row.get("family") == "validation_policies" for row in rules))
         self.assertTrue(any(row.get("family") == "invariant_policies" for row in rules))
+        self.assertTrue(any(row.get("family") == "invariant_policies" for row in payload.get("boundary_warnings") or []))
 
     def test_rules_collection_supports_editable_filter(self):
         response = self.client.get("/xyn/api/rules", {"artifact_slug": "app.team-lunch-poll", "editable": "true"})
