@@ -386,18 +386,19 @@ def get_delivery_preference(
     *,
     owner: UserIdentity,
     source_app_key: str = "",
+    workspace: Optional[Workspace] = None,
 ) -> Dict[str, Any]:
     source_key = str(source_app_key or "").strip()
-    row = (
-        DeliveryPreference.objects.filter(
-            owner=owner,
-            workspace__isnull=True,
-            source_app_key=source_key,
-            notification_type_key="",
-        )
-        .order_by("-updated_at", "-created_at")
-        .first()
-    )
+    filters: Dict[str, Any] = {
+        "owner": owner,
+        "source_app_key": source_key,
+        "notification_type_key": "",
+    }
+    if workspace is None:
+        filters["workspace__isnull"] = True
+    else:
+        filters["workspace"] = workspace
+    row = DeliveryPreference.objects.filter(**filters).order_by("-updated_at", "-created_at").first()
     if row is None:
         return {
             "source_app_key": source_key,
@@ -422,11 +423,12 @@ def set_delivery_preference(
     source_app_key: str = "",
     in_app_enabled: bool,
     email_enabled: bool,
+    workspace: Optional[Workspace] = None,
 ) -> DeliveryPreference:
     source_key = str(source_app_key or "").strip()
     row, _created = DeliveryPreference.objects.update_or_create(
         owner=owner,
-        workspace=None,
+        workspace=workspace,
         source_app_key=source_key,
         notification_type_key="",
         defaults={

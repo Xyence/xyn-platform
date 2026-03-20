@@ -59,6 +59,18 @@ class OrchestrationOperatorApiTests(TestCase):
             subject=f"operator-{suffix}",
             email=f"operator-{suffix}@example.com",
         )
+        self.campaign_identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example",
+            subject=f"campaign-{suffix}",
+            email=f"campaign-{suffix}@example.com",
+        )
+        self.analyst_identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example",
+            subject=f"analyst-{suffix}",
+            email=f"analyst-{suffix}@example.com",
+        )
         self.workspace = Workspace.objects.create(name="Ops Workspace", slug=f"ops-{suffix}")
         WorkspaceMembership.objects.create(
             workspace=self.workspace,
@@ -66,6 +78,8 @@ class OrchestrationOperatorApiTests(TestCase):
             role="admin",
             termination_authority=True,
         )
+        WorkspaceMembership.objects.create(workspace=self.workspace, user_identity=self.campaign_identity, role="contributor")
+        WorkspaceMembership.objects.create(workspace=self.workspace, user_identity=self.analyst_identity, role="reader")
 
         self.pipeline = OrchestrationPipeline.objects.create(
             workspace=self.workspace,
@@ -499,6 +513,57 @@ class OrchestrationOperatorApiTests(TestCase):
         first = payload["events"][0]
         self.assertEqual(first["event_type"], "reconciled_state_published")
         self.assertEqual(first["reconciled_state_version"], "recon-filter")
+
+    def test_campaign_operator_can_read_runs_but_cannot_trigger_mutations(self):
+        run = self._create_run(status="queued")
+        create_payload = {
+            "workspace_id": str(self.workspace.id),
+            "pipeline_key": self.pipeline.key,
+            "trigger_key": "manual_operator",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.campaign_identity):
+            list_response = orchestration_runs_collection(
+                self._request("/xyn/api/orchestration/runs", data={"workspace_id": str(self.workspace.id)})
+            )
+            create_response = orchestration_runs_collection(
+                self._request("/xyn/api/orchestration/runs", method="post", data=json.dumps(create_payload))
+            )
+            rerun_response = orchestration_run_rerun(
+                self._request(
+                    f"/xyn/api/orchestration/runs/{run.id}/rerun",
+                    method="post",
+                    data=json.dumps({"workspace_id": str(self.workspace.id)}),
+                ),
+                str(run.id),
+            )
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(create_response.status_code, 403)
+        self.assertEqual(rerun_response.status_code, 403)
+
+    def test_read_only_analyst_can_read_runs_but_cannot_mutate(self):
+        run = self._create_run(status="queued")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.analyst_identity):
+            list_response = orchestration_runs_collection(
+                self._request("/xyn/api/orchestration/runs", data={"workspace_id": str(self.workspace.id)})
+            )
+            detail_response = orchestration_run_detail(
+                self._request(
+                    f"/xyn/api/orchestration/runs/{run.id}",
+                    data={"workspace_id": str(self.workspace.id)},
+                ),
+                str(run.id),
+            )
+            cancel_response = orchestration_run_cancel(
+                self._request(
+                    f"/xyn/api/orchestration/runs/{run.id}/cancel",
+                    method="post",
+                    data=json.dumps({"workspace_id": str(self.workspace.id), "summary": "nope"}),
+                ),
+                str(run.id),
+            )
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(cancel_response.status_code, 403)
 
 
 if __name__ == "__main__":

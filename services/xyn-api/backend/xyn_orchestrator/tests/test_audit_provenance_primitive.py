@@ -39,9 +39,16 @@ class AuditProvenancePrimitiveTests(TestCase):
             subject=f"prov-admin-{suffix}",
             email=f"prov-admin-{suffix}@example.com",
         )
+        self.reader_identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example",
+            subject=f"prov-reader-{suffix}",
+            email=f"prov-reader-{suffix}@example.com",
+        )
         self.workspace = Workspace.objects.create(slug=f"prov-{suffix}", name="Provenance Workspace")
         self.other_workspace = Workspace.objects.create(slug=f"prov-other-{suffix}", name="Other Provenance Workspace")
         WorkspaceMembership.objects.create(workspace=self.workspace, user_identity=self.identity, role="admin")
+        WorkspaceMembership.objects.create(workspace=self.workspace, user_identity=self.reader_identity, role="reader")
 
     def _request(self, path: str, *, method: str = "get", data=None):
         request = getattr(self.factory, method.lower())(path, data=data or {}, content_type="application/json")
@@ -291,3 +298,13 @@ class AuditProvenancePrimitiveTests(TestCase):
         self.assertEqual(normalized[0], "rule_result")
         self.assertEqual(normalized[1], "42")
 
+    def test_reader_cannot_access_provenance_operator_endpoints(self):
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.reader_identity):
+            events_response = audit_events_collection(
+                self._request("/xyn/api/audit-events", data={"workspace_id": str(self.workspace.id)})
+            )
+            links_response = provenance_links_collection(
+                self._request("/xyn/api/provenance-links", data={"workspace_id": str(self.workspace.id)})
+            )
+        self.assertEqual(events_response.status_code, 403)
+        self.assertEqual(links_response.status_code, 403)

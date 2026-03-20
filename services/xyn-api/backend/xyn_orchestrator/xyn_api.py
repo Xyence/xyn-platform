@@ -370,7 +370,12 @@ from .access_explorer import (
 from .app_authorization import (
     CAP_APP_READ,
     CAP_CAMPAIGNS_MANAGE,
+    CAP_INGEST_RUNS_READ,
     CAP_MATCH_REVIEW,
+    CAP_NOTIFICATION_TARGETS_MANAGE,
+    CAP_NOTIFICATIONS_READ,
+    CAP_PROVENANCE_READ,
+    CAP_REFRESHES_RUN,
     CAP_SOURCES_MANAGE,
     CAP_SUBSCRIBERS_MANAGE,
     CAP_WATCHES_MANAGE,
@@ -8466,10 +8471,24 @@ def _coerce_bool(value: Any, *, field: str) -> bool:
 @csrf_exempt
 @login_required
 def notification_targets_collection(request: HttpRequest) -> JsonResponse:
+    def _resolve_workspace_for_notifications(payload_workspace_id: str) -> Optional[Workspace]:
+        workspace_id = str(payload_workspace_id or "").strip()
+        if not workspace_id:
+            return None
+        return _resolve_workspace_for_identity(identity, workspace_id)
+
     if request.method == "GET":
         identity = _require_authenticated(request)
         if not identity:
             return JsonResponse({"error": "not authenticated"}, status=401)
+        workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace = _resolve_workspace_for_notifications(workspace_id)
+        if workspace is None:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         return JsonResponse({"targets": list_delivery_targets(owner=identity)})
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -8477,6 +8496,14 @@ def notification_targets_collection(request: HttpRequest) -> JsonResponse:
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace = _resolve_workspace_for_notifications(workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     address = str(payload.get("address") or "").strip().lower()
     if not address:
         return JsonResponse({"error": "address is required"}, status=400)
@@ -8512,6 +8539,14 @@ def notification_target_detail(request: HttpRequest, target_id: str) -> JsonResp
         if not identity:
             return JsonResponse({"error": "not authenticated"}, status=401)
         payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace = _resolve_workspace_for_identity(identity, workspace_id)
+        if workspace is None:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         if "enabled" not in payload:
             return JsonResponse({"error": "enabled is required"}, status=400)
         try:
@@ -8532,6 +8567,14 @@ def notification_target_detail(request: HttpRequest, target_id: str) -> JsonResp
         identity = _require_authenticated(request)
         if not identity:
             return JsonResponse({"error": "not authenticated"}, status=401)
+        workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace = _resolve_workspace_for_identity(identity, workspace_id)
+        if workspace is None:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         removed = remove_delivery_target(owner=identity, target_id=str(target_id))
         if not removed:
             return JsonResponse({"error": "delivery target not found"}, status=404)
@@ -8546,11 +8589,29 @@ def notification_preferences_detail(request: HttpRequest) -> JsonResponse:
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     if request.method == "GET":
+        workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace = _resolve_workspace_for_identity(identity, workspace_id)
+        if workspace is None:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATIONS_READ]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         source_app_key = str(request.GET.get("source_app_key") or "").strip()
-        return JsonResponse({"preference": get_delivery_preference(owner=identity, source_app_key=source_app_key)})
+        return JsonResponse(
+            {"preference": get_delivery_preference(owner=identity, source_app_key=source_app_key, workspace=workspace)}
+        )
     if request.method not in {"PUT", "POST"}:
         return JsonResponse({"error": "method not allowed"}, status=405)
     payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace = _resolve_workspace_for_identity(identity, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     source_app_key = str(payload.get("source_app_key") or "").strip()
     if "in_app_enabled" not in payload or "email_enabled" not in payload:
         return JsonResponse({"error": "in_app_enabled and email_enabled are required"}, status=400)
@@ -8564,8 +8625,9 @@ def notification_preferences_detail(request: HttpRequest) -> JsonResponse:
         source_app_key=source_app_key,
         in_app_enabled=in_app_enabled,
         email_enabled=email_enabled,
+        workspace=workspace,
     )
-    return JsonResponse({"preference": get_delivery_preference(owner=identity, source_app_key=source_app_key)})
+    return JsonResponse({"preference": get_delivery_preference(owner=identity, source_app_key=source_app_key, workspace=workspace)})
 
 
 def _serialize_tenant(tenant: Tenant) -> Dict[str, Any]:
@@ -31152,6 +31214,8 @@ def audit_events_collection(request: HttpRequest) -> JsonResponse:
         workspace = _provenance_workspace(identity, workspace_id)
     except PermissionDenied:
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_PROVENANCE_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     service = ProvenanceService()
     object_type = str(request.GET.get("object_type") or "").strip().lower()
     object_id = str(request.GET.get("object_id") or "").strip()
@@ -31189,6 +31253,8 @@ def provenance_links_collection(request: HttpRequest) -> JsonResponse:
     try:
         workspace = _provenance_workspace(identity, workspace_id)
     except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_PROVENANCE_READ]):
         return JsonResponse({"error": "forbidden"}, status=403)
     object_type = str(request.GET.get("object_type") or "").strip().lower()
     object_id = str(request.GET.get("object_id") or "").strip()
@@ -31323,8 +31389,7 @@ def source_connector_detail(request: HttpRequest, source_id: str) -> JsonRespons
     source = get_object_or_404(SourceConnector.objects.select_related("workspace", "last_run", "created_by"), id=source_id)
     if not _workspace_membership(identity, str(source.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
-    required_capabilities = [CAP_APP_READ] if request.method == "GET" else [CAP_SOURCES_MANAGE]
-    if not _require_workspace_capabilities(identity, str(source.workspace_id), required_capabilities):
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
         return JsonResponse({"error": "forbidden"}, status=403)
     service = SourceConnectorService()
     if request.method == "GET":
@@ -32130,6 +32195,8 @@ def orchestration_job_definitions_collection(request: HttpRequest) -> JsonRespon
         workspace = _orchestration_workspace(identity, workspace_id)
     except PermissionDenied:
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     qs = OrchestrationJobDefinition.objects.filter(pipeline__workspace=workspace).select_related("pipeline")
     if pipeline_key:
         qs = qs.filter(pipeline__key=pipeline_key)
@@ -32158,6 +32225,8 @@ def orchestration_schedules_collection(request: HttpRequest) -> JsonResponse:
     try:
         workspace = _orchestration_workspace(identity, workspace_id)
     except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
         return JsonResponse({"error": "forbidden"}, status=403)
     qs = OrchestrationJobSchedule.objects.filter(job_definition__pipeline__workspace=workspace).select_related("job_definition", "job_definition__pipeline")
     if pipeline_key:
@@ -32196,6 +32265,8 @@ def orchestration_dependency_graph(request: HttpRequest) -> JsonResponse:
     try:
         workspace = _orchestration_workspace(identity, workspace_id)
     except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
         return JsonResponse({"error": "forbidden"}, status=403)
     pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key)
     if pipeline is None:
@@ -32247,6 +32318,8 @@ def orchestration_publication_readiness(request: HttpRequest) -> JsonResponse:
     try:
         workspace = _orchestration_workspace(identity, workspace_id)
     except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
         return JsonResponse({"error": "forbidden"}, status=403)
 
     pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
@@ -32361,6 +32434,8 @@ def orchestration_domain_events_collection(request: HttpRequest) -> JsonResponse
         workspace = _orchestration_workspace(identity, workspace_id)
     except PermissionDenied:
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
 
     pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
     pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key) if pipeline_key else None
@@ -32415,6 +32490,8 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
             workspace = _orchestration_workspace(identity, workspace_id)
         except PermissionDenied:
             return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_REFRESHES_RUN]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key)
         if pipeline is None:
             return JsonResponse({"error": "pipeline not found"}, status=404)
@@ -32465,6 +32542,8 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
     try:
         workspace = _orchestration_workspace(identity, workspace_id)
     except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
         return JsonResponse({"error": "forbidden"}, status=403)
 
     qs = OrchestrationRun.objects.filter(workspace=workspace).select_related("pipeline")
@@ -32529,6 +32608,8 @@ def orchestration_run_detail(request: HttpRequest, run_id: str) -> JsonResponse:
     if not _workspace_membership(identity, str(run.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method == "GET":
+        if not _require_workspace_capabilities(identity, str(run.workspace_id), [CAP_INGEST_RUNS_READ]):
+            return JsonResponse({"error": "forbidden"}, status=403)
         context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
         if not context_workspace_id:
             return JsonResponse({"error": "workspace_id is required"}, status=400)
@@ -32548,6 +32629,8 @@ def orchestration_run_rerun(request: HttpRequest, run_id: str) -> JsonResponse:
         return JsonResponse({"error": "method not allowed"}, status=405)
     run = get_object_or_404(OrchestrationRun.objects.select_related("workspace", "pipeline"), id=run_id)
     if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(run.workspace_id), [CAP_REFRESHES_RUN]):
         return JsonResponse({"error": "forbidden"}, status=403)
     payload = _parse_json(request)
     context_workspace_id = str(payload.get("workspace_id") or "").strip()
@@ -32581,6 +32664,8 @@ def orchestration_run_cancel(request: HttpRequest, run_id: str) -> JsonResponse:
         return JsonResponse({"error": "method not allowed"}, status=405)
     run = get_object_or_404(OrchestrationRun.objects.select_related("workspace", "pipeline"), id=run_id)
     if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(run.workspace_id), [CAP_REFRESHES_RUN]):
         return JsonResponse({"error": "forbidden"}, status=403)
     payload = _parse_json(request)
     context_workspace_id = str(payload.get("workspace_id") or "").strip()
@@ -32631,6 +32716,8 @@ def orchestration_run_failure_ack(request: HttpRequest, run_id: str) -> JsonResp
         return JsonResponse({"error": "method not allowed"}, status=405)
     run = get_object_or_404(OrchestrationRun.objects.select_related("workspace", "pipeline"), id=run_id)
     if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(run.workspace_id), [CAP_REFRESHES_RUN]):
         return JsonResponse({"error": "forbidden"}, status=403)
     payload = _parse_json(request)
     context_workspace_id = str(payload.get("workspace_id") or "").strip()

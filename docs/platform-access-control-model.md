@@ -30,6 +30,7 @@ Primary capability families:
 - Workspace membership role maps to default app role.
 - Platform roles can elevate app role.
 - Explicit role bindings at `workspace` or `application` scope can directly assign canonical app roles.
+- Notification target + preference management uses a workspace context for capability checks while preserving owner-scoped target storage.
 
 ## Role mapping defaults
 
@@ -47,3 +48,4 @@ Primary capability families:
 - Add UI management for assigning canonical app roles via scoped bindings.
 - Add finer row/partition policy checks where required (for example jurisdiction-level restrictions).
 - Keep capability-to-endpoint coverage docs synchronized as new platform APIs are added.
+- Align owner-scoped notification-target preference endpoints with workspace capability context when campaign/workspace-scoped target management UX is introduced.

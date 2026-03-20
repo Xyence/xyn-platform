@@ -240,6 +240,18 @@ class SourceConnectorApiTests(TestCase):
             )
         self.assertEqual(response.status_code, 403)
 
+    def test_campaign_operator_cannot_read_source_detail(self):
+        source = self._create_source(mode="manual")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.operator_identity):
+            response = source_connector_detail(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}",
+                    data={"workspace_id": str(self.workspace.id)},
+                ),
+                source["id"],
+            )
+        self.assertEqual(response.status_code, 403)
+
     def test_models_exist(self):
         self._create_source(mode="manual")
         self.assertEqual(SourceConnector.objects.filter(workspace=self.workspace).count(), 1)

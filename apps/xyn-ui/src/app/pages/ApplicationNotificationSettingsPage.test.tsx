@@ -76,11 +76,13 @@ describe("ApplicationNotificationSettingsPage", () => {
     });
   });
 
+  const workspaceId = "ws-1";
+
   function renderPage(path = "/app/notifications/settings") {
     return render(
       <MemoryRouter initialEntries={[path]}>
         <Routes>
-          <Route path="/app/notifications/settings" element={<ApplicationNotificationSettingsPage />} />
+          <Route path="/app/notifications/settings" element={<ApplicationNotificationSettingsPage workspaceId={workspaceId} />} />
         </Routes>
       </MemoryRouter>
     );
@@ -111,6 +113,7 @@ describe("ApplicationNotificationSettingsPage", () => {
         address: "two@example.com",
         enabled: true,
         is_primary: false,
+        workspace_id: workspaceId,
       })
     );
     await waitForSettled();
@@ -124,7 +127,7 @@ describe("ApplicationNotificationSettingsPage", () => {
     await act(async () => {
       await user.click(screen.getByRole("button", { name: "Disable" }));
     });
-    await waitFor(() => expect(apiMocks.setNotificationDeliveryTargetEnabled).toHaveBeenCalledWith("t1", false));
+    await waitFor(() => expect(apiMocks.setNotificationDeliveryTargetEnabled).toHaveBeenCalledWith("t1", false, workspaceId));
     await waitForSettled();
   });
 
@@ -141,6 +144,7 @@ describe("ApplicationNotificationSettingsPage", () => {
         source_app_key: "",
         in_app_enabled: false,
         email_enabled: true,
+        workspace_id: workspaceId,
       })
     );
     await waitForSettled();

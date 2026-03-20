@@ -5370,9 +5370,13 @@ export async function markAllApplicationNotificationsRead(): Promise<Application
   return handle<ApplicationNotificationReadAllResponse>(response);
 }
 
-export async function listNotificationDeliveryTargets(): Promise<NotificationDeliveryTargetsResponse> {
+export async function listNotificationDeliveryTargets(workspaceId: string): Promise<NotificationDeliveryTargetsResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets`, { credentials: "include" });
+  const url = new URL(`${apiBaseUrl}/xyn/api/notifications/targets`);
+  if (workspaceId) {
+    url.searchParams.set("workspace_id", workspaceId);
+  }
+  const response = await apiFetch(url.toString(), { credentials: "include" });
   return handle<NotificationDeliveryTargetsResponse>(response);
 }
 
@@ -5380,6 +5384,7 @@ export async function createNotificationDeliveryTarget(payload: {
   address: string;
   enabled?: boolean;
   is_primary?: boolean;
+  workspace_id: string;
 }): Promise<NotificationDeliveryTargetResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets`, {
@@ -5391,31 +5396,45 @@ export async function createNotificationDeliveryTarget(payload: {
   return handle<NotificationDeliveryTargetResponse>(response);
 }
 
-export async function setNotificationDeliveryTargetEnabled(targetId: string, enabled: boolean): Promise<NotificationDeliveryTargetResponse> {
+export async function setNotificationDeliveryTargetEnabled(
+  targetId: string,
+  enabled: boolean,
+  workspaceId: string
+): Promise<NotificationDeliveryTargetResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets/${encodeURIComponent(targetId)}`, {
     method: "PATCH",
     credentials: "include",
     headers: buildHeaders(),
-    body: JSON.stringify({ enabled }),
+    body: JSON.stringify({ enabled, workspace_id: workspaceId }),
   });
   return handle<NotificationDeliveryTargetResponse>(response);
 }
 
-export async function removeNotificationDeliveryTarget(targetId: string): Promise<{ status: string }> {
+export async function removeNotificationDeliveryTarget(targetId: string, workspaceId: string): Promise<{ status: string }> {
   const apiBaseUrl = resolveApiBaseUrl();
-  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets/${encodeURIComponent(targetId)}`, {
+  const url = new URL(`${apiBaseUrl}/xyn/api/notifications/targets/${encodeURIComponent(targetId)}`);
+  if (workspaceId) {
+    url.searchParams.set("workspace_id", workspaceId);
+  }
+  const response = await apiFetch(url.toString(), {
     method: "DELETE",
     credentials: "include",
   });
   return handle<{ status: string }>(response);
 }
 
-export async function getNotificationDeliveryPreference(sourceAppKey = ""): Promise<NotificationDeliveryPreferenceResponse> {
+export async function getNotificationDeliveryPreference(
+  sourceAppKey = "",
+  workspaceId = ""
+): Promise<NotificationDeliveryPreferenceResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/notifications/preferences`);
   if (sourceAppKey.trim()) {
     url.searchParams.set("source_app_key", sourceAppKey.trim());
+  }
+  if (workspaceId) {
+    url.searchParams.set("workspace_id", workspaceId);
   }
   const response = await apiFetch(url.toString(), { credentials: "include" });
   return handle<NotificationDeliveryPreferenceResponse>(response);
@@ -5425,6 +5444,7 @@ export async function setNotificationDeliveryPreference(payload: {
   source_app_key?: string;
   in_app_enabled: boolean;
   email_enabled: boolean;
+  workspace_id: string;
 }): Promise<NotificationDeliveryPreferenceResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/preferences`, {

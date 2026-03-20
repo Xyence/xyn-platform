@@ -19,7 +19,11 @@ function verificationLabel(value: string): string {
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
-export default function ApplicationNotificationSettingsPage() {
+type ApplicationNotificationSettingsPageProps = {
+  workspaceId?: string;
+};
+
+export default function ApplicationNotificationSettingsPage({ workspaceId = "" }: ApplicationNotificationSettingsPageProps) {
   const [targets, setTargets] = useState<NotificationDeliveryTarget[]>([]);
   const [preference, setPreference] = useState<NotificationDeliveryPreference>({
     source_app_key: "",
@@ -36,9 +40,14 @@ export default function ApplicationNotificationSettingsPage() {
     try {
       setLoading(true);
       setError(null);
+      const resolvedWorkspaceId = workspaceId.trim();
+      if (!resolvedWorkspaceId) {
+        setError("Workspace context is required to manage notification settings.");
+        return;
+      }
       const [targetsResponse, preferenceResponse] = await Promise.all([
-        listNotificationDeliveryTargets(),
-        getNotificationDeliveryPreference(""),
+        listNotificationDeliveryTargets(resolvedWorkspaceId),
+        getNotificationDeliveryPreference("", resolvedWorkspaceId),
       ]);
       setTargets(targetsResponse.targets || []);
       setPreference(
@@ -53,7 +62,7 @@ export default function ApplicationNotificationSettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     void load();
@@ -71,6 +80,7 @@ export default function ApplicationNotificationSettingsPage() {
           address,
           enabled: true,
           is_primary: newIsPrimary,
+          workspace_id: workspaceId,
         });
         setNewEmail("");
         setNewIsPrimary(false);
@@ -81,7 +91,7 @@ export default function ApplicationNotificationSettingsPage() {
         setSaving(false);
       }
     },
-    [load, newEmail, newIsPrimary]
+    [load, newEmail, newIsPrimary, workspaceId]
   );
 
   const onToggleTarget = useCallback(
@@ -89,7 +99,7 @@ export default function ApplicationNotificationSettingsPage() {
       try {
         setSaving(true);
         setError(null);
-        await setNotificationDeliveryTargetEnabled(target.id, !target.enabled);
+        await setNotificationDeliveryTargetEnabled(target.id, !target.enabled, workspaceId);
         await load();
       } catch (err) {
         setError((err as Error).message);
@@ -105,7 +115,7 @@ export default function ApplicationNotificationSettingsPage() {
       try {
         setSaving(true);
         setError(null);
-        await removeNotificationDeliveryTarget(target.id);
+        await removeNotificationDeliveryTarget(target.id, workspaceId);
         await load();
       } catch (err) {
         setError((err as Error).message);
@@ -129,6 +139,7 @@ export default function ApplicationNotificationSettingsPage() {
           source_app_key: candidate.source_app_key || "",
           in_app_enabled: !!candidate.in_app_enabled,
           email_enabled: !!candidate.email_enabled,
+          workspace_id: workspaceId,
         });
         setPreference(response.preference || candidate);
       } catch (err) {
@@ -137,7 +148,7 @@ export default function ApplicationNotificationSettingsPage() {
         setSaving(false);
       }
     },
-    [preference]
+    [preference, workspaceId]
   );
 
   return (
