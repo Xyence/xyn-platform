@@ -213,6 +213,24 @@ class OrchestrationPublicationContractTests(TestCase):
                 reconciled_state_version="missing-v1",
             )
 
+    def test_readiness_requires_current_pointer(self):
+        run = self._new_run()
+        self._succeed_job(run_id=str(run.id), job=self.rebuild_job, output_change_token="recon-v1")
+        ReconciledStateCurrentPointer.objects.filter(
+            workspace=self.workspace,
+            pipeline=self.pipeline,
+            scope_jurisdiction="tx",
+            scope_source="mls",
+        ).delete()
+        readiness = self.publication.evaluation_readiness(
+            workspace_id=str(self.workspace.id),
+            pipeline_id=str(self.pipeline.id),
+            jurisdiction="tx",
+            source="mls",
+        )
+        self.assertFalse(readiness.ready)
+        self.assertEqual(readiness.reason, "reconciled_state_not_published")
+
     def test_signal_publication_links_to_latest_reconciled_state_version(self):
         run = self._new_run()
         self._succeed_job(run_id=str(run.id), job=self.rebuild_job, output_change_token="recon-v2")

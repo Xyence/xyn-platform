@@ -165,22 +165,7 @@ class StagePublicationService:
                 signal_set_version=str(getattr(pointer_row.publication, "signal_set_version", "") or ""),
             )
 
-        publication = self.latest_reconciled_publication(
-            workspace_id=workspace_id,
-            jurisdiction=jurisdiction,
-            source=source,
-            pipeline_id=pipeline_id,
-            pipeline_key=pipeline_key,
-        )
-        if publication is None:
-            return EvaluationReadiness(ready=False, reason="reconciled_state_not_published")
-        return EvaluationReadiness(
-            ready=True,
-            reason="ready",
-            publication_id=str(publication.id),
-            reconciled_state_version=str(publication.reconciled_state_version or ""),
-            signal_set_version=str(publication.signal_set_version or ""),
-        )
+        return EvaluationReadiness(ready=False, reason="reconciled_state_not_published")
 
     def promote_reconciled_publication(
         self, *, publication: OrchestrationStagePublication

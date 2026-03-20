@@ -48,6 +48,7 @@ class WatchEvaluationInput:
     event_key: str = ""
     event_ref: dict[str, Any] = field(default_factory=dict)
     watch_ids: tuple[str, ...] = tuple()
+    reconciled_state_version: str = ""
     run_id: str = ""
     correlation_id: str = ""
     chain_id: str = ""

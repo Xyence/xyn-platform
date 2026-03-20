@@ -376,6 +376,9 @@ class WatchingPrimitiveApiTests(TestCase):
                 )
             )
         self.assertEqual(after.status_code, 201)
+        match = WatchMatchEvent.objects.filter(workspace=self.workspace).first()
+        self.assertIsNotNone(match)
+        self.assertEqual(match.reconciled_state_version, "recon-allow")
 
     def test_evaluate_rejects_when_requested_reconciled_version_is_not_published(self):
         watch = self._create_watch(lifecycle_state="active")

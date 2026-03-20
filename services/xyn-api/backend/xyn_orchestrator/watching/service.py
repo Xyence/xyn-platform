@@ -210,6 +210,7 @@ class WatchService:
         if not workspace_id:
             raise ValueError("workspace_id is required")
         event_ref = payload.event_ref if isinstance(payload.event_ref, dict) else {}
+        reconciled_state_version = str(payload.reconciled_state_version or "").strip()
         qs = self._repository.list_watches(workspace_id=workspace_id)
         if payload.watch_ids:
             qs = qs.filter(id__in=list(payload.watch_ids))
@@ -252,6 +253,7 @@ class WatchService:
                     notification_intent=result.notification_intent,
                     event_fingerprint=event_fingerprint,
                     idempotency_key=resolved_idempotency_key,
+                    reconciled_state_version=reconciled_state_version,
                     run_id=str(payload.run_id or ""),
                     correlation_id=str(payload.correlation_id or ""),
                     chain_id=str(payload.chain_id or ""),
@@ -383,6 +385,7 @@ def serialize_watch_match(row: WatchMatchEvent) -> dict[str, Any]:
         "notification_intent": _as_dict(row.notification_intent_json),
         "event_fingerprint": str(row.event_fingerprint or ""),
         "idempotency_key": str(row.idempotency_key or ""),
+        "reconciled_state_version": str(row.reconciled_state_version or ""),
         "run_id": str(row.run_id) if row.run_id else None,
         "correlation_id": str(row.correlation_id or ""),
         "chain_id": str(row.chain_id or ""),

@@ -31131,6 +31131,7 @@ def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
                 event_key=str(payload.get("event_key") or "").strip(),
                 event_ref=evaluated_event_ref,
                 watch_ids=tuple(str(item).strip() for item in watch_ids if str(item).strip()),
+                reconciled_state_version=str(readiness.reconciled_state_version or ""),
                 run_id=str(payload.get("run_id") or "").strip(),
                 correlation_id=str(payload.get("correlation_id") or "").strip(),
                 chain_id=str(payload.get("chain_id") or "").strip(),
