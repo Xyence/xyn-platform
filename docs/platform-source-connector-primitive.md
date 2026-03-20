@@ -64,6 +64,11 @@ Activation does not create a scheduler loop; it marks the source as ready/active
 `SourceConnector` is the source definition and lifecycle object.
 Derived datasets produced by source processing are output/read-model artifacts (for example orchestration outputs and artifacts), not interchangeable source-definition objects in v1.
 
+## Storage Contract
+
+Ingest artifacts (raw snapshots, normalized outputs, retained parser results) must use the canonical storage contract defined in `docs/platform-storage-contract.md`.
+Source connectors should not persist blob/file data directly on the source model.
+
 ## Relationship to Other Platform Primitives
 
 - orchestration: source execution contracts can produce orchestration run requests (`run_type` + `target_ref` + `scope_source`)

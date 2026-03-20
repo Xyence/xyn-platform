@@ -3874,6 +3874,49 @@ class OrchestrationStagePublication(models.Model):
         return f"{self.pipeline_id}:{self.stage_key}:{self.job_run_id}"
 
 
+class IngestArtifactRecord(models.Model):
+    """Durable metadata/provenance record for ingest-related artifacts."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="ingest_artifacts")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifacts"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifacts"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifacts"
+    )
+    artifact_id = models.UUIDField(db_index=True)
+    artifact_uri = models.TextField(blank=True, default="")
+    storage_provider = models.CharField(max_length=32, blank=True, default="")
+    storage_key = models.TextField(blank=True, default="")
+    content_type = models.CharField(max_length=255, blank=True, default="")
+    byte_length = models.BigIntegerField(null=True, blank=True)
+    sha256 = models.CharField(max_length=64, blank=True, default="")
+    snapshot_type = models.CharField(max_length=64, blank=True, default="")
+    retention_class = models.CharField(max_length=32, blank=True, default="")
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["workspace", "artifact_id"], name="ix_ingest_artifact_workspace"),
+            models.Index(fields=["workspace", "snapshot_type"], name="ix_ingest_artifact_snapshot"),
+            models.Index(fields=["workspace", "retention_class"], name="ix_ingest_artifact_retention"),
+            models.Index(fields=["workspace", "created_at"], name="ix_ingest_artifact_created"),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "artifact_id"], name="uniq_ingest_artifact_workspace"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.artifact_id}"
+
+
 class PlatformDomainEvent(models.Model):
     """Thin durable outbox-style domain event emitted from publication boundaries."""
 
