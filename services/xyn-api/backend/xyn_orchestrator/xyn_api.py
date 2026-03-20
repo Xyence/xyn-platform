@@ -83,6 +83,7 @@ from .models import (
     OrchestrationJobRunAttempt,
     OrchestrationJobRunOutput,
     OrchestrationStagePublication,
+    ReconciledStateCurrentPointer,
     PlatformDomainEvent,
     Goal,
     Application,
@@ -31909,6 +31910,23 @@ def _serialize_stage_publication(publication: Optional[OrchestrationStagePublica
     }
 
 
+def _serialize_reconciled_pointer(pointer: Optional[ReconciledStateCurrentPointer]) -> Optional[Dict[str, Any]]:
+    if pointer is None:
+        return None
+    return {
+        "id": str(pointer.id),
+        "workspace_id": str(pointer.workspace_id),
+        "pipeline_id": str(pointer.pipeline_id),
+        "publication_id": str(pointer.publication_id) if pointer.publication_id else None,
+        "reconciled_state_version": str(pointer.reconciled_state_version or ""),
+        "scope_jurisdiction": str(pointer.scope_jurisdiction or ""),
+        "scope_source": str(pointer.scope_source or ""),
+        "metadata": pointer.metadata_json if isinstance(pointer.metadata_json, dict) else {},
+        "promoted_at": pointer.promoted_at.isoformat() if pointer.promoted_at else None,
+        "updated_at": pointer.updated_at.isoformat() if pointer.updated_at else None,
+    }
+
+
 def _serialize_domain_event(event: PlatformDomainEvent) -> Dict[str, Any]:
     return {
         "id": str(event.id),
@@ -32363,6 +32381,20 @@ def orchestration_publication_readiness(request: HttpRequest) -> JsonResponse:
         required_reconciled_state_version=required_reconciled_state_version,
     )
 
+    pointer_qs = ReconciledStateCurrentPointer.objects.filter(workspace=workspace)
+    if pipeline is not None:
+        pointer_qs = pointer_qs.filter(pipeline=pipeline)
+    if jurisdiction:
+        pointer_qs = pointer_qs.filter(scope_jurisdiction=jurisdiction)
+    if source:
+        pointer_qs = pointer_qs.filter(scope_source=source)
+    current_pointer = pointer_qs.order_by("-promoted_at", "-updated_at").first()
+    history_rows = list(
+        base.filter(stage_key="property_graph_rebuild", stage_state="published")
+        .exclude(reconciled_state_version="")
+        .order_by("-published_at", "-updated_at")[:10]
+    )
+
     gating_qs = OrchestrationJobRun.objects.filter(
         workspace=workspace,
         status="skipped",
@@ -32412,11 +32444,13 @@ def orchestration_publication_readiness(request: HttpRequest) -> JsonResponse:
                 "reconciled_state_version": readiness.reconciled_state_version or "",
                 "signal_set_version": readiness.signal_set_version or "",
             },
+            "current_pointer": _serialize_reconciled_pointer(current_pointer),
             "latest_publications": {
                 "source_normalization": _serialize_stage_publication(normalized),
                 "property_graph_rebuild": _serialize_stage_publication(reconciled),
                 "signal_matching": _serialize_stage_publication(signal),
             },
+            "publication_history": [_serialize_stage_publication(row) for row in history_rows],
             "recent_gating_decisions": gating_rows,
         }
     )

@@ -1,4 +1,7 @@
 import json
+import os
+import shutil
+import tempfile
 import uuid
 from datetime import timedelta
 from unittest import mock
@@ -44,6 +47,8 @@ from xyn_orchestrator.xyn_api import (
 
 class OrchestrationOperatorApiTests(TestCase):
     def setUp(self):
+        self._workspace_root = tempfile.mkdtemp(prefix="xyn-test-workspaces-")
+        os.environ["XYN_WORKSPACE_ROOT"] = self._workspace_root
         self.factory = RequestFactory()
         suffix = uuid.uuid4().hex[:8]
         user_model = get_user_model()
@@ -126,6 +131,11 @@ class OrchestrationOperatorApiTests(TestCase):
             metadata_json={"jurisdictions": ["tx"], "sources": ["mls"]},
         )
         self.lifecycle = OrchestrationLifecycleService()
+
+    def tearDown(self):
+        if self._workspace_root and os.path.isdir(self._workspace_root):
+            shutil.rmtree(self._workspace_root, ignore_errors=True)
+        os.environ.pop("XYN_WORKSPACE_ROOT", None)
 
     def _request(self, path: str, *, method: str = "get", data=None):
         request = getattr(self.factory, method.lower())(path, data=data or {}, content_type="application/json")
@@ -469,6 +479,15 @@ class OrchestrationOperatorApiTests(TestCase):
         self.assertEqual(payload["evaluation_readiness"]["reason"], "reconciled_state_version_not_published")
         self.assertEqual(
             payload["latest_publications"]["property_graph_rebuild"]["reconciled_state_version"],
+            "recon-v-ready",
+        )
+        self.assertEqual(
+            payload["current_pointer"]["reconciled_state_version"],
+            "recon-v-ready",
+        )
+        self.assertGreaterEqual(len(payload["publication_history"]), 1)
+        self.assertEqual(
+            payload["publication_history"][0]["reconciled_state_version"],
             "recon-v-ready",
         )
         reason_codes = {item["reason_code"] for item in payload["recent_gating_decisions"]}

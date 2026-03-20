@@ -7,6 +7,7 @@ from xyn_orchestrator.models import (
     OrchestrationJobDependency,
     OrchestrationJobRun,
     OrchestrationPipeline,
+    OrchestrationStagePublication,
     PlatformDomainEvent,
     ReconciledStateCurrentPointer,
     UserIdentity,
@@ -196,6 +197,14 @@ class OrchestrationPublicationContractTests(TestCase):
         self.assertEqual(pointer.reconciled_state_version, "recon-v2")
         self.assertEqual(
             OrchestrationJobRun.objects.filter(job_definition=self.rebuild_job).count(),
+            2,
+        )
+        self.assertEqual(
+            OrchestrationStagePublication.objects.filter(
+                workspace=self.workspace,
+                pipeline=self.pipeline,
+                stage_key=STAGE_PROPERTY_GRAPH_REBUILD,
+            ).count(),
             2,
         )
         self.assertEqual(

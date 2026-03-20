@@ -45,6 +45,8 @@ Current published reconciled state is anchored by a dedicated pointer:
 - Reconciled publication readiness is durable and queryable through stage publication records.
 - `output_change_token` is a change signal, not a substitute for the Stage C publish boundary.
 - Downstream readers should resolve the current reconciled version via `ReconciledStateCurrentPointer` unless an explicit version is requested.
+- Historical published versions remain inspectable via stage publication history; promotion only updates the current pointer.
+- Operator/read APIs expose `current_pointer` and `publication_history` for partition-scoped inspection.
 
 ## Domain Events (v1)
 
