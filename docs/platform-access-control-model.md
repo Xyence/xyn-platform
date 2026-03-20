@@ -45,7 +45,11 @@ Primary capability families:
 
 ## Follow-up TODOs
 
-- Add UI management for assigning canonical app roles via scoped bindings.
-- Add finer row/partition policy checks where required (for example jurisdiction-level restrictions).
-- Keep capability-to-endpoint coverage docs synchronized as new platform APIs are added.
-- Align owner-scoped notification-target preference endpoints with workspace capability context when campaign/workspace-scoped target management UX is introduced.
+## Post-DealFinder Authorization Follow-ons (Non-blocking)
+
+- UI capability source of truth: surface canonical capability payloads to the UI and replace workspace-role heuristics with capability-driven gating.
+- UI validation/build: clean up root-owned `tsconfig.tsbuildinfo` in `apps/xyn-ui` and run full `npm run build` in CI.
+- Notification target model evolution: consider shared/team-scoped delivery targets instead of owner-only targets (optional enhancement).
+- Finer-grained authorization: add row/partition/jurisdiction-level policy checks in service/repository paths (post-testing hardening).
+- Role assignment/identity integration: persist role assignments, add UI management, and map IdP/OIDC claims to canonical roles (post-testing hardening).
+- Legacy endpoint alignment: migrate remaining ad hoc auth patterns (for example legacy runtime run APIs) onto canonical capabilities (post-testing hardening).
