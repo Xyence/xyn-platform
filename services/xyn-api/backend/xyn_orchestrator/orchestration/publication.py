@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from django.db import transaction
+from django.utils import timezone
 
 from xyn_orchestrator.models import (
     OrchestrationJobRun,
     OrchestrationPipeline,
     OrchestrationStagePublication,
+    ReconciledStateCurrentPointer,
 )
 
 from .domain_events import DomainEventService
@@ -138,6 +140,31 @@ class StagePublicationService:
                 signal_set_version=str(row.signal_set_version or ""),
             )
 
+        pointer = ReconciledStateCurrentPointer.objects.filter(
+            workspace_id=workspace_id,
+            scope_jurisdiction=str(jurisdiction or "").strip(),
+            scope_source=str(source or "").strip(),
+        )
+        if pipeline_id:
+            pointer = pointer.filter(pipeline_id=pipeline_id)
+        elif pipeline_key:
+            pipeline = OrchestrationPipeline.objects.filter(
+                workspace_id=workspace_id,
+                key=str(pipeline_key or "").strip(),
+            ).first()
+            if pipeline is None:
+                return EvaluationReadiness(ready=False, reason="reconciled_state_not_published")
+            pointer = pointer.filter(pipeline=pipeline)
+        pointer_row = pointer.order_by("-promoted_at", "-updated_at").first()
+        if pointer_row and pointer_row.reconciled_state_version:
+            return EvaluationReadiness(
+                ready=True,
+                reason="ready",
+                publication_id=str(pointer_row.publication_id or ""),
+                reconciled_state_version=str(pointer_row.reconciled_state_version or ""),
+                signal_set_version=str(getattr(pointer_row.publication, "signal_set_version", "") or ""),
+            )
+
         publication = self.latest_reconciled_publication(
             workspace_id=workspace_id,
             jurisdiction=jurisdiction,
@@ -154,6 +181,73 @@ class StagePublicationService:
             reconciled_state_version=str(publication.reconciled_state_version or ""),
             signal_set_version=str(publication.signal_set_version or ""),
         )
+
+    def promote_reconciled_publication(
+        self, *, publication: OrchestrationStagePublication
+    ) -> ReconciledStateCurrentPointer:
+        if str(publication.stage_key or "") != STAGE_PROPERTY_GRAPH_REBUILD:
+            raise ValueError("Only property_graph_rebuild publications can be promoted.")
+        if str(publication.stage_state or "") != "published":
+            raise ValueError("Publication is not marked as published.")
+        version = str(publication.reconciled_state_version or "").strip()
+        if not version:
+            raise ValueError("Publication does not include a reconciled_state_version.")
+
+        pointer, _created = ReconciledStateCurrentPointer.objects.update_or_create(
+            workspace_id=publication.workspace_id,
+            pipeline_id=publication.pipeline_id,
+            scope_jurisdiction=str(publication.scope_jurisdiction or "").strip(),
+            scope_source=str(publication.scope_source or "").strip(),
+            defaults={
+                "publication": publication,
+                "reconciled_state_version": version,
+                "promoted_at": timezone.now(),
+                "metadata_json": {
+                    "publication_id": str(publication.id),
+                    "run_id": str(publication.run_id),
+                    "job_run_id": str(publication.job_run_id),
+                },
+            },
+        )
+        return pointer
+
+    def promote_reconciled_state_version(
+        self,
+        *,
+        workspace_id: str,
+        pipeline_id: str = "",
+        pipeline_key: str = "",
+        jurisdiction: str = "",
+        source: str = "",
+        reconciled_state_version: str,
+    ) -> ReconciledStateCurrentPointer:
+        version = str(reconciled_state_version or "").strip()
+        if not version:
+            raise ValueError("reconciled_state_version is required.")
+
+        qs = OrchestrationStagePublication.objects.filter(
+            workspace_id=workspace_id,
+            stage_key=STAGE_PROPERTY_GRAPH_REBUILD,
+            stage_state="published",
+            scope_jurisdiction=str(jurisdiction or "").strip(),
+            scope_source=str(source or "").strip(),
+            reconciled_state_version=version,
+        )
+        if pipeline_id:
+            qs = qs.filter(pipeline_id=pipeline_id)
+        elif pipeline_key:
+            pipeline = OrchestrationPipeline.objects.filter(
+                workspace_id=workspace_id,
+                key=str(pipeline_key or "").strip(),
+            ).first()
+            if pipeline is None:
+                raise ValueError("Pipeline not found for promotion.")
+            qs = qs.filter(pipeline=pipeline)
+
+        publication = qs.order_by("-published_at", "-updated_at").first()
+        if publication is None:
+            raise ValueError("Reconciled publication not found for promotion.")
+        return self.promote_reconciled_publication(publication=publication)
 
     @transaction.atomic
     def record_stage_publication(self, *, job_run: OrchestrationJobRun) -> OrchestrationStagePublication | None:
@@ -240,5 +334,7 @@ class StagePublicationService:
                 )
             )
             publication.refresh_from_db()
+        if stage_key == STAGE_PROPERTY_GRAPH_REBUILD and publication.stage_state == "published":
+            self.promote_reconciled_publication(publication=publication)
         DomainEventService().emit_for_stage_publication(publication)
         return publication

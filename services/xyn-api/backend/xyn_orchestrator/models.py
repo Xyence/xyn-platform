@@ -3874,6 +3874,49 @@ class OrchestrationStagePublication(models.Model):
         return f"{self.pipeline_id}:{self.stage_key}:{self.job_run_id}"
 
 
+class ReconciledStateCurrentPointer(models.Model):
+    """Atomic pointer to the current published reconciled state per scope."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="current_reconciled_pointers")
+    pipeline = models.ForeignKey(
+        OrchestrationPipeline, on_delete=models.CASCADE, related_name="current_reconciled_pointers"
+    )
+    publication = models.ForeignKey(
+        OrchestrationStagePublication,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="current_reconciled_pointers",
+    )
+    reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    promoted_at = models.DateTimeField(default=timezone.now, db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-promoted_at", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "pipeline", "scope_jurisdiction", "scope_source"],
+                name="uniq_recon_ptr_scope",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["workspace", "pipeline", "scope_jurisdiction", "scope_source", "promoted_at"],
+                name="ix_recon_ptr_scope_time",
+            ),
+            models.Index(fields=["workspace", "reconciled_state_version"], name="ix_recon_ptr_version"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.pipeline_id}:{self.reconciled_state_version}"
+
+
 class IngestArtifactRecord(models.Model):
     """Durable metadata/provenance record for ingest-related artifacts."""
 

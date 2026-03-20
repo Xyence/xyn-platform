@@ -8,6 +8,7 @@ from xyn_orchestrator.models import (
     OrchestrationJobRun,
     OrchestrationPipeline,
     PlatformDomainEvent,
+    ReconciledStateCurrentPointer,
     UserIdentity,
     Workspace,
 )
@@ -168,6 +169,49 @@ class OrchestrationPublicationContractTests(TestCase):
         )
         self.assertTrue(readiness.ready)
         self.assertEqual(readiness.reconciled_state_version, "recon-v1")
+
+    def test_current_pointer_created_on_first_publish(self):
+        run = self._new_run()
+        self._succeed_job(run_id=str(run.id), job=self.rebuild_job, output_change_token="recon-v1")
+        pointer = ReconciledStateCurrentPointer.objects.get(
+            workspace=self.workspace,
+            pipeline=self.pipeline,
+            scope_jurisdiction="tx",
+            scope_source="mls",
+        )
+        self.assertEqual(pointer.reconciled_state_version, "recon-v1")
+        self.assertIsNotNone(pointer.publication_id)
+
+    def test_current_pointer_updates_on_new_publish(self):
+        run1 = self._new_run()
+        self._succeed_job(run_id=str(run1.id), job=self.rebuild_job, output_change_token="recon-v1")
+        run2 = self._new_run()
+        self._succeed_job(run_id=str(run2.id), job=self.rebuild_job, output_change_token="recon-v2")
+        pointer = ReconciledStateCurrentPointer.objects.get(
+            workspace=self.workspace,
+            pipeline=self.pipeline,
+            scope_jurisdiction="tx",
+            scope_source="mls",
+        )
+        self.assertEqual(pointer.reconciled_state_version, "recon-v2")
+        self.assertEqual(
+            OrchestrationJobRun.objects.filter(job_definition=self.rebuild_job).count(),
+            2,
+        )
+        self.assertEqual(
+            pointer.publication.reconciled_state_version,
+            "recon-v2",
+        )
+
+    def test_promotion_requires_existing_publication(self):
+        with self.assertRaises(ValueError):
+            self.publication.promote_reconciled_state_version(
+                workspace_id=str(self.workspace.id),
+                pipeline_id=str(self.pipeline.id),
+                jurisdiction="tx",
+                source="mls",
+                reconciled_state_version="missing-v1",
+            )
 
     def test_signal_publication_links_to_latest_reconciled_state_version(self):
         run = self._new_run()

@@ -22,6 +22,11 @@ The platform persists stage publication markers through orchestration stage publ
 
 Markers are partition-aware (`workspace`, `pipeline`, `jurisdiction`, `source`).
 
+Current published reconciled state is anchored by a dedicated pointer:
+
+- `ReconciledStateCurrentPointer` records the single current `reconciled_state_version` per workspace/pipeline/partition.
+- Promotion to current is an atomic pointer update; historical publications remain intact.
+
 ## Required Boundary Rules
 
 1. Stage B completion does not imply evaluation-readiness.
@@ -39,6 +44,7 @@ Markers are partition-aware (`workspace`, `pipeline`, `jurisdiction`, `source`).
 - Stage F notification emission is skipped when Stage E has no durable outputs.
 - Reconciled publication readiness is durable and queryable through stage publication records.
 - `output_change_token` is a change signal, not a substitute for the Stage C publish boundary.
+- Downstream readers should resolve the current reconciled version via `ReconciledStateCurrentPointer` unless an explicit version is requested.
 
 ## Domain Events (v1)
 
