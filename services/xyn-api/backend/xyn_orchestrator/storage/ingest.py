@@ -153,8 +153,16 @@ class IngestStorageService:
                     ProvenanceLinkInput(
                         workspace_id=str(workspace.id),
                         relationship_type="ingest_snapshot",
-                        source_ref=object_ref("source_connector", str(source_connector.id), workspace_id=str(workspace.id)),
-                        target_ref=object_ref("runtime_artifact", str(stored.artifact_id), workspace_id=str(workspace.id)),
+                        source_ref=object_ref(
+                            object_family="source_connector",
+                            object_id=str(source_connector.id),
+                            workspace_id=str(workspace.id),
+                        ),
+                        target_ref=object_ref(
+                            object_family="runtime_artifact",
+                            object_id=str(stored.artifact_id),
+                            workspace_id=str(workspace.id),
+                        ),
                         reason="source snapshot stored",
                         metadata={
                             "snapshot_type": snapshot_value,
