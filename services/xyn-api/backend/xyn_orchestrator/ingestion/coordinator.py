@@ -11,6 +11,7 @@ from xyn_orchestrator import models
 from xyn_orchestrator.orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
 from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService
 from xyn_orchestrator.provenance import ProvenanceLinkInput, ProvenanceService, object_ref
+from xyn_orchestrator.source_adapters import SourceAdapterService
 
 from .archive import ZipArchiveExpander
 from .classification import classify_file
@@ -66,10 +67,12 @@ class IngestionCoordinator:
         fetcher: HttpArtifactFetcher | None = None,
         archive_expander: ZipArchiveExpander | None = None,
         parser_registry: ParserRegistry | None = None,
+        adapter_service: SourceAdapterService | None = None,
     ) -> None:
         self._fetcher = fetcher or HttpArtifactFetcher()
         self._archive = archive_expander or ZipArchiveExpander()
         self._registry = parser_registry or build_default_registry()
+        self._adapters = adapter_service or SourceAdapterService()
 
     def _ensure_pipeline(self, *, workspace: models.Workspace, key: str = "ingestion-runtime") -> models.OrchestrationPipeline:
         pipeline, _ = models.OrchestrationPipeline.objects.get_or_create(
@@ -208,6 +211,11 @@ class IngestionCoordinator:
             ingest_meta["parse_ran"] = True
             if classified.kind == FILE_KIND_ZIP:
                 members = self._archive.expand(parent_artifact=artifact_row, zip_bytes=raw_bytes)
+                self._adapters.persist_zip_candidates(
+                    source_connector=source_connector,
+                    artifact=artifact_row,
+                    members=[models.IngestArtifactMember.objects.get(id=item.member_id) for item in members],
+                )
                 grouped: dict[str, list[Any]] = {}
                 for member in members:
                     grouped.setdefault(member.group_key or member.member_path, []).append(member)
@@ -619,6 +627,7 @@ class IngestionCoordinator:
             )
             if created:
                 parsed_created += 1
+                self._adapters.adapt_parsed_record(source_connector=source_connector, parsed_row=parsed_row)
         if member_row is not None:
             member_row.status = "parsed"
             member_row.failure_reason = ""

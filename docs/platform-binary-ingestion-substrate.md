@@ -13,6 +13,7 @@ It supports:
 - file classification and parser routing
 - generic normalized parsed-record persistence
 - provenance links from parsed records back to artifacts/members/runs
+- source-format adapter normalization above parsed outputs
 
 ## Durable entities
 
@@ -146,3 +147,53 @@ This remains ingestion-scoped and intentionally app/domain-neutral.
 Add a parser class implementing `parse(target, stream) -> ParseOutcome`, register it in `build_default_registry()`, and include parser name/version plus normalization version in outputs.
 
 No coordinator redesign should be needed for additional formats.
+
+## Source-format adapter layer
+
+`xyn_orchestrator.source_adapters` is the reusable layer between parser outputs and app/domain mapping.
+
+Boundary:
+
+- parsers (`IngestParsedRecord`) capture format-specific parse envelopes and provenance
+- adapters (`IngestAdaptedRecord`) normalize format quirks into a stable intermediate contract
+- source inspection/mapping consume adapter hints; app logic should not parse raw source formats directly
+
+### Durable adapted contract
+
+`IngestAdaptedRecord` stores:
+
+- adapter identity (`adapter_name`, `adapter_version`, `adapter_kind`)
+- source format/subtype
+- adapted payload (`adapted_payload_json`) plus optional geometry payload
+- field metadata and schema hints
+- source position metadata (row/feature/table/sheet offsets)
+- provenance/warnings/findings
+- linkage to source connector, run, artifact, member, and parsed record
+
+### Built-in adapters (this pass)
+
+- ZIP adapter
+  - records archive candidate dataset groupings from extracted members
+- CSV adapter
+  - stable row record payload + column metadata
+- Shapefile adapter
+  - geometry + attributes + grouped-member provenance
+- Access adapter
+  - table-aware row payload + table/column hints
+- DBF adapter seam
+  - explicit unsupported/not-yet-implemented status when standalone DBF tabular payload is unavailable
+- Generic JSON HTTP adapter
+  - supports top-level objects/arrays and optional `configuration_json.json_adapter.record_path`
+
+### Inspection and mapping integration
+
+`serialize_source_inspection` now surfaces `adapter_preview`, including:
+
+- `record_count`
+- `adapter_kinds`
+- `source_formats`
+- `field_hints`
+- `sample_records`
+- adapter warnings/findings
+
+This keeps source inspection and mapping anchored to the adapted contract without introducing parallel source models.

@@ -90,6 +90,7 @@ This contract is additive and does not imply an interactive map or data explorer
 
 ## Relationship to Other Platform Primitives
 
+- source adapters: parsed ingestion outputs should flow through the canonical source adapter layer (`IngestAdaptedRecord`) before app/domain mapping; source mapping targets adapted contracts, not raw parser-specific payload shapes.
 - orchestration: source execution contracts can produce orchestration run requests (`run_type` + `target_ref` + `scope_source`)
 - run history: source health can link to `OrchestrationRun` (`last_run`)
 - record matching: source outputs can flow into matching pipelines without source-specific matching code
@@ -110,7 +111,7 @@ without changing core source lifecycle semantics.
 ## Current TODOs
 
 - add connector credential secret reference patterns and rotation workflows
-- add parser/profile adapters for common tabular/file formats
+- extend adapter coverage for deferred formats (ArcGIS REST JSON, standalone DBF parser flow, file geodatabase)
 - add schema drift detection and mapping impact warnings
 - add incremental import cursor/checkpoint tracking
 - add bulk import throughput optimizations and chunk-level diagnostics

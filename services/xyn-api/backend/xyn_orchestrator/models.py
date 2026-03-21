@@ -4087,6 +4087,76 @@ class IngestParsedRecord(models.Model):
         return f"{self.workspace_id}:{self.parser_name}:{self.id}"
 
 
+class IngestAdaptedRecord(models.Model):
+    """Source-adapted intermediate record derived from parsed ingestion outputs."""
+
+    STATUS_CHOICES = [
+        ("ok", "OK"),
+        ("warning", "Warning"),
+        ("error", "Error"),
+        ("unsupported", "Unsupported"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="ingest_adapted_records")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="adapted_records"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_adapted_records"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_adapted_records"
+    )
+    artifact = models.ForeignKey(
+        "IngestArtifactRecord", on_delete=models.CASCADE, related_name="adapted_records"
+    )
+    member = models.ForeignKey(
+        "IngestArtifactMember", null=True, blank=True, on_delete=models.SET_NULL, related_name="adapted_records"
+    )
+    parsed_record = models.ForeignKey(
+        "IngestParsedRecord", null=True, blank=True, on_delete=models.SET_NULL, related_name="adapted_records"
+    )
+    adapter_name = models.CharField(max_length=120, blank=True, default="")
+    adapter_version = models.CharField(max_length=64, blank=True, default="")
+    adapter_kind = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    source_format = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    source_subtype = models.CharField(max_length=120, blank=True, default="")
+    record_index = models.IntegerField(null=True, blank=True)
+    adapted_payload_json = models.JSONField(default=dict, blank=True)
+    geometry_payload_json = models.JSONField(default=dict, blank=True)
+    field_metadata_json = models.JSONField(default=list, blank=True)
+    schema_hints_json = models.JSONField(default=dict, blank=True)
+    source_position_json = models.JSONField(default=dict, blank=True)
+    provenance_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    findings_json = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="ok")
+    failure_reason = models.TextField(blank=True, default="")
+    idempotency_key = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["workspace", "source_connector", "created_at"], name="ix_ing_adapted_source_time"),
+            models.Index(fields=["workspace", "orchestration_run", "created_at"], name="ix_ing_adapted_run_time"),
+            models.Index(fields=["workspace", "adapter_kind", "created_at"], name="ix_ing_adapted_kind_time"),
+            models.Index(fields=["workspace", "source_format", "created_at"], name="ix_ing_adapted_format_time"),
+            models.Index(fields=["workspace", "status", "created_at"], name="ix_ing_adapted_status_time"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=models.Q(idempotency_key__gt=""),
+                name="uniq_ing_adapted_idempotency",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.adapter_kind}:{self.id}"
+
+
 class PlatformDomainEvent(models.Model):
     """Thin durable outbox-style domain event emitted from publication boundaries."""
 

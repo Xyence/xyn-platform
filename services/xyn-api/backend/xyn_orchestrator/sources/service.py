@@ -10,6 +10,7 @@ from django.utils import timezone
 from xyn_orchestrator.models import SourceConnector, SourceInspectionProfile, SourceMapping
 from xyn_orchestrator.provenance import AuditEventInput, ProvenanceService, object_ref
 from xyn_orchestrator.geospatial.utils import compute_centroid, extract_bbox, normalize_geometry
+from xyn_orchestrator.source_adapters import SourceAdapterService
 
 from .interfaces import (
     SOURCE_HEALTH_STATES,
@@ -357,6 +358,18 @@ def serialize_source_inspection(row: SourceInspectionProfile) -> dict[str, Any]:
                 "details": geometry_errors,
             },
         ]
+    adapter_preview = SourceAdapterService().preview_for_source(
+        source_connector=row.source_connector,
+        run_id=str(row.inspection_run_id or ""),
+        sample_limit=20,
+    )
+    if adapter_preview.get("record_count", 0) > 0:
+        enriched_metadata["adapter_profile_summary"] = {
+            "record_count": int(adapter_preview.get("record_count") or 0),
+            "adapter_kinds": list(adapter_preview.get("adapter_kinds") or []),
+            "source_formats": list(adapter_preview.get("source_formats") or []),
+            "field_hint_count": len(adapter_preview.get("field_hints") or []),
+        }
     return {
         "id": str(row.id),
         "source_id": str(row.source_connector_id),
@@ -364,6 +377,7 @@ def serialize_source_inspection(row: SourceInspectionProfile) -> dict[str, Any]:
         "detected_format": row.detected_format,
         "discovered_fields": discovered_fields,
         "sample_metadata": enriched_metadata,
+        "adapter_preview": adapter_preview,
         "validation_findings": validation_findings,
         "inspection_fingerprint": str(row.inspection_fingerprint or ""),
         "idempotency_key": str(row.idempotency_key or ""),
