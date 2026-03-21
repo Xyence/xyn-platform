@@ -4297,6 +4297,119 @@ class ParcelCrosswalkMapping(models.Model):
         return f"{self.workspace_id}:{self.resolution_method}:{self.status}:{self.id}"
 
 
+class GeocodeEnrichmentResult(models.Model):
+    STATUS_CHOICES = [
+        ("selected", "Selected"),
+        ("no_selection", "No Selection"),
+        ("no_candidates", "No Candidates"),
+        ("invalid_input", "Invalid Input"),
+        ("provider_not_configured", "Provider Not Configured"),
+        ("provider_error", "Provider Error"),
+        ("shape_error", "Shape Error"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="geocode_enrichment_results")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="geocode_enrichment_results"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="geocode_enrichment_results"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="geocode_enrichment_results"
+    )
+    adapted_record = models.ForeignKey(
+        "IngestAdaptedRecord", null=True, blank=True, on_delete=models.SET_NULL, related_name="geocode_enrichment_results"
+    )
+    provider_kind = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    provider_name = models.CharField(max_length=120, blank=True, default="")
+    provider_version = models.CharField(max_length=64, blank=True, default="")
+    provider_endpoint_url = models.TextField(blank=True, default="")
+    input_address_raw = models.TextField(blank=True, default="")
+    input_address_normalized = models.TextField(blank=True, default="", db_index=True)
+    input_address_fields_json = models.JSONField(default=dict, blank=True)
+    request_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="no_selection", db_index=True)
+    selected_candidate = models.ForeignKey(
+        "GeocodeEnrichmentCandidate", null=True, blank=True, on_delete=models.SET_NULL, related_name="selected_by_result_sets"
+    )
+    selection_reason = models.CharField(max_length=120, blank=True, default="")
+    request_context_json = models.JSONField(default=dict, blank=True)
+    response_context_json = models.JSONField(default=dict, blank=True)
+    failure_category = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    failure_reason = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "source_connector", "created_at"], name="ix_geo_res_src_time"),
+            models.Index(fields=["workspace", "orchestration_run", "created_at"], name="ix_geo_res_run_time"),
+            models.Index(fields=["workspace", "adapted_record", "created_at"], name="ix_geo_res_adp_time"),
+            models.Index(fields=["workspace", "provider_kind", "created_at"], name="ix_geo_res_kind_time"),
+            models.Index(fields=["workspace", "status", "created_at"], name="ix_geo_res_status_t"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_geocode_result_idempotency",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.provider_kind}:{self.status}:{self.id}"
+
+
+class GeocodeEnrichmentCandidate(models.Model):
+    STATUS_CHOICES = [
+        ("ok", "OK"),
+        ("warning", "Warning"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    result_set = models.ForeignKey(
+        "GeocodeEnrichmentResult", on_delete=models.CASCADE, related_name="candidates"
+    )
+    candidate_rank = models.PositiveIntegerField(default=1)
+    provider_score = models.FloatField(null=True, blank=True)
+    provider_confidence = models.FloatField(null=True, blank=True)
+    matched_label = models.CharField(max_length=300, blank=True, default="")
+    matched_address = models.CharField(max_length=500, blank=True, default="")
+    geometry_json = models.JSONField(default=dict, blank=True)
+    spatial_reference_json = models.JSONField(default=dict, blank=True)
+    provider_attributes_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    is_selected = models.BooleanField(default=False, db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="ok")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["candidate_rank", "created_at"]
+        indexes = [
+            models.Index(fields=["result_set", "candidate_rank"], name="ix_geo_cand_rank"),
+            models.Index(fields=["result_set", "is_selected"], name="ix_geo_cand_sel"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["result_set", "candidate_rank"],
+                name="uniq_geocode_candidate_rank",
+            ),
+            models.UniqueConstraint(
+                fields=["result_set"],
+                condition=Q(is_selected=True),
+                name="uniq_geocode_selected_candidate",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.result_set_id}:rank:{self.candidate_rank}"
+
+
 class PlatformDomainEvent(models.Model):
     """Thin durable outbox-style domain event emitted from publication boundaries."""
 

@@ -318,6 +318,23 @@ class ParcelIdentityResolverService:
                 for item in addresses
             ],
         }
+        geocode_result = None
+        try:
+            from xyn_orchestrator.geocoding.service import GeocodingService
+
+            geocode_result = GeocodingService().selected_for_adapted_record(adapted_record_id=str(adapted.id))
+        except Exception:
+            geocode_result = None
+        if geocode_result is not None:
+            selected = geocode_result.selected_candidate
+            explanation["geocoding_evidence"] = {
+                "geocode_result_id": str(geocode_result.id),
+                "status": str(geocode_result.status or ""),
+                "provider_kind": str(geocode_result.provider_kind or ""),
+                "selected_candidate_id": str(selected.id) if selected else None,
+                "selected_score": float(selected.provider_score) if selected and selected.provider_score is not None else None,
+                "selected_address": str(selected.matched_address or "") if selected else "",
+            }
 
         for candidate in identifiers:
             found = self._find_by_alias(workspace=workspace, namespace=candidate.namespace, normalized_value=candidate.normalized_value)
@@ -451,6 +468,27 @@ class ParcelIdentityResolverService:
                     explanation={"resolution_method": mapping.resolution_method, "confidence": float(mapping.confidence)},
                     run_id=str(adapted.orchestration_run_id or ""),
                     idempotency_key=f"parcel.crosswalk.to_parcel:{mapping.id}",
+                )
+            )
+        if geocode_result is not None:
+            geocode_ref = object_ref(
+                object_family="geocode_enrichment_result",
+                object_id=str(geocode_result.id),
+                workspace_id=str(workspace.id),
+                attributes={
+                    "provider_kind": str(geocode_result.provider_kind or ""),
+                    "status": str(geocode_result.status or ""),
+                },
+            )
+            provenance.record_provenance_link(
+                ProvenanceLinkInput(
+                    workspace_id=str(workspace.id),
+                    relationship_type="parcel_crosswalk_enriched_by_geocode",
+                    source_ref=geocode_ref,
+                    target_ref=crosswalk_ref,
+                    reason="parcel crosswalk resolution included geocoding evidence",
+                    run_id=str(adapted.orchestration_run_id or ""),
+                    idempotency_key=f"parcel.crosswalk.geocode:{mapping.id}:{geocode_result.id}",
                 )
             )
 

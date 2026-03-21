@@ -179,6 +179,48 @@ class ParcelIdentityPrimitiveTests(TestCase):
             ).exists()
         )
 
+    def test_crosswalk_can_reference_selected_geocode_evidence(self):
+        adapted = self._adapted_row({"attributes": {"HANDLE": "H-450", "ADDRESS": "123 N Main St"}})
+        geocode = models.GeocodeEnrichmentResult.objects.create(
+            workspace=self.workspace,
+            source_connector=self.source,
+            orchestration_run=self.run,
+            adapted_record=adapted,
+            provider_kind="arcgis_rest_geocoder",
+            provider_name="arcgis_rest_geocoder",
+            provider_version="1",
+            provider_endpoint_url="https://example.local/geocode",
+            input_address_raw="123 N Main St",
+            input_address_normalized="123 n main st",
+            idempotency_key=f"geo-{uuid.uuid4().hex}",
+            request_fingerprint=uuid.uuid4().hex,
+            status="selected",
+        )
+        candidate = models.GeocodeEnrichmentCandidate.objects.create(
+            result_set=geocode,
+            candidate_rank=1,
+            provider_score=97.0,
+            matched_address="123 N MAIN ST",
+            geometry_json={"x": -90.2, "y": 38.6},
+            is_selected=True,
+        )
+        geocode.selected_candidate = candidate
+        geocode.selection_reason = "highest_score_then_rank"
+        geocode.save(update_fields=["selected_candidate", "selection_reason", "updated_at"])
+
+        mapping = self.service.resolve_adapted_record(adapted_record_id=str(adapted.id))
+        geocode_evidence = mapping.explanation_json.get("geocoding_evidence")
+        self.assertIsInstance(geocode_evidence, dict)
+        self.assertEqual(str(geocode_evidence.get("geocode_result_id") or ""), str(geocode.id))
+        self.assertTrue(
+            models.ProvenanceLink.objects.filter(
+                workspace=self.workspace,
+                relationship_type="parcel_crosswalk_enriched_by_geocode",
+                source_ref_json__object_id=str(geocode.id),
+                target_ref_json__object_id=str(mapping.id),
+            ).exists()
+        )
+
     def test_api_lookup_and_crosswalk_resolution(self):
         adapted = self._adapted_row({"attributes": {"HANDLE": "H-500"}})
         payload = {"workspace_id": str(self.workspace.id), "adapted_record_id": str(adapted.id)}

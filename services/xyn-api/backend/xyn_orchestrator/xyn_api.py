@@ -77,6 +77,7 @@ from .models import (
     ParcelCanonicalIdentity,
     ParcelCrosswalkMapping,
     IngestAdaptedRecord,
+    GeocodeEnrichmentResult,
     OrchestrationPipeline,
     OrchestrationJobDefinition,
     OrchestrationJobSchedule,
@@ -200,6 +201,7 @@ from .parcel_identity import (
     serialize_parcel_crosswalk,
     serialize_parcel_identity,
 )
+from .geocoding import GeocodingService, serialize_geocode_result
 from .orchestration import AppNotificationFailureNotifier
 from .orchestration.domain_events import DomainEventQuery, DomainEventService
 from .orchestration.publication import StagePublicationService
@@ -31913,6 +31915,22 @@ def _parcel_crosswalk_queryset(
     return workspace, qs
 
 
+def _geocode_results_queryset(
+    identity: UserIdentity, workspace_id: str
+) -> tuple[Workspace, models.QuerySet[GeocodeEnrichmentResult]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = (
+        GeocodeEnrichmentResult.objects.filter(workspace=workspace)
+        .select_related("selected_candidate", "source_connector", "orchestration_run", "job_run", "adapted_record")
+        .order_by("-created_at", "-id")
+    )
+    return workspace, qs
+
+
 @login_required
 def parcel_identity_lookup(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
@@ -32099,6 +32117,173 @@ def parcel_crosswalks_resolve_source(request: HttpRequest) -> JsonResponse:
             "source_id": source_id,
             "count": len(rows),
             "crosswalks": [serialize_parcel_crosswalk(row) for row in rows],
+        },
+        status=200,
+    )
+
+
+@login_required
+def geocode_results_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _geocode_results_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    source_id = str(request.GET.get("source_id") or "").strip()
+    if source_id:
+        qs = qs.filter(source_connector_id=source_id)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(orchestration_run_id=run_id)
+    adapted_record_id = str(request.GET.get("adapted_record_id") or "").strip()
+    if adapted_record_id:
+        qs = qs.filter(adapted_record_id=adapted_record_id)
+    status = str(request.GET.get("status") or "").strip().lower()
+    if status:
+        qs = qs.filter(status=status)
+    provider_kind = str(request.GET.get("provider_kind") or "").strip().lower()
+    if provider_kind:
+        qs = qs.filter(provider_kind=provider_kind)
+    failure_category = str(request.GET.get("failure_category") or "").strip().lower()
+    if failure_category:
+        qs = qs.filter(failure_category=failure_category)
+    include_candidates = str(request.GET.get("include_candidates") or "").strip().lower() in {"1", "true", "yes", "on"}
+    limit = max(1, min(500, int(str(request.GET.get("limit") or "50"))))
+    rows = [serialize_geocode_result(row, include_candidates=include_candidates) for row in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "results": rows}, status=200)
+
+
+@login_required
+def geocode_result_detail(request: HttpRequest, result_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    row = get_object_or_404(
+        GeocodeEnrichmentResult.objects.select_related(
+            "workspace",
+            "source_connector",
+            "orchestration_run",
+            "job_run",
+            "adapted_record",
+            "selected_candidate",
+        ),
+        id=result_id,
+    )
+    if workspace_id != str(row.workspace_id):
+        return JsonResponse({"error": "geocode result not found in workspace context"}, status=404)
+    if not _workspace_membership(identity, str(row.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(row.workspace_id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse(serialize_geocode_result(row, include_candidates=True), status=200)
+
+
+@csrf_exempt
+@login_required
+def geocode_results_resolve_adapted(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _geocode_results_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity, str(workspace.id), [CAP_SOURCES_MANAGE, CAP_CAMPAIGNS_MANAGE], require_all=False
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    adapted_record_id = str(payload.get("adapted_record_id") or "").strip()
+    adapted_record_ids_raw = payload.get("adapted_record_ids")
+    adapted_record_ids: list[str] = []
+    if adapted_record_id:
+        adapted_record_ids.append(adapted_record_id)
+    if isinstance(adapted_record_ids_raw, list):
+        adapted_record_ids.extend(str(item).strip() for item in adapted_record_ids_raw if str(item).strip())
+    deduped_ids: list[str] = []
+    seen: set[str] = set()
+    for item in adapted_record_ids:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped_ids.append(item)
+    if not deduped_ids:
+        return JsonResponse({"error": "adapted_record_id or adapted_record_ids is required"}, status=400)
+    if IngestAdaptedRecord.objects.filter(workspace_id=workspace.id, id__in=deduped_ids).count() != len(deduped_ids):
+        return JsonResponse({"error": "one or more adapted_record_ids are invalid for workspace"}, status=404)
+
+    service = GeocodingService()
+    rows = [service.geocode_adapted_record(adapted_record_id=item) for item in deduped_ids]
+    status_code = 201 if len(rows) == 1 else 200
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "count": len(rows),
+            "results": [serialize_geocode_result(row, include_candidates=True) for row in rows],
+        },
+        status=status_code,
+    )
+
+
+@csrf_exempt
+@login_required
+def geocode_results_resolve_source(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    source_id = str(payload.get("source_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if not source_id:
+        return JsonResponse({"error": "source_id is required"}, status=400)
+    try:
+        workspace, _ = _geocode_results_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity, str(workspace.id), [CAP_SOURCES_MANAGE, CAP_CAMPAIGNS_MANAGE], require_all=False
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not SourceConnector.objects.filter(workspace_id=workspace.id, id=source_id).exists():
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    run_id = str(payload.get("run_id") or "").strip()
+    try:
+        limit = int(payload.get("limit") or 500)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "limit must be an integer"}, status=400)
+    service = GeocodingService()
+    rows = service.geocode_for_source(workspace_id=str(workspace.id), source_id=source_id, run_id=run_id, limit=limit)
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source_id": source_id,
+            "count": len(rows),
+            "results": [serialize_geocode_result(row, include_candidates=True) for row in rows],
         },
         status=200,
     )
