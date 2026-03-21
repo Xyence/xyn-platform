@@ -80,8 +80,9 @@ Current built-ins:
 - CSV/TSV parser
 - GeoJSON parser
 - XLSX parser (sheet/row provenance in parsed-record metadata)
-- grouped shapefile placeholder parser (deterministic unsupported/not-implemented outcomes)
-- explicit unsupported handlers for `.xls`, `.mdb/.accdb`, `.xml`, file geodatabase classifications
+- grouped shapefile parser (`.shp/.dbf/.shx` with optional `.prj/.cpg`)
+- Access parser for `.mdb/.accdb` via dependency-aware `mdbtools` integration
+- explicit unsupported handlers for `.xls`, `.xml`, file geodatabase classifications
 
 Unsupported outcomes are explicit and observable (member/status and parsed warning/error rows), never silent.
 
@@ -92,6 +93,20 @@ Issue categories are machine-readable and persisted in `IngestParsedRecord.warni
 - `not_implemented`
 - `invalid_grouped_input`
 - `parse_error`
+
+### Dependency-aware behavior
+
+- **Shapefile parser**
+  - primary backend: `pyshp` (Python-native dependency)
+  - if unavailable: emits `parser_not_installed` (does not crash run execution)
+  - missing `.prj` is warning-only (`parse_error` warning code), parsing continues
+
+- **Access parser**
+  - backend: `mdbtools` CLI (`mdb-tables`, `mdb-export`)
+  - commands are executed with argument lists (`shell=False` semantics) to avoid injection risk
+  - if tools are missing: emits `parser_not_installed`
+  - per-table export failures are warning-level `parse_error` issues (partial outputs preserved)
+  - total table listing/read failure emits error-level `parse_error`
 
 ## Parsed output contract
 
@@ -109,6 +124,20 @@ Idempotency behavior:
 - parsed output rows use deterministic idempotency keys based on source connector, artifact content hash, member path/file name, parser name, record index, and normalized payload hash
 - repeated runs with unchanged content do not create duplicate parsed rows
 - unsupported/deferred/error outcomes persist deterministic warning/error rows with machine-readable issue categories
+
+### Supported format matrix (current runtime)
+
+- **Parsed**
+  - `.csv`, `.tsv`
+  - `.geojson`, JSON feature payloads
+  - `.xlsx`
+  - grouped shapefile bundles (`.shp + .dbf + .shx`, optional `.prj/.cpg`)
+  - `.mdb`, `.accdb` (when `mdbtools` is installed)
+
+- **Classified but not parsed**
+  - `.xls` (`not_implemented`)
+  - `.xml` (`unsupported_format`)
+  - file geodatabase kinds (`not_implemented`)
 
 This remains ingestion-scoped and intentionally app/domain-neutral.
 

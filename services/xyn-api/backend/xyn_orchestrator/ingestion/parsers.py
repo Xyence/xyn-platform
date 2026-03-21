@@ -3,10 +3,15 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import BinaryIO
 
 from .interfaces import (
@@ -18,11 +23,13 @@ from .interfaces import (
     FILE_KIND_JSON,
     FILE_KIND_MDB,
     FILE_KIND_SHP,
+    TARGET_TYPE_GROUPED,
     FILE_KIND_TSV,
     FILE_KIND_XLS,
     FILE_KIND_XLSX,
     FILE_KIND_XML,
     ISSUE_CATEGORY_INVALID_GROUPED_INPUT,
+    ISSUE_CATEGORY_NOT_INSTALLED,
     ISSUE_CATEGORY_NOT_IMPLEMENTED,
     ISSUE_CATEGORY_PARSE_ERROR,
     ISSUE_CATEGORY_UNSUPPORTED_FORMAT,
@@ -49,6 +56,22 @@ class ParserRegistry:
 
     def supported_kinds(self):
         return sorted(self._parsers.keys())
+
+
+def _load_pyshp_module():
+    try:
+        import shapefile as pyshp  # type: ignore
+    except Exception:
+        return None
+    return pyshp
+
+
+def _mdb_tools_available() -> bool:
+    return bool(shutil.which("mdb-tables") and shutil.which("mdb-export"))
+
+
+def _run_mdb_command(args: list[str]):
+    return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
 @dataclass(frozen=True)
@@ -291,6 +314,305 @@ class XlsxParser:
 
 
 @dataclass(frozen=True)
+class ShapefileParser:
+    name: str = "shapefile_parser"
+    version: str = "1.0"
+    supported_kinds: tuple[str, ...] = (FILE_KIND_SHP,)
+
+    def parse(self, *, target: ParseTarget, stream: BinaryIO) -> ParseOutcome:
+        members = set(target.grouped_member_paths or tuple())
+        required = {".shp", ".dbf", ".shx"}
+        have = {f".{path.rsplit('.', 1)[-1].lower()}" for path in members if "." in path}
+        if str(target.target_type or "") != TARGET_TYPE_GROUPED:
+            return ParseOutcome(
+                parser_name=self.name,
+                parser_version=self.version,
+                normalization_version="1",
+                records=tuple(),
+                issues=(
+                    ParseIssue(
+                        category=ISSUE_CATEGORY_INVALID_GROUPED_INPUT,
+                        code="shapefile.grouped_target_required",
+                        message="shapefile parsing requires grouped target metadata",
+                        severity="warning",
+                    ),
+                ),
+                warnings=("shapefile parsing requires grouped target metadata",),
+            )
+        if not required.issubset(have):
+            return ParseOutcome(
+                parser_name=self.name,
+                parser_version=self.version,
+                normalization_version="1",
+                records=tuple(),
+                issues=(
+                    ParseIssue(
+                        category=ISSUE_CATEGORY_INVALID_GROUPED_INPUT,
+                        code="shapefile.missing_required_members",
+                        message="grouped shapefile bundle missing required components (.shp/.dbf/.shx)",
+                        severity="warning",
+                        details={"required": sorted(required), "have": sorted(have)},
+                    ),
+                ),
+                warnings=("grouped shapefile bundle missing required members",),
+            )
+        pyshp = _load_pyshp_module()
+        if pyshp is None:
+            return ParseOutcome(
+                parser_name=self.name,
+                parser_version=self.version,
+                normalization_version="1",
+                records=tuple(),
+                issues=(
+                    ParseIssue(
+                        category=ISSUE_CATEGORY_NOT_INSTALLED,
+                        code="shapefile.pyshp_missing",
+                        message="pyshp dependency is not installed",
+                        severity="warning",
+                    ),
+                ),
+                warnings=("pyshp dependency is not installed",),
+            )
+        member_bytes = target.metadata.get("grouped_member_bytes") if isinstance(target.metadata, dict) else {}
+        if not isinstance(member_bytes, dict):
+            member_bytes = {}
+
+        records: list[ParsedRecordEnvelope] = []
+        issues: list[ParseIssue] = []
+        try:
+            with tempfile.TemporaryDirectory(prefix="xyn-shp-") as tmp_dir:
+                grouped_paths = list(target.grouped_member_paths or tuple())
+                for member_path in grouped_paths:
+                    content = member_bytes.get(member_path)
+                    if not isinstance(content, (bytes, bytearray)):
+                        continue
+                    rel = Path(str(member_path).replace("\\", "/"))
+                    safe_rel = Path(*[part for part in rel.parts if part not in ("..", "/")])
+                    local_path = Path(tmp_dir) / safe_rel
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(local_path, "wb") as fp:
+                        fp.write(bytes(content))
+
+                def _path_for(ext: str) -> str:
+                    for p in grouped_paths:
+                        if p.lower().endswith(ext):
+                            return str(Path(tmp_dir) / Path(p))
+                    return ""
+
+                shp_path = _path_for(".shp")
+                dbf_path = _path_for(".dbf")
+                shx_path = _path_for(".shx")
+                prj_path = _path_for(".prj")
+                cpg_path = _path_for(".cpg")
+                encoding = "utf-8"
+                if cpg_path and os.path.exists(cpg_path):
+                    try:
+                        with open(cpg_path, "r", encoding="utf-8", errors="replace") as fp:
+                            cpg_token = str(fp.read().strip() or "").replace("-", "").lower()
+                        if cpg_token in {"utf8", "utf_8"}:
+                            encoding = "utf-8"
+                        elif cpg_token:
+                            encoding = cpg_token
+                    except Exception:
+                        encoding = "utf-8"
+
+                reader = pyshp.Reader(shp=shp_path, dbf=dbf_path, shx=shx_path, encoding=encoding)
+                field_names = [str(field[0]) for field in list(getattr(reader, "fields", []))[1:]]
+                crs_wkt = ""
+                if prj_path and os.path.exists(prj_path):
+                    with open(prj_path, "r", encoding="utf-8", errors="replace") as fp:
+                        crs_wkt = str(fp.read().strip() or "")
+                if not crs_wkt:
+                    issues.append(
+                        ParseIssue(
+                            category=ISSUE_CATEGORY_PARSE_ERROR,
+                            code="shapefile.missing_prj",
+                            message="projection (.prj) file missing; CRS metadata unavailable",
+                            severity="warning",
+                        )
+                    )
+
+                feature_index = 0
+                for feature_index, shape_record in enumerate(reader.shapeRecords(), start=1):
+                    shape = getattr(shape_record, "shape", None)
+                    record = getattr(shape_record, "record", None)
+                    geometry = getattr(shape, "__geo_interface__", None) if shape is not None else None
+                    attrs: dict[str, object] = {}
+                    if record is not None:
+                        values = list(record)
+                        for i, field_name in enumerate(field_names):
+                            attrs[field_name] = values[i] if i < len(values) else None
+                    source_payload = {"attributes": attrs, "geometry": geometry}
+                    normalized_payload = {"attributes": attrs, "geometry": geometry}
+                    if crs_wkt:
+                        normalized_payload["crs_wkt"] = crs_wkt
+                    records.append(
+                        ParsedRecordEnvelope(
+                            source_payload=source_payload,
+                            normalized_payload=normalized_payload,
+                            source_schema={"fields": field_names, "source_format": "shapefile"},
+                            provenance={
+                                "feature_index": feature_index,
+                                "source_format": "shapefile",
+                                "group_key": str(target.group_key or ""),
+                                "grouped_member_ids": list(target.grouped_member_ids),
+                                "grouped_member_paths": list(target.grouped_member_paths),
+                                "crs_present": bool(crs_wkt),
+                            },
+                            record_index=feature_index,
+                        )
+                    )
+                if feature_index == 0:
+                    issues.append(
+                        ParseIssue(
+                            category=ISSUE_CATEGORY_PARSE_ERROR,
+                            code="shapefile.no_features",
+                            message="shapefile contained no features",
+                            severity="warning",
+                        )
+                    )
+        except Exception as exc:
+            return ParseOutcome(
+                parser_name=self.name,
+                parser_version=self.version,
+                normalization_version="1",
+                records=tuple(),
+                issues=(
+                    ParseIssue(
+                        category=ISSUE_CATEGORY_PARSE_ERROR,
+                        code="shapefile.parse_failed",
+                        message=str(exc),
+                        severity="error",
+                    ),
+                ),
+                warnings=tuple(),
+            )
+        return ParseOutcome(
+            parser_name=self.name,
+            parser_version=self.version,
+            normalization_version="1",
+            records=tuple(records),
+            issues=tuple(issues),
+            warnings=tuple(issue.message for issue in issues if issue.severity != "error"),
+        )
+
+
+@dataclass(frozen=True)
+class AccessParser:
+    name: str = "access_parser"
+    version: str = "1.0"
+    supported_kinds: tuple[str, ...] = (FILE_KIND_MDB, FILE_KIND_ACCDB)
+
+    def parse(self, *, target: ParseTarget, stream: BinaryIO) -> ParseOutcome:
+        if not _mdb_tools_available():
+            return ParseOutcome(
+                parser_name=self.name,
+                parser_version=self.version,
+                normalization_version="1",
+                records=tuple(),
+                issues=(
+                    ParseIssue(
+                        category=ISSUE_CATEGORY_NOT_INSTALLED,
+                        code="access.mdbtools_missing",
+                        message="mdbtools (mdb-tables, mdb-export) is not installed",
+                        severity="warning",
+                    ),
+                ),
+                warnings=("mdbtools (mdb-tables, mdb-export) is not installed",),
+            )
+
+        payload = stream.read()
+        if not isinstance(payload, (bytes, bytearray)):
+            payload = bytes(payload or b"")
+        ext = ".accdb" if str(target.classified_kind or "").strip().lower() == FILE_KIND_ACCDB else ".mdb"
+        records: list[ParsedRecordEnvelope] = []
+        issues: list[ParseIssue] = []
+        try:
+            with tempfile.TemporaryDirectory(prefix="xyn-access-") as tmp_dir:
+                db_path = str(Path(tmp_dir) / f"source{ext}")
+                with open(db_path, "wb") as fp:
+                    fp.write(bytes(payload))
+                list_cmd = _run_mdb_command(["mdb-tables", "-1", db_path])
+                if int(list_cmd.returncode or 0) != 0:
+                    return ParseOutcome(
+                        parser_name=self.name,
+                        parser_version=self.version,
+                        normalization_version="1",
+                        records=tuple(),
+                        issues=(
+                            ParseIssue(
+                                category=ISSUE_CATEGORY_PARSE_ERROR,
+                                code="access.table_list_failed",
+                                message=str(list_cmd.stderr or list_cmd.stdout or "failed to list Access tables").strip(),
+                                severity="error",
+                            ),
+                        ),
+                        warnings=tuple(),
+                    )
+                tables = [str(line).strip() for line in str(list_cmd.stdout or "").splitlines() if str(line).strip()]
+                if not tables:
+                    issues.append(
+                        ParseIssue(
+                            category=ISSUE_CATEGORY_PARSE_ERROR,
+                            code="access.no_tables",
+                            message="access database contained no tables",
+                            severity="warning",
+                        )
+                    )
+                record_index = 0
+                for table in tables:
+                    export_cmd = _run_mdb_command(["mdb-export", db_path, table])
+                    if int(export_cmd.returncode or 0) != 0:
+                        issues.append(
+                            ParseIssue(
+                                category=ISSUE_CATEGORY_PARSE_ERROR,
+                                code="access.table_export_failed",
+                                message=f"failed to export table '{table}'",
+                                severity="warning",
+                                details={"table": table, "stderr": str(export_cmd.stderr or "").strip()},
+                            )
+                        )
+                        continue
+                    reader = csv.DictReader(io.StringIO(str(export_cmd.stdout or "")))
+                    for row_number, row in enumerate(reader, start=1):
+                        record_index += 1
+                        row_data = {str(k): row.get(k) for k in (row.keys() if row else [])}
+                        records.append(
+                            ParsedRecordEnvelope(
+                                source_payload={"table": table, "row": row_data},
+                                normalized_payload={"table": table, "fields": row_data},
+                                source_schema={"columns": list(row.keys()) if row else [], "table": table},
+                                provenance={"table": table, "row_number": row_number, "source_format": "access"},
+                                record_index=record_index,
+                            )
+                        )
+        except Exception as exc:
+            return ParseOutcome(
+                parser_name=self.name,
+                parser_version=self.version,
+                normalization_version="1",
+                records=tuple(),
+                issues=(
+                    ParseIssue(
+                        category=ISSUE_CATEGORY_PARSE_ERROR,
+                        code="access.parse_failed",
+                        message=str(exc),
+                        severity="error",
+                    ),
+                ),
+                warnings=tuple(),
+            )
+        return ParseOutcome(
+            parser_name=self.name,
+            parser_version=self.version,
+            normalization_version="1",
+            records=tuple(records),
+            issues=tuple(issues),
+            warnings=tuple(issue.message for issue in issues if issue.severity != "error"),
+        )
+
+
+@dataclass(frozen=True)
 class UnsupportedFormatParser:
     name: str
     version: str
@@ -366,27 +688,8 @@ def build_default_registry() -> ParserRegistry:
     registry.register(CsvTsvParser())
     registry.register(GeoJsonParser())
     registry.register(XlsxParser())
-    registry.register(UnsupportedGroupedShapefileParser())
-    registry.register(
-        UnsupportedFormatParser(
-            name="xls_unsupported",
-            version="1",
-            supported_kinds=(FILE_KIND_XLS,),
-            category=ISSUE_CATEGORY_NOT_IMPLEMENTED,
-            code="xls.not_implemented",
-            message="xls parsing not implemented",
-        )
-    )
-    registry.register(
-        UnsupportedFormatParser(
-            name="access_unsupported",
-            version="1",
-            supported_kinds=(FILE_KIND_MDB, FILE_KIND_ACCDB),
-            category=ISSUE_CATEGORY_NOT_IMPLEMENTED,
-            code="access.not_implemented",
-            message="mdb/accdb parsing not implemented",
-        )
-    )
+    registry.register(ShapefileParser())
+    registry.register(AccessParser())
     registry.register(
         UnsupportedFormatParser(
             name="xml_unsupported",
@@ -405,6 +708,16 @@ def build_default_registry() -> ParserRegistry:
             category=ISSUE_CATEGORY_NOT_IMPLEMENTED,
             code="file_gdb.not_implemented",
             message="file geodatabase parsing not implemented",
+        )
+    )
+    registry.register(
+        UnsupportedFormatParser(
+            name="xls_unsupported",
+            version="1",
+            supported_kinds=(FILE_KIND_XLS,),
+            category=ISSUE_CATEGORY_NOT_IMPLEMENTED,
+            code="xls.not_implemented",
+            message="xls parsing not implemented",
         )
     )
     return registry

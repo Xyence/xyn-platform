@@ -47,6 +47,33 @@ class _MockHttpResponse:
             yield chunk
 
 
+class _CmdResult:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class _FakeShape:
+    def __init__(self, geom):
+        self.__geo_interface__ = geom
+
+
+class _FakeShapeRecord:
+    def __init__(self, geom, record):
+        self.shape = _FakeShape(geom)
+        self.record = record
+
+
+class _FakeShapefileReader:
+    def __init__(self, records):
+        self.fields = [("DeletionFlag", "C", 1, 0), ("id", "N", 18, 0), ("owner", "C", 60, 0)]
+        self._records = records
+
+    def shapeRecords(self):
+        return self._records
+
+
 class IngestionRuntimeTests(TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -267,13 +294,22 @@ class IngestionRuntimeTests(TestCase):
         self.assertEqual(row.source_payload_json.get("type"), "Feature")
         self.assertEqual(row.normalized_payload_json.get("properties", {}).get("name"), "alpha")
 
-    def test_grouped_shapefile_bundle_routes_to_explicit_unsupported(self):
+    def test_grouped_shapefile_bundle_parses_features_with_grouped_provenance(self):
+        records = [
+            _FakeShapeRecord({"type": "Point", "coordinates": [-97.0, 30.0]}, [1, "Alpha LLC"]),
+            _FakeShapeRecord({"type": "Point", "coordinates": [-97.1, 30.1]}, [2, "Beta LLC"]),
+        ]
+        fake_module = type("FakeShapefile", (), {"Reader": lambda **kwargs: _FakeShapefileReader(records)})
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("parcel/blocks.shp", b"fake-shp")
             archive.writestr("parcel/blocks.dbf", b"fake-dbf")
             archive.writestr("parcel/blocks.shx", b"fake-shx")
-        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            archive.writestr("parcel/blocks.prj", "PROJCS[...]")
+        with (
+            mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get,
+            mock.patch("xyn_orchestrator.ingestion.parsers._load_pyshp_module", return_value=fake_module),
+        ):
             mocked_get.return_value = _MockHttpResponse(
                 url="https://example.com/parcel.zip",
                 headers={"content-type": "application/zip", "content-length": str(len(zip_buf.getvalue()))},
@@ -285,13 +321,12 @@ class IngestionRuntimeTests(TestCase):
                 jurisdiction="tx-travis-county",
                 source_scope="county",
             )
-        self.assertEqual(result.parsed_record_count, 0)
-        parsed_warning = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="warning").first()
-        self.assertIsNotNone(parsed_warning)
-        self.assertEqual(parsed_warning.warnings_json[0]["category"], "not_implemented")
-        self.assertIn("group_member_ids", parsed_warning.provenance_json)
-        members = models.IngestArtifactMember.objects.filter(orchestration_run_id=result.run_id)
-        self.assertTrue(all(row.status == "unsupported" for row in members))
+        self.assertEqual(result.parsed_record_count, 2)
+        parsed_rows = list(models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="ok").order_by("record_index"))
+        self.assertEqual(len(parsed_rows), 2)
+        self.assertEqual(parsed_rows[0].provenance_json.get("target_type"), "grouped")
+        self.assertTrue(parsed_rows[0].provenance_json.get("group_member_ids"))
+        self.assertEqual(parsed_rows[0].normalized_payload_json.get("attributes", {}).get("owner"), "Alpha LLC")
 
     def test_grouped_shapefile_incomplete_bundle_is_invalid_grouped_input(self):
         zip_buf = io.BytesIO()
@@ -314,6 +349,34 @@ class IngestionRuntimeTests(TestCase):
         self.assertIsNotNone(parsed_warning)
         self.assertEqual(parsed_warning.warnings_json[0]["category"], "invalid_grouped_input")
         self.assertIn("missing required", parsed_warning.failure_reason)
+
+    def test_grouped_shapefile_missing_prj_is_warning_not_failure(self):
+        records = [_FakeShapeRecord({"type": "Point", "coordinates": [-97.0, 30.0]}, [1, "Alpha LLC"])]
+        fake_module = type("FakeShapefile", (), {"Reader": lambda **kwargs: _FakeShapefileReader(records)})
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("parcel/blocks.shp", b"fake-shp")
+            archive.writestr("parcel/blocks.dbf", b"fake-dbf")
+            archive.writestr("parcel/blocks.shx", b"fake-shx")
+        with (
+            mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get,
+            mock.patch("xyn_orchestrator.ingestion.parsers._load_pyshp_module", return_value=fake_module),
+        ):
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/parcel-no-prj.zip",
+                headers={"content-type": "application/zip", "content-length": str(len(zip_buf.getvalue()))},
+                chunks=[zip_buf.getvalue()],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/parcel-no-prj.zip",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        row = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="ok").first()
+        self.assertIsNotNone(row)
+        codes = [entry.get("code") for entry in (row.warnings_json or [])]
+        self.assertIn("shapefile.missing_prj", codes)
 
     def test_xlsx_parsing_via_coordinator_with_sheet_row_provenance(self):
         payload = self._xlsx_bytes(
@@ -361,24 +424,97 @@ class IngestionRuntimeTests(TestCase):
         self.assertEqual(warning.warnings_json[0]["category"], "parse_error")
         self.assertEqual(warning.warnings_json[0]["code"], "xlsx.invalid_zip")
 
-    def test_xls_and_access_formats_emit_deterministic_unsupported(self):
-        for filename in ("data.xls", "parcel.mdb", "parcel.accdb"):
-            with self.subTest(filename=filename):
-                with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
-                    mocked_get.return_value = _MockHttpResponse(
-                        url=f"https://example.com/{filename}",
-                        headers={"content-type": "application/octet-stream"},
-                        chunks=[f"binary-{filename}".encode("utf-8")],
-                    )
-                    result = IngestionCoordinator().ingest_from_url(
-                        source_connector=self.source,
-                        source_url=f"https://example.com/{filename}",
-                        jurisdiction="tx-travis-county",
-                        source_scope="county",
-                    )
-                warning = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="warning").first()
-                self.assertIsNotNone(warning)
-                self.assertEqual(warning.warnings_json[0]["category"], "not_implemented")
+    def test_xls_remains_explicit_not_implemented(self):
+        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/data.xls",
+                headers={"content-type": "application/octet-stream"},
+                chunks=[b"binary-xls"],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/data.xls",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        warning = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="warning").first()
+        self.assertIsNotNone(warning)
+        self.assertEqual(warning.warnings_json[0]["category"], "not_implemented")
+
+    def test_access_parser_not_installed_is_explicit(self):
+        with (
+            mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get,
+            mock.patch("xyn_orchestrator.ingestion.parsers._mdb_tools_available", return_value=False),
+        ):
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/parcel.mdb",
+                headers={"content-type": "application/octet-stream"},
+                chunks=[b"binary-mdb"],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/parcel.mdb",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        warning = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="warning").first()
+        self.assertIsNotNone(warning)
+        self.assertEqual(warning.warnings_json[0]["category"], "parser_not_installed")
+
+    def test_access_parser_parses_single_and_multiple_tables(self):
+        cmd_results = [
+            _CmdResult(stdout="parcels\nowners\n"),
+            _CmdResult(stdout="id,address\n1,100 Main\n"),
+            _CmdResult(stdout="id,name\n1,Alpha LLC\n2,Beta LLC\n"),
+        ]
+        with (
+            mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get,
+            mock.patch("xyn_orchestrator.ingestion.parsers._mdb_tools_available", return_value=True),
+            mock.patch("xyn_orchestrator.ingestion.parsers._run_mdb_command", side_effect=cmd_results),
+        ):
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/parcel.accdb",
+                headers={"content-type": "application/octet-stream"},
+                chunks=[b"binary-access"],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/parcel.accdb",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        self.assertEqual(result.parsed_record_count, 3)
+        rows = list(models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="ok").order_by("record_index"))
+        self.assertEqual(rows[0].provenance_json.get("table"), "parcels")
+        self.assertEqual(rows[1].provenance_json.get("table"), "owners")
+
+    def test_access_parser_partial_table_failure_still_emits_successful_rows(self):
+        cmd_results = [
+            _CmdResult(stdout="parcels\nowners\n"),
+            _CmdResult(returncode=1, stderr="failed owners export"),
+            _CmdResult(stdout="id,address\n1,100 Main\n"),
+        ]
+        with (
+            mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get,
+            mock.patch("xyn_orchestrator.ingestion.parsers._mdb_tools_available", return_value=True),
+            mock.patch("xyn_orchestrator.ingestion.parsers._run_mdb_command", side_effect=cmd_results),
+        ):
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/partial.mdb",
+                headers={"content-type": "application/octet-stream"},
+                chunks=[b"binary-partial"],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/partial.mdb",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        self.assertEqual(result.parsed_record_count, 1)
+        row = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="ok").first()
+        self.assertIsNotNone(row)
+        codes = [entry.get("code") for entry in (row.warnings_json or [])]
+        self.assertIn("access.table_export_failed", codes)
 
     def test_xml_and_file_gdb_emit_explicit_unsupported_or_not_implemented(self):
         fixtures = [
@@ -486,7 +622,10 @@ class IngestionRuntimeTests(TestCase):
             archive.writestr("bundle/shape.shp", b"fake-shp")
             archive.writestr("bundle/shape.dbf", b"fake-dbf")
             archive.writestr("bundle/shape.shx", b"fake-shx")
-        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+        with (
+            mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get,
+            mock.patch("xyn_orchestrator.ingestion.parsers._load_pyshp_module", return_value=None),
+        ):
             mocked_get.return_value = _MockHttpResponse(
                 url="https://example.com/mixed.zip",
                 headers={"content-type": "application/zip"},
@@ -525,7 +664,10 @@ class IngestionRuntimeTests(TestCase):
             archive.writestr("parcel/blocks.shp", b"fake-shp")
             archive.writestr("parcel/blocks.dbf", b"fake-dbf")
             archive.writestr("parcel/blocks.shx", b"fake-shx")
-        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+        with (
+            mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get,
+            mock.patch("xyn_orchestrator.ingestion.parsers._load_pyshp_module", return_value=None),
+        ):
             mocked_get.return_value = _MockHttpResponse(
                 url="https://example.com/parcel.zip",
                 headers={"content-type": "application/zip"},

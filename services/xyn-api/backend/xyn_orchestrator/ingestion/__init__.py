@@ -38,9 +38,11 @@ from .interfaces import (
     ParsedRecordEnvelope,
 )
 from .parsers import (
+    AccessParser,
     CsvTsvParser,
     GeoJsonParser,
     ParserRegistry,
+    ShapefileParser,
     UnsupportedFormatParser,
     UnsupportedGroupedShapefileParser,
     XlsxParser,
@@ -63,6 +65,8 @@ __all__ = [
     "CsvTsvParser",
     "GeoJsonParser",
     "XlsxParser",
+    "ShapefileParser",
+    "AccessParser",
     "ParserRegistry",
     "UnsupportedFormatParser",
     "UnsupportedGroupedShapefileParser",

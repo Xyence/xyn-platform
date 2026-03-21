@@ -212,9 +212,8 @@ class IngestionCoordinator:
                 for member in members:
                     grouped.setdefault(member.group_key or member.member_path, []).append(member)
                 for _, rows in grouped.items():
-                    kinds = {row.classified_type for row in rows}
                     shp_member = next((row for row in rows if row.classified_type == FILE_KIND_SHP), None)
-                    if shp_member is not None and kinds.intersection({"dbf", "shx", "prj", "cpg"}):
+                    if shp_member is not None:
                         result = self._parse_grouped_shapefile(
                             workspace=workspace,
                             run=run,
@@ -434,7 +433,7 @@ class IngestionCoordinator:
             group_key=str(member_row.group_key or ""),
             grouped_member_ids=tuple(str(item.member_id) for item in members),
             grouped_member_paths=tuple(str(item.member_path) for item in members),
-            metadata={},
+            metadata={"grouped_member_bytes": {str(item.member_path): bytes(item.raw_bytes) for item in members}},
         )
         outcome = parser.parse(target=target, stream=io.BytesIO(shp_member.raw_bytes))
         warnings.extend(list(outcome.warnings))
@@ -497,7 +496,9 @@ class IngestionCoordinator:
             has_error_issue = any(str(item.get("severity")) == "error" for item in issue_payload)
             failure_reason = "; ".join(list(outcome.warnings) or issue_messages) or "parser outcome without records"
             unsupported_outcomes = sum(
-                1 for issue in outcome.issues if str(issue.category) in {ISSUE_CATEGORY_UNSUPPORTED_FORMAT, ISSUE_CATEGORY_NOT_IMPLEMENTED}
+                1
+                for issue in outcome.issues
+                if str(issue.category) in {ISSUE_CATEGORY_UNSUPPORTED_FORMAT, ISSUE_CATEGORY_NOT_IMPLEMENTED, ISSUE_CATEGORY_NOT_INSTALLED}
             )
             key = hashlib.sha256(
                 (
