@@ -202,7 +202,7 @@ export default function SourceInspectionReviewPage({ workspaceId, workspaceName 
             <div className="field-label">Latest Inspection</div>
             <div className="field-value">
               {latestInspection ? (
-                <StatusPill status={latestInspection.status} label={latestInspection.status} />
+                <StatusPill status={latestInspection.status} />
               ) : (
                 "—"
               )}
@@ -302,7 +302,7 @@ export default function SourceInspectionReviewPage({ workspaceId, workspaceName 
                       <div>
                         <div className="field-label">Status</div>
                         <div className="field-value">
-                          <StatusPill status={mappingCurrent.status} label={mappingCurrent.status} />
+                          <StatusPill status={mappingCurrent.status} />
                         </div>
                       </div>
                     </div>
