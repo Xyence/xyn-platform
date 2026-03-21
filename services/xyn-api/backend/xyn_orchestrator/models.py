@@ -3935,6 +3935,13 @@ class IngestArtifactRecord(models.Model):
     )
     artifact_id = models.UUIDField(db_index=True)
     artifact_uri = models.TextField(blank=True, default="")
+    source_url = models.TextField(blank=True, default="")
+    final_url = models.TextField(blank=True, default="")
+    original_filename = models.CharField(max_length=255, blank=True, default="")
+    response_status = models.IntegerField(null=True, blank=True)
+    etag = models.CharField(max_length=255, blank=True, default="")
+    last_modified = models.CharField(max_length=255, blank=True, default="")
+    fetched_at = models.DateTimeField(null=True, blank=True)
     storage_provider = models.CharField(max_length=32, blank=True, default="")
     storage_key = models.TextField(blank=True, default="")
     content_type = models.CharField(max_length=255, blank=True, default="")
@@ -3960,6 +3967,124 @@ class IngestArtifactRecord(models.Model):
 
     def __str__(self) -> str:
         return f"{self.workspace_id}:{self.artifact_id}"
+
+
+class IngestArtifactMember(models.Model):
+    """Durable metadata for archive members extracted from parent artifacts."""
+
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("parsed", "Parsed"),
+        ("unsupported", "Unsupported"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="ingest_artifact_members")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifact_members"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifact_members"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifact_members"
+    )
+    parent_artifact = models.ForeignKey(
+        "IngestArtifactRecord", on_delete=models.CASCADE, related_name="members"
+    )
+    member_artifact = models.ForeignKey(
+        "IngestArtifactRecord", null=True, blank=True, on_delete=models.SET_NULL, related_name="member_of"
+    )
+    member_path = models.TextField(blank=True, default="")
+    member_basename = models.CharField(max_length=255, blank=True, default="")
+    group_key = models.CharField(max_length=255, blank=True, default="")
+    extension = models.CharField(max_length=32, blank=True, default="")
+    classified_type = models.CharField(max_length=64, blank=True, default="")
+    byte_length = models.BigIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="pending")
+    failure_reason = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["workspace", "parent_artifact"], name="ix_ing_member_parent"),
+            models.Index(fields=["workspace", "group_key"], name="ix_ing_member_group"),
+            models.Index(fields=["workspace", "classified_type"], name="ix_ing_member_class"),
+            models.Index(fields=["workspace", "status"], name="ix_ing_member_status"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["parent_artifact", "member_path"],
+                name="uniq_ing_member_parent_path",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.parent_artifact_id}:{self.member_path}"
+
+
+class IngestParsedRecord(models.Model):
+    """Generic normalized parsed output envelope for ingestion runtimes."""
+
+    STATUS_CHOICES = [
+        ("ok", "OK"),
+        ("warning", "Warning"),
+        ("error", "Error"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="ingest_parsed_records")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="parsed_records"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_parsed_records"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_parsed_records"
+    )
+    artifact = models.ForeignKey(
+        "IngestArtifactRecord", on_delete=models.CASCADE, related_name="parsed_records"
+    )
+    member = models.ForeignKey(
+        "IngestArtifactMember", null=True, blank=True, on_delete=models.SET_NULL, related_name="parsed_records"
+    )
+    parser_name = models.CharField(max_length=120, blank=True, default="")
+    parser_version = models.CharField(max_length=64, blank=True, default="")
+    normalization_version = models.CharField(max_length=64, blank=True, default="")
+    record_index = models.IntegerField(null=True, blank=True)
+    source_payload_json = models.JSONField(default=dict, blank=True)
+    normalized_payload_json = models.JSONField(default=dict, blank=True)
+    source_schema_json = models.JSONField(default=dict, blank=True)
+    provenance_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="ok")
+    failure_reason = models.TextField(blank=True, default="")
+    idempotency_key = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["workspace", "orchestration_run"], name="ix_ing_parsed_run"),
+            models.Index(fields=["workspace", "artifact"], name="ix_ing_parsed_artifact"),
+            models.Index(fields=["workspace", "member"], name="ix_ing_parsed_member"),
+            models.Index(fields=["workspace", "parser_name"], name="ix_ing_parsed_parser"),
+            models.Index(fields=["workspace", "status"], name="ix_ing_parsed_status"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=models.Q(idempotency_key__gt=""),
+                name="uniq_ing_parsed_idempotency",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.parser_name}:{self.id}"
 
 
 class PlatformDomainEvent(models.Model):
