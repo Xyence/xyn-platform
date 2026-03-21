@@ -50,13 +50,28 @@ Grouped member support is based on shared basename (`group_key`) so multi-file f
 
 `ParserRegistry` routes by classified file kind.
 
+The parser contract supports both single-file and grouped parse targets:
+
+- `target_type=file` for direct artifacts or extracted members
+- `target_type=grouped` for logical grouped bundles (for example shared-basename shapefile members)
+
 Current built-ins:
 
 - CSV/TSV parser
 - GeoJSON parser
-- grouped shapefile placeholder parser (explicit unsupported warning)
+- XLSX parser (sheet/row provenance in parsed-record metadata)
+- grouped shapefile placeholder parser (deterministic unsupported/not-implemented outcomes)
+- explicit unsupported handlers for `.xls`, `.mdb/.accdb`, `.xml`, file geodatabase classifications
 
-Unsupported formats are explicit and observable (member/status and warning outputs), never silent.
+Unsupported outcomes are explicit and observable (member/status and parsed warning/error rows), never silent.
+
+Issue categories are machine-readable and persisted in `IngestParsedRecord.warnings_json`:
+
+- `unsupported_format`
+- `parser_not_installed`
+- `not_implemented`
+- `invalid_grouped_input`
+- `parse_error`
 
 ## Parsed output contract
 
@@ -66,6 +81,8 @@ Unsupported formats are explicit and observable (member/status and warning outpu
 - `normalized_payload_json`
 - `source_schema_json`
 - `provenance_json`
+
+For grouped parse targets, `provenance_json` includes grouped member ids/paths so one logical parse target can be traced back to all contributing members.
 
 This remains ingestion-scoped and intentionally app/domain-neutral.
 

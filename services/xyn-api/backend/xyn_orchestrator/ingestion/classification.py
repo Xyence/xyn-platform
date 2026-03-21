@@ -7,6 +7,8 @@ from .interfaces import (
     FILE_KIND_CPG,
     FILE_KIND_CSV,
     FILE_KIND_DBF,
+    FILE_KIND_FILE_GDB,
+    FILE_KIND_GDBTABLE,
     FILE_KIND_GEOJSON,
     FILE_KIND_JSON,
     FILE_KIND_MDB,
@@ -40,6 +42,8 @@ _EXTENSION_TO_KIND = {
     "accdb": FILE_KIND_ACCDB,
     "xml": FILE_KIND_XML,
     "pdf": FILE_KIND_PDF,
+    "gdb": FILE_KIND_FILE_GDB,
+    "gdbtable": FILE_KIND_GDBTABLE,
 }
 
 
@@ -50,6 +54,10 @@ def _group_key(path: str) -> str:
 
 def classify_file(*, filename: str, content_type: str = "") -> FileClassification:
     token = str(filename or "").strip().lower()
+    if ".gdb/" in token or token.endswith(".gdb"):
+        ext = "gdbtable" if token.endswith(".gdbtable") else "gdb"
+        kind = FILE_KIND_GDBTABLE if ext == "gdbtable" else FILE_KIND_FILE_GDB
+        return FileClassification(kind=kind, extension=ext, group_key=_group_key(token), mime_type=str(content_type or "").strip().lower())
     ext = ""
     if "." in token:
         ext = token.rsplit(".", 1)[-1]

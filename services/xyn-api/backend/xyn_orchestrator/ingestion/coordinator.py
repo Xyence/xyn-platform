@@ -14,7 +14,19 @@ from xyn_orchestrator.provenance import ProvenanceLinkInput, ProvenanceService, 
 from .archive import ZipArchiveExpander
 from .classification import classify_file
 from .fetch import HttpArtifactFetcher
-from .interfaces import FILE_KIND_SHP, FILE_KIND_ZIP, FetchRequest, ParseTarget
+from .interfaces import (
+    FILE_KIND_SHP,
+    FILE_KIND_ZIP,
+    ISSUE_CATEGORY_NOT_IMPLEMENTED,
+    ISSUE_CATEGORY_NOT_INSTALLED,
+    ISSUE_CATEGORY_UNSUPPORTED_FORMAT,
+    ParseIssue,
+    ParseOutcome,
+    FetchRequest,
+    ParseTarget,
+    TARGET_TYPE_FILE,
+    TARGET_TYPE_GROUPED,
+)
 from .parsers import ParserRegistry, build_default_registry
 
 logger = logging.getLogger(__name__)
@@ -117,7 +129,7 @@ class IngestionCoordinator:
                 meta = artifact_row.metadata_json if isinstance(artifact_row.metadata_json, dict) else {}
                 meta["deduped_from_artifact_id"] = str(previous.id)
                 artifact_row.metadata_json = meta
-                artifact_row.save(update_fields=["metadata_json", "updated_at"])
+                artifact_row.save(update_fields=["metadata_json"])
 
             classified = classify_file(filename=fetch_result.original_filename, content_type=fetch_result.content_type)
             with open(fetch_result.local_path, "rb") as fp:
@@ -203,6 +215,7 @@ class IngestionCoordinator:
             artifact_record_id=str(artifact_row.id),
             source_path=filename,
             classified_kind=kind,
+            target_type=TARGET_TYPE_FILE,
         )
         outcome = parser.parse(target=target, stream=io.BytesIO(content))
         warnings.extend(list(outcome.warnings))
@@ -232,6 +245,28 @@ class IngestionCoordinator:
             member.failure_reason = f"unsupported member type: {member.classified_type}"
             member.save(update_fields=["status", "failure_reason", "updated_at"])
             warnings.append(member.failure_reason)
+            self._persist_outcome(
+                workspace=workspace,
+                run=run,
+                source_connector=source_connector,
+                artifact_row=artifact_row,
+                member_row=member,
+                outcome=ParseOutcome(
+                    parser_name="unsupported",
+                    parser_version="1",
+                    normalization_version="0",
+                    records=tuple(),
+                    warnings=(member.failure_reason,),
+                    issues=(
+                        ParseIssue(
+                            category=ISSUE_CATEGORY_UNSUPPORTED_FORMAT,
+                            code="unsupported.member.kind",
+                            message=member.failure_reason,
+                            severity="warning",
+                        ),
+                    ),
+                ),
+            )
             return 0
         target = ParseTarget(
             workspace_id=str(workspace.id),
@@ -241,6 +276,7 @@ class IngestionCoordinator:
             member_id=str(member.id),
             source_path=str(member.member_path),
             classified_kind=str(member.classified_type or ""),
+            target_type=TARGET_TYPE_FILE,
             group_key=str(member.group_key or ""),
         )
         outcome = parser.parse(target=target, stream=io.BytesIO(content))
@@ -283,11 +319,11 @@ class IngestionCoordinator:
             member_id=str(member_row.id),
             source_path=str(member_row.member_path or ""),
             classified_kind=FILE_KIND_SHP,
+            target_type=TARGET_TYPE_GROUPED,
             group_key=str(member_row.group_key or ""),
-            metadata={
-                "group_member_ids": [str(item.member_id) for item in members],
-                "group_member_paths": [str(item.member_path) for item in members],
-            },
+            grouped_member_ids=tuple(str(item.member_id) for item in members),
+            grouped_member_paths=tuple(str(item.member_path) for item in members),
+            metadata={},
         )
         outcome = parser.parse(target=target, stream=io.BytesIO(shp_member.raw_bytes))
         warnings.extend(list(outcome.warnings))
@@ -298,13 +334,23 @@ class IngestionCoordinator:
             artifact_row=artifact_row,
             member_row=member_row,
             outcome=outcome,
-            target_metadata=target.metadata,
+            target_metadata={
+                "target_type": TARGET_TYPE_GROUPED,
+                "group_member_ids": list(target.grouped_member_ids),
+                "group_member_paths": list(target.grouped_member_paths),
+            },
         )
-        for item in members:
-            row = models.IngestArtifactMember.objects.get(id=item.member_id)
-            row.status = "unsupported"
-            row.failure_reason = "grouped shapefile routed but parser not implemented"
-            row.save(update_fields=["status", "failure_reason", "updated_at"])
+        unsupported_categories = {
+            ISSUE_CATEGORY_UNSUPPORTED_FORMAT,
+            ISSUE_CATEGORY_NOT_IMPLEMENTED,
+            ISSUE_CATEGORY_NOT_INSTALLED,
+        }
+        if any(str(issue.category) in unsupported_categories for issue in outcome.issues):
+            for item in members:
+                row = models.IngestArtifactMember.objects.get(id=item.member_id)
+                row.status = "unsupported"
+                row.failure_reason = "; ".join(outcome.warnings) or "grouped shapefile not parsed"
+                row.save(update_fields=["status", "failure_reason", "updated_at"])
         return count
 
     def _persist_outcome(
@@ -319,8 +365,23 @@ class IngestionCoordinator:
         target_metadata: dict[str, Any] | None = None,
     ) -> int:
         base_meta = target_metadata if isinstance(target_metadata, dict) else {}
+        if "target_type" not in base_meta:
+            base_meta = {**base_meta, "target_type": TARGET_TYPE_FILE}
         count = 0
-        if not outcome.records and outcome.warnings:
+        if not outcome.records and (outcome.warnings or getattr(outcome, "issues", tuple())):
+            issue_payload = [
+                {
+                    "category": str(issue.category),
+                    "code": str(issue.code),
+                    "message": str(issue.message),
+                    "severity": str(issue.severity),
+                    "details": issue.details if isinstance(issue.details, dict) else {},
+                }
+                for issue in getattr(outcome, "issues", tuple())
+            ]
+            issue_messages = [str(item.get("message") or "") for item in issue_payload if str(item.get("message") or "").strip()]
+            has_error_issue = any(str(item.get("severity")) == "error" for item in issue_payload)
+            failure_reason = "; ".join(list(outcome.warnings) or issue_messages) or "parser outcome without records"
             key = hashlib.sha256(
                 f"{workspace.id}|{artifact_row.id}|{member_row.id if member_row else ''}|{outcome.parser_name}|warnings".encode("utf-8")
             ).hexdigest()
@@ -335,12 +396,29 @@ class IngestionCoordinator:
                     "parser_name": str(outcome.parser_name),
                     "parser_version": str(outcome.parser_version),
                     "normalization_version": str(outcome.normalization_version),
-                    "status": "warning",
-                    "failure_reason": "; ".join(outcome.warnings),
-                    "provenance_json": base_meta,
+                    "status": "error" if has_error_issue else "warning",
+                    "failure_reason": failure_reason,
+                    "provenance_json": {
+                        **base_meta,
+                        "target_type": str(base_meta.get("target_type") or TARGET_TYPE_FILE),
+                        "group_member_ids": list(base_meta.get("group_member_ids", [])),
+                        "group_member_paths": list(base_meta.get("group_member_paths", [])),
+                    },
+                    "warnings_json": issue_payload,
                 },
             )
             return 0
+        issue_payload = [
+            {
+                "category": str(issue.category),
+                "code": str(issue.code),
+                "message": str(issue.message),
+                "severity": str(issue.severity),
+                "details": issue.details if isinstance(issue.details, dict) else {},
+            }
+            for issue in getattr(outcome, "issues", tuple())
+        ]
+        has_error_issue = any(str(item.get("severity")) == "error" for item in issue_payload)
         for record in outcome.records:
             key_raw = "|".join(
                 [
@@ -369,9 +447,13 @@ class IngestionCoordinator:
                     "source_payload_json": record.source_payload,
                     "normalized_payload_json": record.normalized_payload,
                     "source_schema_json": record.source_schema,
-                    "provenance_json": {**base_meta, **record.provenance},
-                    "warnings_json": list(record.warnings),
-                    "status": str(record.status or "ok"),
+                    "provenance_json": {
+                        **base_meta,
+                        **record.provenance,
+                        "target_type": str(base_meta.get("target_type") or TARGET_TYPE_FILE),
+                    },
+                    "warnings_json": [*list(record.warnings), *issue_payload],
+                    "status": "error" if has_error_issue else str(record.status or "ok"),
                 },
             )
             source_family = "ingest_artifact_member" if member_row else "ingest_artifact"

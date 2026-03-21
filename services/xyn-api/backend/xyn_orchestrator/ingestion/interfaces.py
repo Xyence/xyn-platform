@@ -20,7 +20,18 @@ FILE_KIND_MDB = "mdb"
 FILE_KIND_ACCDB = "accdb"
 FILE_KIND_XML = "xml"
 FILE_KIND_PDF = "pdf"
+FILE_KIND_FILE_GDB = "file_gdb"
+FILE_KIND_GDBTABLE = "gdbtable"
 FILE_KIND_UNKNOWN_BINARY = "unknown_binary"
+
+TARGET_TYPE_FILE = "file"
+TARGET_TYPE_GROUPED = "grouped"
+
+ISSUE_CATEGORY_UNSUPPORTED_FORMAT = "unsupported_format"
+ISSUE_CATEGORY_NOT_INSTALLED = "parser_not_installed"
+ISSUE_CATEGORY_NOT_IMPLEMENTED = "not_implemented"
+ISSUE_CATEGORY_INVALID_GROUPED_INPUT = "invalid_grouped_input"
+ISSUE_CATEGORY_PARSE_ERROR = "parse_error"
 
 
 @dataclass(frozen=True)
@@ -64,7 +75,10 @@ class ParseTarget:
     member_id: str = ""
     source_path: str = ""
     classified_kind: str = ""
+    target_type: str = TARGET_TYPE_FILE
     group_key: str = ""
+    grouped_member_ids: tuple[str, ...] = tuple()
+    grouped_member_paths: tuple[str, ...] = tuple()
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -80,11 +94,21 @@ class ParsedRecordEnvelope:
 
 
 @dataclass(frozen=True)
+class ParseIssue:
+    category: str
+    code: str
+    message: str
+    severity: str = "warning"
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ParseOutcome:
     parser_name: str
     parser_version: str
     normalization_version: str
     records: tuple[ParsedRecordEnvelope, ...]
+    issues: tuple[ParseIssue, ...] = tuple()
     warnings: tuple[str, ...] = tuple()
 
 

@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import zipfile
+from xml.sax.saxutils import escape
 from unittest import mock
 
 from django.conf import settings
@@ -14,6 +15,7 @@ from xyn_orchestrator.ingestion.classification import classify_file
 from xyn_orchestrator.ingestion.coordinator import IngestionCoordinator
 from xyn_orchestrator.ingestion.fetch import HttpArtifactFetcher
 from xyn_orchestrator.ingestion.interfaces import (
+    FILE_KIND_FILE_GDB,
     FILE_KIND_CSV,
     FILE_KIND_GEOJSON,
     FILE_KIND_SHP,
@@ -82,11 +84,76 @@ class IngestionRuntimeTests(TestCase):
             os.environ["XYN_ARTIFACT_ROOT"] = self._prior_artifact_root
         settings.MEDIA_ROOT = self._prior_media_root
 
+    def _xlsx_bytes(self, *, sheets: list[tuple[str, list[list[str]]]]) -> bytes:
+        workbook_sheets = []
+        workbook_rels = []
+        sheet_xml = {}
+        for index, (name, rows) in enumerate(sheets, start=1):
+            rid = f"rId{index}"
+            workbook_sheets.append(f'<sheet name="{escape(name)}" sheetId="{index}" r:id="{rid}"/>')
+            workbook_rels.append(
+                f'<Relationship Id="{rid}" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+                f'Target="worksheets/sheet{index}.xml"/>'
+            )
+            row_parts: list[str] = []
+            for row_number, row in enumerate(rows, start=1):
+                cell_parts: list[str] = []
+                for col_number, value in enumerate(row, start=1):
+                    col = chr(ord("A") + col_number - 1)
+                    cell_parts.append(f'<c r="{col}{row_number}" t="inlineStr"><is><t>{escape(str(value))}</t></is></c>')
+                row_parts.append(f'<row r="{row_number}">{"".join(cell_parts)}</row>')
+            sheet_xml[index] = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                f'<sheetData>{"".join(row_parts)}</sheetData>'
+                "</worksheet>"
+            )
+
+        workbook_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            f'<sheets>{"".join(workbook_sheets)}</sheets>'
+            "</workbook>"
+        )
+        rels_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'{"".join(workbook_rels)}'
+            "</Relationships>"
+        )
+        content_types = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            + "".join(
+                f'<Override PartName="/xl/worksheets/sheet{idx}.xml" '
+                'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                for idx in sheet_xml.keys()
+            )
+            + "</Types>"
+        )
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", content_types)
+            archive.writestr("_rels/.rels", "")
+            archive.writestr("xl/workbook.xml", workbook_xml)
+            archive.writestr("xl/_rels/workbook.xml.rels", rels_xml)
+            for idx, xml in sheet_xml.items():
+                archive.writestr(f"xl/worksheets/sheet{idx}.xml", xml)
+        return buf.getvalue()
+
     def test_file_classification_matrix(self):
         self.assertEqual(classify_file(filename="bundle.zip").kind, FILE_KIND_ZIP)
         self.assertEqual(classify_file(filename="rows.csv").kind, FILE_KIND_CSV)
         self.assertEqual(classify_file(filename="shape.shp").kind, FILE_KIND_SHP)
         self.assertEqual(classify_file(filename="map.geojson").kind, FILE_KIND_GEOJSON)
+        self.assertEqual(classify_file(filename="county.gdb").kind, FILE_KIND_FILE_GDB)
         self.assertEqual(classify_file(filename="blob.bin").kind, FILE_KIND_UNKNOWN_BINARY)
 
     def test_http_fetch_metadata_capture_and_raw_artifact_persistence(self):
@@ -221,9 +288,120 @@ class IngestionRuntimeTests(TestCase):
         self.assertEqual(result.parsed_record_count, 0)
         parsed_warning = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="warning").first()
         self.assertIsNotNone(parsed_warning)
+        self.assertEqual(parsed_warning.warnings_json[0]["category"], "not_implemented")
         self.assertIn("group_member_ids", parsed_warning.provenance_json)
         members = models.IngestArtifactMember.objects.filter(orchestration_run_id=result.run_id)
         self.assertTrue(all(row.status == "unsupported" for row in members))
+
+    def test_grouped_shapefile_incomplete_bundle_is_invalid_grouped_input(self):
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("parcel/blocks.shp", b"fake-shp")
+            archive.writestr("parcel/blocks.dbf", b"fake-dbf")
+        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/parcel-incomplete.zip",
+                headers={"content-type": "application/zip", "content-length": str(len(zip_buf.getvalue()))},
+                chunks=[zip_buf.getvalue()],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/parcel-incomplete.zip",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        parsed_warning = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="warning").first()
+        self.assertIsNotNone(parsed_warning)
+        self.assertEqual(parsed_warning.warnings_json[0]["category"], "invalid_grouped_input")
+        self.assertIn("missing required", parsed_warning.failure_reason)
+
+    def test_xlsx_parsing_via_coordinator_with_sheet_row_provenance(self):
+        payload = self._xlsx_bytes(
+            sheets=[
+                ("Parcels", [["parcel_id", "owner"], ["101", "Alpha LLC"], ["102", "Beta Trust"]]),
+                ("Notes", [["id", "text"], ["1", "hello"]]),
+            ]
+        )
+        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/data.xlsx",
+                headers={"content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+                chunks=[payload],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/data.xlsx",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        rows = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id).order_by("record_index", "created_at")
+        self.assertEqual(rows.count(), 3)
+        first = rows.first()
+        self.assertEqual(first.provenance_json.get("sheet"), "Parcels")
+        self.assertEqual(first.provenance_json.get("row_number"), 2)
+        self.assertEqual(first.normalized_payload_json.get("fields", {}).get("owner"), "Alpha LLC")
+
+    def test_xlsx_malformed_payload_is_persisted_as_parse_error(self):
+        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/bad.xlsx",
+                headers={"content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+                chunks=[b"not-a-zip"],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/bad.xlsx",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        self.assertEqual(result.parsed_record_count, 0)
+        warning = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id).first()
+        self.assertIsNotNone(warning)
+        self.assertEqual(warning.status, "error")
+        self.assertEqual(warning.warnings_json[0]["category"], "parse_error")
+        self.assertEqual(warning.warnings_json[0]["code"], "xlsx.invalid_zip")
+
+    def test_xls_and_access_formats_emit_deterministic_unsupported(self):
+        for filename in ("data.xls", "parcel.mdb", "parcel.accdb"):
+            with self.subTest(filename=filename):
+                with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+                    mocked_get.return_value = _MockHttpResponse(
+                        url=f"https://example.com/{filename}",
+                        headers={"content-type": "application/octet-stream"},
+                        chunks=[b"binary"],
+                    )
+                    result = IngestionCoordinator().ingest_from_url(
+                        source_connector=self.source,
+                        source_url=f"https://example.com/{filename}",
+                        jurisdiction="tx-travis-county",
+                        source_scope="county",
+                    )
+                warning = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="warning").first()
+                self.assertIsNotNone(warning)
+                self.assertEqual(warning.warnings_json[0]["category"], "not_implemented")
+
+    def test_xml_and_file_gdb_emit_explicit_unsupported_or_not_implemented(self):
+        fixtures = [
+            ("data.xml", b"<root><item>1</item></root>", "unsupported_format"),
+            ("county.gdb", b"gdb", "not_implemented"),
+        ]
+        for filename, payload, expected_category in fixtures:
+            with self.subTest(filename=filename):
+                with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+                    mocked_get.return_value = _MockHttpResponse(
+                        url=f"https://example.com/{filename}",
+                        headers={"content-type": "application/octet-stream"},
+                        chunks=[payload],
+                    )
+                    result = IngestionCoordinator().ingest_from_url(
+                        source_connector=self.source,
+                        source_url=f"https://example.com/{filename}",
+                        jurisdiction="tx-travis-county",
+                        source_scope="county",
+                    )
+                warning = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="warning").first()
+                self.assertIsNotNone(warning)
+                self.assertEqual(warning.warnings_json[0]["category"], expected_category)
 
     def test_parsed_records_link_back_with_provenance(self):
         with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
