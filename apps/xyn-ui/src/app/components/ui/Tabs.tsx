@@ -7,7 +7,7 @@ type TabOption<T extends string> = {
 
 type TabsProps<T extends string> = {
   value: T;
-  options: TabOption<T>[];
+  options: ReadonlyArray<TabOption<T>>;
   onChange: (next: T) => void;
   ariaLabel?: string;
   className?: string;

@@ -13,7 +13,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("../../api/xyn", () => apiMocks);
 
 describe("SourceInspectionReviewPage", () => {
-  let consoleError: ReturnType<typeof vi.spyOn> | null = null;
+  let consoleError: { mockRestore: () => void } | null = null;
 
   beforeEach(() => {
     vi.clearAllMocks();
