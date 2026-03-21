@@ -178,6 +178,7 @@ from .sources import (
     serialize_source_inspection,
     serialize_source_mapping,
 )
+from .source_governance import SourceGovernanceService, normalize_governance_policy
 from .watching import (
     WATCH_LIFECYCLE_STATES,
     WATCH_SUBSCRIBER_TYPES,
@@ -31402,6 +31403,7 @@ def source_connectors_collection(request: HttpRequest) -> JsonResponse:
                     refresh_cadence_seconds=int(payload.get("refresh_cadence_seconds") or 0),
                     orchestration_pipeline_key=str(payload.get("orchestration_pipeline_key") or "").strip(),
                     configuration=payload.get("configuration") if isinstance(payload.get("configuration"), dict) else {},
+                    governance=payload.get("governance") if isinstance(payload.get("governance"), dict) else {},
                     provenance=payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {},
                     metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
                     created_by_id=str(identity.id),
@@ -31509,6 +31511,20 @@ def source_connector_detail(request: HttpRequest, source_id: str) -> JsonRespons
             return JsonResponse({"error": "configuration must be an object"}, status=400)
         source.configuration_json = cfg or {}
         update_fields.append("configuration_json")
+    if "governance" in payload:
+        governance = payload.get("governance")
+        if governance is not None and not isinstance(governance, dict):
+            return JsonResponse({"error": "governance must be an object"}, status=400)
+        try:
+            source.governance_json = normalize_governance_policy(governance or {}, strict=True)
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        update_fields.append("governance_json")
+    if "review_approved" in payload:
+        source.review_approved = bool(payload.get("review_approved"))
+        source.review_approved_at = timezone.now() if source.review_approved else None
+        source.review_approved_by = identity if source.review_approved else None
+        update_fields.extend(["review_approved", "review_approved_at", "review_approved_by"])
     if "provenance" in payload:
         provenance = payload.get("provenance")
         if provenance is not None and not isinstance(provenance, dict):
@@ -31627,6 +31643,21 @@ def source_connector_activate(request: HttpRequest, source_id: str) -> JsonRespo
     if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
         return JsonResponse({"error": "source not found in workspace context"}, status=404)
     service = SourceConnectorService()
+    governance_decision = SourceGovernanceService().evaluate(source=source, action="activate_source")
+    if governance_decision.decision != "allow":
+        SourceGovernanceService().emit_audit_event(
+            source=source,
+            decision=governance_decision,
+            actor_id=str(identity.id),
+            metadata={"route": "source_connector_activate"},
+        )
+        return JsonResponse(
+            {
+                "error": governance_decision.message,
+                "governance_decision": governance_decision.as_dict(),
+            },
+            status=409 if governance_decision.decision == "defer" else 403,
+        )
     readiness = service.validate_readiness(source_id=str(source.id))
     if not readiness.ready:
         return JsonResponse({"error": "source is not ready for activation", "readiness": {"reasons": list(readiness.reasons)}}, status=409)
@@ -33091,6 +33122,27 @@ def ingest_artifact_detail(request: HttpRequest, artifact_id: str) -> JsonRespon
     )
 
 
+def _resolve_run_source_connector(
+    *,
+    workspace: Workspace,
+    payload: dict[str, Any],
+) -> SourceConnector | None:
+    source_connector_id = str(payload.get("source_connector_id") or "").strip()
+    target_ref = payload.get("target_ref") if isinstance(payload.get("target_ref"), dict) else {}
+    if not source_connector_id:
+        source_connector_id = str(target_ref.get("source_connector_id") or "").strip()
+    if not source_connector_id and str(target_ref.get("target_type") or "").strip() == "source_connector":
+        source_connector_id = str(target_ref.get("target_id") or "").strip()
+    if source_connector_id:
+        return SourceConnector.objects.filter(id=source_connector_id, workspace=workspace).first()
+    source_key = str(payload.get("source") or "").strip()
+    if not source_key:
+        source_key = str(target_ref.get("source_key") or "").strip()
+    if not source_key:
+        return None
+    return SourceConnector.objects.filter(workspace=workspace, key=source_key).first()
+
+
 @csrf_exempt
 @login_required
 def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
@@ -33114,6 +33166,23 @@ def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
         pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key)
         if pipeline is None:
             return JsonResponse({"error": "pipeline not found"}, status=404)
+        source_connector = _resolve_run_source_connector(workspace=workspace, payload=payload)
+        if source_connector is not None:
+            governance_decision = SourceGovernanceService().evaluate(source=source_connector, action="run_source")
+            if governance_decision.decision != "allow":
+                SourceGovernanceService().emit_audit_event(
+                    source=source_connector,
+                    decision=governance_decision,
+                    actor_id=str(identity.id),
+                    metadata={"route": "orchestration_runs_collection"},
+                )
+                return JsonResponse(
+                    {
+                        "error": governance_decision.message,
+                        "governance_decision": governance_decision.as_dict(),
+                    },
+                    status=409 if governance_decision.decision == "defer" else 403,
+                )
         metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         manual_params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
         explicit_idempotency_key = str(payload.get("idempotency_key") or "").strip()

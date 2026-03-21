@@ -3283,8 +3283,14 @@ class SourceConnector(models.Model):
     refresh_cadence_seconds = models.PositiveIntegerField(default=0)
     orchestration_pipeline_key = models.CharField(max_length=120, blank=True, default="")
     configuration_json = models.JSONField(default=dict, blank=True)
+    governance_json = models.JSONField(default=dict, blank=True)
     provenance_json = models.JSONField(default=dict, blank=True)
     metadata_json = models.JSONField(default=dict, blank=True)
+    review_approved = models.BooleanField(default=False, db_index=True)
+    review_approved_at = models.DateTimeField(null=True, blank=True)
+    review_approved_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="approved_source_connectors"
+    )
     last_run = models.ForeignKey(
         "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_connectors"
     )

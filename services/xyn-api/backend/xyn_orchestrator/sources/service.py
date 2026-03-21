@@ -11,6 +11,7 @@ from xyn_orchestrator.models import SourceConnector, SourceInspectionProfile, So
 from xyn_orchestrator.provenance import AuditEventInput, ProvenanceService, object_ref
 from xyn_orchestrator.geospatial.utils import compute_centroid, extract_bbox, normalize_geometry
 from xyn_orchestrator.source_adapters import SourceAdapterService
+from xyn_orchestrator.source_governance import SourceGovernanceService, normalize_governance_policy
 
 from .interfaces import (
     SOURCE_HEALTH_STATES,
@@ -38,6 +39,7 @@ class SourceExecutionContract:
 class SourceConnectorService:
     def __init__(self, *, repository: SourceConnectorRepository | None = None):
         self._repository = repository or SourceConnectorRepository()
+        self._governance = SourceGovernanceService()
 
     def register_source(self, registration: SourceRegistration) -> SourceConnector:
         key = str(registration.key or "").strip().lower().replace(" ", "_")
@@ -49,6 +51,10 @@ class SourceConnectorService:
         mode = str(registration.source_mode or "manual").strip().lower()
         if mode not in SOURCE_MODES:
             raise ValueError(f"unsupported source_mode '{mode}'")
+        governance = normalize_governance_policy(
+            registration.governance if isinstance(registration.governance, dict) else {},
+            strict=bool(registration.governance),
+        )
         return self._repository.create_source(
             workspace_id=registration.workspace_id,
             key=key,
@@ -58,6 +64,7 @@ class SourceConnectorService:
             refresh_cadence_seconds=max(0, int(registration.refresh_cadence_seconds or 0)),
             orchestration_pipeline_key=str(registration.orchestration_pipeline_key or "").strip(),
             configuration=registration.configuration if isinstance(registration.configuration, dict) else {},
+            governance=governance,
             provenance=registration.provenance if isinstance(registration.provenance, dict) else {},
             metadata=registration.metadata if isinstance(registration.metadata, dict) else {},
             created_by_id=str(registration.created_by_id or "").strip(),
@@ -141,6 +148,10 @@ class SourceConnectorService:
         readiness = self.validate_readiness(source_id=source_id)
         if not readiness.ready:
             raise ValueError("source is not ready for activation")
+        governance_decision = self._governance.evaluate(source=source, action="activate_source")
+        if governance_decision.decision != "allow":
+            self._governance.emit_audit_event(source=source, decision=governance_decision)
+            raise ValueError(f"{governance_decision.reason_code}: {governance_decision.message}")
         source.is_active = True
         source.lifecycle_state = "active"
         source.health_status = "healthy" if source.health_status == "unknown" else source.health_status
@@ -164,6 +175,50 @@ class SourceConnectorService:
                 metadata={"lifecycle_state": str(updated.lifecycle_state), "health_status": str(updated.health_status)},
                 idempotency_key=hashlib.sha256(
                     f"source.activate|{updated.workspace_id}|{updated.id}|{updated.lifecycle_state}".encode("utf-8")
+                ).hexdigest(),
+            )
+        )
+        return updated
+
+    def set_review_approval(
+        self,
+        *,
+        source_id: str,
+        approved: bool,
+        actor_id: str = "",
+    ) -> SourceConnector:
+        source = self._repository.get_source(source_id=source_id)
+        source.review_approved = bool(approved)
+        source.review_approved_at = timezone.now() if approved else None
+        source.review_approved_by_id = str(actor_id or "") or None
+        updated = self._repository.update_source(
+            source=source,
+            update_fields=["review_approved", "review_approved_at", "review_approved_by"],
+        )
+        ProvenanceService().record_audit_event(
+            AuditEventInput(
+                workspace_id=str(updated.workspace_id),
+                event_type="source_governance.review_state_changed",
+                subject_ref=object_ref(
+                    object_family="source_connector",
+                    object_id=str(updated.id),
+                    workspace_id=str(updated.workspace_id),
+                    attributes={"key": str(updated.key), "source_type": str(updated.source_type)},
+                ),
+                actor_ref=(
+                    object_ref(
+                        object_family="user_identity",
+                        object_id=str(actor_id),
+                        workspace_id=str(updated.workspace_id),
+                    )
+                    if actor_id
+                    else None
+                ),
+                summary=f"Source governance review {'approved' if approved else 'revoked'}: {updated.key}",
+                reason="manual review state updated",
+                metadata={"review_approved": bool(approved)},
+                idempotency_key=hashlib.sha256(
+                    f"source.review|{updated.workspace_id}|{updated.id}|{int(bool(approved))}|{actor_id}".encode("utf-8")
                 ).hexdigest(),
             )
         )
@@ -277,6 +332,9 @@ class SourceConnectorService:
 
 
 def serialize_source_connector(source: SourceConnector, *, readiness: SourceReadiness | None = None) -> dict[str, Any]:
+    governance_service = SourceGovernanceService()
+    governance_policy = normalize_governance_policy(source.governance_json if isinstance(source.governance_json, dict) else {})
+    governance_status = governance_service.evaluate(source=source, action="run_source").as_dict()
     current_mapping = source.mappings.filter(is_current=True).order_by("-version").first()
     latest_inspection = source.inspections.order_by("-inspected_at", "-id").first()
     return {
@@ -292,8 +350,13 @@ def serialize_source_connector(source: SourceConnector, *, readiness: SourceRead
         "refresh_cadence_seconds": int(source.refresh_cadence_seconds or 0),
         "orchestration_pipeline_key": str(source.orchestration_pipeline_key or ""),
         "configuration": source.configuration_json if isinstance(source.configuration_json, dict) else {},
+        "governance": governance_policy,
+        "governance_status": governance_status,
         "provenance": source.provenance_json if isinstance(source.provenance_json, dict) else {},
         "metadata": source.metadata_json if isinstance(source.metadata_json, dict) else {},
+        "review_approved": bool(source.review_approved),
+        "review_approved_at": source.review_approved_at.isoformat() if source.review_approved_at else None,
+        "review_approved_by_id": str(source.review_approved_by_id) if source.review_approved_by_id else None,
         "last_run_id": str(source.last_run_id) if source.last_run_id else None,
         "last_inspected_at": source.last_inspected_at.isoformat() if source.last_inspected_at else None,
         "last_validated_at": source.last_validated_at.isoformat() if source.last_validated_at else None,

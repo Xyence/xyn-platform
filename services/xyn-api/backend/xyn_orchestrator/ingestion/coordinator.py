@@ -11,6 +11,7 @@ from xyn_orchestrator import models
 from xyn_orchestrator.orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
 from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService
 from xyn_orchestrator.provenance import ProvenanceLinkInput, ProvenanceService, object_ref
+from xyn_orchestrator.source_governance import SourceGovernanceService
 from xyn_orchestrator.source_adapters import SourceAdapterService
 
 from .archive import ZipArchiveExpander
@@ -73,6 +74,7 @@ class IngestionCoordinator:
         self._archive = archive_expander or ZipArchiveExpander()
         self._registry = parser_registry or build_default_registry()
         self._adapters = adapter_service or SourceAdapterService()
+        self._governance = SourceGovernanceService()
 
     def _ensure_pipeline(self, *, workspace: models.Workspace, key: str = "ingestion-runtime") -> models.OrchestrationPipeline:
         pipeline, _ = models.OrchestrationPipeline.objects.get_or_create(
@@ -141,6 +143,31 @@ class IngestionCoordinator:
         parsed_count = 0
         artifact_row: models.IngestArtifactRecord | None = None
         try:
+            governance_decision = self._governance.evaluate(source=source_connector, action="fetch_source")
+            if governance_decision.decision != "allow":
+                self._governance.emit_audit_event(
+                    source=source_connector,
+                    decision=governance_decision,
+                    run_id=str(run.id),
+                    metadata={"stage": "ingestion_precheck"},
+                )
+                ingest_meta = run.metadata_json.get("ingestion", {}) if isinstance(run.metadata_json, dict) else {}
+                if not isinstance(ingest_meta, dict):
+                    ingest_meta = {}
+                ingest_meta["outcome"] = governance_decision.decision
+                ingest_meta["governance_decision"] = governance_decision.as_dict()
+                ingest_meta["fetch_attempted"] = False
+                run.metadata_json = {**(run.metadata_json if isinstance(run.metadata_json, dict) else {}), "ingestion": ingest_meta}
+                run.status = "failed" if governance_decision.decision == "deny" else "skipped"
+                run.summary = governance_decision.message[:240]
+                run.completed_at = datetime.now(timezone.utc)
+                run.save(update_fields=["status", "summary", "metadata_json", "completed_at", "updated_at"])
+                return IngestionExecutionResult(
+                    run_id=str(run.id),
+                    artifact_record_id="",
+                    parsed_record_count=0,
+                    warnings=(governance_decision.reason_code,),
+                )
             fetch_result = self._fetcher.fetch_to_artifact(
                 workspace=workspace,
                 source_connector=source_connector,

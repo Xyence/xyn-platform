@@ -266,6 +266,22 @@ class IngestionRuntimeTests(TestCase):
         self.assertEqual(rows.count(), 2)
         self.assertEqual(rows.first().provenance_json.get("row_number"), 1)
 
+    def test_ingestion_fetch_is_blocked_by_governance_precheck(self):
+        self.source.governance_json = {"legal_status": "prohibited"}
+        self.source.save(update_fields=["governance_json", "updated_at"])
+        result = IngestionCoordinator().ingest_from_url(
+            source_connector=self.source,
+            source_url="https://example.com/data.csv",
+            jurisdiction="tx-travis-county",
+            source_scope="county",
+        )
+        run = models.OrchestrationRun.objects.get(id=result.run_id)
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(result.parsed_record_count, 0)
+        self.assertEqual(result.artifact_record_id, "")
+        ingestion_meta = (run.metadata_json or {}).get("ingestion", {})
+        self.assertEqual((ingestion_meta.get("governance_decision") or {}).get("reason_code"), "governance.legal_prohibited")
+
     def test_geojson_parsing_via_coordinator_preserves_feature_payload(self):
         payload = {
             "type": "FeatureCollection",

@@ -18,6 +18,8 @@ from xyn_orchestrator.models import (
     OrchestrationPipeline,
     OrchestrationRun,
     PlatformDomainEvent,
+    PlatformAuditEvent,
+    SourceConnector,
     UserIdentity,
     Workspace,
     WorkspaceMembership,
@@ -257,6 +259,35 @@ class OrchestrationOperatorApiTests(TestCase):
         second_payload = json.loads(second.content)
         self.assertEqual(first_payload["id"], second_payload["id"])
         self.assertEqual(OrchestrationRun.objects.filter(workspace=self.workspace, pipeline=self.pipeline).count(), 1)
+
+    def test_manual_trigger_is_blocked_by_source_governance(self):
+        source = SourceConnector.objects.create(
+            workspace=self.workspace,
+            key="county-source",
+            name="County Source",
+            source_mode="remote_url",
+            governance_json={"review_required": True, "allowed_ingestion_methods": ["download"]},
+        )
+        create_payload = {
+            "workspace_id": str(self.workspace.id),
+            "pipeline_key": self.pipeline.key,
+            "source": "county-source",
+            "target_ref": {"target_type": "source_connector", "target_id": str(source.id)},
+            "jurisdiction": "tx-travis-county",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = orchestration_runs_collection(
+                self._request("/xyn/api/orchestration/runs", method="post", data=json.dumps(create_payload))
+            )
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["governance_decision"]["reason_code"], "governance.review_required")
+        self.assertTrue(
+            PlatformAuditEvent.objects.filter(
+                workspace=self.workspace,
+                event_type="source_governance.deferred_run",
+            ).exists()
+        )
 
     def test_operator_can_inspect_run_detail_with_attempts_outputs_and_dependency_context(self):
         run = self._create_run()

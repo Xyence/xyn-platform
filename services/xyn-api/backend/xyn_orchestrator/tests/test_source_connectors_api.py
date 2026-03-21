@@ -52,6 +52,12 @@ class SourceConnectorApiTests(TestCase):
         return request
 
     def _create_source(self, *, mode: str = "manual") -> dict:
+        allowed_method = {
+            "manual": "manual",
+            "file_upload": "upload",
+            "remote_url": "download",
+            "api_polling": "api",
+        }.get(mode, "manual")
         payload = {
             "workspace_id": str(self.workspace.id),
             "key": f"source-{uuid.uuid4().hex[:6]}",
@@ -60,6 +66,7 @@ class SourceConnectorApiTests(TestCase):
             "source_mode": mode,
             "refresh_cadence_seconds": 3600 if mode in {"remote_url", "api_polling"} else 0,
             "configuration": {"url": "https://example.com/feed.csv"} if mode != "manual" else {},
+            "governance": {"allowed_ingestion_methods": [allowed_method], "legal_status": "allowed"},
             "provenance": {"origin_url": "https://example.com/feed.csv"},
         }
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
@@ -73,6 +80,8 @@ class SourceConnectorApiTests(TestCase):
         source = self._create_source(mode="file_upload")
         self.assertEqual(source["lifecycle_state"], "registered")
         self.assertEqual(source["source_mode"], "file_upload")
+        self.assertIn("governance_status", source)
+        self.assertEqual(source["governance"]["legal_status"], "allowed")
 
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             response = source_connectors_collection(
@@ -226,6 +235,122 @@ class SourceConnectorApiTests(TestCase):
             )
         self.assertEqual(response.status_code, 400)
 
+    def test_invalid_governance_contract_is_rejected(self):
+        payload = {
+            "workspace_id": str(self.workspace.id),
+            "key": "bad-governance-source",
+            "name": "Bad Governance Source",
+            "source_mode": "manual",
+            "governance": {"allowed_ingestion_methods": ["ftp_sync"]},
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = source_connectors_collection(
+                self._request("/xyn/api/source-connectors", method="post", data=json.dumps(payload))
+            )
+        self.assertEqual(response.status_code, 400)
+
+    def test_activation_is_deferred_when_governance_review_required(self):
+        source = self._create_source(mode="manual")
+        source_row = SourceConnector.objects.get(id=source["id"])
+        source_row.governance_json = {"review_required": True, "allowed_ingestion_methods": ["manual"]}
+        source_row.save(update_fields=["governance_json", "updated_at"])
+
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            inspect_response = source_connector_inspections_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/inspections",
+                    method="post",
+                    data=json.dumps(
+                        {
+                            "workspace_id": str(self.workspace.id),
+                            "status": "ok",
+                            "detected_format": "csv",
+                            "discovered_fields": [{"name": "parcel_id", "type": "string"}],
+                        }
+                    ),
+                ),
+                source["id"],
+            )
+            mapping_response = source_connector_mappings_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/mappings",
+                    method="post",
+                    data=json.dumps(
+                        {
+                            "workspace_id": str(self.workspace.id),
+                            "status": "validated",
+                            "field_mapping": {"parcel_id": "source.parcel_id"},
+                            "transformation_hints": {},
+                            "validation_state": {"ok": True},
+                        }
+                    ),
+                ),
+                source["id"],
+            )
+            activate_response = source_connector_activate(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/activate",
+                    method="post",
+                    data=json.dumps({"workspace_id": str(self.workspace.id)}),
+                ),
+                source["id"],
+            )
+        self.assertEqual(inspect_response.status_code, 201)
+        self.assertEqual(mapping_response.status_code, 201)
+        self.assertEqual(activate_response.status_code, 409)
+        payload = json.loads(activate_response.content)
+        self.assertEqual(payload["governance_decision"]["reason_code"], "governance.review_required")
+
+    def test_activation_allowed_after_review_approval(self):
+        source = self._create_source(mode="manual")
+        source_row = SourceConnector.objects.get(id=source["id"])
+        source_row.governance_json = {"review_required": True, "allowed_ingestion_methods": ["manual"]}
+        source_row.review_approved = True
+        source_row.review_approved_by = self.identity
+        source_row.review_approved_at = source_row.created_at
+        source_row.save(update_fields=["governance_json", "review_approved", "review_approved_by", "review_approved_at", "updated_at"])
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            source_connector_inspections_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/inspections",
+                    method="post",
+                    data=json.dumps(
+                        {
+                            "workspace_id": str(self.workspace.id),
+                            "status": "ok",
+                            "detected_format": "csv",
+                            "discovered_fields": [{"name": "parcel_id", "type": "string"}],
+                        }
+                    ),
+                ),
+                source["id"],
+            )
+            source_connector_mappings_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/mappings",
+                    method="post",
+                    data=json.dumps(
+                        {
+                            "workspace_id": str(self.workspace.id),
+                            "status": "validated",
+                            "field_mapping": {"parcel_id": "source.parcel_id"},
+                            "transformation_hints": {},
+                            "validation_state": {"ok": True},
+                        }
+                    ),
+                ),
+                source["id"],
+            )
+            activate_response = source_connector_activate(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/activate",
+                    method="post",
+                    data=json.dumps({"workspace_id": str(self.workspace.id)}),
+                ),
+                source["id"],
+            )
+        self.assertEqual(activate_response.status_code, 200)
+
     def test_campaign_operator_cannot_manage_sources(self):
         payload = {
             "workspace_id": str(self.workspace.id),
@@ -255,6 +380,27 @@ class SourceConnectorApiTests(TestCase):
     def test_models_exist(self):
         self._create_source(mode="manual")
         self.assertEqual(SourceConnector.objects.filter(workspace=self.workspace).count(), 1)
+
+    def test_source_detail_patch_can_set_review_approval(self):
+        source = self._create_source(mode="manual")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = source_connector_detail(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}",
+                    method="patch",
+                    data=json.dumps(
+                        {
+                            "workspace_id": str(self.workspace.id),
+                            "review_approved": True,
+                        }
+                    ),
+                ),
+                source["id"],
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertTrue(payload["review_approved"])
+        self.assertEqual(payload["review_approved_by_id"], str(self.identity.id))
 
     def test_inspection_and_mapping_replay_with_idempotency_key(self):
         source = self._create_source(mode="remote_url")

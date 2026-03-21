@@ -52,6 +52,55 @@ A source is activation-ready when:
 
 Activation does not create a scheduler loop; it marks the source as ready/active for orchestration-driven refresh execution.
 
+## Source Governance Contract
+
+`SourceConnector.governance_json` is the typed governance declaration for execution invariants. This is intentionally separate from policy bundles/rules.
+
+Supported fields:
+
+- `allowed_ingestion_methods`: `download | api | upload | browser_automation | manual`
+- `browser_automation_allowed`: boolean, defaults to `false` when omitted
+- `review_required`: boolean
+- `legal_status`: `allowed | restricted | prohibited`
+- `legal_notes`: optional text
+- `legal_reference_urls`: optional list of URLs
+- `expected_refresh_interval_seconds`: optional freshness expectation
+- `notes`: optional operator/governance notes
+
+Safe defaults:
+
+- browser automation is denied unless explicitly allowed
+- `legal_status=prohibited` blocks activation/run/fetch/automation
+- sources without governance metadata remain backward-compatible and evaluate as `legal_status=allowed`
+
+Enforcement points:
+
+- source activation (`POST /source-connectors/{id}/activate`)
+- run trigger (`POST /orchestration/runs`) when a source connector context is present
+- ingestion fetch pre-check (`IngestionCoordinator.ingest_from_url`)
+
+Decision outputs are explicit and inspectable:
+
+- `decision`: `allow | deny | defer`
+- `reason_code`: machine-readable governance reason
+- `message`: operator-friendly text
+- `freshness`: `fresh | stale | unknown` based on `last_success_at` + expected refresh interval
+
+Review gate:
+
+- `review_required=true` defers execution until source review approval is set (`review_approved`, `review_approved_at`, `review_approved_by`)
+
+Audit taxonomy:
+
+- `source_governance.denied_run`
+- `source_governance.deferred_run`
+- `source_governance.denied_fetch`
+- `source_governance.deferred_fetch`
+- `source_governance.denied_activation`
+- `source_governance.deferred_activation`
+- `source_governance.denied_browser_automation`
+- `source_governance.review_state_changed`
+
 ## Replay/idempotency behavior
 
 - inspection and mapping POST flows accept optional `idempotency_key`.
@@ -119,6 +168,8 @@ For JSON-backed sources, adapter behavior can be steered via existing connector 
 ## Current TODOs
 
 - add connector credential secret reference patterns and rotation workflows
+- add explicit reviewer workflows/UI around `review_required` approvals and revocations
+- add scheduler-time governance checks for all automated trigger paths
 - extend adapter coverage for deferred formats (ArcGIS REST JSON, standalone DBF parser flow, file geodatabase)
 - add schema drift detection and mapping impact warnings
 - add incremental import cursor/checkpoint tracking

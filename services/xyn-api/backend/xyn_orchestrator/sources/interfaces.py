@@ -40,6 +40,7 @@ class SourceRegistration:
     refresh_cadence_seconds: int = 0
     orchestration_pipeline_key: str = ""
     configuration: dict[str, Any] = field(default_factory=dict)
+    governance: dict[str, Any] = field(default_factory=dict)
     provenance: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_by_id: str = ""
