@@ -9,6 +9,7 @@ This is the concise boundary reference for platform primitives that are most vul
 - Lifecycle/state-machine: `xyn_orchestrator.lifecycle_primitive` + `LifecycleTransition`.
 - Geospatial: `xyn_orchestrator.geospatial` (PostGIS-backed repository + framework-neutral DTO/service contract).
 - Record matching: `xyn_orchestrator.matching` + `RecordMatchEvaluation`.
+- Parcel identity/crosswalk: `xyn_orchestrator.parcel_identity` + `ParcelCanonicalIdentity` / `ParcelIdentifierAlias` / `ParcelCrosswalkMapping`.
 - Source/import contracts: `xyn_orchestrator.sources` + source connector models.
 - Watch/subscription: `xyn_orchestrator.watching` + watch models/APIs.
 - Audit/provenance: `xyn_orchestrator.provenance` + `PlatformAuditEvent` and `ProvenanceLink`.
@@ -95,6 +96,7 @@ Use **orchestration/config** for how work runs:
 - New app-local lifecycle engines or parallel transition tables.
 - New generic run-history tables for data-processing work that bypass orchestration runs.
 - App-local matching scoring engines outside `xyn_orchestrator.matching`.
+- App-local parcel crosswalk tables or one-off parcel join heuristics outside `xyn_orchestrator.parcel_identity`.
 - Raw PostGIS query logic outside `xyn_orchestrator.geospatial` repository seams.
 - App-local watch/subscription abstractions that bypass `xyn_orchestrator.watching`.
 - Alternate audit/provenance object-reference shapes that diverge from canonical object refs.
@@ -135,3 +137,5 @@ Machine-readable object schemas for canonical primitives live in:
 - TODO: define a shared docs matrix for replay semantics (`idempotency_key`, deterministic fingerprint, uniqueness backstop) across watch/matching/source/notification flows.
 - TODO: add lightweight operator/event-consumer documentation for polling `PlatformDomainEvent` by partition/version.
 - TODO: add durable app-role assignment management APIs/UI for `application_admin` / `campaign_operator` / `read_only_analyst`.
+- TODO: add stronger parcel crosswalk conflict-resolution flows (supersede/merge/manual review) for cases where one alias appears to map to multiple canonical parcels.
+- TODO: add geospatial fallback resolver integration in parcel identity once canonical geospatial candidate scoring is ready.

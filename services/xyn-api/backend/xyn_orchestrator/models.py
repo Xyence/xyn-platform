@@ -4157,6 +4157,146 @@ class IngestAdaptedRecord(models.Model):
         return f"{self.workspace_id}:{self.adapter_kind}:{self.id}"
 
 
+class ParcelCanonicalIdentity(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("merged", "Merged"),
+        ("inactive", "Inactive"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="parcel_identities")
+    canonical_namespace = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    canonical_value_raw = models.CharField(max_length=255, blank=True, default="")
+    canonical_value_normalized = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active", db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "canonical_namespace", "canonical_value_normalized"], name="ix_parcel_canon_lookup"),
+            models.Index(fields=["workspace", "status", "created_at"], name="ix_parcel_canon_status_time"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.canonical_namespace}:{self.canonical_value_normalized or self.id}"
+
+
+class ParcelIdentifierAlias(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="parcel_identifier_aliases")
+    parcel = models.ForeignKey("ParcelCanonicalIdentity", on_delete=models.CASCADE, related_name="aliases")
+    namespace = models.CharField(max_length=80, db_index=True)
+    value_raw = models.CharField(max_length=255, blank=True, default="")
+    value_normalized = models.CharField(max_length=255, db_index=True)
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="parcel_identifier_aliases"
+    )
+    is_canonical = models.BooleanField(default=False, db_index=True)
+    confidence = models.FloatField(default=1.0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active", db_index=True)
+    valid_from = models.DateTimeField(null=True, blank=True)
+    valid_to = models.DateTimeField(null=True, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "namespace", "value_normalized"], name="ix_parcel_alias_lookup"),
+            models.Index(fields=["workspace", "parcel", "namespace"], name="ix_parcel_alias_parcel_ns"),
+            models.Index(fields=["workspace", "source_connector", "created_at"], name="ix_parcel_alias_source_time"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "namespace", "value_normalized", "parcel"],
+                name="uniq_parcel_alias_value_per_parcel",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "parcel", "namespace"],
+                condition=Q(is_canonical=True),
+                name="uniq_parcel_alias_canonical_per_namespace",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.namespace}:{self.value_normalized}"
+
+
+class ParcelCrosswalkMapping(models.Model):
+    STATUS_CHOICES = [
+        ("resolved", "Resolved"),
+        ("unresolved", "Unresolved"),
+        ("deferred", "Deferred"),
+        ("superseded", "Superseded"),
+    ]
+    METHOD_CHOICES = [
+        ("deterministic_identifier", "Deterministic Identifier"),
+        ("deterministic_composite", "Deterministic Composite"),
+        ("address_fallback", "Address Fallback"),
+        ("deferred_geospatial", "Deferred Geospatial"),
+        ("unresolved", "Unresolved"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="parcel_crosswalk_mappings")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="parcel_crosswalk_mappings"
+    )
+    adapted_record = models.ForeignKey(
+        "IngestAdaptedRecord", null=True, blank=True, on_delete=models.SET_NULL, related_name="parcel_crosswalk_mappings"
+    )
+    parcel = models.ForeignKey(
+        "ParcelCanonicalIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="crosswalk_mappings"
+    )
+    record_match_evaluation = models.ForeignKey(
+        "RecordMatchEvaluation", null=True, blank=True, on_delete=models.SET_NULL, related_name="parcel_crosswalk_mappings"
+    )
+    namespace = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    identifier_value_raw = models.CharField(max_length=255, blank=True, default="")
+    identifier_value_normalized = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    composite_key_normalized = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="resolved", db_index=True)
+    resolution_method = models.CharField(max_length=40, choices=METHOD_CHOICES, default="deterministic_identifier", db_index=True)
+    confidence = models.FloatField(default=0.0)
+    reason = models.TextField(blank=True, default="")
+    explanation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    valid_from = models.DateTimeField(null=True, blank=True)
+    valid_to = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "source_connector", "created_at"], name="ix_pcl_xw_src_time"),
+            models.Index(fields=["workspace", "parcel", "created_at"], name="ix_pcl_xw_par_time"),
+            models.Index(fields=["workspace", "status", "created_at"], name="ix_pcl_xw_st_time"),
+            models.Index(fields=["workspace", "resolution_method", "created_at"], name="ix_pcl_xw_mtd_time"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_parcel_crosswalk_idempotency",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.resolution_method}:{self.status}:{self.id}"
+
+
 class PlatformDomainEvent(models.Model):
     """Thin durable outbox-style domain event emitted from publication boundaries."""
 
