@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xyence.io/schemas/source_inspection_profile.v1.schema.json",
+  "title": "Source Inspection Profile",
+  "type": "object",
+  "required": ["id", "source_id", "status", "detected_format", "discovered_fields", "sample_metadata", "validation_findings"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "source_id": { "type": "string", "format": "uuid" },
+    "status": { "type": "string", "enum": ["ok", "warning", "error"] },
+    "detected_format": { "type": "string" },
+    "discovered_fields": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "sample_metadata": { "type": "object", "additionalProperties": true },
+    "validation_findings": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "inspection_run_id": { "type": ["string", "null"], "format": "uuid" },
+    "inspected_by_id": { "type": ["string", "null"], "format": "uuid" },
+    "inspected_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": false
+}

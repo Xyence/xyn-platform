@@ -204,90 +204,6 @@ def _goal_plan(
     )
 
 
-def _real_estate_factory_plan(application_name: str, objective: str) -> GeneratedApplicationPlan:
-    goals = [
-        _goal_plan(
-            title="Listing and Property Foundation",
-            description="Stand up the first listing source, normalize property data, and expose the durable property model.",
-            priority="high",
-            planning_summary="Start with the smallest domain slice: ingest listings and make property data inspectable before deeper analysis.",
-            resolution_notes=[
-                "Bias toward one listing source and a clean normalized property model first.",
-                "Validate durable records in Xyn before adding scoring or outreach.",
-            ],
-            threads=[
-                ("Listing Data Ingestion", "Identify the first listing source and normalize its records.", "high", "data", 1),
-                ("Property Model and CRUD", "Persist core property, market, and source records and expose CRUD.", "high", "application", 2),
-            ],
-            work_items=[
-                ("Listing Data Ingestion", "Identify the first listing source and capture the ingestion contract", "Choose the initial listing feed and define required normalized fields.", "high", 1, []),
-                ("Listing Data Ingestion", "Implement the first listing ingestion flow", "Load sample listing records and validate normalized property data.", "high", 2, ["Identify the first listing source and capture the ingestion contract"]),
-                ("Property Model and CRUD", "Define the property, source, and market entity model", "Model the first durable real-estate entities for the MVP.", "high", 3, []),
-                ("Property Model and CRUD", "Expose CRUD, list, and detail views for property records", "Make the property slice inspectable in Xyn panels and generated app surfaces.", "high", 4, ["Define the property, source, and market entity model"]),
-            ],
-        ),
-        _goal_plan(
-            title="Comparable Analysis and Deal Scoring",
-            description="Add comparable selection and a first-pass score with persisted explanation fields.",
-            priority="high",
-            planning_summary="Once property records exist, add comparables and a first-pass score so opportunities can be ranked.",
-            resolution_notes=[
-                "Keep the scoring formula explainable and persisted.",
-                "Prefer comp transparency over complex heuristics.",
-            ],
-            threads=[
-                ("Comparable Analysis", "Model comp records and comparable selection criteria.", "normal", "analysis", 1),
-                ("Deal Scoring", "Persist a first-pass opportunity score with explanation fields.", "normal", "analysis", 2),
-            ],
-            work_items=[
-                ("Comparable Analysis", "Define comparable selection criteria and comp record relationships", "Capture MVP comparable rules and persist the comp model.", "normal", 1, []),
-                ("Comparable Analysis", "Expose comps in property detail and summary views", "Make comparable evidence inspectable per property.", "normal", 2, ["Define comparable selection criteria and comp record relationships"]),
-                ("Deal Scoring", "Implement first-pass deal scoring with explanation fields", "Persist a score and the factors that produced it.", "normal", 3, ["Expose comps in property detail and summary views"]),
-                ("Deal Scoring", "Expose score summaries in list and report views", "Rank properties by score in the generated application surfaces.", "normal", 4, ["Implement first-pass deal scoring with explanation fields"]),
-            ],
-        ),
-        _goal_plan(
-            title="Opportunity Review and Outreach Workflow",
-            description="Add the operational review flow for ranked opportunities and basic outreach readiness state.",
-            priority="normal",
-            planning_summary="Close the MVP loop with a ranked review workflow and durable follow-up state, without external outreach integrations.",
-            resolution_notes=[
-                "Keep outreach integrations future-facing.",
-                "Focus on operator review and follow-up state first.",
-            ],
-            threads=[
-                ("Opportunity Review UI", "Build ranked review and drill-down surfaces.", "normal", "ui", 1),
-                ("Lead and Outreach Workflow", "Persist follow-up, notes, and outreach readiness state.", "low", "workflow", 2),
-            ],
-            work_items=[
-                ("Opportunity Review UI", "Build the ranked opportunity review surface", "Surface scored opportunities with ranking and filtering.", "normal", 1, []),
-                ("Opportunity Review UI", "Add detail drill-down for score and comp evidence", "Let operators inspect why an opportunity looks promising.", "normal", 2, ["Build the ranked opportunity review surface"]),
-                ("Lead and Outreach Workflow", "Track lead follow-up state for approved opportunities", "Persist notes, status, and outreach readiness state.", "low", 3, []),
-            ],
-        ),
-    ]
-    return GeneratedApplicationPlan(
-        application_name=application_name,
-        application_summary="An AI-assisted real estate deal finder that ingests listing data, scores opportunities, and supports operator review.",
-        source_factory_key="ai_real_estate_deal_finder",
-        request_objective=objective,
-        generated_goals=goals,
-        ordering_hints=[
-            "Start with listing ingestion and property CRUD before comparable analysis.",
-            "Only add outreach workflow after operators can review ranked opportunities.",
-        ],
-        dependency_hints=[
-            "Comparable analysis depends on durable property records.",
-            "Scoring depends on comparable evidence.",
-            "Outreach workflow depends on ranked opportunity review.",
-        ],
-        resolution_notes=[
-            "This factory favors an MVP-first vertical slice.",
-            "Generated goals remain reviewable before any queueing or execution.",
-        ],
-    )
-
-
 def _telecom_support_factory_plan(application_name: str, objective: str) -> GeneratedApplicationPlan:
     goals = [
         _goal_plan(
@@ -507,21 +423,6 @@ def _generic_application_plan(application_name: str, objective: str) -> Generate
 
 BUILT_IN_APPLICATION_FACTORIES: List[ApplicationFactoryDefinition] = [
     ApplicationFactoryDefinition(
-        key="ai_real_estate_deal_finder",
-        name="AI Real Estate Deal Finder",
-        description="Generates an MVP-first plan for ingesting listings, scoring opportunities, and reviewing deals.",
-        intended_use_case="Data-rich property opportunity applications with scoring and operator review.",
-        generated_goal_families=[
-            "Listing and Property Foundation",
-            "Comparable Analysis and Deal Scoring",
-            "Opportunity Review and Outreach",
-        ],
-        assumptions=[
-            "Starts with one listing source and a property-centric data model.",
-            "Keeps outreach integrations future-facing.",
-        ],
-    ),
-    ApplicationFactoryDefinition(
         key="telecom_support_operations_console",
         name="Telecom Support Operations Console",
         description="Generates a support-operations plan centered on case intake, workflow, escalation, and reporting.",
@@ -566,7 +467,6 @@ BUILT_IN_APPLICATION_FACTORIES: List[ApplicationFactoryDefinition] = [
 
 
 FACTORY_PLAN_BUILDERS = {
-    "ai_real_estate_deal_finder": _real_estate_factory_plan,
     "telecom_support_operations_console": _telecom_support_factory_plan,
     "reseller_portal": _reseller_portal_factory_plan,
     "generic_application_mvp": _generic_application_plan,
@@ -590,8 +490,6 @@ def infer_application_factory_key(*, objective: str, requested_factory_key: str 
     if explicit and get_application_factory(explicit):
         return explicit
     lowered = str(objective or "").strip().lower()
-    if any(marker in lowered for marker in ("real estate", "deal finder", "listing data", "comparables", "property scoring")):
-        return "ai_real_estate_deal_finder"
     if any(marker in lowered for marker in ("telecom", "support console", "support operations", "support ops", "case escalation")):
         return "telecom_support_operations_console"
     if any(marker in lowered for marker in ("reseller portal", "reseller", "marketplace", "malware-services", "portal")):

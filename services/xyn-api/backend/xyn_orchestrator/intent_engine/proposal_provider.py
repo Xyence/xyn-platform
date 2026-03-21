@@ -137,11 +137,19 @@ class LlmIntentProposalProvider(IntentProposalProvider):
         return data
 
     @staticmethod
-    def _attach_meta(parsed: Dict[str, Any], *, model_name: str, context_pack_meta: Dict[str, str]) -> Dict[str, Any]:
+    def _attach_meta(
+        parsed: Dict[str, Any],
+        *,
+        model_name: str,
+        context_pack_meta: Dict[str, str],
+        ai_resolution: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         parsed["_model"] = model_name
         parsed["_context_pack_slug"] = context_pack_meta.get("slug", "")
         parsed["_context_pack_version"] = context_pack_meta.get("version", "")
         parsed["_context_pack_hash"] = context_pack_meta.get("hash", "")
+        if isinstance(ai_resolution, dict):
+            parsed["_ai_resolution"] = dict(ai_resolution)
         return parsed
 
     def propose(self, *, message: str, artifact_type_hint: Optional[str] = None, has_artifact_context: bool = False) -> Dict[str, Any]:
@@ -164,6 +172,7 @@ class LlmIntentProposalProvider(IntentProposalProvider):
                 parsed,
                 model_name=str(first.get("model") or resolved.get("model_name") or ""),
                 context_pack_meta=context_pack,
+                ai_resolution=resolved.get("agent_resolution") if isinstance(resolved.get("agent_resolution"), dict) else None,
             )
         except IntentContextPackMissingError:
             raise
@@ -191,6 +200,7 @@ class LlmIntentProposalProvider(IntentProposalProvider):
                     parsed,
                     model_name=str(repaired.get("model") or resolved.get("model_name") or ""),
                     context_pack_meta=context_pack,
+                    ai_resolution=resolved.get("agent_resolution") if isinstance(resolved.get("agent_resolution"), dict) else None,
                 )
             except Exception:
                 return {

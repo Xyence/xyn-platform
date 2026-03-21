@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   applyApplicationPlan,
+  createCampaign,
   executeAppPalettePrompt,
   getApplication,
   getApplicationPlan,
+  getCampaign,
   getComposerState,
   getGoal,
   getArtifactConsoleDetailBySlug,
@@ -15,6 +17,8 @@ import {
   getEmsStatusRollupCanvasTable,
   getRuntimeRunArtifactContent,
   getRuntimeRunCanvasApi,
+  getAiRoutingStatus,
+  listAiAgents,
   getSystemReadiness,
   getWorkItem,
   getWorkQueue,
@@ -25,6 +29,7 @@ import {
   listCoordinationThreads,
   listWorkItems,
   listAppBuilderArtifacts,
+  listCampaigns,
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
   publishDevTask,
@@ -37,6 +42,7 @@ import {
   retryDevTask,
   updateApplication,
   updateApplicationPlan,
+  updateCampaign,
   updateWorkItem,
 } from "../../../api/xyn";
 import type {
@@ -44,7 +50,12 @@ import type {
   ApplicationDetail,
   ApplicationFactorySummary,
   ApplicationPlanDetail,
+  CampaignDetail,
+  CampaignListResponse,
   AppPaletteResult,
+  AiAgent,
+  AiAgentResolution,
+  AiRoutingStatusResponse,
   ArtifactCanvasTableResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFileRow,
@@ -92,9 +103,11 @@ import IdentityConfigurationPage from "../../pages/IdentityConfigurationPage";
 import SecretConfigurationPage from "../../pages/SecretConfigurationPage";
 import ActivityPage from "../../pages/ActivityPage";
 import AIConfigPage from "../../pages/AIConfigPage";
+import AIAgentRoutingPage from "../../pages/AIAgentRoutingPage";
 import PlatformRenderingSettingsPage from "../../pages/PlatformRenderingSettingsPage";
 import PlatformDeploySettingsPage from "../../pages/PlatformDeploySettingsPage";
 import PlatformBrandingPage from "../../pages/PlatformBrandingPage";
+import RulesBrowserPanel from "../rules/RulesBrowserPanel";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 
 export type ConsolePanelKey =
@@ -104,6 +117,8 @@ export type ConsolePanelKey =
   | "goal_detail"
   | "application_plan_detail"
   | "application_detail"
+  | "campaign_list"
+  | "campaign_detail"
   | "workspaces"
   | "thread_list"
   | "thread_detail"
@@ -121,6 +136,7 @@ export type ConsolePanelKey =
   | "artifact_detail"
   | "artifact_raw_json"
   | "artifact_files"
+  | "rules_browser"
   | "ems_devices"
   | "ems_registrations"
   | "ems_device_status_rollup"
@@ -279,6 +295,72 @@ function SystemReadinessBanner({ readiness }: { readiness: SystemReadinessRespon
           ))}
         </div>
       </details>
+    </section>
+  );
+}
+
+function routingRowLabel(row: AiAgentResolution | null): "Explicit" | "Fallback" | "Missing" {
+  if (!row || !row.resolved_agent_name) return "Missing";
+  if (row.resolution_source === "explicit") return "Explicit";
+  if (row.resolution_source === "default_fallback") return "Fallback";
+  return "Missing";
+}
+
+function routingPurposeRow(routing: AiAgentResolution[], purpose: string): AiAgentResolution | null {
+  return routing.find((row) => String(row.purpose || "").trim().toLowerCase() === purpose) || null;
+}
+
+function workItemDispatchPurpose(item: Pick<WorkItemDetail, "task_type" | "intent_type" | "context_purpose"> | null): "planning" | "coding" {
+  if (!item) return "coding";
+  const taskType = String(item.task_type || "").trim().toLowerCase();
+  const intentType = String(item.intent_type || "").trim().toLowerCase();
+  const contextPurpose = String(item.context_purpose || "").trim().toLowerCase();
+  if (
+    taskType.includes("plan")
+    || intentType.includes("plan")
+    || contextPurpose === "planning"
+  ) {
+    return "planning";
+  }
+  return "coding";
+}
+
+function routingResolutionLabel(row: AiAgentResolution | null, purpose: "planning" | "coding"): string {
+  if (!row) return "Unresolved routing";
+  if (row.resolution_source === "explicit") return `Explicit ${purpose} assignment`;
+  if (row.resolution_source === "default_fallback") return "Default fallback";
+  return titleCaseLabel(row.resolution_source || "unresolved");
+}
+
+function AiAgentRoutingCard({ routing }: { routing: AiAgentResolution[] | null }) {
+  if (!routing || !routing.length) return null;
+  const defaultRow = routingPurposeRow(routing, "default");
+  const planningRow = routingPurposeRow(routing, "planning");
+  const codingRow = routingPurposeRow(routing, "coding");
+  const rows = [
+    { purpose: "Planning", row: planningRow },
+    { purpose: "Coding", row: codingRow },
+    { purpose: "Default", row: defaultRow },
+  ];
+  return (
+    <section className="card ai-routing-card">
+      <div className="card-header">
+        <h3>AI Agent Routing</h3>
+      </div>
+      <div className="ai-routing-rows">
+        {rows.map((entry) => {
+          const status = routingRowLabel(entry.row);
+          return (
+            <div key={entry.purpose} className="ai-routing-row">
+              <span className="field-label">{entry.purpose}</span>
+              <span className="field-value ai-routing-value">
+                <span>{entry.row?.resolved_agent_name || "Not configured"}</span>
+                <span className={`ai-routing-status ${status.toLowerCase()}`}>{status}</span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </section>
   );
 }
@@ -1022,6 +1104,259 @@ function GoalListPanel({
   );
 }
 
+function CampaignListPanel({
+  workspaceId,
+  onOpenPanel,
+  onTitleChange,
+  autoCreate,
+}: {
+  workspaceId: string;
+  onTitleChange?: (title: string) => void;
+  autoCreate?: boolean;
+} & PanelProps) {
+  const [payload, setPayload] = useState<CampaignListResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(Boolean(autoCreate));
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [campaignType, setCampaignType] = useState("generic");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function loadCampaigns() {
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await listCampaigns(workspaceId);
+      setPayload(next);
+      const defaultType =
+        next.campaign_types.find((row) => row.key === "generic")?.key ||
+        next.campaign_types[0]?.key ||
+        "generic";
+      setCampaignType(defaultType);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load campaigns");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadCampaigns();
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (autoCreate) setCreateOpen(true);
+  }, [autoCreate]);
+
+  useEffect(() => {
+    onTitleChange?.("Campaigns");
+  }, [onTitleChange]);
+
+  async function handleCreate(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!name.trim() || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const created = await createCampaign({
+        workspace_id: workspaceId,
+        name: name.trim(),
+        campaign_type: campaignType,
+        description: description.trim() || undefined,
+      });
+      setName("");
+      setDescription("");
+      setCreateOpen(false);
+      await loadCampaigns();
+      onOpenPanel("campaign_detail", { campaign_id: created.id, workspace_id: workspaceId });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create campaign");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (loading) return <p className="muted">Loading campaigns…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  const campaigns = payload?.campaigns || [];
+  const campaignTypes = payload?.campaign_types || [{ key: "generic", label: "Generic Campaign", description: "" }];
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <div className="panel-row-actions">
+          <button type="button" className="ghost sm" onClick={() => setCreateOpen((current) => !current)}>
+            {createOpen ? "Cancel" : "Create campaign"}
+          </button>
+        </div>
+        {createOpen ? (
+          <form className="panel-inline-form" onSubmit={handleCreate}>
+            <input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Campaign name"
+              aria-label="Campaign name"
+              required
+            />
+            <select value={campaignType} onChange={(event) => setCampaignType(event.target.value)} aria-label="Campaign type">
+              {campaignTypes.map((type) => (
+                <option key={type.key} value={type.key}>
+                  {type.label}
+                </option>
+              ))}
+            </select>
+            <input
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="Description (optional)"
+              aria-label="Campaign description"
+            />
+            <button type="submit" className="primary sm" disabled={submitting || !name.trim()}>
+              {submitting ? "Creating…" : "Create"}
+            </button>
+          </form>
+        ) : null}
+      </section>
+      <section className="card">
+        <div className="canvas-table-wrap">
+          <table className="canvas-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Updated</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {campaigns.map((campaign) => (
+                <tr key={campaign.id}>
+                  <td>{campaign.name}</td>
+                  <td>{campaign.campaign_type}</td>
+                  <td>{campaign.status}</td>
+                  <td>{formatPanelTimestamp(campaign.updated_at)}</td>
+                  <td>
+                    <button type="button" className="ghost sm" onClick={() => onOpenPanel("campaign_detail", { campaign_id: campaign.id, workspace_id: workspaceId })}>
+                      Open
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!campaigns.length ? (
+                <tr>
+                  <td colSpan={5} className="muted">No campaigns found in this workspace.</td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CampaignDetailPanel({
+  campaignId,
+  workspaceId,
+  onTitleChange,
+}: {
+  campaignId: string;
+  workspaceId: string;
+  onTitleChange?: (title: string) => void;
+}) {
+  const [payload, setPayload] = useState<CampaignDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [status, setStatus] = useState("draft");
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const next = await getCampaign(campaignId, workspaceId);
+        if (!active) return;
+        setPayload(next);
+        setName(next.name || "");
+        setDescription(next.description || "");
+        setStatus(next.status || "draft");
+      } catch (err) {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : "Failed to load campaign");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [campaignId, workspaceId]);
+
+  useEffect(() => {
+    onTitleChange?.(payload?.name || "Campaign");
+  }, [onTitleChange, payload?.name]);
+
+  async function handleSave(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!payload || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await updateCampaign(payload.id, {
+        workspace_id: workspaceId,
+        name: name.trim(),
+        description: description.trim(),
+        status,
+      });
+      setPayload(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save campaign");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <p className="muted">Loading campaign…</p>;
+  if (error) return <p className="danger-text">{error}</p>;
+  if (!payload) return <p className="muted">Campaign not found.</p>;
+
+  return (
+    <div className="panel-section-stack">
+      <section className="card">
+        <form className="panel-inline-form" onSubmit={handleSave}>
+          <input value={name} onChange={(event) => setName(event.target.value)} aria-label="Campaign name" required />
+          <select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Campaign status">
+            <option value="draft">Draft</option>
+            <option value="active">Active</option>
+            <option value="paused">Paused</option>
+            <option value="completed">Completed</option>
+            <option value="archived">Archived</option>
+          </select>
+          <input value={description} onChange={(event) => setDescription(event.target.value)} aria-label="Campaign description" placeholder="Description" />
+          <button type="submit" className="primary sm" disabled={saving || !name.trim()}>
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </form>
+      </section>
+      <section className="card">
+        <div className="detail-grid">
+          <div><div className="field-label">Campaign ID</div><div className="field-value">{payload.id}</div></div>
+          <div><div className="field-label">Workspace</div><div className="field-value">{workspaceId}</div></div>
+          <div><div className="field-label">Slug</div><div className="field-value">{payload.slug}</div></div>
+          <div><div className="field-label">Type</div><div className="field-value">{payload.campaign_type}</div></div>
+          <div><div className="field-label">Created</div><div className="field-value">{formatPanelTimestamp(payload.created_at)}</div></div>
+          <div><div className="field-label">Updated</div><div className="field-value">{formatPanelTimestamp(payload.updated_at)}</div></div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function GoalDetailPanel({
   goalId,
   workspaceId,
@@ -1039,7 +1374,6 @@ function GoalDetailPanel({
     status: "idle",
     message: null,
   });
-
   useEffect(() => {
     let active = true;
     (async () => {
@@ -1886,6 +2220,12 @@ function WorkItemDetailPanel({
     status: "idle",
     message: null,
   });
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [routingStatus, setRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
+  const [compatibleAgents, setCompatibleAgents] = useState<AiAgent[]>([]);
+  const [agentSelectionLoading, setAgentSelectionLoading] = useState(false);
+  const [agentSelectionError, setAgentSelectionError] = useState<string | null>(null);
+  const [selectedAgentOverrideId, setSelectedAgentOverrideId] = useState("routed");
 
   async function loadWorkItem(active = true) {
     try {
@@ -1910,6 +2250,68 @@ function WorkItemDetailPanel({
     };
   }, [workItemId]);
 
+  const queue = payload?.execution_queue;
+  const canDispatchSelectedTask = Boolean(queue?.dispatchable && !queue?.dispatched && (queue?.selected_for_dispatch ?? true));
+  const dispatchPurpose = workItemDispatchPurpose(payload);
+  const routedResolution = routingPurposeRow(routingStatus?.routing || [], dispatchPurpose);
+  const routedAgentId = String(routedResolution?.resolved_agent_id || "").trim();
+  const routedAgentName = String(routedResolution?.resolved_agent_name || "").trim() || "No routed agent";
+  const routedResolutionText = routingResolutionLabel(routedResolution, dispatchPurpose);
+  const overrideAgent = selectedAgentOverrideId === "routed"
+    ? null
+    : compatibleAgents.find((agent) => agent.id === selectedAgentOverrideId) || null;
+  const effectiveAgentName = overrideAgent?.name || routedAgentName;
+  const effectiveResolutionText = overrideAgent ? "Action override" : routedResolutionText;
+  const canShowOverrideControls = compatibleAgents.length > 1;
+
+  useEffect(() => {
+    if (!canDispatchSelectedTask || !workspaceId) {
+      setRoutingStatus(null);
+      setCompatibleAgents([]);
+      setSelectedAgentOverrideId("routed");
+      setAdvancedOpen(false);
+      setAgentSelectionError(null);
+      setAgentSelectionLoading(false);
+      return;
+    }
+    let active = true;
+    setAgentSelectionLoading(true);
+    setAgentSelectionError(null);
+    void Promise.all([
+      getAiRoutingStatus(),
+      listAiAgents({ purpose: dispatchPurpose, enabled: true }),
+    ])
+      .then(([nextRouting, agentsResponse]) => {
+        if (!active) return;
+        setRoutingStatus(nextRouting);
+        setCompatibleAgents(agentsResponse.agents || []);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setAgentSelectionError(err instanceof Error ? err.message : "Failed to load routed agent context.");
+        setRoutingStatus(null);
+        setCompatibleAgents([]);
+      })
+      .finally(() => {
+        if (!active) return;
+        setAgentSelectionLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [canDispatchSelectedTask, dispatchPurpose, workspaceId, workItemId]);
+
+  useEffect(() => {
+    if (!canShowOverrideControls && selectedAgentOverrideId !== "routed") {
+      setSelectedAgentOverrideId("routed");
+      return;
+    }
+    if (selectedAgentOverrideId === "routed") return;
+    if (!compatibleAgents.some((agent) => agent.id === selectedAgentOverrideId)) {
+      setSelectedAgentOverrideId("routed");
+    }
+  }, [canShowOverrideControls, compatibleAgents, selectedAgentOverrideId]);
+
   async function handleBriefAction(action: "mark_ready" | "approve" | "reject" | "regenerate") {
     try {
       setActionState({ status: "submitting", message: null });
@@ -1928,12 +2330,19 @@ function WorkItemDetailPanel({
     if (!workspaceId) return;
     try {
       setActionState({ status: "submitting", message: null });
-      const response = await dispatchWorkItem(workItemId, workspaceId);
+      const overrideId = selectedAgentOverrideId !== "routed" && selectedAgentOverrideId !== routedAgentId
+        ? selectedAgentOverrideId
+        : "";
+      const response = overrideId
+        ? await dispatchWorkItem(workItemId, workspaceId, { agent_override_id: overrideId })
+        : await dispatchWorkItem(workItemId, workspaceId);
       setPayload(response.work_item || (await getWorkItem(workItemId)));
       setActionState({
         status: "idle",
         message: response.status === "dispatched" ? `Dispatched ${String(response.queue_item?.work_item_id || payload?.work_item_id || workItemId)}.` : response.status,
       });
+      setSelectedAgentOverrideId("routed");
+      setAdvancedOpen(false);
     } catch (err) {
       setActionState({ status: "idle", message: err instanceof Error ? err.message : "Failed to dispatch work item" });
     }
@@ -1987,12 +2396,10 @@ function WorkItemDetailPanel({
   if (error) return <p className="danger-text">{error}</p>;
   if (!payload) return <p className="muted">Work item not found.</p>;
   const review = payload.execution_brief_review;
-  const queue = payload.execution_queue;
   const execution = payload.execution_run;
   const recovery = payload.execution_recovery;
   const changeSet = payload.change_set;
   const publish = payload.publish_state;
-  const canDispatchSelectedTask = Boolean(queue?.dispatchable && !queue?.dispatched && (queue?.selected_for_dispatch ?? true));
 
   return (
     <div className="ems-panel-body">
@@ -2031,6 +2438,39 @@ function WorkItemDetailPanel({
           ) : null}
           {canDispatchSelectedTask ? (
             <div className="inline-action-row" style={{ marginTop: 12 }}>
+              <div style={{ width: "100%" }}>
+                <div className="detail-grid" style={{ marginBottom: 10 }}>
+                  <div><div className="field-label">Purpose</div><div className="field-value">{titleCaseLabel(dispatchPurpose)}</div></div>
+                  <div><div className="field-label">Routed Agent</div><div className="field-value">{routedAgentName}</div></div>
+                  <div><div className="field-label">Resolution</div><div className="field-value">{routedResolutionText}</div></div>
+                  <div><div className="field-label">Effective Agent</div><div className="field-value">{effectiveAgentName}</div></div>
+                  <div><div className="field-label">Source</div><div className="field-value">{effectiveResolutionText}</div></div>
+                </div>
+                {agentSelectionLoading ? <p className="muted small" style={{ marginTop: 0 }}>Loading routed agent context…</p> : null}
+                {agentSelectionError ? <p className="danger-text small" style={{ marginTop: 0 }}>{agentSelectionError}</p> : null}
+                {canShowOverrideControls ? (
+                  <details open={advancedOpen} onToggle={(event) => setAdvancedOpen((event.currentTarget as HTMLDetailsElement).open)}>
+                    <summary><strong>Advanced</strong></summary>
+                    <div style={{ marginTop: 8 }}>
+                      <label className="field-label" htmlFor={`agent-override-${workItemId}`}>Agent override</label>
+                      <select
+                        id={`agent-override-${workItemId}`}
+                        value={selectedAgentOverrideId}
+                        onChange={(event) => setSelectedAgentOverrideId(event.target.value)}
+                        style={{ maxWidth: 360 }}
+                      >
+                        <option value="routed">Use routed agent</option>
+                        {compatibleAgents.map((agent) => (
+                          <option key={agent.id} value={agent.id}>{agent.name}</option>
+                        ))}
+                      </select>
+                      <p className="muted small" style={{ marginTop: 6 }}>
+                        This override applies only to this dispatch and does not change Platform Settings.
+                      </p>
+                    </div>
+                  </details>
+                ) : null}
+              </div>
               <button type="button" className="ghost sm" disabled={actionState.status === "submitting" || !workspaceId} onClick={handleDispatchTask}>
                 Dispatch Task
               </button>
@@ -2104,6 +2544,22 @@ function WorkItemDetailPanel({
           <div><div className="field-label">Finished</div><div className="field-value">{execution?.finished_at || "—"}</div></div>
         </div>
         <p className="muted" style={{ marginTop: 12 }}>{execution?.message || "No execution run has been dispatched yet."}</p>
+        {execution?.agent_selection ? (
+          <div style={{ marginTop: 12 }}>
+            <div className="field-label">Agent Selection</div>
+            <div className="field-value">
+              {execution.agent_selection.effective_agent_name || "—"}
+              {execution.agent_selection.override_applied ? (
+                <span style={{ marginLeft: 8, fontSize: 12, padding: "2px 8px", borderRadius: 999, background: "#fff3d9", color: "#8a5a00" }}>
+                  Override Used
+                </span>
+              ) : null}
+            </div>
+            <div className="muted small" style={{ marginTop: 4 }}>
+              Purpose: {titleCaseLabel(execution.agent_selection.purpose || "coding")} · Routed: {execution.agent_selection.routed_agent_name || "—"} ({execution.agent_selection.routed_resolution_label || "Unknown"}) · Source: {execution.agent_selection.effective_resolution_label || "Unknown"}
+            </div>
+          </div>
+        ) : null}
         {execution?.summary ? (
           <div style={{ marginTop: 12 }}>
             <div className="field-label">Result Summary</div>
@@ -2866,6 +3322,7 @@ type PlatformSettingsSurface =
   | "identity_configuration"
   | "secrets"
   | "activity"
+  | "ai_routing"
   | "ai_agents"
   | "rendering_settings"
   | "deploy_settings"
@@ -2893,6 +3350,8 @@ function platformSettingsSurfaceLabel(surface: PlatformSettingsSurface): string 
       return "Secrets";
     case "activity":
       return "Activity";
+    case "ai_routing":
+      return "AI Agent Routing";
     case "ai_agents":
       return "AI Agents";
     case "rendering_settings":
@@ -2912,6 +3371,7 @@ function mapPlatformSettingsRouteToSurface(route: string): PlatformSettingsSurfa
   if (path.endsWith("/platform/identity-configuration")) return "identity_configuration";
   if (path.endsWith("/platform/secrets")) return "secrets";
   if (path.endsWith("/platform/activity")) return "activity";
+  if (path.endsWith("/platform/ai-routing")) return "ai_routing";
   if (path.endsWith("/platform/ai-agents")) return "ai_agents";
   if (path.endsWith("/platform/rendering-settings")) return "rendering_settings";
   if (path.endsWith("/platform/deploy")) return "deploy_settings";
@@ -2939,6 +3399,7 @@ const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
     "identity_configuration",
     "secrets",
     "activity",
+    "ai_routing",
     "ai_agents",
     "rendering_settings",
     "deploy_settings",
@@ -3047,6 +3508,7 @@ const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
       {activeSurface === "identity_configuration" ? <IdentityConfigurationPage /> : null}
       {activeSurface === "secrets" ? <SecretConfigurationPage /> : null}
       {activeSurface === "activity" ? <ActivityPage workspaceId="" /> : null}
+      {activeSurface === "ai_routing" ? <AIAgentRoutingPage /> : null}
       {activeSurface === "ai_agents" ? <AIConfigPage /> : null}
       {activeSurface === "rendering_settings" ? <PlatformRenderingSettingsPage /> : null}
       {activeSurface === "deploy_settings" ? <PlatformDeploySettingsPage /> : null}
@@ -3331,6 +3793,9 @@ function ArtifactDetailPanel({
         </button>
         <button type="button" className="ghost sm" onClick={() => onOpenPanel("artifact_files", { slug: payload.artifact.slug })}>
           Open Files
+        </button>
+        <button type="button" className="ghost sm" onClick={() => onOpenPanel("rules_browser", { artifact_slug: payload.artifact.slug })}>
+          Browse Rules
         </button>
       </div>
       {manage.length ? (
@@ -4797,6 +5262,8 @@ const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   workspaces: "Workspaces",
   goal_list: "Goals",
   goal_detail: "Goal",
+  campaign_list: "Campaigns",
+  campaign_detail: "Campaign",
   application_plan_detail: "Application Plan",
   application_detail: "Application",
   thread_list: "Threads",
@@ -4815,6 +5282,7 @@ const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   artifact_detail: "Artifact Detail",
   artifact_raw_json: "Artifact Raw JSON",
   artifact_files: "Artifact Files",
+  rules_browser: "Rules Browser",
   ems_devices: "EMS Devices",
   ems_registrations: "EMS Registrations",
   ems_device_status_rollup: "EMS Device Status Rollup",
@@ -4875,6 +5343,7 @@ export default function WorkbenchPanelHost({
 }) {
   const [resolvedTitle, setResolvedTitle] = useState("");
   const [systemReadiness, setSystemReadiness] = useState<SystemReadinessResponse | null>(null);
+  const [aiRoutingStatus, setAiRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
   useEffect(() => {
     setResolvedTitle("");
   }, [panel?.panel_id, panel?.key]);
@@ -4887,6 +5356,20 @@ export default function WorkbenchPanelHost({
       })
       .catch(() => {
         if (active) setSystemReadiness(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    let active = true;
+    getAiRoutingStatus()
+      .then((next) => {
+        if (active) setAiRoutingStatus(next);
+      })
+      .catch(() => {
+        if (active) setAiRoutingStatus(null);
       });
     return () => {
       active = false;
@@ -5006,6 +5489,27 @@ export default function WorkbenchPanelHost({
 
     if (panel.key === "goal_list") {
       return <GoalListPanel workspaceId={workspaceId} onOpenPanel={openPanel} onTitleChange={setResolvedTitle} />;
+    }
+
+    if (panel.key === "campaign_list") {
+      return (
+        <CampaignListPanel
+          workspaceId={workspaceId}
+          onOpenPanel={openPanel}
+          onTitleChange={setResolvedTitle}
+          autoCreate={panel.params?.create === true}
+        />
+      );
+    }
+
+    if (panel.key === "campaign_detail") {
+      return (
+        <CampaignDetailPanel
+          campaignId={String(panel.params?.campaign_id || "")}
+          workspaceId={workspaceId}
+          onTitleChange={setResolvedTitle}
+        />
+      );
     }
 
     if (panel.key === "goal_detail") {
@@ -5155,6 +5659,18 @@ export default function WorkbenchPanelHost({
     }
     if (panel.key === "artifact_raw_json") return <ArtifactRawJsonPanel slug={String(panel.params?.slug || "")} />;
     if (panel.key === "artifact_files") return <ArtifactFilesPanel slug={String(panel.params?.slug || "")} />;
+    if (panel.key === "rules_browser") {
+      return (
+        <RulesBrowserPanel
+          workspaceId={workspaceId}
+          artifactSlug={String(panel.params?.artifact_slug || "") || undefined}
+          appSlug={String(panel.params?.app_slug || "") || undefined}
+          query={String(panel.params?.q || panel.params?.query || "") || undefined}
+          editableOnly={panel.params?.editable === true}
+          systemOnly={panel.params?.system === true}
+        />
+      );
+    }
     if (panel.key === "record_detail") {
       return (
         <GenericRecordDetailPanel
@@ -5294,6 +5810,7 @@ export default function WorkbenchPanelHost({
             }}
           />
         </div>
+        <AiAgentRoutingCard routing={aiRoutingStatus?.routing || null} />
         <SystemReadinessBanner readiness={systemReadiness} />
       </div>
     );
@@ -5302,6 +5819,7 @@ export default function WorkbenchPanelHost({
   return (
     <div>
       <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>
+      <AiAgentRoutingCard routing={aiRoutingStatus?.routing || null} />
       <SystemReadinessBanner readiness={systemReadiness} />
     </div>
   );

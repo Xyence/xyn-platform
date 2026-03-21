@@ -15,7 +15,7 @@ import fnmatch
 from functools import wraps
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit, quote, unquote
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, List, Set, Tuple, TypedDict
+from typing import Any, Dict, Iterable, Optional, List, Sequence, Set, Tuple, TypedDict
 
 import requests
 import boto3
@@ -23,6 +23,7 @@ from authlib.jose import JsonWebKey, jwt
 from markdownify import markdownify as _markdownify_html
 from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.validators import validate_email
 from django.core.paginator import Paginator
 from django.db import models, transaction
 from django.db.models import Q
@@ -65,6 +66,29 @@ from .models import (
     CoordinationEvent,
     CoordinationThread,
     DevTask,
+    Campaign,
+    CampaignType,
+    WatchDefinition,
+    WatchMatchEvent,
+    PlatformAuditEvent,
+    ProvenanceLink,
+    SourceConnector,
+    RecordMatchEvaluation,
+    ParcelCanonicalIdentity,
+    ParcelCrosswalkMapping,
+    IngestAdaptedRecord,
+    GeocodeEnrichmentResult,
+    OrchestrationPipeline,
+    OrchestrationJobDefinition,
+    OrchestrationJobSchedule,
+    OrchestrationJobDependency,
+    OrchestrationRun,
+    OrchestrationJobRun,
+    OrchestrationJobRunAttempt,
+    OrchestrationJobRunOutput,
+    OrchestrationStagePublication,
+    ReconciledStateCurrentPointer,
+    PlatformDomainEvent,
     Goal,
     Application,
     ApplicationPlan,
@@ -134,7 +158,58 @@ from .models import (
     PlatformConfigDocument,
     Report,
     ReportAttachment,
+    IngestArtifactRecord,
 )
+from .matching import (
+    DjangoMatchResultRepository,
+    MatchableRecordRef,
+    RecordMatchingService,
+    StrategyContext,
+    evaluation_as_dict,
+)
+from .sources import (
+    SOURCE_MODES,
+    SourceConnectorService,
+    SourceHealthUpdate,
+    SourceInspectionInput,
+    SourceMappingInput,
+    SourceRegistration,
+    serialize_source_connector,
+    serialize_source_inspection,
+    serialize_source_mapping,
+)
+from .source_governance import SourceGovernanceService, normalize_governance_policy
+from .watching import (
+    WATCH_LIFECYCLE_STATES,
+    WATCH_SUBSCRIBER_TYPES,
+    WatchEvaluationInput,
+    WatchRegistration,
+    WatchService,
+    WatchSubscriberInput,
+    serialize_watch,
+    serialize_watch_evaluation,
+    serialize_watch_match,
+    serialize_watch_subscriber,
+)
+from .provenance import (
+    PROVENANCE_DIRECTIONS,
+    ProvenanceService,
+    serialize_audit_event,
+    serialize_provenance_link,
+)
+from .parcel_identity import (
+    ParcelIdentityResolverService,
+    serialize_parcel_crosswalk,
+    serialize_parcel_identity,
+)
+from .geocoding import GeocodingService, serialize_geocode_result
+from .orchestration import AppNotificationFailureNotifier
+from .orchestration.domain_events import DomainEventQuery, DomainEventService
+from .orchestration.publication import StagePublicationService
+from .orchestration.schedule_policy import supported_schedule_kinds, unsupported_schedule_kinds
+from .orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
+from .orchestration.lifecycle import OrchestrationLifecycleService
+from .jurisdiction import require_canonical_jurisdiction
 from .xco import (
     THREAD_PRIORITY_ORDER,
     active_run_count,
@@ -260,6 +335,18 @@ from .oidc import (
 from .secret_stores import SecretStoreError, normalize_secret_logical_name, write_secret_value
 from .storage.registry import StorageProviderRegistry
 from .notifications.registry import NotifierRegistry, resolve_secret_ref_value
+from .notifications.service import (
+    create_delivery_target,
+    get_delivery_preference,
+    get_unread_count_for_recipient,
+    list_delivery_targets,
+    list_notifications_for_recipient,
+    mark_all_notifications_as_read,
+    mark_notification_as_read,
+    remove_delivery_target,
+    set_delivery_preference,
+    set_delivery_target_enabled,
+)
 from .dns_providers import Route53DnsProvider
 from .instance_drivers import (
     SshDockerComposeInstanceDriver,
@@ -274,6 +361,7 @@ from .ai_runtime import (
     get_default_agent_bootstrap_status,
     invoke_model,
     mask_secret,
+    resolve_agent_routing,
     resolve_ai_config,
 )
 from .ai_compat import compute_effective_params
@@ -292,6 +380,23 @@ from .access_explorer import (
     user_roles as access_user_roles_data,
     compute_effective_permissions as access_compute_effective_permissions,
     role_detail as access_role_detail_data,
+)
+from .app_authorization import (
+    CAP_APP_READ,
+    CAP_CAMPAIGNS_MANAGE,
+    CAP_INGEST_RUNS_READ,
+    CAP_MATCH_REVIEW,
+    CAP_NOTIFICATION_TARGETS_MANAGE,
+    CAP_NOTIFICATIONS_READ,
+    CAP_PROVENANCE_READ,
+    CAP_REFRESHES_RUN,
+    CAP_SOURCES_MANAGE,
+    CAP_SUBSCRIBERS_MANAGE,
+    CAP_WATCHES_MANAGE,
+    canonical_model_payload as app_access_canonical_model_payload,
+    effective_app_roles as app_access_effective_roles,
+    effective_capabilities_for_roles as app_access_effective_capabilities,
+    has_required_capabilities as app_access_has_required_capabilities,
 )
 from .seeds import (
     apply_seed_packs,
@@ -992,6 +1097,9 @@ def _prompt_interpretation_from_intent(
         "decompose_goal": ("plan", "Decompose goal"),
         "summarize_plan": ("show", "Summarize plan"),
         "queue_first_slice": ("queue", "Queue first slice"),
+        "create_campaign": ("create", "Create campaign"),
+        "list_campaigns": ("show", "List campaigns"),
+        "show_campaign": ("show", "Show campaign"),
         "list_application_factories": ("show", "List application factories"),
         "open_composer": ("show", "Open composer"),
         "generate_application_plan": ("plan", "Generate application plan"),
@@ -1106,7 +1214,7 @@ def _prompt_interpretation_from_intent(
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CONTINUATION.value
     elif intent.intent_type in {"create_and_dispatch_run", "run_validation", "investigate_issue", "retry_run", "continue_run"}:
         execution_mode = PromptInterpretationExecutionMode.QUEUED_RUN.value
-    elif intent.intent_type in {"create_thread", "create_goal"}:
+    elif intent.intent_type in {"create_thread", "create_goal", "create_campaign"}:
         execution_mode = PromptInterpretationExecutionMode.WORK_ITEM_CREATION.value
     elif intent.intent_type in {"decompose_goal", "approve_plan", "approve_recommendation", "queue_first_slice", "queue_next_slice", "apply_application_plan"}:
         execution_mode = PromptInterpretationExecutionMode.AWAITING_REVIEW.value
@@ -1314,6 +1422,9 @@ def _conversation_action_from_intent(
             IntentType.QUEUE_FIRST_SLICE.value: ConversationActionType.QUEUE_FIRST_SLICE.value,
             IntentType.LIST_GOALS.value: ConversationActionType.LIST_GOALS.value,
             IntentType.SHOW_GOAL.value: ConversationActionType.SHOW_GOAL.value,
+            IntentType.CREATE_CAMPAIGN.value: ConversationActionType.CREATE_CAMPAIGN.value,
+            IntentType.LIST_CAMPAIGNS.value: ConversationActionType.LIST_CAMPAIGNS.value,
+            IntentType.SHOW_CAMPAIGN.value: ConversationActionType.SHOW_CAMPAIGN.value,
             IntentType.LIST_APPLICATION_FACTORIES.value: ConversationActionType.LIST_APPLICATION_FACTORIES.value,
             IntentType.OPEN_COMPOSER.value: ConversationActionType.OPEN_COMPOSER.value,
             IntentType.GENERATE_APPLICATION_PLAN.value: ConversationActionType.GENERATE_APPLICATION_PLAN.value,
@@ -1330,6 +1441,12 @@ def _conversation_action_from_intent(
         target_kind = "goal"
         if intent.intent_type == IntentType.LIST_APPLICATION_FACTORIES.value:
             target_kind = "workspace"
+        elif intent.intent_type == IntentType.LIST_CAMPAIGNS.value:
+            target_kind = "workspace"
+        elif intent.intent_type == IntentType.CREATE_CAMPAIGN.value:
+            target_kind = "workspace"
+        elif intent.intent_type == IntentType.SHOW_CAMPAIGN.value:
+            target_kind = "campaign"
         elif intent.intent_type == IntentType.GENERATE_APPLICATION_PLAN.value:
             target_kind = "application_plan"
         elif intent.intent_type == IntentType.APPLY_APPLICATION_PLAN.value:
@@ -1407,6 +1524,7 @@ def _log_prompt_activity(
     structured_operation: Optional[Dict[str, Any]] = None,
     prompt_interpretation: Optional[Dict[str, Any]] = None,
     conversation_action: Optional[Dict[str, Any]] = None,
+    ai_resolution: Optional[Dict[str, Any]] = None,
 ) -> None:
     # Epic D trace coverage is asserted at this logging seam. End-to-end persistence
     # through the full activity-store test path remains separately blocked by the
@@ -1429,6 +1547,7 @@ def _log_prompt_activity(
             "structured_operation": structured_operation if isinstance(structured_operation, dict) else {},
             "prompt_interpretation": prompt_interpretation if isinstance(prompt_interpretation, dict) else {},
             "conversation_action": conversation_action if isinstance(conversation_action, dict) else {},
+            "agent_resolution": ai_resolution if isinstance(ai_resolution, dict) else {},
         },
     )
 
@@ -4100,6 +4219,43 @@ WORKSPACE_OIDC_NONCE_PREFIX = "workspace_oidc_nonce:"
 
 def _workspace_membership(identity: UserIdentity, workspace_id: str) -> Optional[WorkspaceMembership]:
     return WorkspaceMembership.objects.filter(workspace_id=workspace_id, user_identity=identity).first()
+
+
+def _app_roles_for_identity(identity: UserIdentity, workspace_id: str) -> List[str]:
+    membership = _workspace_membership(identity, workspace_id)
+    workspace_role = membership.role if membership else ""
+    explicit_roles = list(
+        RoleBinding.objects.filter(
+            user_identity=identity,
+            scope_kind__in=["workspace", "application"],
+            scope_id=workspace_id,
+        ).values_list("role", flat=True)
+    )
+    platform_roles = _get_roles(identity)
+    return app_access_effective_roles(
+        workspace_role=workspace_role,
+        platform_roles=platform_roles,
+        explicit_roles=explicit_roles,
+    )
+
+
+def _app_capabilities_for_identity(identity: UserIdentity, workspace_id: str) -> List[str]:
+    return app_access_effective_capabilities(_app_roles_for_identity(identity, workspace_id))
+
+
+def _require_workspace_capabilities(
+    identity: UserIdentity,
+    workspace_id: str,
+    required_capabilities: Sequence[str],
+    *,
+    require_all: bool = True,
+) -> bool:
+    capabilities = _app_capabilities_for_identity(identity, workspace_id)
+    return app_access_has_required_capabilities(
+        effective_capabilities=capabilities,
+        required_capabilities=required_capabilities,
+        require_all=require_all,
+    )
 
 
 def _workspace_has_role(identity: UserIdentity, workspace_id: str, minimum_role: str) -> bool:
@@ -7855,7 +8011,9 @@ def access_registry(request: HttpRequest) -> JsonResponse:
         metadata={"endpoint": "registry", "actor_id": str(identity.id) if identity else ""},
         request=request,
     )
-    return JsonResponse(access_canonical_registry())
+    payload = dict(access_canonical_registry())
+    payload["applicationAuthorizationModel"] = app_access_canonical_model_payload()
+    return JsonResponse(payload)
 
 
 @csrf_exempt
@@ -8227,6 +8385,263 @@ def api_me(request: HttpRequest) -> JsonResponse:
             "platform_initialization": _platform_initialization_state(identity),
         }
     )
+
+
+@csrf_exempt
+@login_required
+def notifications_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    limit_raw = request.GET.get("limit")
+    offset_raw = request.GET.get("offset")
+    unread_only = _parse_bool_param(request.GET.get("unread_only"), default=False)
+    source_app_key = str(request.GET.get("source_app_key") or "").strip()
+    category = str(request.GET.get("category") or "").strip()
+    try:
+        limit = int(limit_raw) if limit_raw is not None else 50
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "invalid limit"}, status=400)
+    try:
+        offset = int(offset_raw) if offset_raw is not None else 0
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "invalid offset"}, status=400)
+    payload = list_notifications_for_recipient(
+        recipient=identity,
+        limit=limit,
+        offset=offset,
+        unread_only=unread_only,
+        source_app_key=source_app_key,
+        category=category,
+    )
+    payload["unread_count"] = get_unread_count_for_recipient(recipient=identity)
+    return JsonResponse(payload)
+
+
+@csrf_exempt
+@login_required
+def notifications_unread_count(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    return JsonResponse({"unread_count": get_unread_count_for_recipient(recipient=identity)})
+
+
+@csrf_exempt
+@login_required
+def notification_mark_read(request: HttpRequest, notification_id: str) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    changed = mark_notification_as_read(
+        recipient=identity,
+        notification_id=str(notification_id),
+    )
+    if not changed:
+        return JsonResponse({"error": "notification not found"}, status=404)
+    return JsonResponse(
+        {
+            "notification_id": str(notification_id),
+            "unread": False,
+            "unread_count": get_unread_count_for_recipient(recipient=identity),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def notifications_mark_all_read(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    updated = mark_all_notifications_as_read(recipient=identity)
+    return JsonResponse(
+        {
+            "updated": int(updated),
+            "unread_count": get_unread_count_for_recipient(recipient=identity),
+        }
+    )
+
+
+def _coerce_bool(value: Any, *, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    token = str(value or "").strip().lower()
+    if token in {"true", "1", "yes"}:
+        return True
+    if token in {"false", "0", "no"}:
+        return False
+    raise ValueError(f"{field} must be a boolean")
+
+
+@csrf_exempt
+@login_required
+def notification_targets_collection(request: HttpRequest) -> JsonResponse:
+    def _resolve_workspace_for_notifications(payload_workspace_id: str) -> Optional[Workspace]:
+        workspace_id = str(payload_workspace_id or "").strip()
+        if not workspace_id:
+            return None
+        return _resolve_workspace_for_identity(identity, workspace_id)
+
+    if request.method == "GET":
+        identity = _require_authenticated(request)
+        if not identity:
+            return JsonResponse({"error": "not authenticated"}, status=401)
+        workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace = _resolve_workspace_for_notifications(workspace_id)
+        if workspace is None:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        return JsonResponse({"targets": list_delivery_targets(owner=identity)})
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace = _resolve_workspace_for_notifications(workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    address = str(payload.get("address") or "").strip().lower()
+    if not address:
+        return JsonResponse({"error": "address is required"}, status=400)
+    try:
+        validate_email(address)
+    except ValidationError:
+        return JsonResponse({"error": "invalid email address"}, status=400)
+    try:
+        enabled = _coerce_bool(payload.get("enabled", True), field="enabled")
+        is_primary = _coerce_bool(payload.get("is_primary", False), field="is_primary")
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    try:
+        row = create_delivery_target(
+            owner=identity,
+            address=address,
+            channel="email",
+            enabled=enabled,
+            is_primary=is_primary,
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    targets = list_delivery_targets(owner=identity)
+    target_payload = next((item for item in targets if str(item.get("id") or "") == str(row.id)), None)
+    return JsonResponse({"target": target_payload}, status=201)
+
+
+@csrf_exempt
+@login_required
+def notification_target_detail(request: HttpRequest, target_id: str) -> JsonResponse:
+    if request.method == "PATCH":
+        identity = _require_authenticated(request)
+        if not identity:
+            return JsonResponse({"error": "not authenticated"}, status=401)
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace = _resolve_workspace_for_identity(identity, workspace_id)
+        if workspace is None:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if "enabled" not in payload:
+            return JsonResponse({"error": "enabled is required"}, status=400)
+        try:
+            enabled = _coerce_bool(payload.get("enabled"), field="enabled")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        row = set_delivery_target_enabled(
+            owner=identity,
+            target_id=str(target_id),
+            enabled=enabled,
+        )
+        if row is None:
+            return JsonResponse({"error": "delivery target not found"}, status=404)
+        targets = list_delivery_targets(owner=identity)
+        target_payload = next((item for item in targets if str(item.get("id") or "") == str(row.id)), None)
+        return JsonResponse({"target": target_payload})
+    if request.method == "DELETE":
+        identity = _require_authenticated(request)
+        if not identity:
+            return JsonResponse({"error": "not authenticated"}, status=401)
+        workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace = _resolve_workspace_for_identity(identity, workspace_id)
+        if workspace is None:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        removed = remove_delivery_target(owner=identity, target_id=str(target_id))
+        if not removed:
+            return JsonResponse({"error": "delivery target not found"}, status=404)
+        return JsonResponse({"status": "deleted"})
+    return JsonResponse({"error": "method not allowed"}, status=405)
+
+
+@csrf_exempt
+@login_required
+def notification_preferences_detail(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "GET":
+        workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        workspace = _resolve_workspace_for_identity(identity, workspace_id)
+        if workspace is None:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATIONS_READ]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        source_app_key = str(request.GET.get("source_app_key") or "").strip()
+        return JsonResponse(
+            {"preference": get_delivery_preference(owner=identity, source_app_key=source_app_key, workspace=workspace)}
+        )
+    if request.method not in {"PUT", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    workspace = _resolve_workspace_for_identity(identity, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_NOTIFICATION_TARGETS_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    source_app_key = str(payload.get("source_app_key") or "").strip()
+    if "in_app_enabled" not in payload or "email_enabled" not in payload:
+        return JsonResponse({"error": "in_app_enabled and email_enabled are required"}, status=400)
+    try:
+        in_app_enabled = _coerce_bool(payload.get("in_app_enabled"), field="in_app_enabled")
+        email_enabled = _coerce_bool(payload.get("email_enabled"), field="email_enabled")
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    set_delivery_preference(
+        owner=identity,
+        source_app_key=source_app_key,
+        in_app_enabled=in_app_enabled,
+        email_enabled=email_enabled,
+        workspace=workspace,
+    )
+    return JsonResponse({"preference": get_delivery_preference(owner=identity, source_app_key=source_app_key, workspace=workspace)})
 
 
 def _serialize_tenant(tenant: Tenant) -> Dict[str, Any]:
@@ -10344,6 +10759,440 @@ def _artifact_file_metadata_rows(artifact: Artifact) -> List[Dict[str, Any]]:
             }
         )
     return rows
+
+
+_RULE_FAMILY_LABELS: Dict[str, str] = {
+    "validation_policies": "Validation Policies",
+    "relation_constraints": "Relation Constraints",
+    "transition_policies": "Transition Policies",
+    "invariant_policies": "Invariant Policies",
+    "derived_policies": "Derived Policies",
+    "trigger_policies": "Trigger Policies",
+}
+
+_RULE_BOUNDARY_DISCOURAGED_FAMILIES = {
+    "validation_policies",
+    "transition_policies",
+    "invariant_policies",
+}
+
+_RULE_BOUNDARY_NOTICE = {
+    "title": "Rules Boundary",
+    "body": (
+        "Rules are for business policy (scoring, thresholds, alerts). "
+        "Do not use rules for app invariants or orchestration behavior."
+    ),
+    "doc_ref": "docs/platform-architecture-boundaries.md#rules-boundary-platform-contract",
+}
+
+
+def _humanize_rule_token(value: str) -> str:
+    return " ".join(
+        part.capitalize()
+        for part in re.split(r"[_\-\s]+", str(value or "").strip())
+        if part
+    )
+
+
+def _policy_bundle_from_artifact(artifact: Artifact) -> Optional[Dict[str, Any]]:
+    payload = _latest_artifact_content_json(artifact)
+    if str(payload.get("schema_version") or "").strip() == "xyn.policy_bundle.v0":
+        return payload
+    nested = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
+    if str(nested.get("schema_version") or "").strip() == "xyn.policy_bundle.v0":
+        return nested
+    return None
+
+
+def _policy_slug_for_app_slug(app_slug: str) -> str:
+    token = str(app_slug or "").strip().lower()
+    if not token:
+        return ""
+    if token.startswith("app."):
+        token = token[4:]
+    token = token.replace(" ", "-")
+    token = re.sub(r"[^a-z0-9._-]+", "", token).strip(".-")
+    return f"policy.{token}" if token else ""
+
+
+def _policy_rule_owner_kind(bundle: Dict[str, Any], rule: Dict[str, Any]) -> str:
+    override = str(rule.get("owner_kind") or "").strip()
+    if override:
+        return override
+    ownership = bundle.get("ownership") if isinstance(bundle.get("ownership"), dict) else {}
+    return str(ownership.get("owner_kind") or "generated_application").strip() or "generated_application"
+
+
+def _policy_rule_editable(bundle: Dict[str, Any], rule: Dict[str, Any]) -> bool:
+    if isinstance(rule.get("editable"), bool):
+        return bool(rule.get("editable"))
+    ownership = bundle.get("ownership") if isinstance(bundle.get("ownership"), dict) else {}
+    return bool(ownership.get("editable"))
+
+
+def _policy_scope_label(bundle: Dict[str, Any], rule: Dict[str, Any]) -> str:
+    scope = rule.get("scope") if isinstance(rule.get("scope"), dict) else {}
+    if scope:
+        return str(scope.get("scope_kind") or scope.get("kind") or scope.get("scope") or "").strip()
+    bundle_scope = bundle.get("scope") if isinstance(bundle.get("scope"), dict) else {}
+    applies_to = bundle_scope.get("applies_to") if isinstance(bundle_scope.get("applies_to"), list) else []
+    return str(applies_to[0] if applies_to else "generated_runtime").strip() or "generated_runtime"
+
+
+def _can_view_policy_bundle(identity: UserIdentity, bundle: Dict[str, Any]) -> bool:
+    if _is_platform_admin(identity):
+        return True
+    ownership = bundle.get("ownership") if isinstance(bundle.get("ownership"), dict) else {}
+    owner_kind = str(ownership.get("owner_kind") or "").strip().lower()
+    if owner_kind in {"platform", "platform_managed", "system"}:
+        return False
+    scope = bundle.get("scope") if isinstance(bundle.get("scope"), dict) else {}
+    applies_to = [str(item).strip().lower() for item in (scope.get("applies_to") if isinstance(scope.get("applies_to"), list) else [])]
+    if "system" in applies_to:
+        return False
+    return True
+
+
+def _policy_rule_visibility(
+    *,
+    identity: UserIdentity,
+    bundle: Dict[str, Any],
+    rule: Dict[str, Any],
+    editable_only: Optional[bool],
+    system_only: Optional[bool],
+) -> bool:
+    if not _can_view_policy_bundle(identity, bundle):
+        return False
+    owner_kind = _policy_rule_owner_kind(bundle, rule).lower()
+    rule_editable = _policy_rule_editable(bundle, rule)
+    if editable_only is True and not rule_editable:
+        return False
+    if editable_only is False and rule_editable:
+        return False
+    is_system = owner_kind in {"platform", "platform_managed", "system"}
+    if system_only is True and not is_system:
+        return False
+    if system_only is False and is_system:
+        return False
+    return True
+
+
+def _policy_rule_rows_for_bundle(
+    *,
+    identity: UserIdentity,
+    artifact: Artifact,
+    bundle: Dict[str, Any],
+    family_filters: Set[str],
+    editable_only: Optional[bool],
+    system_only: Optional[bool],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    policies = bundle.get("policies") if isinstance(bundle.get("policies"), dict) else {}
+    bundle_id = str(bundle.get("bundle_id") or _artifact_slug(artifact) or "").strip()
+    for family, entries in policies.items():
+        if family_filters and family not in family_filters:
+            continue
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if not _policy_rule_visibility(
+                identity=identity,
+                bundle=bundle,
+                rule=entry,
+                editable_only=editable_only,
+                system_only=system_only,
+            ):
+                continue
+            enforcement_stage = str(entry.get("enforcement_stage") or "").strip() or "not_compiled"
+            enforced = enforcement_stage == "runtime_enforced"
+            owner_kind = _policy_rule_owner_kind(bundle, entry)
+            rule_id = str(entry.get("id") or "").strip() or f"{bundle_id}:{family}:{len(rows) + 1}"
+            rows.append(
+                {
+                    "id": rule_id,
+                    "title": str(entry.get("name") or entry.get("description") or rule_id),
+                    "name": str(entry.get("name") or ""),
+                    "description": str(entry.get("description") or ""),
+                    "family": family,
+                    "family_label": _RULE_FAMILY_LABELS.get(family, _humanize_rule_token(family)),
+                    "enforced": enforced,
+                    "enforcement_status": "enforced" if enforced else "documented_only",
+                    "enforcement_stage": enforcement_stage,
+                    "scope": _policy_scope_label(bundle, entry),
+                    "ownership": owner_kind,
+                    "editable": _policy_rule_editable(bundle, entry),
+                    "summary": str(((entry.get("explanation") or {}) if isinstance(entry.get("explanation"), dict) else {}).get("user_summary") or ""),
+                    "source_policy_bundle": {
+                        "bundle_id": bundle_id,
+                        "artifact_slug": _artifact_slug(artifact),
+                        "app_slug": str(bundle.get("app_slug") or ""),
+                    },
+                    "metadata": {
+                        "status": str(entry.get("status") or ""),
+                        "targets": entry.get("targets") if isinstance(entry.get("targets"), list) else [],
+                        "parameters": entry.get("parameters") if isinstance(entry.get("parameters"), dict) else {},
+                        "source": entry.get("source") if isinstance(entry.get("source"), dict) else {},
+                    },
+                }
+            )
+    return rows
+
+
+def _rules_payload_from_candidates(
+    *,
+    identity: UserIdentity,
+    candidates: Iterable[Artifact],
+    family_filters: Set[str],
+    editable_only: Optional[bool],
+    system_only: Optional[bool],
+    bundle_id_filter: str = "",
+) -> Dict[str, Any]:
+    bundles: List[Dict[str, Any]] = []
+    rules: List[Dict[str, Any]] = []
+    filtered_bundle_count = 0
+    boundary_warnings: List[Dict[str, Any]] = []
+    for artifact in candidates:
+        bundle = _policy_bundle_from_artifact(artifact)
+        if not bundle:
+            continue
+        bundle_id = str(bundle.get("bundle_id") or _artifact_slug(artifact) or "").strip()
+        if bundle_id_filter and bundle_id != bundle_id_filter:
+            continue
+        if not _can_view_policy_bundle(identity, bundle):
+            filtered_bundle_count += 1
+            continue
+        ownership = bundle.get("ownership") if isinstance(bundle.get("ownership"), dict) else {}
+        owner_kind = str(ownership.get("owner_kind") or "generated_application").strip() or "generated_application"
+        bundle_editable = bool(ownership.get("editable"))
+        is_system_bundle = owner_kind.lower() in {"platform", "platform_managed", "system"}
+        if editable_only is True and not bundle_editable:
+            continue
+        if editable_only is False and bundle_editable:
+            continue
+        if system_only is True and not is_system_bundle:
+            continue
+        if system_only is False and is_system_bundle:
+            continue
+        bundle_rules = _policy_rule_rows_for_bundle(
+            identity=identity,
+            artifact=artifact,
+            bundle=bundle,
+            family_filters=family_filters,
+            editable_only=editable_only,
+            system_only=system_only,
+        )
+        rules.extend(bundle_rules)
+        bundles.append(
+            {
+                "bundle_id": bundle_id,
+                "title": str(bundle.get("title") or artifact.title or bundle_id),
+                "app_slug": str(bundle.get("app_slug") or ""),
+                "artifact_slug": _artifact_slug(artifact),
+                "description": str(bundle.get("description") or ""),
+                "scope": bundle.get("scope") if isinstance(bundle.get("scope"), dict) else {},
+                "ownership": {
+                    "owner_kind": owner_kind,
+                    "editable": bundle_editable,
+                    "source": str(ownership.get("source") or ""),
+                },
+                "rule_count": len(bundle_rules),
+                "compiled_rule_count": sum(1 for row in bundle_rules if bool(row.get("enforced"))),
+                "documented_rule_count": sum(1 for row in bundle_rules if not bool(row.get("enforced"))),
+                "artifact_id": str(artifact.id),
+                "updated_at": artifact.updated_at.isoformat() if artifact.updated_at else "",
+            }
+        )
+    grouped_counts: Dict[str, Dict[str, int]] = {}
+    for row in rules:
+        family = str(row.get("family") or "").strip()
+        if not family:
+            continue
+        bucket = grouped_counts.setdefault(family, {"count": 0, "enforced": 0, "documented_only": 0})
+        bucket["count"] += 1
+        if bool(row.get("enforced")):
+            bucket["enforced"] += 1
+        else:
+            bucket["documented_only"] += 1
+        if family in _RULE_BOUNDARY_DISCOURAGED_FAMILIES:
+            boundary_warnings.append(
+                {
+                    "rule_id": str(row.get("id") or ""),
+                    "family": family,
+                    "message": "This rule family often encodes app invariants. Prefer fixed logic unless this is strictly a tunable business policy.",
+                    "severity": "warning",
+                    "boundary": "rules_boundary",
+                }
+            )
+    groups = [
+        {
+            "family": family,
+            "label": _RULE_FAMILY_LABELS.get(family, _humanize_rule_token(family)),
+            "count": counts["count"],
+            "enforced": counts["enforced"],
+            "documented_only": counts["documented_only"],
+        }
+        for family, counts in sorted(grouped_counts.items(), key=lambda item: item[0])
+    ]
+    if boundary_warnings:
+        logging.getLogger(__name__).warning(
+            "rules_boundary_warning",
+            extra={"warning_count": len(boundary_warnings), "families": sorted({w["family"] for w in boundary_warnings})},
+        )
+    return {
+        "bundles": bundles,
+        "rules": rules,
+        "groups": groups,
+        "access": {"filtered_out_bundles": filtered_bundle_count},
+        "boundary_notice": _RULE_BOUNDARY_NOTICE,
+        "boundary_warnings": boundary_warnings,
+    }
+
+
+def _resolve_policy_bundle_candidates(
+    *,
+    artifact_slug: str = "",
+    app_slug: str = "",
+    query: str = "",
+) -> List[Artifact]:
+    policy_qs = Artifact.objects.select_related("type").filter(type__slug="policy_bundle").order_by("-updated_at", "-created_at")
+    normalized_artifact_slug = str(artifact_slug or "").strip()
+    normalized_app_slug = str(app_slug or "").strip()
+    normalized_query = str(query or "").strip()
+    if normalized_artifact_slug:
+        target = _resolve_artifact_by_slug(normalized_artifact_slug)
+        if target is None:
+            return []
+        if target.type_id and str(target.type.slug or "") == "policy_bundle":
+            return [target]
+        candidates = []
+        bundle = _policy_bundle_from_artifact(target)
+        if bundle:
+            candidates.append(target)
+        mapped_slug = _policy_slug_for_app_slug(normalized_artifact_slug)
+        if mapped_slug:
+            candidates.extend(list(policy_qs.filter(slug=mapped_slug)[:5]))
+        target_app_slug = str((bundle or {}).get("app_slug") or normalized_artifact_slug).strip()
+        mapped_app_slug = str(target_app_slug or "").strip()
+        if mapped_app_slug:
+            candidates.extend(
+                list(
+                    policy_qs.filter(
+                        Q(slug__iexact=_policy_slug_for_app_slug(mapped_app_slug))
+                        | Q(title__icontains=mapped_app_slug.replace(".", " "))
+                    )[:10]
+                )
+            )
+        dedup: Dict[str, Artifact] = {}
+        for row in candidates:
+            dedup[str(row.id)] = row
+        return list(dedup.values())
+    if normalized_app_slug:
+        mapped_slug = _policy_slug_for_app_slug(normalized_app_slug)
+        if mapped_slug:
+            rows = list(policy_qs.filter(slug=mapped_slug)[:10])
+            if rows:
+                return rows
+        return list(policy_qs.filter(Q(title__icontains=normalized_app_slug) | Q(slug__icontains=normalized_app_slug))[:25])
+    if normalized_query:
+        return list(policy_qs.filter(Q(title__icontains=normalized_query) | Q(slug__icontains=normalized_query))[:40])
+    return list(policy_qs[:40])
+
+
+def _parse_optional_bool_filter(raw: Optional[str]) -> Optional[bool]:
+    token = str(raw or "").strip().lower()
+    if token in {"", "any", "all"}:
+        return None
+    return _parse_bool_param(token, default=False)
+
+
+@csrf_exempt
+@login_required
+def rules_collection(request: HttpRequest) -> JsonResponse:
+    # Rules are for business policy visibility/inspection, not app invariants or orchestration behavior.
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if workspace_id and _resolve_workspace_for_identity(identity, workspace_id) is None:
+        return JsonResponse({"error": "workspace not found or forbidden"}, status=403)
+    artifact_slug = str(request.GET.get("artifact_slug") or "").strip()
+    app_slug = str(request.GET.get("app_slug") or "").strip()
+    query = str(request.GET.get("q") or "").strip()
+    bundle_id_filter = str(request.GET.get("bundle_id") or "").strip()
+    editable_only = _parse_optional_bool_filter(request.GET.get("editable"))
+    system_only = _parse_optional_bool_filter(request.GET.get("system"))
+    family_tokens = [
+        str(token or "").strip()
+        for token in str(request.GET.get("family") or "").split(",")
+        if str(token or "").strip()
+    ]
+    family_filters = set(family_tokens)
+    candidates = _resolve_policy_bundle_candidates(
+        artifact_slug=artifact_slug,
+        app_slug=app_slug,
+        query=query,
+    )
+    payload = _rules_payload_from_candidates(
+        identity=identity,
+        candidates=candidates,
+        family_filters=family_filters,
+        editable_only=editable_only,
+        system_only=system_only,
+        bundle_id_filter=bundle_id_filter,
+    )
+    payload["target"] = {
+        "artifact_slug": artifact_slug or None,
+        "app_slug": app_slug or None,
+        "query": query or None,
+        "workspace_id": workspace_id or None,
+        "bundle_id": bundle_id_filter or None,
+    }
+    payload["filters"] = {
+        "family": sorted(family_filters),
+        "editable": editable_only,
+        "system": system_only,
+    }
+    return JsonResponse(payload)
+
+
+@csrf_exempt
+@login_required
+def artifact_by_slug_rules(request: HttpRequest, artifact_slug: str) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if workspace_id and _resolve_workspace_for_identity(identity, workspace_id) is None:
+        return JsonResponse({"error": "workspace not found or forbidden"}, status=403)
+    family_tokens = [
+        str(token or "").strip()
+        for token in str(request.GET.get("family") or "").split(",")
+        if str(token or "").strip()
+    ]
+    payload = _rules_payload_from_candidates(
+        identity=identity,
+        candidates=_resolve_policy_bundle_candidates(artifact_slug=artifact_slug),
+        family_filters=set(family_tokens),
+        editable_only=_parse_optional_bool_filter(request.GET.get("editable")),
+        system_only=_parse_optional_bool_filter(request.GET.get("system")),
+        bundle_id_filter=str(request.GET.get("bundle_id") or "").strip(),
+    )
+    payload["target"] = {
+        "artifact_slug": str(artifact_slug or "").strip(),
+        "workspace_id": workspace_id or None,
+    }
+    payload["filters"] = {
+        "family": sorted(set(family_tokens)),
+        "editable": _parse_optional_bool_filter(request.GET.get("editable")),
+        "system": _parse_optional_bool_filter(request.GET.get("system")),
+    }
+    return JsonResponse(payload)
 
 
 @csrf_exempt
@@ -15501,6 +16350,128 @@ def ai_bootstrap_status(request: HttpRequest) -> JsonResponse:
 
 
 @csrf_exempt
+def ai_routing_status(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if not _can_manage_ai(identity):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    _ensure_default_agent_purposes()
+    if request.method == "GET":
+        return JsonResponse(_serialize_ai_routing_status())
+    if request.method != "PATCH":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    payload = _parse_json(request)
+    updated = False
+    with transaction.atomic():
+        if "default_agent_id" in payload:
+            updated = True
+            default_agent_id = str(payload.get("default_agent_id") or "").strip()
+            if not default_agent_id:
+                return JsonResponse({"error": "default_agent_id is required"}, status=400)
+            default_agent = AgentDefinition.objects.filter(id=default_agent_id, enabled=True).first()
+            if not default_agent:
+                return JsonResponse({"error": "default_agent_id not found or disabled"}, status=400)
+            AgentDefinition.objects.exclude(id=default_agent.id).filter(is_default=True).update(is_default=False)
+            if not default_agent.is_default:
+                default_agent.is_default = True
+                default_agent.save(update_fields=["is_default", "updated_at"])
+
+        if "planning_agent_id" in payload:
+            updated = True
+            err = _update_purpose_routing_assignment("planning", payload.get("planning_agent_id"))
+            if err:
+                return JsonResponse({"error": err}, status=400)
+        if "coding_agent_id" in payload:
+            updated = True
+            err = _update_purpose_routing_assignment("coding", payload.get("coding_agent_id"))
+            if err:
+                return JsonResponse({"error": err}, status=400)
+    if not updated:
+        return JsonResponse({"error": "at least one routing field is required"}, status=400)
+    return JsonResponse(_serialize_ai_routing_status())
+
+
+def _resolve_explicit_purpose_assignment(purpose_slug: str) -> Optional[AgentDefinitionPurpose]:
+    purpose = str(purpose_slug or "").strip().lower()
+    if not purpose:
+        return None
+    return (
+        AgentDefinitionPurpose.objects.select_related("agent_definition")
+        .filter(purpose__slug=purpose, is_default_for_purpose=True, agent_definition__enabled=True)
+        .first()
+    )
+
+
+def _serialize_ai_routing_status() -> Dict[str, Any]:
+    default_routing = dict(resolve_agent_routing(purpose_slug=""))
+    default_routing["purpose"] = "default"
+    default_routing["resolution_type"] = "required_default"
+
+    routing: List[Dict[str, Any]] = [default_routing]
+    for purpose_slug in ["planning", "coding"]:
+        purpose_routing = dict(resolve_agent_routing(purpose_slug=purpose_slug))
+        explicit_assignment = _resolve_explicit_purpose_assignment(purpose_slug)
+        purpose_routing["resolution_type"] = "explicit" if explicit_assignment else "falls_back_to_default"
+        purpose_routing["explicit_agent_id"] = str(explicit_assignment.agent_definition_id) if explicit_assignment else None
+        purpose_routing["explicit_agent_name"] = (
+            str(explicit_assignment.agent_definition.name or "") if explicit_assignment else None
+        )
+        routing.append(purpose_routing)
+
+    recent: List[Dict[str, Any]] = []
+    audit_rows = AuditLog.objects.filter(message__in=["ai_invocation", "intent.resolve"]).order_by("-created_at")[:80]
+    for row in audit_rows:
+        meta = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+        resolution = meta.get("agent_resolution") if isinstance(meta.get("agent_resolution"), dict) else None
+        if resolution is None and row.message == "intent.resolve":
+            proposal = meta.get("proposal") if isinstance(meta.get("proposal"), dict) else {}
+            resolution = proposal.get("_ai_resolution") if isinstance(proposal.get("_ai_resolution"), dict) else None
+        if not isinstance(resolution, dict):
+            continue
+        recent.append(
+            {
+                "event_id": str(row.id),
+                "event_type": row.message,
+                "created_at": row.created_at,
+                "purpose": str(resolution.get("purpose") or ""),
+                "resolved_agent_id": resolution.get("resolved_agent_id"),
+                "resolved_agent_name": resolution.get("resolved_agent_name"),
+                "resolution_source": resolution.get("resolution_source"),
+                "reason": resolution.get("reason"),
+            }
+        )
+        if len(recent) >= 20:
+            break
+    return {"routing": routing, "recent_resolutions": recent}
+
+
+def _update_purpose_routing_assignment(purpose_slug: str, agent_id_raw: Any) -> Optional[str]:
+    purpose = AgentPurpose.objects.filter(slug=str(purpose_slug or "").strip().lower()).first()
+    if not purpose:
+        return f"purpose '{purpose_slug}' not found"
+
+    desired_agent_id = str(agent_id_raw or "").strip()
+    if not desired_agent_id:
+        AgentDefinitionPurpose.objects.filter(purpose=purpose, is_default_for_purpose=True).update(is_default_for_purpose=False)
+        return None
+
+    agent = AgentDefinition.objects.filter(id=desired_agent_id, enabled=True).first()
+    if not agent:
+        return f"agent '{desired_agent_id}' not found or disabled"
+
+    link, _ = AgentDefinitionPurpose.objects.get_or_create(agent_definition=agent, purpose=purpose)
+    if not link.is_default_for_purpose:
+        link.is_default_for_purpose = True
+        link.save(update_fields=["is_default_for_purpose"])
+    AgentDefinitionPurpose.objects.filter(purpose=purpose, is_default_for_purpose=True).exclude(id=link.id).update(
+        is_default_for_purpose=False
+    )
+    return None
+
+
+@csrf_exempt
 def system_readiness(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
     if not identity:
@@ -17055,6 +18026,41 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
     return None
 
 
+def _match_rules_panel_command(message: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    text = str(message or "").strip()
+    if not text:
+        return None
+    lower = re.sub(r"\s+", " ", text.lower()).strip()
+    lower = re.sub(r"^(?:please[,\s]+)+", "", lower)
+    lower = re.sub(r"^(?:can|could|would)\s+you\s+", "", lower)
+    lower = re.sub(r"^take\s+me\s+to\s+", "go to ", lower)
+    lower = re.sub(r"[.!?,:;]+$", "", lower)
+    lower = re.sub(r"^show\s+me\s+", "show ", lower)
+    lower = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", lower)
+    lower = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", lower)
+    lower = re.sub(r"[.!?,:;]+$", "", lower)
+
+    target_match = re.search(r"(?:show|open|list)\s+(?:rules|policy bundle)\s+for\s+(.+)$", lower)
+    if target_match:
+        raw_target = str(target_match.group(1) or "").strip().strip("\"' ")
+        params: Dict[str, Any] = {"q": raw_target}
+        if raw_target.startswith("policy."):
+            params["artifact_slug"] = raw_target
+        elif raw_target.startswith("app."):
+            params["app_slug"] = raw_target
+        return ("rules_browser", params)
+
+    if re.fullmatch(r"(?:show|open|list)\s+editable\s+rules", lower):
+        return ("rules_browser", {"editable": True})
+    if re.fullmatch(r"(?:show|open|list)\s+system\s+rules", lower):
+        return ("rules_browser", {"system": True})
+    if re.fullmatch(r"(?:show|open|list)\s+policy\s+bundle", lower):
+        return ("rules_browser", {"policy_bundle": True})
+    if re.fullmatch(r"(?:show|open|list)\s+rules", lower):
+        return ("rules_browser", {})
+    return None
+
+
 def _unsupported_artifact_filter_reason(message: str) -> Optional[str]:
     text = str(message or "").strip()
     if not text:
@@ -17099,6 +18105,23 @@ def _match_core_surface_command(message: str) -> Optional[Tuple[str, Dict[str, A
     }
     if normalized in platform_settings_aliases:
         return ("platform_settings", {})
+    campaign_aliases = {
+        "campaigns",
+        "show campaigns",
+        "open campaigns",
+        "list campaigns",
+        "go to campaigns",
+    }
+    if normalized in campaign_aliases:
+        return ("campaign_list", {})
+    create_campaign_aliases = {
+        "new campaign",
+        "create campaign",
+        "add campaign",
+        "start campaign",
+    }
+    if normalized in create_campaign_aliases:
+        return ("campaign_list", {"create": True})
     return None
 
 
@@ -17182,6 +18205,12 @@ def _direct_panel_target_for_conversation_action(
         return "composer_detail", {"workspace_id": workspace_id}
     if action_type == ConversationActionType.SHOW_GOAL.value and target_id and not summary_mode:
         return "composer_detail", {"workspace_id": workspace_id, "goal_id": target_id}
+    if action_type == ConversationActionType.LIST_CAMPAIGNS.value:
+        return "campaign_list", {"workspace_id": workspace_id}
+    if action_type == ConversationActionType.CREATE_CAMPAIGN.value:
+        return "campaign_list", {"workspace_id": workspace_id, "create": True}
+    if action_type == ConversationActionType.SHOW_CAMPAIGN.value and target_id:
+        return "campaign_detail", {"workspace_id": workspace_id, "campaign_id": target_id}
     if action_type == ConversationActionType.SHOW_APPLICATION.value and target_id:
         return "composer_detail", {"workspace_id": workspace_id, "application_id": target_id}
     return None
@@ -17653,6 +18682,28 @@ def _runtime_run_belongs_to_workspace(run_payload: Dict[str, Any], workspace: Wo
     return workspace_id == str(workspace.id)
 
 
+def _runtime_run_agent_selection_payload(metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    selection = metadata.get("ai_agent_selection") if isinstance(metadata.get("ai_agent_selection"), dict) else {}
+    if not selection:
+        return None
+    purpose = str(selection.get("purpose") or "").strip().lower()
+    if not purpose:
+        return None
+    return {
+        "purpose": purpose,
+        "routed_agent_id": str(selection.get("routed_agent_id") or "").strip() or None,
+        "routed_agent_name": str(selection.get("routed_agent_name") or "").strip() or None,
+        "routed_resolution_source": str(selection.get("routed_resolution_source") or "").strip() or None,
+        "routed_resolution_label": str(selection.get("routed_resolution_label") or "").strip() or None,
+        "effective_agent_id": str(selection.get("effective_agent_id") or "").strip() or None,
+        "effective_agent_name": str(selection.get("effective_agent_name") or "").strip() or None,
+        "effective_resolution_source": str(selection.get("effective_resolution_source") or "").strip() or None,
+        "effective_resolution_label": str(selection.get("effective_resolution_label") or "").strip() or None,
+        "override_agent_id": str(selection.get("override_agent_id") or "").strip() or None,
+        "override_applied": bool(selection.get("override_applied")),
+    }
+
+
 def _runtime_run_summary_payload(run_payload: Dict[str, Any], *, now: Optional[dt.datetime] = None) -> Dict[str, Any]:
     prompt_payload = run_payload.get("prompt_payload") if isinstance(run_payload.get("prompt_payload"), dict) else {}
     target = prompt_payload.get("target") if isinstance(prompt_payload.get("target"), dict) else {}
@@ -17682,6 +18733,7 @@ def _runtime_run_summary_payload(run_payload: Dict[str, Any], *, now: Optional[d
         },
         "failure_reason": run_payload.get("failure_reason"),
         "escalation_reason": run_payload.get("escalation_reason"),
+        "agent_selection": _runtime_run_agent_selection_payload(metadata),
     }
 
 
@@ -20373,7 +21425,7 @@ def _intent_apply_open_artifact_panel(
 ) -> JsonResponse:
     panel_key = str(payload.get("panel_key") or "").strip()
     params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-    valid_panel_keys = {"artifact_list", "artifact_detail", "artifact_raw_json", "artifact_files"}
+    valid_panel_keys = {"artifact_list", "artifact_detail", "artifact_raw_json", "artifact_files", "rules_browser"}
     if panel_key not in valid_panel_keys:
         return JsonResponse({"error": "unsupported panel_key"}, status=400)
 
@@ -20543,9 +21595,15 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
     core_surface_request = _match_core_surface_command(message)
     if core_surface_request:
         panel_key, params = core_surface_request
+        if panel_key == "campaign_list":
+            action_label = "Open campaigns"
+            summary = "Will open campaigns."
+        else:
+            action_label = "Open platform settings"
+            summary = "Will open platform settings."
         prompt_interpretation = _direct_panel_prompt_interpretation(
             intent_type="open_view",
-            action_label="Open platform settings",
+            action_label=action_label,
             resolution_notes=["resolved as a direct platform surface navigation action"],
         )
         response_payload = {
@@ -20553,7 +21611,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             "action_type": "ValidateDraft",
             "artifact_type": "Workspace",
             "artifact_id": None,
-            "summary": "Will open platform settings.",
+            "summary": summary,
             "prompt_interpretation": prompt_interpretation,
             "next_actions": [
                 {"label": "Open panel", "action": "OpenPanel", "panel_key": panel_key, "params": params},
@@ -20584,6 +21642,51 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 thread_id=context_thread_id,
             )
         return JsonResponse(response_payload)
+    rules_panel_request = _match_rules_panel_command(message)
+    if rules_panel_request:
+        panel_key, params = rules_panel_request
+        prompt_interpretation = _direct_panel_prompt_interpretation(
+            intent_type="open_rules_panel",
+            action_label="Open rules browser",
+            resolution_notes=["resolved as a direct policy bundle and rules navigation action"],
+        )
+        response_payload = {
+            "status": "IntentResolved",
+            "action_type": "ValidateDraft",
+            "artifact_type": "Workspace",
+            "artifact_id": None,
+            "summary": "Will open rules browser.",
+            "prompt_interpretation": prompt_interpretation,
+            "next_actions": [
+                {"label": "Open panel", "action": "OpenPanel", "panel_key": panel_key, "params": params},
+            ],
+            "audit": {
+                "request_id": str(uuid.uuid4()),
+                "timestamp": timezone.now().isoformat(),
+            },
+        }
+        if not preview_mode:
+            _audit_intent_event(
+                message="intent.resolve",
+                identity=identity,
+                request_id=request_id,
+                artifact_id=None,
+                proposal={"operation": "open_rules_panel", "panel_key": panel_key, "params": params, "prompt": message},
+                resolution=response_payload,
+            )
+            _log_prompt_activity(
+                request_id=request_id,
+                identity=identity,
+                status="completed",
+                prompt=message,
+                request_type="intent.resolve",
+                workspace_id=context_workspace_id,
+                summary=response_payload["summary"],
+                prompt_interpretation=prompt_interpretation,
+                thread_id=context_thread_id,
+            )
+        return JsonResponse(response_payload)
+
     artifact_panel_request = _match_artifact_panel_command(message)
     if artifact_panel_request:
         panel_key, params = artifact_panel_request
@@ -21365,6 +22468,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             summary=str(result.get("summary") or ""),
             error=str((result.get("validation_errors") or [""])[0] or "") if str(result.get("status") or "") in {"UnsupportedIntent", "ValidationError"} else "",
             thread_id=context_thread_id,
+            ai_resolution=proposal.get("_ai_resolution") if isinstance(proposal, dict) and isinstance(proposal.get("_ai_resolution"), dict) else None,
         )
     return JsonResponse(result)
 
@@ -21977,9 +23081,12 @@ def ai_invoke(request: HttpRequest) -> JsonResponse:
         metadata_json={
             "actor_identity_id": str(identity.id),
             "agent_slug": resolved.get("agent_slug") or agent_slug,
+            "agent_id": resolved.get("agent_id"),
+            "agent_name": resolved.get("agent_name"),
             "provider": resolved.get("provider"),
             "model_name": resolved.get("model_name"),
             "purpose": resolved.get("purpose"),
+            "agent_resolution": resolved.get("agent_resolution") if isinstance(resolved.get("agent_resolution"), dict) else {},
             "metadata": metadata,
         },
     )
@@ -21992,6 +23099,9 @@ def ai_invoke(request: HttpRequest) -> JsonResponse:
             "effective_params": result.get("effective_params") if isinstance(result.get("effective_params"), dict) else {},
             "warnings": result.get("warnings") if isinstance(result.get("warnings"), list) else [],
             "agent_slug": resolved.get("agent_slug") or agent_slug,
+            "agent_name": resolved.get("agent_name"),
+            "purpose": resolved.get("purpose"),
+            "agent_resolution": resolved.get("agent_resolution") if isinstance(resolved.get("agent_resolution"), dict) else {},
         }
     )
 
@@ -25711,6 +26821,8 @@ def run_commands(request: HttpRequest, run_id: str) -> JsonResponse:
 
 @login_required
 def runtime_runs_collection(request: HttpRequest) -> JsonResponse:
+    # Boundary: this endpoint proxies the legacy/runtime execution seam.
+    # For new data-processing run history, use orchestration run APIs.
     identity = _require_authenticated(request)
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
@@ -25746,6 +26858,8 @@ def runtime_runs_collection(request: HttpRequest) -> JsonResponse:
 
 @login_required
 def runtime_run_detail(request: HttpRequest, run_id: uuid.UUID) -> JsonResponse:
+    # Boundary: runtime run detail is a proxy view for the runtime seam, not
+    # the canonical platform run-history API for new ingest/data pipelines.
     identity = _require_authenticated(request)
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
@@ -25998,7 +27112,83 @@ def _build_dev_task_runtime_prompt(task: DevTask, work_item: Dict[str, Any]) -> 
     return {"title": title, "body": "\n".join(body_lines).strip()}
 
 
-def _build_dev_task_runtime_payload(task: DevTask, workspace: Workspace) -> Dict[str, Any]:
+def _dev_task_dispatch_purpose(task: DevTask) -> str:
+    task_type = str(task.task_type or "").strip().lower()
+    intent_type = str(task.intent_type or "").strip().lower()
+    context_purpose = str(task.context_purpose or "").strip().lower()
+    if "plan" in task_type or "plan" in intent_type or context_purpose == "planning":
+        return "planning"
+    return "coding"
+
+
+def _agent_resolution_label(*, purpose: str, resolution_source: str) -> str:
+    source = str(resolution_source or "").strip().lower()
+    if source == "explicit":
+        return f"Explicit {purpose} assignment"
+    if source == "default_fallback":
+        return "Default fallback"
+    if not source:
+        return "Unresolved routing"
+    return source.replace("_", " ").strip().title()
+
+
+def _resolve_dev_task_agent_selection(task: DevTask, *, agent_override_id: Optional[str] = None) -> Dict[str, Any]:
+    purpose = _dev_task_dispatch_purpose(task)
+    routed = resolve_agent_routing(purpose_slug=purpose)
+    routed_agent_id = str(routed.get("resolved_agent_id") or "").strip()
+    routed_agent_name = str(routed.get("resolved_agent_name") or "").strip()
+    routed_resolution_source = str(routed.get("resolution_source") or "").strip().lower()
+    effective_agent_id = routed_agent_id or None
+    effective_agent_name = routed_agent_name or None
+    effective_resolution_source = routed_resolution_source
+    override_id = str(agent_override_id or "").strip()
+    override_applied = False
+    if override_id:
+        _ensure_default_agent_purposes()
+        override_agent = (
+            AgentDefinition.objects.prefetch_related("purposes")
+            .filter(id=override_id, enabled=True)
+            .first()
+        )
+        if not override_agent:
+            raise ValueError("agent override is invalid or disabled")
+        purpose_slugs = {str(item.slug or "").strip().lower() for item in override_agent.purposes.all()}
+        if purpose not in purpose_slugs:
+            raise ValueError(f"agent override is not compatible with purpose '{purpose}'")
+        effective_agent_id = str(override_agent.id)
+        effective_agent_name = str(override_agent.name or "").strip()
+        override_applied = effective_agent_id != (routed_agent_id or None)
+        if override_applied:
+            effective_resolution_source = "action_override"
+    return {
+        "purpose": purpose,
+        "routed_agent_id": routed_agent_id,
+        "routed_agent_name": routed_agent_name,
+        "routed_resolution_source": routed_resolution_source,
+        "routed_resolution_label": _agent_resolution_label(
+            purpose=purpose,
+            resolution_source=routed_resolution_source,
+        ),
+        "effective_agent_id": effective_agent_id,
+        "effective_agent_name": effective_agent_name,
+        "effective_resolution_source": effective_resolution_source,
+        "effective_resolution_label": "Action override"
+        if effective_resolution_source == "action_override"
+        else _agent_resolution_label(
+            purpose=purpose,
+            resolution_source=effective_resolution_source,
+        ),
+        "override_agent_id": override_id or None,
+        "override_applied": override_applied,
+    }
+
+
+def _build_dev_task_runtime_payload(
+    task: DevTask,
+    workspace: Workspace,
+    *,
+    agent_selection: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     source = _load_dev_task_runtime_source(task)
     work_item = source["work_item"]
     handoff = resolve_execution_brief(task, work_item=work_item)
@@ -26043,6 +27233,7 @@ def _build_dev_task_runtime_payload(task: DevTask, workspace: Workspace) -> Dict
                 "source_entity_id": str(task.source_entity_id or ""),
                 "execution_brief": handoff.brief,
                 "execution_brief_source": handoff.source_kind,
+                "ai_agent_selection": agent_selection if isinstance(agent_selection, dict) else {},
             },
         },
         "policy": {
@@ -26152,6 +27343,7 @@ def _serialize_runtime_run_for_dev_task(detail: Dict[str, Any]) -> Dict[str, Any
         "finished_at": detail.get("completed_at"),
         "failure_reason": detail.get("failure_reason"),
         "escalation_reason": detail.get("escalation_reason"),
+        "agent_selection": detail.get("agent_selection") if isinstance(detail.get("agent_selection"), dict) else None,
     }
 
 
@@ -26357,6 +27549,7 @@ def _resolve_dev_task_execution_payload(
             for item in artifacts_payload[:3]
             if isinstance(item, dict)
         ],
+        "agent_selection": (run_payload or {}).get("agent_selection") if isinstance((run_payload or {}).get("agent_selection"), dict) else None,
         "message": _execution_run_message(
             execution_state=execution_state,
             summary=run_summary,
@@ -26487,6 +27680,92 @@ def _serialize_selected_work_item_queue_state(task: DevTask, *, normalized_statu
 
 def _serialize_goal_summary(goal: Goal) -> Dict[str, Any]:
     return serialize_goal_summary(goal)
+
+
+def _campaign_slug_exists(workspace_id: str, slug: str, *, exclude_campaign_id: Optional[str] = None) -> bool:
+    qs = Campaign.objects.filter(workspace_id=workspace_id, slug=slug)
+    if exclude_campaign_id:
+        qs = qs.exclude(id=exclude_campaign_id)
+    return qs.exists()
+
+
+def _next_available_campaign_slug(workspace_id: str, name: str, *, exclude_campaign_id: Optional[str] = None) -> str:
+    base = slugify(name)[:120] or "campaign"
+    candidate = base
+    suffix = 2
+    while _campaign_slug_exists(workspace_id, candidate, exclude_campaign_id=exclude_campaign_id):
+        token = f"-{suffix}"
+        candidate = f"{base[: max(1, 120 - len(token))]}{token}"
+        suffix += 1
+    return candidate
+
+
+def _builtin_campaign_type_definition() -> Dict[str, Any]:
+    return {
+        "key": "generic",
+        "label": "Generic Campaign",
+        "description": "Default campaign type for platform-level workflows.",
+        "icon": "campaign",
+        "scope": "global",
+        "workspace_id": None,
+        "enabled": True,
+        "metadata": {},
+    }
+
+
+def _campaign_type_definitions_for_workspace(workspace: Workspace) -> List[Dict[str, Any]]:
+    rows: Dict[str, Dict[str, Any]] = {"generic": _builtin_campaign_type_definition()}
+    for record in (
+        CampaignType.objects.filter(Q(workspace__isnull=True) | Q(workspace=workspace))
+        .filter(enabled=True)
+        .order_by("label", "key")
+    ):
+        key = str(record.key or "").strip()
+        if not key:
+            continue
+        rows[key] = {
+            "key": key,
+            "label": str(record.label or key),
+            "description": str(record.description or ""),
+            "icon": str(record.icon or ""),
+            "scope": "workspace" if record.workspace_id else "global",
+            "workspace_id": str(record.workspace_id) if record.workspace_id else None,
+            "enabled": bool(record.enabled),
+            "metadata": record.metadata_json if isinstance(record.metadata_json, dict) else {},
+        }
+    return list(rows.values())
+
+
+def _serialize_campaign_summary(campaign: Campaign) -> Dict[str, Any]:
+    return {
+        "id": str(campaign.id),
+        "workspace_id": str(campaign.workspace_id),
+        "slug": str(campaign.slug or ""),
+        "name": campaign.name,
+        "campaign_type": campaign.campaign_type,
+        "status": campaign.status,
+        "description": campaign.description or "",
+        "archived": bool(campaign.archived),
+        "created_by": str(campaign.created_by_id) if campaign.created_by_id else None,
+        "created_at": campaign.created_at,
+        "updated_at": campaign.updated_at,
+    }
+
+
+def _serialize_campaign_detail(campaign: Campaign, *, workspace: Optional[Workspace] = None) -> Dict[str, Any]:
+    resolved_workspace = workspace or Workspace.objects.filter(id=campaign.workspace_id).first()
+    available_types = _campaign_type_definitions_for_workspace(resolved_workspace) if resolved_workspace else [_builtin_campaign_type_definition()]
+    type_lookup = {
+        str(entry.get("key") or "").strip(): entry
+        for entry in available_types
+        if isinstance(entry, dict) and str(entry.get("key") or "").strip()
+    }
+    return {
+        **_serialize_campaign_summary(campaign),
+        "campaign_type_definition": type_lookup.get(campaign.campaign_type) or _builtin_campaign_type_definition(),
+        "available_campaign_types": available_types,
+        "metadata": campaign.metadata_json if isinstance(campaign.metadata_json, dict) else {},
+    }
 
 
 def _serialize_goal_recent_result(goal: Goal, result: Any, *, goal_status: str) -> Dict[str, Any]:
@@ -27554,6 +28833,9 @@ def _execute_conversation_action(
         ConversationActionType.QUEUE_FIRST_SLICE.value,
         ConversationActionType.LIST_GOALS.value,
         ConversationActionType.SHOW_GOAL.value,
+        ConversationActionType.CREATE_CAMPAIGN.value,
+        ConversationActionType.LIST_CAMPAIGNS.value,
+        ConversationActionType.SHOW_CAMPAIGN.value,
         ConversationActionType.LIST_APPLICATION_FACTORIES.value,
         ConversationActionType.OPEN_COMPOSER.value,
         ConversationActionType.GENERATE_APPLICATION_PLAN.value,
@@ -27574,9 +28856,13 @@ def _execute_conversation_action(
         application_id = target_id if target_kind == "application" else ""
         application_plan_id = target_id if target_kind == "application_plan" else ""
         goal_id = target_id if target_kind == "goal" else ""
+        campaign_id = target_id if target_kind == "campaign" else ""
         goal: Optional[Goal] = None
         if goal_id:
             goal = Goal.objects.filter(id=goal_id, workspace=workspace).first()
+        campaign: Optional[Campaign] = None
+        if campaign_id:
+            campaign = Campaign.objects.filter(id=campaign_id, workspace=workspace).first()
         application: Optional[Application] = None
         if application_id:
             application = Application.objects.filter(id=application_id, workspace=workspace).first()
@@ -27625,6 +28911,125 @@ def _execute_conversation_action(
                     "operation_result": True,
                     "result": {"workspace_id": str(workspace.id)},
                 },
+            )
+        if action_type == ConversationActionType.LIST_CAMPAIGNS.value:
+            rows = [
+                _serialize_campaign_summary(item)
+                for item in Campaign.objects.filter(workspace=workspace, archived=False).order_by("-updated_at", "-created_at")[:200]
+            ]
+            return _direct_panel_intent_response(
+                request_id=request_id,
+                summary=f"Found {len(rows)} campaign(s).",
+                panel_key="campaign_list",
+                params={"workspace_id": str(workspace.id)},
+                prompt_interpretation=prompt_interpretation,
+                extra_payload={
+                    "intent": intent_payload,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"campaigns": rows},
+                },
+            )
+        if action_type == ConversationActionType.CREATE_CAMPAIGN.value:
+            name = str(action_payload.get("name") or action_payload.get("title") or prompt).strip() or "New Campaign"
+            campaign_type = str(action_payload.get("campaign_type") or "generic").strip() or "generic"
+            allowed_types = {
+                str(item.get("key") or "").strip()
+                for item in _campaign_type_definitions_for_workspace(workspace)
+                if isinstance(item, dict)
+            }
+            if campaign_type not in allowed_types:
+                campaign_type = "generic"
+            campaign = Campaign.objects.create(
+                workspace=workspace,
+                slug=_next_available_campaign_slug(str(workspace.id), name),
+                name=name[:240],
+                campaign_type=campaign_type,
+                status="draft",
+                description=str(action_payload.get("description") or "").strip(),
+                created_by=identity,
+            )
+            detail = _serialize_campaign_detail(campaign, workspace=workspace)
+            action = {
+                **action,
+                "target_object": {
+                    "kind": "campaign",
+                    "id": str(campaign.id),
+                    "label": campaign.name,
+                    "workspace_id": str(workspace.id),
+                },
+            }
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Created campaign {campaign.name}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"campaign": detail},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "campaign_detail", "label": "Open Campaign", "params": {"workspace_id": str(workspace.id), "campaign_id": str(campaign.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
+            )
+        if action_type == ConversationActionType.SHOW_CAMPAIGN.value:
+            if campaign is None:
+                return JsonResponse(
+                    {
+                        "status": "IntentClarificationRequired",
+                        "artifact_type": "Workspace",
+                        "artifact_id": None,
+                        "summary": "No campaign could be resolved from the conversation context.",
+                        "intent": intent_payload,
+                        "prompt_interpretation": prompt_interpretation,
+                        "conversation_action": action,
+                        "operation_result": False,
+                        "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                    },
+                    status=409,
+                )
+            detail = _serialize_campaign_detail(campaign, workspace=workspace)
+            direct_campaign_target = _direct_panel_target_for_conversation_action(
+                action_type=action_type,
+                workspace_id=str(workspace.id),
+                action_payload=action_payload,
+                target={"id": str(campaign.id)},
+            )
+            if direct_campaign_target:
+                panel_key, params = direct_campaign_target
+                return _direct_panel_intent_response(
+                    request_id=request_id,
+                    summary=f"Showing campaign {campaign.name}.",
+                    panel_key=panel_key,
+                    params=params,
+                    prompt_interpretation=prompt_interpretation,
+                    extra_payload={
+                        "intent": intent_payload,
+                        "conversation_action": action,
+                        "operation_result": True,
+                        "result": {"campaign": detail},
+                    },
+                )
+            return JsonResponse(
+                {
+                    "status": "DraftReady",
+                    "artifact_type": "Workspace",
+                    "artifact_id": None,
+                    "summary": f"Showing campaign {campaign.name}.",
+                    "intent": intent_payload,
+                    "prompt_interpretation": prompt_interpretation,
+                    "conversation_action": action,
+                    "operation_result": True,
+                    "result": {"campaign": detail},
+                    "next_actions": [
+                        {"action": "OpenPanel", "panel_key": "campaign_detail", "label": "Open Campaign", "params": {"workspace_id": str(workspace.id), "campaign_id": str(campaign.id)}}
+                    ],
+                    "audit": {"request_id": request_id, "timestamp": timezone.now().isoformat()},
+                }
             )
         if action_type == ConversationActionType.GENERATE_APPLICATION_PLAN.value:
             objective = str(action_payload.get("objective") or action_payload.get("reference") or prompt).strip()
@@ -28336,10 +29741,17 @@ def _execute_conversation_action(
     )
 
 
-def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -> Dict[str, Any]:
+def _submit_dev_task_runtime_run(
+    task: DevTask,
+    *,
+    workspace: Workspace,
+    user,
+    agent_override_id: Optional[str] = None,
+) -> Dict[str, Any]:
     source = _load_dev_task_runtime_source(task)
     ensure_execution_brief_ready(task, work_item=source["work_item"])
-    payload = _build_dev_task_runtime_payload(task, workspace)
+    agent_selection = _resolve_dev_task_agent_selection(task, agent_override_id=agent_override_id)
+    payload = _build_dev_task_runtime_payload(task, workspace, agent_selection=agent_selection)
     response = _seed_api_request(method="POST", path="/api/v1/runtime/runs", payload=payload, timeout=30)
     content_type = str(response.headers.get("content-type") or "").lower()
     if "application/json" not in content_type:
@@ -28376,7 +29788,7 @@ def _submit_dev_task_runtime_run(task: DevTask, *, workspace: Workspace, user) -
             "updated_at",
         ]
     )
-    return {"run_id": str(task.runtime_run_id), "status": task.status}
+    return {"run_id": str(task.runtime_run_id), "status": task.status, "agent_selection": agent_selection}
 
 
 def _conversation_default_repo(prompt: str) -> str:
@@ -28667,22 +30079,33 @@ def _goal_queryset(identity: UserIdentity, workspace_id: str):
     return workspace, _active_goals_for_workspace(workspace)
 
 
+def _campaign_queryset(identity: UserIdentity, workspace_id: str):
+    workspace = _resolve_workspace_for_identity(identity, workspace_id)
+    if not workspace:
+        raise PermissionDenied("workspace not accessible")
+    return workspace, Campaign.objects.filter(workspace=workspace).select_related("created_by")
+
+
 def _active_goals_for_workspace(workspace: Workspace):
-    return (
-        Goal.objects.filter(workspace=workspace)
-        .filter(Q(application__isnull=True) | ~Q(application__status="archived"))
-        .select_related("requested_by")
-        .prefetch_related("threads__work_items", "work_items")
-    )
+    qs = Goal.objects.filter(workspace=workspace)
+    if hasattr(qs, "filter"):
+        qs = qs.filter(Q(application__isnull=True) | ~Q(application__status="archived"))
+    if hasattr(qs, "select_related"):
+        qs = qs.select_related("requested_by")
+    if hasattr(qs, "prefetch_related"):
+        qs = qs.prefetch_related("threads__work_items", "work_items")
+    return qs
 
 
 def _active_coordination_threads_for_workspace(workspace: Workspace):
-    return (
-        CoordinationThread.objects.filter(workspace=workspace)
-        .filter(Q(goal__application__isnull=True) | ~Q(goal__application__status="archived"))
-        .select_related("owner")
-        .prefetch_related("work_items", "events")
-    )
+    qs = CoordinationThread.objects.filter(workspace=workspace)
+    if hasattr(qs, "filter"):
+        qs = qs.filter(Q(goal__application__isnull=True) | ~Q(goal__application__status="archived"))
+    if hasattr(qs, "select_related"):
+        qs = qs.select_related("owner")
+    if hasattr(qs, "prefetch_related"):
+        qs = qs.prefetch_related("work_items", "events")
+    return qs
 
 
 def _activate_goal_first_slice(goal: Goal) -> Dict[str, Optional[str]]:
@@ -29288,6 +30711,2738 @@ def application_detail(request: HttpRequest, application_id: str) -> JsonRespons
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     return JsonResponse(_serialize_application_detail(application))
+
+
+@login_required
+def campaign_types_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _campaign_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse({"campaign_types": _campaign_type_definitions_for_workspace(workspace)})
+
+
+@csrf_exempt
+@login_required
+def campaigns_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        name = str(payload.get("name") or "").strip()
+        if not workspace_id or not name:
+            return JsonResponse({"error": "workspace_id and name are required"}, status=400)
+        try:
+            workspace, _ = _campaign_queryset(identity, workspace_id)
+        except PermissionDenied:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_CAMPAIGNS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        available_types = _campaign_type_definitions_for_workspace(workspace)
+        allowed_types = {str(item.get("key") or "").strip() for item in available_types if isinstance(item, dict)}
+        campaign_type = str(payload.get("campaign_type") or "generic").strip() or "generic"
+        if campaign_type not in allowed_types:
+            return JsonResponse({"error": "campaign_type is not enabled for this workspace"}, status=400)
+        status_value = str(payload.get("status") or "draft").strip().lower() or "draft"
+        allowed_statuses = {choice for choice, _label in Campaign.STATUS_CHOICES}
+        if status_value not in allowed_statuses:
+            return JsonResponse({"error": "invalid status"}, status=400)
+        campaign = Campaign.objects.create(
+            workspace=workspace,
+            slug=_next_available_campaign_slug(str(workspace.id), name),
+            name=name[:240],
+            campaign_type=campaign_type,
+            status=status_value,
+            description=str(payload.get("description") or "").strip(),
+            created_by=identity,
+            archived=bool(payload.get("archived")),
+            metadata_json=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        )
+        return JsonResponse(_serialize_campaign_detail(campaign, workspace=workspace), status=201)
+
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _campaign_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    status_filter = str(request.GET.get("status") or "").strip().lower()
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+    campaign_type = str(request.GET.get("campaign_type") or "").strip()
+    if campaign_type:
+        qs = qs.filter(campaign_type=campaign_type)
+    include_archived = str(request.GET.get("include_archived") or "").strip().lower() in {"1", "true", "yes"}
+    if not include_archived:
+        qs = qs.filter(archived=False)
+    rows = [_serialize_campaign_summary(campaign) for campaign in qs.order_by("-updated_at", "-created_at")]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "campaigns": rows,
+            "campaign_types": _campaign_type_definitions_for_workspace(workspace),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def campaign_detail(request: HttpRequest, campaign_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    campaign = get_object_or_404(Campaign.objects.select_related("workspace", "created_by"), id=campaign_id)
+    if not _workspace_membership(identity, str(campaign.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        if not _require_workspace_capabilities(identity, str(campaign.workspace_id), [CAP_APP_READ]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not context_workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        if context_workspace_id != str(campaign.workspace_id):
+            return JsonResponse({"error": "campaign not found in workspace context"}, status=404)
+        return JsonResponse(_serialize_campaign_detail(campaign, workspace=campaign.workspace))
+    if request.method not in {"PATCH", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    if not _require_workspace_capabilities(identity, str(campaign.workspace_id), [CAP_CAMPAIGNS_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(campaign.workspace_id):
+        return JsonResponse({"error": "campaign not found in workspace context"}, status=404)
+    update_fields: List[str] = []
+    if "name" in payload:
+        next_name = str(payload.get("name") or "").strip()
+        if not next_name:
+            return JsonResponse({"error": "name cannot be empty"}, status=400)
+        campaign.name = next_name[:240]
+        update_fields.append("name")
+    if "slug" in payload:
+        slug = slugify(str(payload.get("slug") or "").strip())[:120]
+        if not slug:
+            return JsonResponse({"error": "slug cannot be empty"}, status=400)
+        if _campaign_slug_exists(str(campaign.workspace_id), slug, exclude_campaign_id=str(campaign.id)):
+            return JsonResponse({"error": "slug already exists in this workspace"}, status=409)
+        campaign.slug = slug
+        update_fields.append("slug")
+    if "description" in payload:
+        campaign.description = str(payload.get("description") or "").strip()
+        update_fields.append("description")
+    if "status" in payload:
+        next_status = str(payload.get("status") or "").strip().lower()
+        allowed_statuses = {choice for choice, _label in Campaign.STATUS_CHOICES}
+        if next_status not in allowed_statuses:
+            return JsonResponse({"error": "invalid status"}, status=400)
+        campaign.status = next_status
+        update_fields.append("status")
+    if "campaign_type" in payload:
+        next_type = str(payload.get("campaign_type") or "").strip() or "generic"
+        allowed_types = {
+            str(item.get("key") or "").strip()
+            for item in _campaign_type_definitions_for_workspace(campaign.workspace)
+            if isinstance(item, dict)
+        }
+        if next_type not in allowed_types:
+            return JsonResponse({"error": "campaign_type is not enabled for this workspace"}, status=400)
+        campaign.campaign_type = next_type
+        update_fields.append("campaign_type")
+    if "archived" in payload:
+        campaign.archived = bool(payload.get("archived"))
+        update_fields.append("archived")
+    if "metadata" in payload:
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return JsonResponse({"error": "metadata must be an object"}, status=400)
+        campaign.metadata_json = metadata or {}
+        update_fields.append("metadata_json")
+    if update_fields:
+        campaign.save(update_fields=[*update_fields, "updated_at"])
+    return JsonResponse(_serialize_campaign_detail(campaign, workspace=campaign.workspace))
+
+
+def _watch_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[WatchDefinition]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = WatchDefinition.objects.filter(workspace=workspace).select_related("linked_campaign", "created_by").order_by("-updated_at", "-created_at")
+    return workspace, qs
+
+
+@csrf_exempt
+@login_required
+def watches_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    service = WatchService()
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        try:
+            workspace, _ = _watch_queryset(identity, workspace_id)
+        except PermissionDenied:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_WATCHES_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        try:
+            row = service.register_watch(
+                WatchRegistration(
+                    workspace_id=str(workspace.id),
+                    key=str(payload.get("key") or "").strip(),
+                    name=str(payload.get("name") or "").strip(),
+                    target_kind=str(payload.get("target_kind") or "generic").strip() or "generic",
+                    target_ref=payload.get("target_ref") if isinstance(payload.get("target_ref"), dict) else {},
+                    filter_criteria=payload.get("filter_criteria") if isinstance(payload.get("filter_criteria"), dict) else {},
+                    lifecycle_state=str(payload.get("lifecycle_state") or "draft").strip() or "draft",
+                    linked_campaign_id=str(payload.get("linked_campaign_id") or "").strip(),
+                    metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+                    created_by_id=str(identity.id),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        except Exception:
+            return JsonResponse({"error": "watch key already exists in workspace or linked campaign is invalid"}, status=409)
+        return JsonResponse(serialize_watch(row), status=201)
+
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _watch_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    lifecycle_state = str(request.GET.get("lifecycle_state") or "").strip().lower()
+    if lifecycle_state:
+        qs = qs.filter(lifecycle_state=lifecycle_state)
+    target_kind = str(request.GET.get("target_kind") or "").strip().lower()
+    if target_kind:
+        qs = qs.filter(target_kind=target_kind)
+    rows = [serialize_watch(item) for item in qs]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "lifecycle_states": list(WATCH_LIFECYCLE_STATES),
+            "subscriber_types": list(WATCH_SUBSCRIBER_TYPES),
+            "watches": rows,
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def watch_detail(request: HttpRequest, watch_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    watch = get_object_or_404(WatchDefinition.objects.select_related("workspace", "linked_campaign", "created_by"), id=watch_id)
+    if not _workspace_membership(identity, str(watch.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_APP_READ]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not context_workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        if context_workspace_id != str(watch.workspace_id):
+            return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+        return JsonResponse(serialize_watch(watch))
+    if request.method not in {"PATCH", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_WATCHES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(watch.workspace_id):
+        return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+    update_fields: List[str] = []
+    if "name" in payload:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return JsonResponse({"error": "name cannot be empty"}, status=400)
+        watch.name = name[:240]
+        update_fields.append("name")
+    if "target_kind" in payload:
+        watch.target_kind = str(payload.get("target_kind") or "generic").strip().lower() or "generic"
+        update_fields.append("target_kind")
+    if "target_ref" in payload:
+        target_ref = payload.get("target_ref")
+        if target_ref is not None and not isinstance(target_ref, dict):
+            return JsonResponse({"error": "target_ref must be an object"}, status=400)
+        watch.target_ref_json = target_ref or {}
+        update_fields.append("target_ref_json")
+    if "filter_criteria" in payload:
+        filter_criteria = payload.get("filter_criteria")
+        if filter_criteria is not None and not isinstance(filter_criteria, dict):
+            return JsonResponse({"error": "filter_criteria must be an object"}, status=400)
+        watch.filter_criteria_json = filter_criteria or {}
+        update_fields.append("filter_criteria_json")
+    if "metadata" in payload:
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return JsonResponse({"error": "metadata must be an object"}, status=400)
+        watch.metadata_json = metadata or {}
+        update_fields.append("metadata_json")
+    if "lifecycle_state" in payload:
+        lifecycle_state = str(payload.get("lifecycle_state") or "").strip().lower()
+        if lifecycle_state not in WATCH_LIFECYCLE_STATES:
+            return JsonResponse({"error": f"lifecycle_state must be one of {', '.join(WATCH_LIFECYCLE_STATES)}"}, status=400)
+        watch.lifecycle_state = lifecycle_state
+        update_fields.append("lifecycle_state")
+    if "linked_campaign_id" in payload:
+        campaign_id = str(payload.get("linked_campaign_id") or "").strip()
+        if campaign_id:
+            campaign = Campaign.objects.filter(id=campaign_id, workspace_id=watch.workspace_id).first()
+            if campaign is None:
+                return JsonResponse({"error": "linked campaign not found in workspace context"}, status=404)
+            watch.linked_campaign = campaign
+        else:
+            watch.linked_campaign = None
+        update_fields.append("linked_campaign")
+    if update_fields:
+        watch.save(update_fields=[*update_fields, "updated_at"])
+    return JsonResponse(serialize_watch(watch))
+
+
+@csrf_exempt
+@login_required
+def watch_activate(request: HttpRequest, watch_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    watch = get_object_or_404(WatchDefinition.objects.select_related("workspace"), id=watch_id)
+    if not _workspace_membership(identity, str(watch.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_WATCHES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(watch.workspace_id):
+        return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+    service = WatchService()
+    watch = service.update_watch_lifecycle(watch_id=str(watch.id), lifecycle_state="active")
+    return JsonResponse(serialize_watch(watch))
+
+
+@csrf_exempt
+@login_required
+def watch_pause(request: HttpRequest, watch_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    watch = get_object_or_404(WatchDefinition.objects.select_related("workspace"), id=watch_id)
+    if not _workspace_membership(identity, str(watch.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_WATCHES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(watch.workspace_id):
+        return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+    service = WatchService()
+    watch = service.update_watch_lifecycle(watch_id=str(watch.id), lifecycle_state="paused")
+    return JsonResponse(serialize_watch(watch))
+
+
+@csrf_exempt
+@login_required
+def watch_subscribers_collection(request: HttpRequest, watch_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    watch = get_object_or_404(WatchDefinition.objects.select_related("workspace"), id=watch_id)
+    if not _workspace_membership(identity, str(watch.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = WatchService()
+    if request.method == "POST":
+        if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_SUBSCRIBERS_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        payload = _parse_json(request)
+        if str(payload.get("workspace_id") or "").strip() != str(watch.workspace_id):
+            return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+        try:
+            row = service.add_subscriber(
+                WatchSubscriberInput(
+                    watch_id=str(watch.id),
+                    subscriber_type=str(payload.get("subscriber_type") or "").strip(),
+                    subscriber_ref=str(payload.get("subscriber_ref") or "").strip(),
+                    destination=payload.get("destination") if isinstance(payload.get("destination"), dict) else {},
+                    preferences=payload.get("preferences") if isinstance(payload.get("preferences"), dict) else {},
+                    enabled=bool(payload.get("enabled", True)),
+                    created_by_id=str(identity.id),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        return JsonResponse(serialize_watch_subscriber(row), status=201)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(watch.workspace_id), [CAP_APP_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if context_workspace_id != str(watch.workspace_id):
+        return JsonResponse({"error": "watch not found in workspace context"}, status=404)
+    rows = [serialize_watch_subscriber(item) for item in service.list_subscribers(watch_id=str(watch.id))]
+    return JsonResponse(
+        {
+            "watch_id": str(watch.id),
+            "workspace_id": str(watch.workspace_id),
+            "subscriber_types": list(WATCH_SUBSCRIBER_TYPES),
+            "subscribers": rows,
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def watch_matches_evaluate(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _watch_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_WATCHES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    event_ref = payload.get("event_ref") if isinstance(payload.get("event_ref"), dict) else {}
+    required_reconciled_state_version = str(
+        payload.get("reconciled_state_version")
+        or event_ref.get("reconciled_state_version")
+        or ""
+    ).strip()
+    jurisdictions_payload = payload.get("jurisdictions")
+    if isinstance(jurisdictions_payload, list):
+        normalized = [str(item or "").strip() for item in jurisdictions_payload if str(item or "").strip()]
+        if len(normalized) > 1:
+            return JsonResponse({"error": "multi-jurisdiction evaluation is unsupported"}, status=400)
+        if normalized:
+            event_ref = dict(event_ref)
+            event_ref.setdefault("jurisdiction", normalized[0])
+    event_ref_jurisdictions = event_ref.get("jurisdictions")
+    if isinstance(event_ref_jurisdictions, list) and len(event_ref_jurisdictions) > 1:
+        return JsonResponse({"error": "multi-jurisdiction evaluation is unsupported"}, status=400)
+    try:
+        jurisdiction = require_canonical_jurisdiction(
+            payload.get("jurisdiction") or event_ref.get("jurisdiction") or "",
+            context="jurisdiction",
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    if not jurisdiction:
+        return JsonResponse({"error": "jurisdiction is required"}, status=400)
+    readiness = StagePublicationService().evaluation_readiness(
+        workspace_id=str(workspace.id),
+        pipeline_key=str(payload.get("pipeline_key") or event_ref.get("pipeline_key") or "").strip(),
+        jurisdiction=jurisdiction,
+        source=str(payload.get("source") or event_ref.get("source") or "").strip(),
+        required_reconciled_state_version=required_reconciled_state_version,
+    )
+    if not readiness.ready:
+        return JsonResponse(
+            {
+                "error": "evaluation deferred: reconciled state publication is required",
+                "reason": readiness.reason,
+                "readiness": {
+                    "ready": False,
+                    "publication_id": readiness.publication_id or None,
+                    "reconciled_state_version": readiness.reconciled_state_version or "",
+                    "signal_set_version": readiness.signal_set_version or "",
+                },
+            },
+            status=409,
+        )
+    evaluated_event_ref = dict(event_ref)
+    if readiness.reconciled_state_version:
+        evaluated_event_ref["reconciled_state_version"] = readiness.reconciled_state_version
+    watch_ids = payload.get("watch_ids") if isinstance(payload.get("watch_ids"), list) else []
+    service = WatchService()
+    try:
+        rows = service.evaluate(
+            WatchEvaluationInput(
+                workspace_id=str(workspace.id),
+                event_key=str(payload.get("event_key") or "").strip(),
+                scope_jurisdiction=jurisdiction,
+                event_ref=evaluated_event_ref,
+                watch_ids=tuple(str(item).strip() for item in watch_ids if str(item).strip()),
+                reconciled_state_version=str(readiness.reconciled_state_version or ""),
+                run_id=str(payload.get("run_id") or "").strip(),
+                correlation_id=str(payload.get("correlation_id") or "").strip(),
+                chain_id=str(payload.get("chain_id") or "").strip(),
+                idempotency_key=str(payload.get("idempotency_key") or "").strip(),
+                metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+            ),
+            persist=bool(payload.get("persist", True)),
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "persisted": bool(payload.get("persist", True)),
+            "reconciled_state_version": readiness.reconciled_state_version or "",
+            "results": [serialize_watch_evaluation(item) for item in rows],
+        },
+        status=201 if bool(payload.get("persist", True)) else 200,
+    )
+
+
+@login_required
+def watch_matches_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _watch_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    qs = WatchMatchEvent.objects.filter(workspace=workspace).select_related("watch", "run").order_by("-created_at", "-id")
+    watch_id = str(request.GET.get("watch_id") or "").strip()
+    if watch_id:
+        qs = qs.filter(watch_id=watch_id)
+    event_key = str(request.GET.get("event_key") or "").strip()
+    if event_key:
+        qs = qs.filter(event_key=event_key)
+    matched = str(request.GET.get("matched") or "").strip().lower()
+    if matched in {"true", "1", "yes"}:
+        qs = qs.filter(matched=True)
+    elif matched in {"false", "0", "no"}:
+        qs = qs.filter(matched=False)
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
+    rows = [serialize_watch_match(item) for item in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "matches": rows})
+
+
+def _provenance_workspace(identity: UserIdentity, workspace_id: str) -> Workspace:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    return workspace
+
+
+@login_required
+def audit_events_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _provenance_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_PROVENANCE_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = ProvenanceService()
+    object_type = str(request.GET.get("object_type") or "").strip().lower()
+    object_id = str(request.GET.get("object_id") or "").strip()
+    event_type = str(request.GET.get("event_type") or "").strip().lower()
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    run_id = str(request.GET.get("run_id") or "").strip()
+    limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
+    if object_type and object_id:
+        qs = service.audit_history(workspace_id=str(workspace.id), object_type=object_type, object_id=object_id)
+    else:
+        qs = PlatformAuditEvent.objects.filter(workspace=workspace).select_related("run").order_by("-created_at", "-id")
+    if event_type:
+        qs = qs.filter(event_type=event_type)
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    rows = [serialize_audit_event(item) for item in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "events": rows})
+
+
+@login_required
+def provenance_links_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _provenance_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_PROVENANCE_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    object_type = str(request.GET.get("object_type") or "").strip().lower()
+    object_id = str(request.GET.get("object_id") or "").strip()
+    direction = str(request.GET.get("direction") or "both").strip().lower() or "both"
+    if direction not in PROVENANCE_DIRECTIONS:
+        return JsonResponse({"error": f"direction must be one of {', '.join(PROVENANCE_DIRECTIONS)}"}, status=400)
+    service = ProvenanceService()
+    if object_type and object_id:
+        qs = service.provenance_for_object(
+            workspace_id=str(workspace.id),
+            object_type=object_type,
+            object_id=object_id,
+            direction=direction,
+        )
+    else:
+        qs = ProvenanceLink.objects.filter(workspace=workspace).select_related("origin_event", "run").order_by("-created_at", "-id")
+    relationship_type = str(request.GET.get("relationship_type") or "").strip().lower()
+    if relationship_type:
+        qs = qs.filter(relationship_type=relationship_type)
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
+    rows = [serialize_provenance_link(item) for item in qs[:limit]]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "direction": direction,
+            "links": rows,
+        }
+    )
+
+
+def _source_connector_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[SourceConnector]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = SourceConnector.objects.filter(workspace=workspace).select_related("last_run", "created_by").order_by("-updated_at", "-created_at")
+    return workspace, qs
+
+
+@csrf_exempt
+@login_required
+def source_connectors_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    service = SourceConnectorService()
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        try:
+            workspace, _ = _source_connector_queryset(identity, workspace_id)
+        except PermissionDenied:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_SOURCES_MANAGE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        try:
+            source = service.register_source(
+                SourceRegistration(
+                    workspace_id=str(workspace.id),
+                    key=str(payload.get("key") or "").strip(),
+                    name=str(payload.get("name") or "").strip(),
+                    source_type=str(payload.get("source_type") or "generic").strip() or "generic",
+                    source_mode=str(payload.get("source_mode") or "manual").strip() or "manual",
+                    refresh_cadence_seconds=int(payload.get("refresh_cadence_seconds") or 0),
+                    orchestration_pipeline_key=str(payload.get("orchestration_pipeline_key") or "").strip(),
+                    configuration=payload.get("configuration") if isinstance(payload.get("configuration"), dict) else {},
+                    governance=payload.get("governance") if isinstance(payload.get("governance"), dict) else {},
+                    provenance=payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {},
+                    metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+                    created_by_id=str(identity.id),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        except Exception:
+            return JsonResponse({"error": "source key already exists in workspace"}, status=409)
+        readiness = service.validate_readiness(source_id=str(source.id))
+        return JsonResponse(serialize_source_connector(source, readiness=readiness), status=201)
+
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _source_connector_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    source_mode = str(request.GET.get("source_mode") or "").strip().lower()
+    if source_mode:
+        qs = qs.filter(source_mode=source_mode)
+    lifecycle_state = str(request.GET.get("lifecycle_state") or "").strip().lower()
+    if lifecycle_state:
+        qs = qs.filter(lifecycle_state=lifecycle_state)
+    health_status = str(request.GET.get("health_status") or "").strip().lower()
+    if health_status:
+        qs = qs.filter(health_status=health_status)
+    is_active = str(request.GET.get("is_active") or "").strip().lower()
+    if is_active in {"true", "1", "yes"}:
+        qs = qs.filter(is_active=True)
+    elif is_active in {"false", "0", "no"}:
+        qs = qs.filter(is_active=False)
+    rows = [serialize_source_connector(item) for item in qs]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source_modes": list(SOURCE_MODES),
+            "sources": rows,
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def source_connector_detail(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace", "last_run", "created_by"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = SourceConnectorService()
+    if request.method == "GET":
+        context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not context_workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        if context_workspace_id != str(source.workspace_id):
+            return JsonResponse({"error": "source not found in workspace context"}, status=404)
+        readiness = service.validate_readiness(source_id=str(source.id))
+        return JsonResponse(serialize_source_connector(source, readiness=readiness))
+    if request.method not in {"PATCH", "POST"}:
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+
+    update_fields: List[str] = []
+    if "name" in payload:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return JsonResponse({"error": "name cannot be empty"}, status=400)
+        source.name = name[:240]
+        update_fields.append("name")
+    if "source_type" in payload:
+        source.source_type = str(payload.get("source_type") or "generic").strip().lower() or "generic"
+        update_fields.append("source_type")
+    if "source_mode" in payload:
+        mode = str(payload.get("source_mode") or "").strip().lower()
+        if mode not in SOURCE_MODES:
+            return JsonResponse({"error": f"source_mode must be one of {', '.join(SOURCE_MODES)}"}, status=400)
+        source.source_mode = mode
+        update_fields.append("source_mode")
+    if "refresh_cadence_seconds" in payload:
+        try:
+            source.refresh_cadence_seconds = max(0, int(payload.get("refresh_cadence_seconds") or 0))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "refresh_cadence_seconds must be an integer"}, status=400)
+        update_fields.append("refresh_cadence_seconds")
+    if "orchestration_pipeline_key" in payload:
+        source.orchestration_pipeline_key = str(payload.get("orchestration_pipeline_key") or "").strip()
+        update_fields.append("orchestration_pipeline_key")
+    if "configuration" in payload:
+        cfg = payload.get("configuration")
+        if cfg is not None and not isinstance(cfg, dict):
+            return JsonResponse({"error": "configuration must be an object"}, status=400)
+        source.configuration_json = cfg or {}
+        update_fields.append("configuration_json")
+    if "governance" in payload:
+        governance = payload.get("governance")
+        if governance is not None and not isinstance(governance, dict):
+            return JsonResponse({"error": "governance must be an object"}, status=400)
+        try:
+            source.governance_json = normalize_governance_policy(governance or {}, strict=True)
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        update_fields.append("governance_json")
+    if "review_approved" in payload:
+        source.review_approved = bool(payload.get("review_approved"))
+        source.review_approved_at = timezone.now() if source.review_approved else None
+        source.review_approved_by = identity if source.review_approved else None
+        update_fields.extend(["review_approved", "review_approved_at", "review_approved_by"])
+    if "provenance" in payload:
+        provenance = payload.get("provenance")
+        if provenance is not None and not isinstance(provenance, dict):
+            return JsonResponse({"error": "provenance must be an object"}, status=400)
+        source.provenance_json = provenance or {}
+        update_fields.append("provenance_json")
+    if "metadata" in payload:
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return JsonResponse({"error": "metadata must be an object"}, status=400)
+        source.metadata_json = metadata or {}
+        update_fields.append("metadata_json")
+    if update_fields:
+        source.save(update_fields=[*update_fields, "updated_at"])
+    readiness = service.validate_readiness(source_id=str(source.id))
+    return JsonResponse(serialize_source_connector(source, readiness=readiness))
+
+
+@csrf_exempt
+@login_required
+def source_connector_inspections_collection(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = SourceConnectorService()
+    if request.method == "POST":
+        payload = _parse_json(request)
+        if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+            return JsonResponse({"error": "source not found in workspace context"}, status=404)
+        try:
+            row = service.record_inspection(
+                SourceInspectionInput(
+                    source_id=str(source.id),
+                    status=str(payload.get("status") or "ok").strip() or "ok",
+                    detected_format=str(payload.get("detected_format") or "").strip(),
+                    discovered_fields=payload.get("discovered_fields") if isinstance(payload.get("discovered_fields"), list) else [],
+                    sample_metadata=payload.get("sample_metadata") if isinstance(payload.get("sample_metadata"), dict) else {},
+                    validation_findings=payload.get("validation_findings") if isinstance(payload.get("validation_findings"), list) else [],
+                    inspected_by_id=str(identity.id),
+                    inspection_run_id=str(payload.get("inspection_run_id") or "").strip(),
+                    idempotency_key=str(payload.get("idempotency_key") or "").strip(),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        return JsonResponse(serialize_source_inspection(row), status=201)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if context_workspace_id != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    rows = [serialize_source_inspection(item) for item in source.inspections.all().order_by("-inspected_at", "-id")]
+    return JsonResponse({"source_id": str(source.id), "inspections": rows})
+
+
+@csrf_exempt
+@login_required
+def source_connector_mappings_collection(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = SourceConnectorService()
+    if request.method == "POST":
+        payload = _parse_json(request)
+        if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+            return JsonResponse({"error": "source not found in workspace context"}, status=404)
+        try:
+            row = service.update_mapping(
+                SourceMappingInput(
+                    source_id=str(source.id),
+                    status=str(payload.get("status") or "draft").strip() or "draft",
+                    field_mapping=payload.get("field_mapping") if isinstance(payload.get("field_mapping"), dict) else {},
+                    transformation_hints=payload.get("transformation_hints") if isinstance(payload.get("transformation_hints"), dict) else {},
+                    validation_state=payload.get("validation_state") if isinstance(payload.get("validation_state"), dict) else {},
+                    validated_by_id=str(identity.id),
+                    validation_run_id=str(payload.get("validation_run_id") or "").strip(),
+                    idempotency_key=str(payload.get("idempotency_key") or "").strip(),
+                )
+            )
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        return JsonResponse(serialize_source_mapping(row), status=201)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if context_workspace_id != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    rows = [serialize_source_mapping(item) for item in source.mappings.all().order_by("-version", "-created_at")]
+    return JsonResponse({"source_id": str(source.id), "mappings": rows})
+
+
+@csrf_exempt
+@login_required
+def source_connector_activate(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    service = SourceConnectorService()
+    governance_decision = SourceGovernanceService().evaluate(source=source, action="activate_source")
+    if governance_decision.decision != "allow":
+        SourceGovernanceService().emit_audit_event(
+            source=source,
+            decision=governance_decision,
+            actor_id=str(identity.id),
+            metadata={"route": "source_connector_activate"},
+        )
+        return JsonResponse(
+            {
+                "error": governance_decision.message,
+                "governance_decision": governance_decision.as_dict(),
+            },
+            status=409 if governance_decision.decision == "defer" else 403,
+        )
+    readiness = service.validate_readiness(source_id=str(source.id))
+    if not readiness.ready:
+        return JsonResponse({"error": "source is not ready for activation", "readiness": {"reasons": list(readiness.reasons)}}, status=409)
+    source = service.activate_source(source_id=str(source.id))
+    readiness = service.validate_readiness(source_id=str(source.id))
+    return JsonResponse(serialize_source_connector(source, readiness=readiness))
+
+
+@csrf_exempt
+@login_required
+def source_connector_pause(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    service = SourceConnectorService()
+    source = service.pause_source(source_id=str(source.id))
+    readiness = service.validate_readiness(source_id=str(source.id))
+    return JsonResponse(serialize_source_connector(source, readiness=readiness))
+
+
+@csrf_exempt
+@login_required
+def source_connector_health_update(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(source.workspace_id), [CAP_SOURCES_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    service = SourceConnectorService()
+    try:
+        source = service.update_health(
+            SourceHealthUpdate(
+                source_id=str(source.id),
+                health_status=str(payload.get("health_status") or "unknown").strip() or "unknown",
+                lifecycle_state=str(payload.get("lifecycle_state") or "").strip() or None,
+                success=bool(payload.get("success")),
+                failure_reason=str(payload.get("failure_reason") or "").strip(),
+                run_id=str(payload.get("run_id") or "").strip(),
+            )
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    readiness = service.validate_readiness(source_id=str(source.id))
+    return JsonResponse(serialize_source_connector(source, readiness=readiness))
+
+
+def _record_matching_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[RecordMatchEvaluation]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = RecordMatchEvaluation.objects.filter(workspace=workspace).select_related("run").order_by("-created_at")
+    return workspace, qs
+
+
+def _serialize_record_match_result(row: RecordMatchEvaluation) -> Dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "workspace_id": str(row.workspace_id),
+        "strategy_key": row.strategy_key,
+        "pair_fingerprint": str(row.pair_fingerprint or ""),
+        "idempotency_key": str(row.idempotency_key or ""),
+        "score": float(row.score),
+        "decision": row.decision,
+        "confidence": row.confidence,
+        "candidate_a": row.candidate_a_ref_json if isinstance(row.candidate_a_ref_json, dict) else {},
+        "candidate_b": row.candidate_b_ref_json if isinstance(row.candidate_b_ref_json, dict) else {},
+        "explanation": row.explanation_json if isinstance(row.explanation_json, dict) else {},
+        "metadata": row.metadata_json if isinstance(row.metadata_json, dict) else {},
+        "extra": row.extra_json if isinstance(row.extra_json, dict) else {},
+        "run_id": str(row.run_id) if row.run_id else None,
+        "correlation_id": row.correlation_id or "",
+        "chain_id": row.chain_id or "",
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+@csrf_exempt
+@login_required
+def record_matching_evaluate(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _record_matching_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_CAMPAIGNS_MANAGE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    candidate_a_payload = payload.get("candidate_a")
+    candidate_b_payload = payload.get("candidate_b")
+    if not isinstance(candidate_a_payload, dict) or not isinstance(candidate_b_payload, dict):
+        return JsonResponse({"error": "candidate_a and candidate_b are required objects"}, status=400)
+
+    def _to_ref(raw: Dict[str, Any]) -> MatchableRecordRef:
+        return MatchableRecordRef(
+            source_namespace=str(raw.get("source_namespace") or "").strip(),
+            source_record_type=str(raw.get("source_record_type") or "").strip(),
+            source_record_id=str(raw.get("source_record_id") or "").strip(),
+            workspace_id=str(raw.get("workspace_id") or workspace_id).strip(),
+            attributes=raw.get("attributes") if isinstance(raw.get("attributes"), dict) else {},
+        )
+
+    candidate_a = _to_ref(candidate_a_payload)
+    candidate_b = _to_ref(candidate_b_payload)
+    if not candidate_a.source_namespace or not candidate_a.source_record_type or not candidate_a.source_record_id:
+        return JsonResponse({"error": "candidate_a requires source_namespace, source_record_type, and source_record_id"}, status=400)
+    if not candidate_b.source_namespace or not candidate_b.source_record_type or not candidate_b.source_record_id:
+        return JsonResponse({"error": "candidate_b requires source_namespace, source_record_type, and source_record_id"}, status=400)
+
+    strategy_key = str(payload.get("strategy_key") or "").strip()
+    persist = bool(payload.get("persist", True))
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    run_id = str(payload.get("run_id") or "").strip()
+    correlation_id = str(payload.get("correlation_id") or "").strip()
+    chain_id = str(payload.get("chain_id") or "").strip()
+    idempotency_key = str(payload.get("idempotency_key") or "").strip()
+    service = RecordMatchingService(repository=None)
+    available_strategy_keys = service.registry.keys()
+    if strategy_key and strategy_key not in available_strategy_keys:
+        return JsonResponse({"error": "unknown strategy_key", "available_strategy_keys": available_strategy_keys}, status=400)
+    context = StrategyContext(
+        workspace_id=str(workspace.id),
+        run_id=run_id,
+        correlation_id=correlation_id,
+        chain_id=chain_id,
+        idempotency_key=idempotency_key,
+        metadata=metadata,
+    )
+    evaluation = service.evaluate_pair(
+        workspace_id=str(workspace.id),
+        candidate_a=candidate_a,
+        candidate_b=candidate_b,
+        strategy_key=strategy_key,
+        context=context,
+        persist=False,
+        metadata=metadata,
+    )
+    response_payload: Dict[str, Any] = {
+        "workspace_id": str(workspace.id),
+        "evaluation": evaluation_as_dict(evaluation),
+        "persisted": False,
+        "available_strategy_keys": available_strategy_keys,
+    }
+    if persist:
+        repository = DjangoMatchResultRepository()
+        row = repository.persist_evaluation(
+            workspace_id=str(workspace.id),
+            evaluation=evaluation,
+            run_id=run_id,
+            correlation_id=correlation_id,
+            chain_id=chain_id,
+            idempotency_key=idempotency_key,
+            metadata=metadata,
+        )
+        response_payload["persisted"] = True
+        response_payload["result"] = _serialize_record_match_result(row)
+    return JsonResponse(response_payload, status=201 if persist else 200)
+
+
+@login_required
+def record_matching_results_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _record_matching_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    strategy_key = str(request.GET.get("strategy_key") or "").strip()
+    if strategy_key:
+        qs = qs.filter(strategy_key=strategy_key)
+    decision = str(request.GET.get("decision") or "").strip().lower()
+    if decision:
+        qs = qs.filter(decision=decision)
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(run_id=run_id)
+    created_after = parse_datetime(str(request.GET.get("created_after") or "").strip())
+    if created_after:
+        qs = qs.filter(created_at__gte=created_after)
+    created_before = parse_datetime(str(request.GET.get("created_before") or "").strip())
+    if created_before:
+        qs = qs.filter(created_at__lte=created_before)
+    min_score = request.GET.get("min_score")
+    if min_score not in {None, ""}:
+        try:
+            qs = qs.filter(score__gte=float(min_score))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "min_score must be numeric"}, status=400)
+    max_score = request.GET.get("max_score")
+    if max_score not in {None, ""}:
+        try:
+            qs = qs.filter(score__lte=float(max_score))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "max_score must be numeric"}, status=400)
+    limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
+    rows = [_serialize_record_match_result(item) for item in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "results": rows})
+
+
+@login_required
+def record_matching_result_detail(request: HttpRequest, result_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    row = get_object_or_404(RecordMatchEvaluation.objects.select_related("workspace", "run"), id=result_id)
+    if workspace_id != str(row.workspace_id):
+        return JsonResponse({"error": "match result not found in workspace context"}, status=404)
+    if not _workspace_membership(identity, str(row.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(row.workspace_id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse(_serialize_record_match_result(row))
+
+
+def _parcel_identity_queryset(
+    identity: UserIdentity, workspace_id: str
+) -> tuple[Workspace, models.QuerySet[ParcelCanonicalIdentity]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = ParcelCanonicalIdentity.objects.filter(workspace=workspace).order_by("-created_at", "-id")
+    return workspace, qs
+
+
+def _parcel_crosswalk_queryset(
+    identity: UserIdentity, workspace_id: str
+) -> tuple[Workspace, models.QuerySet[ParcelCrosswalkMapping]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = (
+        ParcelCrosswalkMapping.objects.filter(workspace=workspace)
+        .select_related("parcel", "source_connector", "adapted_record")
+        .order_by("-created_at", "-id")
+    )
+    return workspace, qs
+
+
+def _geocode_results_queryset(
+    identity: UserIdentity, workspace_id: str
+) -> tuple[Workspace, models.QuerySet[GeocodeEnrichmentResult]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = (
+        GeocodeEnrichmentResult.objects.filter(workspace=workspace)
+        .select_related("selected_candidate", "source_connector", "orchestration_run", "job_run", "adapted_record")
+        .order_by("-created_at", "-id")
+    )
+    return workspace, qs
+
+
+@login_required
+def parcel_identity_lookup(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    namespace = str(request.GET.get("namespace") or "").strip()
+    value = str(request.GET.get("value") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if not namespace or not value:
+        return JsonResponse({"error": "namespace and value are required"}, status=400)
+    try:
+        workspace, _ = _parcel_identity_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    service = ParcelIdentityResolverService()
+    parcel = service.lookup_by_identifier(workspace_id=str(workspace.id), namespace=namespace, value=value)
+    if parcel is None:
+        return JsonResponse({"workspace_id": str(workspace.id), "parcel": None}, status=200)
+    return JsonResponse({"workspace_id": str(workspace.id), "parcel": serialize_parcel_identity(parcel)}, status=200)
+
+
+@login_required
+def parcel_identity_detail(request: HttpRequest, parcel_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    parcel = get_object_or_404(ParcelCanonicalIdentity.objects.select_related("workspace"), id=parcel_id)
+    if workspace_id != str(parcel.workspace_id):
+        return JsonResponse({"error": "parcel identity not found in workspace context"}, status=404)
+    if not _workspace_membership(identity, str(parcel.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(parcel.workspace_id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse(serialize_parcel_identity(parcel))
+
+
+@login_required
+def parcel_crosswalks_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _parcel_crosswalk_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    source_id = str(request.GET.get("source_id") or "").strip()
+    if source_id:
+        qs = qs.filter(source_connector_id=source_id)
+    parcel_id = str(request.GET.get("parcel_id") or "").strip()
+    if parcel_id:
+        qs = qs.filter(parcel_id=parcel_id)
+    adapted_record_id = str(request.GET.get("adapted_record_id") or "").strip()
+    if adapted_record_id:
+        qs = qs.filter(adapted_record_id=adapted_record_id)
+    status = str(request.GET.get("status") or "").strip().lower()
+    if status:
+        qs = qs.filter(status=status)
+    resolution_method = str(request.GET.get("resolution_method") or "").strip().lower()
+    if resolution_method:
+        qs = qs.filter(resolution_method=resolution_method)
+    min_confidence = request.GET.get("min_confidence")
+    if min_confidence not in {None, ""}:
+        try:
+            qs = qs.filter(confidence__gte=float(min_confidence))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "min_confidence must be numeric"}, status=400)
+    max_confidence = request.GET.get("max_confidence")
+    if max_confidence not in {None, ""}:
+        try:
+            qs = qs.filter(confidence__lte=float(max_confidence))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "max_confidence must be numeric"}, status=400)
+    limit = max(1, min(500, int(str(request.GET.get("limit") or "50"))))
+    rows = [serialize_parcel_crosswalk(row) for row in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "crosswalks": rows}, status=200)
+
+
+@csrf_exempt
+@login_required
+def parcel_crosswalks_resolve_adapted(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _parcel_crosswalk_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity, str(workspace.id), [CAP_SOURCES_MANAGE, CAP_CAMPAIGNS_MANAGE], require_all=False
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    adapted_record_id = str(payload.get("adapted_record_id") or "").strip()
+    adapted_record_ids_raw = payload.get("adapted_record_ids")
+    adapted_record_ids: list[str] = []
+    if adapted_record_id:
+        adapted_record_ids.append(adapted_record_id)
+    if isinstance(adapted_record_ids_raw, list):
+        adapted_record_ids.extend(str(item).strip() for item in adapted_record_ids_raw if str(item).strip())
+    deduped_ids: list[str] = []
+    seen: set[str] = set()
+    for item in adapted_record_ids:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped_ids.append(item)
+    if not deduped_ids:
+        return JsonResponse({"error": "adapted_record_id or adapted_record_ids is required"}, status=400)
+    if IngestAdaptedRecord.objects.filter(workspace_id=workspace.id, id__in=deduped_ids).count() != len(deduped_ids):
+        return JsonResponse({"error": "one or more adapted_record_ids are invalid for workspace"}, status=404)
+
+    service = ParcelIdentityResolverService()
+    rows = [service.resolve_adapted_record(adapted_record_id=item) for item in deduped_ids]
+    status_code = 201 if len(rows) == 1 else 200
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "count": len(rows),
+            "crosswalks": [serialize_parcel_crosswalk(row) for row in rows],
+        },
+        status=status_code,
+    )
+
+
+@csrf_exempt
+@login_required
+def parcel_crosswalks_resolve_source(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    source_id = str(payload.get("source_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if not source_id:
+        return JsonResponse({"error": "source_id is required"}, status=400)
+    try:
+        workspace, _ = _parcel_crosswalk_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity, str(workspace.id), [CAP_SOURCES_MANAGE, CAP_CAMPAIGNS_MANAGE], require_all=False
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not SourceConnector.objects.filter(workspace_id=workspace.id, id=source_id).exists():
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    run_id = str(payload.get("run_id") or "").strip()
+    try:
+        limit = int(payload.get("limit") or 500)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "limit must be an integer"}, status=400)
+    service = ParcelIdentityResolverService()
+    rows = service.resolve_for_source(workspace_id=str(workspace.id), source_id=source_id, run_id=run_id, limit=limit)
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source_id": source_id,
+            "count": len(rows),
+            "crosswalks": [serialize_parcel_crosswalk(row) for row in rows],
+        },
+        status=200,
+    )
+
+
+@login_required
+def geocode_results_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _geocode_results_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    source_id = str(request.GET.get("source_id") or "").strip()
+    if source_id:
+        qs = qs.filter(source_connector_id=source_id)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(orchestration_run_id=run_id)
+    adapted_record_id = str(request.GET.get("adapted_record_id") or "").strip()
+    if adapted_record_id:
+        qs = qs.filter(adapted_record_id=adapted_record_id)
+    status = str(request.GET.get("status") or "").strip().lower()
+    if status:
+        qs = qs.filter(status=status)
+    provider_kind = str(request.GET.get("provider_kind") or "").strip().lower()
+    if provider_kind:
+        qs = qs.filter(provider_kind=provider_kind)
+    failure_category = str(request.GET.get("failure_category") or "").strip().lower()
+    if failure_category:
+        qs = qs.filter(failure_category=failure_category)
+    include_candidates = str(request.GET.get("include_candidates") or "").strip().lower() in {"1", "true", "yes", "on"}
+    limit = max(1, min(500, int(str(request.GET.get("limit") or "50"))))
+    rows = [serialize_geocode_result(row, include_candidates=include_candidates) for row in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "results": rows}, status=200)
+
+
+@login_required
+def geocode_result_detail(request: HttpRequest, result_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    row = get_object_or_404(
+        GeocodeEnrichmentResult.objects.select_related(
+            "workspace",
+            "source_connector",
+            "orchestration_run",
+            "job_run",
+            "adapted_record",
+            "selected_candidate",
+        ),
+        id=result_id,
+    )
+    if workspace_id != str(row.workspace_id):
+        return JsonResponse({"error": "geocode result not found in workspace context"}, status=404)
+    if not _workspace_membership(identity, str(row.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(row.workspace_id), [CAP_MATCH_REVIEW]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse(serialize_geocode_result(row, include_candidates=True), status=200)
+
+
+@csrf_exempt
+@login_required
+def geocode_results_resolve_adapted(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _geocode_results_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity, str(workspace.id), [CAP_SOURCES_MANAGE, CAP_CAMPAIGNS_MANAGE], require_all=False
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    adapted_record_id = str(payload.get("adapted_record_id") or "").strip()
+    adapted_record_ids_raw = payload.get("adapted_record_ids")
+    adapted_record_ids: list[str] = []
+    if adapted_record_id:
+        adapted_record_ids.append(adapted_record_id)
+    if isinstance(adapted_record_ids_raw, list):
+        adapted_record_ids.extend(str(item).strip() for item in adapted_record_ids_raw if str(item).strip())
+    deduped_ids: list[str] = []
+    seen: set[str] = set()
+    for item in adapted_record_ids:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped_ids.append(item)
+    if not deduped_ids:
+        return JsonResponse({"error": "adapted_record_id or adapted_record_ids is required"}, status=400)
+    if IngestAdaptedRecord.objects.filter(workspace_id=workspace.id, id__in=deduped_ids).count() != len(deduped_ids):
+        return JsonResponse({"error": "one or more adapted_record_ids are invalid for workspace"}, status=404)
+
+    service = GeocodingService()
+    rows = [service.geocode_adapted_record(adapted_record_id=item) for item in deduped_ids]
+    status_code = 201 if len(rows) == 1 else 200
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "count": len(rows),
+            "results": [serialize_geocode_result(row, include_candidates=True) for row in rows],
+        },
+        status=status_code,
+    )
+
+
+@csrf_exempt
+@login_required
+def geocode_results_resolve_source(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    source_id = str(payload.get("source_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if not source_id:
+        return JsonResponse({"error": "source_id is required"}, status=400)
+    try:
+        workspace, _ = _geocode_results_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity, str(workspace.id), [CAP_SOURCES_MANAGE, CAP_CAMPAIGNS_MANAGE], require_all=False
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not SourceConnector.objects.filter(workspace_id=workspace.id, id=source_id).exists():
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    run_id = str(payload.get("run_id") or "").strip()
+    try:
+        limit = int(payload.get("limit") or 500)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "limit must be an integer"}, status=400)
+    service = GeocodingService()
+    rows = service.geocode_for_source(workspace_id=str(workspace.id), source_id=source_id, run_id=run_id, limit=limit)
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source_id": source_id,
+            "count": len(rows),
+            "results": [serialize_geocode_result(row, include_candidates=True) for row in rows],
+        },
+        status=200,
+    )
+
+
+def _orchestration_workspace(identity: UserIdentity, workspace_id: str) -> Workspace:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    return workspace
+
+
+def _orchestration_pipeline_for_workspace(workspace: Workspace, pipeline_key: str) -> Optional[OrchestrationPipeline]:
+    key = str(pipeline_key or "").strip()
+    if not key:
+        return None
+    return OrchestrationPipeline.objects.filter(workspace=workspace, key=key).first()
+
+
+def _serialize_orchestration_job_definition(job: OrchestrationJobDefinition) -> Dict[str, Any]:
+    return {
+        "id": str(job.id),
+        "pipeline_id": str(job.pipeline_id),
+        "job_key": job.job_key,
+        "stage_key": job.stage_key,
+        "name": job.name,
+        "description": job.description or "",
+        "handler_key": job.handler_key,
+        "enabled": bool(job.enabled),
+        "only_if_upstream_changed": bool(job.only_if_upstream_changed),
+        "runs_per_jurisdiction": bool(job.runs_per_jurisdiction),
+        "runs_per_source": bool(job.runs_per_source),
+        "concurrency_limit": int(job.concurrency_limit or 1),
+        "retry_policy": {
+            "max_attempts": int(job.retry_max_attempts or 1),
+            "initial_backoff_seconds": int(job.backoff_initial_seconds or 1),
+            "max_backoff_seconds": int(job.backoff_max_seconds or 1),
+            "multiplier": float(job.backoff_multiplier or 1.0),
+        },
+        "artifact": {
+            "produces_artifact": bool(job.produces_artifact),
+            "artifact_kind": str(job.artifact_kind or "").strip() or None,
+        },
+        "schedule": job.schedule_json if isinstance(job.schedule_json, dict) else {},
+        "metadata": job.metadata_json if isinstance(job.metadata_json, dict) else {},
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+    }
+
+
+def _serialize_orchestration_schedule(schedule: OrchestrationJobSchedule) -> Dict[str, Any]:
+    supported_kinds = set(supported_schedule_kinds())
+    return {
+        "id": str(schedule.id),
+        "job_definition_id": str(schedule.job_definition_id),
+        "schedule_key": schedule.schedule_key,
+        "schedule_kind": schedule.schedule_kind,
+        "supported_in_v1": schedule.schedule_kind in supported_kinds,
+        "enabled": bool(schedule.enabled),
+        "cron_expression": schedule.cron_expression or "",
+        "interval_seconds": int(schedule.interval_seconds or 0),
+        "timezone_name": schedule.timezone_name or "UTC",
+        "next_fire_at": schedule.next_fire_at.isoformat() if schedule.next_fire_at else None,
+        "last_fired_at": schedule.last_fired_at.isoformat() if schedule.last_fired_at else None,
+        "metadata": schedule.metadata_json if isinstance(schedule.metadata_json, dict) else {},
+        "created_at": schedule.created_at.isoformat() if schedule.created_at else None,
+        "updated_at": schedule.updated_at.isoformat() if schedule.updated_at else None,
+    }
+
+
+def _serialize_stage_publication(publication: Optional[OrchestrationStagePublication]) -> Optional[Dict[str, Any]]:
+    if publication is None:
+        return None
+    return {
+        "id": str(publication.id),
+        "stage_key": str(publication.stage_key or ""),
+        "stage_state": str(publication.stage_state or ""),
+        "scope_jurisdiction": str(publication.scope_jurisdiction or ""),
+        "scope_source": str(publication.scope_source or ""),
+        "normalized_snapshot_ref": str(publication.normalized_snapshot_ref or ""),
+        "normalized_change_token": str(publication.normalized_change_token or ""),
+        "reconciled_state_version": str(publication.reconciled_state_version or ""),
+        "signal_set_version": str(publication.signal_set_version or ""),
+        "pipeline_id": str(publication.pipeline_id),
+        "run_id": str(publication.run_id),
+        "job_run_id": str(publication.job_run_id),
+        "publication_metadata": publication.publication_metadata_json if isinstance(publication.publication_metadata_json, dict) else {},
+        "published_at": publication.published_at.isoformat() if publication.published_at else None,
+        "updated_at": publication.updated_at.isoformat() if publication.updated_at else None,
+    }
+
+
+def _serialize_reconciled_pointer(pointer: Optional[ReconciledStateCurrentPointer]) -> Optional[Dict[str, Any]]:
+    if pointer is None:
+        return None
+    return {
+        "id": str(pointer.id),
+        "workspace_id": str(pointer.workspace_id),
+        "pipeline_id": str(pointer.pipeline_id),
+        "publication_id": str(pointer.publication_id) if pointer.publication_id else None,
+        "reconciled_state_version": str(pointer.reconciled_state_version or ""),
+        "scope_jurisdiction": str(pointer.scope_jurisdiction or ""),
+        "scope_source": str(pointer.scope_source or ""),
+        "metadata": pointer.metadata_json if isinstance(pointer.metadata_json, dict) else {},
+        "promoted_at": pointer.promoted_at.isoformat() if pointer.promoted_at else None,
+        "updated_at": pointer.updated_at.isoformat() if pointer.updated_at else None,
+    }
+
+
+def _serialize_domain_event(event: PlatformDomainEvent) -> Dict[str, Any]:
+    return {
+        "id": str(event.id),
+        "workspace_id": str(event.workspace_id),
+        "pipeline_id": str(event.pipeline_id) if event.pipeline_id else None,
+        "run_id": str(event.run_id) if event.run_id else None,
+        "job_run_id": str(event.job_run_id) if event.job_run_id else None,
+        "publication_id": str(event.publication_id) if event.publication_id else None,
+        "event_type": str(event.event_type or ""),
+        "event_status": str(event.event_status or ""),
+        "stage_key": str(event.stage_key or ""),
+        "scope_jurisdiction": str(event.scope_jurisdiction or ""),
+        "scope_source": str(event.scope_source or ""),
+        "normalized_snapshot_ref": str(event.normalized_snapshot_ref or ""),
+        "normalized_change_token": str(event.normalized_change_token or ""),
+        "reconciled_state_version": str(event.reconciled_state_version or ""),
+        "signal_set_version": str(event.signal_set_version or ""),
+        "subject_ref": event.subject_ref_json if isinstance(event.subject_ref_json, dict) else {},
+        "payload": event.payload_json if isinstance(event.payload_json, dict) else {},
+        "metadata": event.metadata_json if isinstance(event.metadata_json, dict) else {},
+        "correlation_id": str(event.correlation_id or ""),
+        "chain_id": str(event.chain_id or ""),
+        "created_at": event.created_at.isoformat() if event.created_at else None,
+    }
+
+
+def _serialize_orchestration_job_run_summary(job_run: OrchestrationJobRun) -> Dict[str, Any]:
+    stage_key = str(job_run.job_definition.stage_key or "")
+    skipped_reason = str(job_run.skipped_reason or "")
+    gating_reason = skipped_reason if job_run.status == "skipped" and skipped_reason else ""
+    return {
+        "id": str(job_run.id),
+        "job_definition_id": str(job_run.job_definition_id),
+        "job_key": str(job_run.job_definition.job_key),
+        "stage_key": stage_key,
+        "status": str(job_run.status),
+        "skipped_reason": skipped_reason,
+        "gating_decision": {
+            "blocked": bool(gating_reason),
+            "reason_code": gating_reason,
+            "stage_key": stage_key,
+        },
+        "attempt_count": int(job_run.attempt_count or 0),
+        "max_attempts": int(job_run.max_attempts or 1),
+        "next_attempt_at": job_run.next_attempt_at.isoformat() if job_run.next_attempt_at else None,
+        "upstream_changed": bool(job_run.upstream_changed),
+        "scope_jurisdiction": str(job_run.scope_jurisdiction or ""),
+        "scope_source": str(job_run.scope_source or ""),
+        "summary": str(job_run.summary or ""),
+        "error_text": str(job_run.error_text or ""),
+        "metrics": job_run.metrics_json if isinstance(job_run.metrics_json, dict) else {},
+        "error_details": job_run.error_details_json if isinstance(job_run.error_details_json, dict) else {},
+        "output_change_token": str(job_run.output_change_token or ""),
+        "queued_at": job_run.queued_at.isoformat() if job_run.queued_at else None,
+        "started_at": job_run.started_at.isoformat() if job_run.started_at else None,
+        "heartbeat_at": job_run.heartbeat_at.isoformat() if job_run.heartbeat_at else None,
+        "completed_at": job_run.completed_at.isoformat() if job_run.completed_at else None,
+        "stale_deadline_at": job_run.stale_deadline_at.isoformat() if job_run.stale_deadline_at else None,
+        "stale_at": job_run.stale_at.isoformat() if job_run.stale_at else None,
+        "stale_reason": str(job_run.stale_reason or ""),
+        "created_at": job_run.created_at.isoformat() if job_run.created_at else None,
+        "updated_at": job_run.updated_at.isoformat() if job_run.updated_at else None,
+    }
+
+
+def _serialize_orchestration_run_summary(run: OrchestrationRun) -> Dict[str, Any]:
+    return {
+        "id": str(run.id),
+        "workspace_id": str(run.workspace_id),
+        "pipeline_id": str(run.pipeline_id),
+        "pipeline_key": str(run.pipeline.key),
+        "run_type": str(run.run_type or "data_pipeline"),
+        "target_ref": run.target_ref_json if isinstance(run.target_ref_json, dict) else {},
+        "status": str(run.status),
+        "trigger_cause": str(run.trigger_cause),
+        "trigger_key": str(run.trigger_key or ""),
+        "correlation_id": str(run.correlation_id or ""),
+        "chain_id": str(run.chain_id or ""),
+        "scope_jurisdiction": str(run.scope_jurisdiction or ""),
+        "scope_source": str(run.scope_source or ""),
+        "summary": str(run.summary or ""),
+        "error_text": str(run.error_text or ""),
+        "queued_at": run.queued_at.isoformat() if run.queued_at else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "heartbeat_at": run.heartbeat_at.isoformat() if run.heartbeat_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "stale_deadline_at": run.stale_deadline_at.isoformat() if run.stale_deadline_at else None,
+        "stale_at": run.stale_at.isoformat() if run.stale_at else None,
+        "stale_reason": str(run.stale_reason or ""),
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+    }
+
+
+def _serialize_orchestration_run_detail(run: OrchestrationRun) -> Dict[str, Any]:
+    dependency_rows = list(
+        OrchestrationJobDependency.objects.filter(pipeline=run.pipeline)
+        .select_related("upstream_job", "downstream_job")
+        .order_by("created_at")
+    )
+    dependency_map: Dict[str, List[str]] = {}
+    for edge in dependency_rows:
+        downstream_key = str(edge.downstream_job.job_key)
+        upstream_key = str(edge.upstream_job.job_key)
+        dependency_map.setdefault(downstream_key, []).append(upstream_key)
+
+    job_runs = list(
+        OrchestrationJobRun.objects.filter(run=run)
+        .select_related("job_definition")
+        .order_by("job_definition__stage_key", "job_definition__job_key", "created_at")
+    )
+    job_run_ids = [row.id for row in job_runs]
+    attempts_by_job_run: Dict[str, List[Dict[str, Any]]] = {}
+    outputs_by_job_run: Dict[str, List[Dict[str, Any]]] = {}
+    publications_by_job_run: Dict[str, Dict[str, Any]] = {}
+    domain_events_by_job_run: Dict[str, List[Dict[str, Any]]] = {}
+
+    attempt_rows = list(
+        OrchestrationJobRunAttempt.objects.filter(job_run_id__in=job_run_ids)
+        .order_by("job_run_id", "attempt_number", "created_at")
+    )
+    for attempt in attempt_rows:
+        key = str(attempt.job_run_id)
+        attempts_by_job_run.setdefault(key, []).append(
+            {
+                "id": str(attempt.id),
+                "attempt_number": int(attempt.attempt_number or 0),
+                "status": str(attempt.status),
+                "executor_key": str(attempt.executor_key or ""),
+                "summary": str(attempt.summary or ""),
+                "error_text": str(attempt.error_text or ""),
+                "error_details": attempt.error_details_json if isinstance(attempt.error_details_json, dict) else {},
+                "metrics": attempt.metrics_json if isinstance(attempt.metrics_json, dict) else {},
+                "output": attempt.output_json if isinstance(attempt.output_json, dict) else {},
+                "retryable": bool(attempt.retryable),
+                "queued_at": attempt.queued_at.isoformat() if attempt.queued_at else None,
+                "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
+                "heartbeat_at": attempt.heartbeat_at.isoformat() if attempt.heartbeat_at else None,
+                "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
+                "stale_at": attempt.stale_at.isoformat() if attempt.stale_at else None,
+                "created_at": attempt.created_at.isoformat() if attempt.created_at else None,
+                "updated_at": attempt.updated_at.isoformat() if attempt.updated_at else None,
+            }
+        )
+
+    output_rows = list(
+        OrchestrationJobRunOutput.objects.filter(job_run_id__in=job_run_ids)
+        .order_by("job_run_id", "created_at")
+    )
+    for output in output_rows:
+        key = str(output.job_run_id)
+        outputs_by_job_run.setdefault(key, []).append(
+            {
+                "id": str(output.id),
+                "attempt_id": str(output.attempt_id) if output.attempt_id else None,
+                "output_key": str(output.output_key),
+                "output_type": str(output.output_type),
+                "output_uri": str(output.output_uri or ""),
+                "output_change_token": str(output.output_change_token or ""),
+                "artifact_id": str(output.artifact_id) if output.artifact_id else None,
+                "metadata": output.metadata_json if isinstance(output.metadata_json, dict) else {},
+                "payload": output.payload_json if isinstance(output.payload_json, dict) else {},
+                "created_at": output.created_at.isoformat() if output.created_at else None,
+            }
+        )
+
+    publication_rows = list(
+        OrchestrationStagePublication.objects.filter(job_run_id__in=job_run_ids)
+        .order_by("job_run_id", "-published_at")
+    )
+    for publication in publication_rows:
+        publications_by_job_run[str(publication.job_run_id)] = _serialize_stage_publication(publication) or {}
+
+    domain_event_rows = list(
+        PlatformDomainEvent.objects.filter(job_run_id__in=job_run_ids)
+        .order_by("job_run_id", "-created_at", "-id")
+    )
+    for event in domain_event_rows:
+        domain_events_by_job_run.setdefault(str(event.job_run_id), []).append(_serialize_domain_event(event))
+
+    jobs_payload: List[Dict[str, Any]] = []
+    for row in job_runs:
+        item = _serialize_orchestration_job_run_summary(row)
+        item["dependencies"] = dependency_map.get(str(row.job_definition.job_key), [])
+        item["attempts"] = attempts_by_job_run.get(str(row.id), [])
+        item["outputs"] = outputs_by_job_run.get(str(row.id), [])
+        item["stage_publication"] = publications_by_job_run.get(str(row.id))
+        item["domain_events"] = domain_events_by_job_run.get(str(row.id), [])
+        jobs_payload.append(item)
+
+    metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+    publication_service = StagePublicationService()
+    readiness = publication_service.evaluation_readiness(
+        workspace_id=str(run.workspace_id),
+        pipeline_id=str(run.pipeline_id),
+        jurisdiction=str(run.scope_jurisdiction or ""),
+        source=str(run.scope_source or ""),
+    )
+    scope_publications_qs = OrchestrationStagePublication.objects.filter(
+        workspace_id=run.workspace_id,
+        pipeline_id=run.pipeline_id,
+        scope_jurisdiction=str(run.scope_jurisdiction or ""),
+        scope_source=str(run.scope_source or ""),
+    )
+    return {
+        **_serialize_orchestration_run_summary(run),
+        "metrics": run.metrics_json if isinstance(run.metrics_json, dict) else {},
+        "error_details": run.error_details_json if isinstance(run.error_details_json, dict) else {},
+        "idempotency_key": str(run.idempotency_key or ""),
+        "dedupe_key": str(run.dedupe_key or ""),
+        "rerun_of_id": str(run.rerun_of_id) if run.rerun_of_id else None,
+        "initiated_by_id": str(run.initiated_by_id) if run.initiated_by_id else None,
+        "metadata": metadata,
+        "dependency_context": dependency_map,
+        "publication_readiness": {
+            "ready": bool(readiness.ready),
+            "reason": str(readiness.reason),
+            "publication_id": readiness.publication_id or None,
+            "reconciled_state_version": readiness.reconciled_state_version or "",
+            "signal_set_version": readiness.signal_set_version or "",
+        },
+        "latest_scope_publications": {
+            "source_normalization": _serialize_stage_publication(
+                scope_publications_qs.filter(stage_key="source_normalization").order_by("-published_at", "-updated_at").first()
+            ),
+            "property_graph_rebuild": _serialize_stage_publication(
+                scope_publications_qs.filter(stage_key="property_graph_rebuild", stage_state="published")
+                .exclude(reconciled_state_version="")
+                .order_by("-published_at", "-updated_at")
+                .first()
+            ),
+            "signal_matching": _serialize_stage_publication(
+                scope_publications_qs.filter(stage_key="signal_matching", stage_state="published")
+                .exclude(signal_set_version="")
+                .order_by("-published_at", "-updated_at")
+                .first()
+            ),
+        },
+        "jobs": jobs_payload,
+    }
+
+
+def _orchestration_failure_recipient_ids(workspace: Workspace) -> List[str]:
+    memberships = (
+        WorkspaceMembership.objects.filter(workspace=workspace)
+        .select_related("user_identity")
+        .order_by("created_at")
+    )
+    recipient_ids: List[str] = []
+    for membership in memberships:
+        if membership.role not in {"admin", "moderator"} and not membership.termination_authority:
+            continue
+        if not membership.user_identity_id:
+            continue
+        recipient_ids.append(str(membership.user_identity_id))
+    return recipient_ids
+
+
+def _notify_orchestration_failure(run: OrchestrationRun, *, reason: str, actor: Optional[UserIdentity] = None) -> None:
+    recipients = _orchestration_failure_recipient_ids(run.workspace)
+    if not recipients:
+        return
+    notifier = AppNotificationFailureNotifier(recipient_ids=recipients)
+    notifier.notify_run_failure(
+        workspace_id=str(run.workspace_id),
+        run_id=str(run.id),
+        pipeline_key=str(run.pipeline.key),
+        job_key="pipeline",
+        error_text=f"Orchestration run {run.status}: {reason}",
+        metadata={"status": str(run.status), "reason": reason, "actor_id": str(actor.id) if actor else ""},
+    )
+
+
+@login_required
+def orchestration_job_definitions_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    qs = OrchestrationJobDefinition.objects.filter(pipeline__workspace=workspace).select_related("pipeline")
+    if pipeline_key:
+        qs = qs.filter(pipeline__key=pipeline_key)
+    rows = [
+        {
+            **_serialize_orchestration_job_definition(item),
+            "pipeline_key": str(item.pipeline.key),
+        }
+        for item in qs.order_by("pipeline__key", "stage_key", "job_key")
+    ]
+    return JsonResponse({"workspace_id": str(workspace.id), "job_definitions": rows})
+
+
+@login_required
+def orchestration_schedules_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    job_key = str(request.GET.get("job_key") or "").strip()
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    qs = OrchestrationJobSchedule.objects.filter(job_definition__pipeline__workspace=workspace).select_related("job_definition", "job_definition__pipeline")
+    if pipeline_key:
+        qs = qs.filter(job_definition__pipeline__key=pipeline_key)
+    if job_key:
+        qs = qs.filter(job_definition__job_key=job_key)
+    rows = [
+        {
+            **_serialize_orchestration_schedule(item),
+            "pipeline_key": str(item.job_definition.pipeline.key),
+            "job_key": str(item.job_definition.job_key),
+        }
+        for item in qs.order_by("job_definition__pipeline__key", "job_definition__job_key", "schedule_key")
+    ]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "supported_schedule_kinds": list(supported_schedule_kinds()),
+            "unsupported_schedule_kinds": list(unsupported_schedule_kinds()),
+            "schedules": rows,
+        }
+    )
+
+
+@login_required
+def orchestration_dependency_graph(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    if not workspace_id or not pipeline_key:
+        return JsonResponse({"error": "workspace_id and pipeline_key are required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key)
+    if pipeline is None:
+        return JsonResponse({"error": "pipeline not found"}, status=404)
+    job_rows = list(pipeline.job_definitions.order_by("stage_key", "job_key"))
+    edges = list(
+        OrchestrationJobDependency.objects.filter(pipeline=pipeline)
+        .select_related("upstream_job", "downstream_job")
+        .order_by("created_at")
+    )
+    nodes = [
+        {
+            "job_key": str(job.job_key),
+            "stage_key": str(job.stage_key),
+            "name": str(job.name),
+            "only_if_upstream_changed": bool(job.only_if_upstream_changed),
+            "enabled": bool(job.enabled),
+        }
+        for job in job_rows
+    ]
+    edge_rows = [
+        {
+            "upstream_job_key": str(edge.upstream_job.job_key),
+            "downstream_job_key": str(edge.downstream_job.job_key),
+        }
+        for edge in edges
+    ]
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "pipeline_id": str(pipeline.id),
+            "pipeline_key": str(pipeline.key),
+            "nodes": nodes,
+            "edges": edge_rows,
+        }
+    )
+
+
+@login_required
+def orchestration_publication_readiness(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key) if pipeline_key else None
+    if pipeline_key and pipeline is None:
+        return JsonResponse({"error": "pipeline not found"}, status=404)
+
+    jurisdiction = str(request.GET.get("jurisdiction") or "").strip()
+    source = str(request.GET.get("source") or "").strip()
+    required_reconciled_state_version = str(request.GET.get("reconciled_state_version") or "").strip()
+    try:
+        jurisdiction = require_canonical_jurisdiction(jurisdiction, context="jurisdiction")
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    base = OrchestrationStagePublication.objects.filter(workspace=workspace)
+    if pipeline is not None:
+        base = base.filter(pipeline=pipeline)
+    if jurisdiction:
+        base = base.filter(scope_jurisdiction=jurisdiction)
+    if source:
+        base = base.filter(scope_source=source)
+
+    normalized = base.filter(stage_key="source_normalization").order_by("-published_at", "-updated_at").first()
+    reconciled = (
+        base.filter(stage_key="property_graph_rebuild", stage_state="published")
+        .exclude(reconciled_state_version="")
+        .order_by("-published_at", "-updated_at")
+        .first()
+    )
+    signal = (
+        base.filter(stage_key="signal_matching", stage_state="published")
+        .exclude(signal_set_version="")
+        .order_by("-published_at", "-updated_at")
+        .first()
+    )
+
+    readiness = StagePublicationService().evaluation_readiness(
+        workspace_id=str(workspace.id),
+        pipeline_id=str(pipeline.id) if pipeline else "",
+        jurisdiction=jurisdiction,
+        source=source,
+        required_reconciled_state_version=required_reconciled_state_version,
+    )
+
+    pointer_qs = ReconciledStateCurrentPointer.objects.filter(workspace=workspace)
+    if pipeline is not None:
+        pointer_qs = pointer_qs.filter(pipeline=pipeline)
+    if jurisdiction:
+        pointer_qs = pointer_qs.filter(scope_jurisdiction=jurisdiction)
+    if source:
+        pointer_qs = pointer_qs.filter(scope_source=source)
+    current_pointer = pointer_qs.order_by("-promoted_at", "-updated_at").first()
+    history_rows = list(
+        base.filter(stage_key="property_graph_rebuild", stage_state="published")
+        .exclude(reconciled_state_version="")
+        .order_by("-published_at", "-updated_at")[:10]
+    )
+
+    gating_qs = OrchestrationJobRun.objects.filter(
+        workspace=workspace,
+        status="skipped",
+        skipped_reason__in=[
+            "reconciled_state_not_published",
+            "reconciled_state_version_not_published",
+            "evaluation_output_missing",
+        ],
+    ).select_related("run", "pipeline", "job_definition")
+    if pipeline is not None:
+        gating_qs = gating_qs.filter(pipeline=pipeline)
+    if jurisdiction:
+        gating_qs = gating_qs.filter(scope_jurisdiction=jurisdiction)
+    if source:
+        gating_qs = gating_qs.filter(scope_source=source)
+    limit = max(1, min(100, int(str(request.GET.get("decision_limit") or "20"))))
+    gating_rows = [
+        {
+            "job_run_id": str(row.id),
+            "run_id": str(row.run_id),
+            "pipeline_id": str(row.pipeline_id),
+            "pipeline_key": str(row.pipeline.key),
+            "job_key": str(row.job_definition.job_key),
+            "stage_key": str(row.job_definition.stage_key),
+            "status": str(row.status),
+            "reason_code": str(row.skipped_reason or ""),
+            "summary": str(row.summary or ""),
+            "scope_jurisdiction": str(row.scope_jurisdiction or ""),
+            "scope_source": str(row.scope_source or ""),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+        for row in gating_qs.order_by("-updated_at", "-created_at")[:limit]
+    ]
+
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "pipeline_id": str(pipeline.id) if pipeline else None,
+            "pipeline_key": str(pipeline.key) if pipeline else "",
+            "scope": {"jurisdiction": jurisdiction, "source": source},
+            "required_reconciled_state_version": required_reconciled_state_version,
+            "evaluation_readiness": {
+                "ready": bool(readiness.ready),
+                "reason": str(readiness.reason),
+                "publication_id": readiness.publication_id or None,
+                "reconciled_state_version": readiness.reconciled_state_version or "",
+                "signal_set_version": readiness.signal_set_version or "",
+            },
+            "current_pointer": _serialize_reconciled_pointer(current_pointer),
+            "latest_publications": {
+                "source_normalization": _serialize_stage_publication(normalized),
+                "property_graph_rebuild": _serialize_stage_publication(reconciled),
+                "signal_matching": _serialize_stage_publication(signal),
+            },
+            "publication_history": [_serialize_stage_publication(row) for row in history_rows],
+            "recent_gating_decisions": gating_rows,
+        }
+    )
+
+
+@login_required
+def orchestration_domain_events_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key) if pipeline_key else None
+    if pipeline_key and pipeline is None:
+        return JsonResponse({"error": "pipeline not found"}, status=404)
+
+    try:
+        limit = int(request.GET.get("limit") or "100")
+    except ValueError:
+        limit = 100
+    jurisdiction = str(request.GET.get("jurisdiction") or "").strip()
+    if jurisdiction:
+        try:
+            jurisdiction = require_canonical_jurisdiction(jurisdiction, context="jurisdiction")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+    query = DomainEventQuery(
+        workspace_id=str(workspace.id),
+        event_type=str(request.GET.get("event_type") or "").strip(),
+        stage_key=str(request.GET.get("stage_key") or "").strip(),
+        pipeline_id=str(pipeline.id) if pipeline else "",
+        jurisdiction=jurisdiction,
+        source=str(request.GET.get("source") or "").strip(),
+        reconciled_state_version=str(request.GET.get("reconciled_state_version") or "").strip(),
+        signal_set_version=str(request.GET.get("signal_set_version") or "").strip(),
+        run_id=str(request.GET.get("run_id") or "").strip(),
+        publication_id=str(request.GET.get("publication_id") or "").strip(),
+        chain_id=str(request.GET.get("chain_id") or "").strip(),
+        correlation_id=str(request.GET.get("correlation_id") or "").strip(),
+        limit=max(1, min(limit, 500)),
+    )
+    rows = DomainEventService().list_events(query)
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "pipeline_id": str(pipeline.id) if pipeline else None,
+            "pipeline_key": str(pipeline.key) if pipeline else "",
+            "events": [_serialize_domain_event(item) for item in rows],
+        }
+    )
+
+
+@login_required
+def ingest_artifacts_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    qs = IngestArtifactRecord.objects.filter(workspace=workspace)
+    source_id = str(request.GET.get("source_id") or "").strip()
+    if source_id:
+        qs = qs.filter(source_connector_id=source_id)
+    snapshot_type = str(request.GET.get("snapshot_type") or "").strip()
+    if snapshot_type:
+        qs = qs.filter(snapshot_type=snapshot_type)
+    retention_class = str(request.GET.get("retention_class") or "").strip()
+    if retention_class:
+        qs = qs.filter(retention_class=retention_class)
+    run_id = str(request.GET.get("run_id") or "").strip()
+    if run_id:
+        qs = qs.filter(orchestration_run_id=run_id)
+    artifact_id = str(request.GET.get("artifact_id") or "").strip()
+    if artifact_id:
+        qs = qs.filter(artifact_id=artifact_id)
+    try:
+        limit = int(request.GET.get("limit") or "100")
+    except ValueError:
+        limit = 100
+    limit = max(1, min(limit, 500))
+    rows = [
+        {
+            "id": str(row.id),
+            "workspace_id": str(row.workspace_id),
+            "source_connector_id": str(row.source_connector_id) if row.source_connector_id else None,
+            "orchestration_run_id": str(row.orchestration_run_id) if row.orchestration_run_id else None,
+            "job_run_id": str(row.job_run_id) if row.job_run_id else None,
+            "artifact_id": str(row.artifact_id),
+            "artifact_uri": str(row.artifact_uri or ""),
+            "storage_provider": str(row.storage_provider or ""),
+            "storage_key": str(row.storage_key or ""),
+            "content_type": str(row.content_type or ""),
+            "byte_length": int(row.byte_length or 0),
+            "sha256": str(row.sha256 or ""),
+            "snapshot_type": str(row.snapshot_type or ""),
+            "retention_class": str(row.retention_class or ""),
+            "scope_jurisdiction": str(row.scope_jurisdiction or ""),
+            "scope_source": str(row.scope_source or ""),
+            "metadata": row.metadata_json if isinstance(row.metadata_json, dict) else {},
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in qs.order_by("-created_at")[:limit]
+    ]
+    return JsonResponse({"workspace_id": str(workspace.id), "artifacts": rows})
+
+
+@login_required
+def ingest_artifact_detail(request: HttpRequest, artifact_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    row = get_object_or_404(IngestArtifactRecord.objects.filter(workspace=workspace), id=artifact_id)
+    return JsonResponse(
+        {
+            "id": str(row.id),
+            "workspace_id": str(row.workspace_id),
+            "source_connector_id": str(row.source_connector_id) if row.source_connector_id else None,
+            "orchestration_run_id": str(row.orchestration_run_id) if row.orchestration_run_id else None,
+            "job_run_id": str(row.job_run_id) if row.job_run_id else None,
+            "artifact_id": str(row.artifact_id),
+            "artifact_uri": str(row.artifact_uri or ""),
+            "storage_provider": str(row.storage_provider or ""),
+            "storage_key": str(row.storage_key or ""),
+            "content_type": str(row.content_type or ""),
+            "byte_length": int(row.byte_length or 0),
+            "sha256": str(row.sha256 or ""),
+            "snapshot_type": str(row.snapshot_type or ""),
+            "retention_class": str(row.retention_class or ""),
+            "scope_jurisdiction": str(row.scope_jurisdiction or ""),
+            "scope_source": str(row.scope_source or ""),
+            "metadata": row.metadata_json if isinstance(row.metadata_json, dict) else {},
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+    )
+
+
+def _resolve_run_source_connector(
+    *,
+    workspace: Workspace,
+    payload: dict[str, Any],
+) -> SourceConnector | None:
+    source_connector_id = str(payload.get("source_connector_id") or "").strip()
+    target_ref = payload.get("target_ref") if isinstance(payload.get("target_ref"), dict) else {}
+    if not source_connector_id:
+        source_connector_id = str(target_ref.get("source_connector_id") or "").strip()
+    if not source_connector_id and str(target_ref.get("target_type") or "").strip() == "source_connector":
+        source_connector_id = str(target_ref.get("target_id") or "").strip()
+    if source_connector_id:
+        return SourceConnector.objects.filter(id=source_connector_id, workspace=workspace).first()
+    source_key = str(payload.get("source") or "").strip()
+    if not source_key:
+        source_key = str(target_ref.get("source_key") or "").strip()
+    if not source_key:
+        return None
+    return SourceConnector.objects.filter(workspace=workspace, key=source_key).first()
+
+
+@csrf_exempt
+@login_required
+def orchestration_runs_collection(request: HttpRequest) -> JsonResponse:
+    # Boundary: canonical run-history API for new orchestrated data-processing
+    # workflows (ingest/import/normalize/reconcile/rules/dispatch).
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method == "POST":
+        payload = _parse_json(request)
+        workspace_id = str(payload.get("workspace_id") or "").strip()
+        pipeline_key = str(payload.get("pipeline_key") or "").strip()
+        if not workspace_id or not pipeline_key:
+            return JsonResponse({"error": "workspace_id and pipeline_key are required"}, status=400)
+        try:
+            workspace = _orchestration_workspace(identity, workspace_id)
+        except PermissionDenied:
+            return JsonResponse({"error": "forbidden"}, status=403)
+        if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_REFRESHES_RUN]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        pipeline = _orchestration_pipeline_for_workspace(workspace, pipeline_key)
+        if pipeline is None:
+            return JsonResponse({"error": "pipeline not found"}, status=404)
+        source_connector = _resolve_run_source_connector(workspace=workspace, payload=payload)
+        if source_connector is not None:
+            governance_decision = SourceGovernanceService().evaluate(source=source_connector, action="run_source")
+            if governance_decision.decision != "allow":
+                SourceGovernanceService().emit_audit_event(
+                    source=source_connector,
+                    decision=governance_decision,
+                    actor_id=str(identity.id),
+                    metadata={"route": "orchestration_runs_collection"},
+                )
+                return JsonResponse(
+                    {
+                        "error": governance_decision.message,
+                        "governance_decision": governance_decision.as_dict(),
+                    },
+                    status=409 if governance_decision.decision == "defer" else 403,
+                )
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        manual_params = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+        explicit_idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        trigger_key = str(payload.get("trigger_key") or "manual_api").strip() or "manual_api"
+        try:
+            jurisdiction = require_canonical_jurisdiction(payload.get("jurisdiction") or "", context="jurisdiction")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        lifecycle = OrchestrationLifecycleService()
+        run = lifecycle.create_run(
+            RunCreateRequest(
+                workspace_id=str(workspace.id),
+                pipeline_key=str(pipeline.key),
+                trigger=RunTrigger(trigger_cause="manual", trigger_key=trigger_key),
+                run_type=str(payload.get("run_type") or "data_pipeline").strip() or "data_pipeline",
+                target_ref=payload.get("target_ref") if isinstance(payload.get("target_ref"), dict) else {},
+                initiated_by_id=str(identity.id),
+                scope=ExecutionScope(
+                    jurisdiction=jurisdiction,
+                    source=str(payload.get("source") or "").strip(),
+                ),
+                metadata={
+                    **metadata,
+                    **({"idempotency_key": explicit_idempotency_key} if explicit_idempotency_key else {}),
+                    "manual_parameters": manual_params,
+                },
+            )
+        )
+        _audit_action(
+            "orchestration_manual_trigger",
+            metadata={
+                "workspace_id": str(workspace.id),
+                "pipeline_key": str(pipeline.key),
+                "run_id": str(run.id),
+                "trigger_key": trigger_key,
+                "jurisdiction": jurisdiction,
+                "source": str(payload.get("source") or "").strip(),
+            },
+            request=request,
+        )
+        run = OrchestrationRun.objects.select_related("pipeline", "workspace").get(id=run.id)
+        return JsonResponse(_serialize_orchestration_run_summary(run), status=201)
+
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace = _orchestration_workspace(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_INGEST_RUNS_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    qs = OrchestrationRun.objects.filter(workspace=workspace).select_related("pipeline")
+    pipeline_key = str(request.GET.get("pipeline_key") or "").strip()
+    if pipeline_key:
+        qs = qs.filter(pipeline__key=pipeline_key)
+    status_filter = str(request.GET.get("status") or "").strip().lower()
+    if status_filter:
+        qs = qs.filter(status=status_filter)
+    trigger_cause = str(request.GET.get("trigger_cause") or "").strip().lower()
+    if trigger_cause:
+        qs = qs.filter(trigger_cause=trigger_cause)
+    run_type = str(request.GET.get("run_type") or "").strip()
+    if run_type:
+        qs = qs.filter(run_type=run_type)
+    job_key = str(request.GET.get("job_key") or "").strip()
+    if job_key:
+        qs = qs.filter(job_runs__job_definition__job_key=job_key).distinct()
+    jurisdiction = str(request.GET.get("jurisdiction") or "").strip()
+    if jurisdiction:
+        try:
+            jurisdiction = require_canonical_jurisdiction(jurisdiction, context="jurisdiction")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        qs = qs.filter(scope_jurisdiction=jurisdiction)
+    source = str(request.GET.get("source") or "").strip()
+    if source:
+        qs = qs.filter(scope_source=source)
+    correlation_id = str(request.GET.get("correlation_id") or "").strip()
+    if correlation_id:
+        qs = qs.filter(correlation_id=correlation_id)
+    chain_id = str(request.GET.get("chain_id") or "").strip()
+    if chain_id:
+        qs = qs.filter(chain_id=chain_id)
+    created_after = _parse_iso_datetime(request.GET.get("created_after"))
+    if created_after is not None:
+        qs = qs.filter(created_at__gte=created_after)
+    created_before = _parse_iso_datetime(request.GET.get("created_before"))
+    if created_before is not None:
+        qs = qs.filter(created_at__lte=created_before)
+    failed_or_stale = str(request.GET.get("failed_or_stale") or "").strip().lower() in {"1", "true", "yes"}
+    if failed_or_stale:
+        qs = qs.filter(status__in=["failed", "stale"])
+    try:
+        limit = int(request.GET.get("limit") or "100")
+    except ValueError:
+        limit = 100
+    limit = max(1, min(limit, 500))
+    rows = [
+        _serialize_orchestration_run_summary(run)
+        for run in qs.order_by("-created_at")[:limit]
+    ]
+    return JsonResponse({"workspace_id": str(workspace.id), "runs": rows})
+
+
+@csrf_exempt
+@login_required
+def orchestration_run_detail(request: HttpRequest, run_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    run = get_object_or_404(
+        OrchestrationRun.objects.select_related("workspace", "pipeline", "initiated_by", "rerun_of"),
+        id=run_id,
+    )
+    if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        if not _require_workspace_capabilities(identity, str(run.workspace_id), [CAP_INGEST_RUNS_READ]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        context_workspace_id = str(request.GET.get("workspace_id") or "").strip()
+        if not context_workspace_id:
+            return JsonResponse({"error": "workspace_id is required"}, status=400)
+        if context_workspace_id != str(run.workspace_id):
+            return JsonResponse({"error": "run not found in workspace context"}, status=404)
+        return JsonResponse(_serialize_orchestration_run_detail(run))
+    return JsonResponse({"error": "method not allowed"}, status=405)
+
+
+@csrf_exempt
+@login_required
+def orchestration_run_rerun(request: HttpRequest, run_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    run = get_object_or_404(OrchestrationRun.objects.select_related("workspace", "pipeline"), id=run_id)
+    if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(run.workspace_id), [CAP_REFRESHES_RUN]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(run.workspace_id):
+        return JsonResponse({"error": "run not found in workspace context"}, status=404)
+    lifecycle = OrchestrationLifecycleService()
+    rerun = lifecycle.request_rerun(run_id=str(run.id), requested_by_id=str(identity.id))
+    _audit_action(
+        "orchestration_manual_rerun",
+        metadata={
+            "workspace_id": str(run.workspace_id),
+            "pipeline_key": str(run.pipeline.key),
+            "run_id": str(run.id),
+            "rerun_id": str(rerun.id),
+        },
+        request=request,
+    )
+    rerun = OrchestrationRun.objects.select_related("pipeline", "workspace").get(id=rerun.id)
+    return JsonResponse(_serialize_orchestration_run_summary(rerun), status=201)
+
+
+@csrf_exempt
+@login_required
+def orchestration_run_cancel(request: HttpRequest, run_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    run = get_object_or_404(OrchestrationRun.objects.select_related("workspace", "pipeline"), id=run_id)
+    if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(run.workspace_id), [CAP_REFRESHES_RUN]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(run.workspace_id):
+        return JsonResponse({"error": "run not found in workspace context"}, status=404)
+
+    with transaction.atomic():
+        locked = OrchestrationRun.objects.select_for_update().get(id=run.id)
+        if locked.status not in {"pending", "queued"}:
+            return JsonResponse({"error": "only pending or queued runs can be cancelled"}, status=409)
+        now = timezone.now()
+        locked.status = "cancelled"
+        locked.completed_at = now
+        locked.summary = str(payload.get("summary") or locked.summary or "Cancelled by operator")[:240]
+        locked.save(update_fields=["status", "completed_at", "summary", "updated_at"])
+        OrchestrationJobRun.objects.filter(run=locked, status__in=["pending", "queued", "waiting_retry"]).update(
+            status="cancelled",
+            completed_at=now,
+            updated_at=now,
+        )
+        OrchestrationJobRunAttempt.objects.filter(
+            job_run__run=locked,
+            status__in=["pending", "queued", "running"],
+        ).update(status="cancelled", completed_at=now, updated_at=now)
+
+    _audit_action(
+        "orchestration_run_cancelled",
+        metadata={
+            "workspace_id": str(run.workspace_id),
+            "pipeline_key": str(run.pipeline.key),
+            "run_id": str(run.id),
+        },
+        request=request,
+    )
+    locked = OrchestrationRun.objects.select_related("pipeline", "workspace").get(id=run.id)
+    return JsonResponse(_serialize_orchestration_run_summary(locked))
+
+
+@csrf_exempt
+@login_required
+def orchestration_run_failure_ack(request: HttpRequest, run_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    run = get_object_or_404(OrchestrationRun.objects.select_related("workspace", "pipeline"), id=run_id)
+    if not _workspace_membership(identity, str(run.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(run.workspace_id), [CAP_REFRESHES_RUN]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    context_workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not context_workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if context_workspace_id != str(run.workspace_id):
+        return JsonResponse({"error": "run not found in workspace context"}, status=404)
+    if run.status not in {"failed", "stale"}:
+        return JsonResponse({"error": "run is not failed or stale"}, status=409)
+    metadata = run.metadata_json if isinstance(run.metadata_json, dict) else {}
+    now = timezone.now().isoformat()
+    metadata["operator_ack"] = {
+        "acknowledged_at": now,
+        "acknowledged_by_id": str(identity.id),
+        "note": str(payload.get("note") or "").strip(),
+    }
+    run.metadata_json = metadata
+    run.save(update_fields=["metadata_json", "updated_at"])
+    _notify_orchestration_failure(run, reason="operator_acknowledged", actor=identity)
+    _audit_action(
+        "orchestration_failure_acknowledged",
+        metadata={
+            "workspace_id": str(run.workspace_id),
+            "pipeline_key": str(run.pipeline.key),
+            "run_id": str(run.id),
+        },
+        request=request,
+    )
+    return JsonResponse(_serialize_orchestration_run_detail(run))
 
 
 @login_required
@@ -30079,7 +34234,14 @@ def _dispatch_next_queue_item(*, workspace: Workspace, user, identity: UserIdent
     }
 
 
-def _dispatch_selected_queue_item(*, workspace: Workspace, task: DevTask, user, identity: UserIdentity) -> Dict[str, Any]:
+def _dispatch_selected_queue_item(
+    *,
+    workspace: Workspace,
+    task: DevTask,
+    user,
+    identity: UserIdentity,
+    agent_override_id: Optional[str] = None,
+) -> Dict[str, Any]:
     _, qs = _coordination_thread_queryset(identity, str(workspace.id))
     task_lookup = _coordination_task_lookup_factory(str(workspace.id))
     queue_task_lookup = lambda reference: DevTask.objects.filter(id=reference).first()
@@ -30101,7 +34263,12 @@ def _dispatch_selected_queue_item(*, workspace: Workspace, task: DevTask, user, 
     if thread:
         record_thread_event(thread=thread, event_type="work_item_promoted", work_item=selected_task, payload={"work_item_id": selected_task.work_item_id or str(selected_task.id)})
     try:
-        result = _submit_dev_task_runtime_run(selected_task, workspace=workspace, user=user)
+        result = _submit_dev_task_runtime_run(
+            selected_task,
+            workspace=workspace,
+            user=user,
+            agent_override_id=agent_override_id,
+        )
     except ValueError as exc:
         selected_task.status = "awaiting_review"
         selected_task.last_error = str(exc)
@@ -30128,6 +34295,7 @@ def _dispatch_selected_queue_item(*, workspace: Workspace, task: DevTask, user, 
         "work_item_id": entry.work_item_id,
         "task_id": entry.task_id,
         "run_id": result.get("run_id"),
+        "agent_selection": result.get("agent_selection") if isinstance(result.get("agent_selection"), dict) else None,
     }
 
 
@@ -30165,12 +34333,19 @@ def dev_task_dispatch(request: HttpRequest, task_id: str) -> JsonResponse:
     workspace_id = str(payload.get("workspace_id") or "").strip()
     if not workspace_id:
         return JsonResponse({"error": "workspace_id is required"}, status=400)
+    agent_override_id = str(payload.get("agent_override_id") or "").strip() or None
     workspace, _ = _coordination_thread_queryset(identity, workspace_id)
     task = get_object_or_404(DevTask, id=task_id)
     if not task.coordination_thread_id or str(task.coordination_thread.workspace_id) != str(workspace.id):
         return JsonResponse({"error": "work item is not part of the selected workspace queue"}, status=404)
     try:
-        result = _dispatch_selected_queue_item(workspace=workspace, task=task, user=request.user, identity=identity)
+        result = _dispatch_selected_queue_item(
+            workspace=workspace,
+            task=task,
+            user=request.user,
+            identity=identity,
+            agent_override_id=agent_override_id,
+        )
     except RuntimeError as exc:
         task.refresh_from_db()
         detail_payload = _serialize_work_item_detail(task)

@@ -4313,6 +4313,29 @@ button.sm {
   color: var(--danger);
 }
 
+.xyn-console-execution-context {
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-soft) 84%, transparent);
+  padding: 10px 12px;
+}
+
+.xyn-console-execution-context h4 {
+  margin: 0 0 8px;
+}
+
+.xyn-console-metadata-grid {
+  display: grid;
+  gap: 8px 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.xyn-console-metadata-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .xyn-console-list {
   margin: 0;
   padding: 0;
@@ -4663,6 +4686,53 @@ button.sm {
 
 .system-readiness-banner details:not([open]) {
   margin-bottom: 0;
+}
+
+.ai-routing-card {
+  margin-top: 12px;
+}
+
+.ai-routing-rows {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-routing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ai-routing-value {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ai-routing-status {
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.ai-routing-status.explicit {
+  border-color: color-mix(in srgb, #2d7a46 70%, transparent);
+  color: #9ff3c3;
+}
+
+.ai-routing-status.fallback {
+  border-color: color-mix(in srgb, #c18401 70%, transparent);
+  color: #ffd27e;
+}
+
+.ai-routing-status.missing {
+  border-color: color-mix(in srgb, #d14343 70%, transparent);
+  color: #ffb3b3;
 }
 
 .ems-panel-head {

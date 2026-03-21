@@ -5,7 +5,7 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from xyn_orchestrator.models import AgentPurpose, ModelConfig, ModelProvider, RoleBinding, UserIdentity
+from xyn_orchestrator.models import AgentDefinitionPurpose, AgentPurpose, AuditLog, ModelConfig, ModelProvider, RoleBinding, UserIdentity
 
 
 class AiConfigApiTests(TestCase):
@@ -143,6 +143,96 @@ class AiConfigApiTests(TestCase):
         self.assertEqual(payload["planning_agent_slug"], "planning-assistant")
         self.assertEqual(payload["coding_agent_slug"], "coding-assistant")
 
+    def test_ai_routing_status_reports_current_purpose_resolution(self):
+        self._set_identity(self.admin_identity)
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+                "XYN_AI_PLANNING_PROVIDER": "anthropic",
+                "XYN_AI_PLANNING_MODEL": "claude-3-7-sonnet-latest",
+                "XYN_AI_PLANNING_API_KEY": "sk-plan-anthropic",
+                "XYN_AI_CODING_PROVIDER": "gemini",
+                "XYN_AI_CODING_MODEL": "gemini-2.0-flash",
+                "XYN_AI_CODING_API_KEY": "sk-code-gemini",
+            },
+            clear=False,
+        ):
+            response = self.client.get("/xyn/api/ai/routing")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        routing = payload.get("routing") or []
+        self.assertEqual(len(routing), 3)
+        planning = next(item for item in routing if item.get("purpose") == "planning")
+        coding = next(item for item in routing if item.get("purpose") == "coding")
+        self.assertEqual(planning.get("resolved_agent_name"), "Xyn Planning Assistant")
+        self.assertEqual(planning.get("resolution_source"), "explicit")
+        self.assertEqual(coding.get("resolved_agent_name"), "Xyn Coding Assistant")
+        self.assertEqual(coding.get("resolution_source"), "explicit")
+
+    def test_ai_routing_patch_updates_and_clears_planning_assignment(self):
+        self._set_identity(self.admin_identity)
+        provider = self._ensure_provider()
+        model_config = ModelConfig.objects.create(provider=provider, model_name="gpt-4o-mini", enabled=True)
+        create_agent = self.client.post(
+            "/xyn/api/ai/agents",
+            data=json.dumps(
+                {
+                    "slug": "planner-explicit",
+                    "name": "Planner Explicit",
+                    "model_config_id": str(model_config.id),
+                    "purposes": ["planning"],
+                    "enabled": True,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(create_agent.status_code, 200)
+        planning_agent = create_agent.json()["agent"]
+
+        assign_response = self.client.patch(
+            "/xyn/api/ai/routing",
+            data=json.dumps({"planning_agent_id": planning_agent["id"]}),
+            content_type="application/json",
+        )
+        self.assertEqual(assign_response.status_code, 200)
+        planning = next(item for item in assign_response.json().get("routing") or [] if item.get("purpose") == "planning")
+        self.assertEqual(planning.get("resolved_agent_id"), planning_agent["id"])
+        self.assertEqual(planning.get("resolution_type"), "explicit")
+        self.assertTrue(
+            AgentDefinitionPurpose.objects.filter(
+                purpose__slug="planning",
+                agent_definition_id=planning_agent["id"],
+                is_default_for_purpose=True,
+            ).exists()
+        )
+
+        clear_response = self.client.patch(
+            "/xyn/api/ai/routing",
+            data=json.dumps({"planning_agent_id": None}),
+            content_type="application/json",
+        )
+        self.assertEqual(clear_response.status_code, 200)
+        routing = clear_response.json().get("routing") or []
+        default_route = next(item for item in routing if item.get("purpose") == "default")
+        planning = next(item for item in routing if item.get("purpose") == "planning")
+        self.assertEqual(planning.get("resolution_type"), "falls_back_to_default")
+        self.assertEqual(planning.get("resolved_agent_id"), default_route.get("resolved_agent_id"))
+        self.assertFalse(
+            AgentDefinitionPurpose.objects.filter(purpose__slug="planning", is_default_for_purpose=True).exists()
+        )
+
+    def test_non_admin_cannot_patch_ai_routing(self):
+        self._set_identity(self.user_identity)
+        response = self.client.patch(
+            "/xyn/api/ai/routing",
+            data=json.dumps({"planning_agent_id": None}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+
     @patch("xyn_orchestrator.xyn_api.invoke_model")
     def test_ai_invoke_uses_agent_and_returns_content(self, invoke_mock):
         self._set_identity(self.admin_identity)
@@ -190,8 +280,17 @@ class AiConfigApiTests(TestCase):
         self.assertEqual(body["content"], "Generated markdown")
         self.assertEqual(body["provider"], "openai")
         self.assertEqual(body["agent_slug"], "docs-invoke")
+        self.assertEqual(body["agent_name"], "Docs Invoke")
         self.assertEqual(body["effective_params"]["temperature"], 0.2)
         self.assertEqual(body["warnings"], [])
+        self.assertEqual((body.get("agent_resolution") or {}).get("resolved_agent_name"), "Docs Invoke")
+        self.assertEqual((body.get("agent_resolution") or {}).get("resolution_source"), "explicit")
+        audit = AuditLog.objects.filter(message="ai_invocation").order_by("-created_at").first()
+        self.assertIsNotNone(audit)
+        assert audit is not None
+        audit_meta = audit.metadata_json if isinstance(audit.metadata_json, dict) else {}
+        self.assertEqual((audit_meta.get("agent_resolution") or {}).get("resolved_agent_name"), "Docs Invoke")
+        self.assertEqual((audit_meta.get("agent_resolution") or {}).get("resolution_source"), "explicit")
         invoke_kwargs = invoke_mock.call_args.kwargs
         resolved = invoke_kwargs["resolved_config"]
         self.assertIn("assist docs", str(resolved.get("system_prompt") or ""))

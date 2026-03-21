@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,6 +9,10 @@ const apiMocks = vi.hoisted(() => ({
   executeAppPalettePrompt: vi.fn(),
   listGoals: vi.fn(),
   getGoal: vi.fn(),
+  listCampaigns: vi.fn(),
+  createCampaign: vi.fn(),
+  getCampaign: vi.fn(),
+  updateCampaign: vi.fn(),
   reviewGoal: vi.fn(),
   getApplicationPlan: vi.fn(),
   applyApplicationPlan: vi.fn(),
@@ -33,6 +37,8 @@ const apiMocks = vi.hoisted(() => ({
   updateWorkItem: vi.fn(),
   getRuntimeRunArtifactContent: vi.fn(),
   getSystemReadiness: vi.fn(),
+  getAiRoutingStatus: vi.fn(),
+  listAiAgents: vi.fn(),
   getExecutionPlan: vi.fn(),
 }));
 
@@ -61,6 +67,10 @@ vi.mock("../../../api/xyn", async () => {
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
+    listCampaigns: apiMocks.listCampaigns,
+    createCampaign: apiMocks.createCampaign,
+    getCampaign: apiMocks.getCampaign,
+    updateCampaign: apiMocks.updateCampaign,
     reviewGoal: apiMocks.reviewGoal,
     getApplicationPlan: apiMocks.getApplicationPlan,
     applyApplicationPlan: apiMocks.applyApplicationPlan,
@@ -85,6 +95,8 @@ vi.mock("../../../api/xyn", async () => {
     updateWorkItem: apiMocks.updateWorkItem,
     getRuntimeRunArtifactContent: apiMocks.getRuntimeRunArtifactContent,
     getSystemReadiness: apiMocks.getSystemReadiness,
+    getAiRoutingStatus: apiMocks.getAiRoutingStatus,
+    listAiAgents: apiMocks.listAiAgents,
     getExecutionPlan: apiMocks.getExecutionPlan,
   };
 });
@@ -119,6 +131,56 @@ describe("WorkbenchPanelHost entity refresh", () => {
         workspace_root: "/app/workspaces",
         artifact_root: "/app/media",
       },
+    });
+    apiMocks.getAiRoutingStatus.mockResolvedValue({
+      routing: [
+        {
+          purpose: "default",
+          resolved_agent_id: "agent-default",
+          resolved_agent_name: "Bootstrap Default Agent",
+          resolution_source: "explicit",
+          reason: "default agent configured",
+        },
+        {
+          purpose: "planning",
+          resolved_agent_id: "agent-planning",
+          resolved_agent_name: "Claude Planning Agent",
+          resolution_source: "explicit",
+          fallback_agent_id: "agent-default",
+          fallback_agent_name: "Bootstrap Default Agent",
+          reason: "purpose 'planning' has an explicit default agent assignment",
+        },
+        {
+          purpose: "coding",
+          resolved_agent_id: "agent-default",
+          resolved_agent_name: "Bootstrap Default Agent",
+          resolution_source: "default_fallback",
+          fallback_agent_id: "agent-default",
+          fallback_agent_name: "Bootstrap Default Agent",
+          reason: "no coding-specific agent is configured",
+        },
+      ],
+      recent_resolutions: [],
+    });
+    apiMocks.listAiAgents.mockResolvedValue({
+      agents: [
+        {
+          id: "agent-default",
+          slug: "default-assistant",
+          name: "Bootstrap Default Agent",
+          model_config_id: "model-default",
+          enabled: true,
+          purposes: ["default", "planning", "coding"],
+        },
+        {
+          id: "agent-coding-alt",
+          slug: "coding-alt",
+          name: "Claude Coding Agent",
+          model_config_id: "model-coding",
+          enabled: true,
+          purposes: ["coding"],
+        },
+      ],
     });
     apiMocks.getExecutionPlan.mockResolvedValue({
       capability_id: "build_application",
@@ -158,6 +220,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getSystemReadiness).toHaveBeenCalled());
+    await waitFor(() => expect(apiMocks.getAiRoutingStatus).toHaveBeenCalled());
+    expect(screen.getByText("AI Agent Routing")).toBeInTheDocument();
+    expect(screen.getByText("Claude Planning Agent")).toBeInTheDocument();
+    expect(screen.getAllByText("Bootstrap Default Agent").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Fallback")).toBeInTheDocument();
     expect(screen.getByText("System Readiness")).toBeInTheDocument();
     expect(screen.getByText("Configuration required")).toBeInTheDocument();
     expect(screen.getByText(/No enabled coding agents are configured\./)).toBeInTheDocument();
@@ -355,6 +422,138 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument());
     expect(screen.getByText(/Recommended Goal: AI Real Estate Deal Finder/i)).toBeInTheDocument();
     expect(screen.getByText(/Portfolio activity is balanced/i)).toBeInTheDocument();
+  });
+
+  it("lists campaigns and supports creating a campaign from the list panel", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.listCampaigns
+      .mockResolvedValueOnce({
+        workspace_id: "ws-1",
+        campaigns: [],
+        campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      })
+      .mockResolvedValueOnce({
+        workspace_id: "ws-1",
+        campaigns: [
+          {
+            id: "camp-1",
+            workspace_id: "ws-1",
+            slug: "launch-2026",
+            name: "Launch 2026",
+            campaign_type: "generic",
+            status: "draft",
+            description: "",
+            archived: false,
+            created_at: "2026-03-18T10:00:00Z",
+            updated_at: "2026-03-18T10:00:00Z",
+          },
+        ],
+        campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      });
+    apiMocks.createCampaign.mockResolvedValue({
+      id: "camp-1",
+      workspace_id: "ws-1",
+      slug: "launch-2026",
+      name: "Launch 2026",
+      campaign_type: "generic",
+      status: "draft",
+      description: "",
+      archived: false,
+      created_at: "2026-03-18T10:00:00Z",
+      updated_at: "2026-03-18T10:00:00Z",
+      campaign_type_definition: { key: "generic", label: "Generic Campaign", description: "Default campaign type." },
+      available_campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      metadata: {},
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "campaign-list", panel_type: "table", instance_key: "campaign-list", key: "campaign_list", params: { workspace_id: "ws-1", create: true } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.listCampaigns).toHaveBeenCalledWith("ws-1"));
+    fireEvent.change(screen.getByLabelText("Campaign name"), { target: { value: "Launch 2026" } });
+    await act(async () => {
+      screen.getByRole("button", { name: "Create" }).click();
+    });
+    await waitFor(() =>
+      expect(apiMocks.createCampaign).toHaveBeenCalledWith({
+        workspace_id: "ws-1",
+        name: "Launch 2026",
+        campaign_type: "generic",
+        description: undefined,
+      }),
+    );
+    await waitFor(() =>
+      expect(onOpenPanel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          key: "campaign_detail",
+          params: { campaign_id: "camp-1", workspace_id: "ws-1" },
+        }),
+      ),
+    );
+  });
+
+  it("loads and updates a campaign detail panel", async () => {
+    apiMocks.getCampaign.mockResolvedValue({
+      id: "camp-1",
+      workspace_id: "ws-1",
+      slug: "launch-2026",
+      name: "Launch 2026",
+      campaign_type: "generic",
+      status: "draft",
+      description: "Initial campaign",
+      archived: false,
+      created_at: "2026-03-18T10:00:00Z",
+      updated_at: "2026-03-18T10:00:00Z",
+      campaign_type_definition: { key: "generic", label: "Generic Campaign", description: "Default campaign type." },
+      available_campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      metadata: {},
+    });
+    apiMocks.updateCampaign.mockResolvedValue({
+      id: "camp-1",
+      workspace_id: "ws-1",
+      slug: "launch-2026",
+      name: "Launch 2026",
+      campaign_type: "generic",
+      status: "active",
+      description: "Initial campaign",
+      archived: false,
+      created_at: "2026-03-18T10:00:00Z",
+      updated_at: "2026-03-18T11:00:00Z",
+      campaign_type_definition: { key: "generic", label: "Generic Campaign", description: "Default campaign type." },
+      available_campaign_types: [{ key: "generic", label: "Generic Campaign", description: "Default campaign type." }],
+      metadata: {},
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "campaign-detail", panel_type: "detail", instance_key: "campaign:camp-1", key: "campaign_detail", params: { campaign_id: "camp-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getCampaign).toHaveBeenCalledWith("camp-1", "ws-1"));
+    fireEvent.change(screen.getByLabelText("Campaign status"), { target: { value: "active" } });
+    await act(async () => {
+      screen.getByRole("button", { name: "Save" }).click();
+    });
+    await waitFor(() =>
+      expect(apiMocks.updateCampaign).toHaveBeenCalledWith("camp-1", {
+        workspace_id: "ws-1",
+        name: "Launch 2026",
+        description: "Initial campaign",
+        status: "active",
+      }),
+    );
   });
 
   it("loads durable goal detail with threads, work items, and recommendation", async () => {
@@ -2230,6 +2429,214 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Dispatched wi-1.")).toBeInTheDocument();
     expect(screen.getByText("Latest execution run: run-1 · workspace ws-1")).toBeInTheDocument();
     expect(screen.getByText("Task has been dispatched and is waiting to start.")).toBeInTheDocument();
+  });
+
+  it("supports a temporary agent override at dispatch time", async () => {
+    apiMocks.getWorkItem.mockResolvedValueOnce({
+      id: "task-override",
+      work_item_id: "wi-override",
+      title: "Implement override dispatch",
+      description: "Dispatch with a one-off coding agent override.",
+      status: "queued",
+      target_repo: "xyn-platform",
+      target_branch: "develop",
+      task_type: "codegen",
+      priority: 0,
+      attempts: 0,
+      max_attempts: 2,
+      execution_queue: {
+        queue_ready: true,
+        dispatchable: true,
+        dispatched: false,
+        blocked: false,
+        status: "queue_ready",
+        reason: null,
+        message: "Task is approved and ready for queue dispatch.",
+      },
+      execution_brief_review: {
+        has_brief: true,
+        review_state: "approved",
+        revision: 1,
+        history_count: 0,
+        summary: "Implement override dispatch",
+        objective: "Use one-off override",
+        target_repository_slug: "xyn-platform",
+        target_branch: "develop",
+        gated: true,
+        ready: true,
+        blocked: false,
+        blocked_reason: null,
+        blocked_message: "Execution brief is ready for execution.",
+        review_notes: "Approved",
+        available_actions: [],
+      },
+      execution_run: {
+        has_run: false,
+        run_id: null,
+        source: null,
+        state: "not_started",
+        raw_status: null,
+        validation_status: "not_run",
+        summary: null,
+        error: null,
+        started_at: null,
+        finished_at: null,
+        artifact_count: 0,
+        artifact_labels: [],
+        message: "No execution run has been dispatched yet.",
+      },
+      execution_recovery: {
+        retryable: false,
+        requeueable: false,
+        in_flight: false,
+        failed: false,
+        blocked: false,
+        status: "idle",
+        reason: null,
+        message: "Recovery actions are unavailable.",
+        available_actions: [],
+      },
+      change_set: {
+        available: false,
+        status: "unavailable",
+        has_changes: false,
+        source: "workspace",
+        changed_file_count: 0,
+        files: [],
+        patch_available: false,
+        message: "No workspace change set found.",
+      },
+      publish_state: {
+        status: "idle",
+        message: "No publish action has been recorded yet.",
+        available_actions: [],
+      },
+    });
+    apiMocks.dispatchWorkItem.mockResolvedValue({
+      status: "dispatched",
+      queue_item: { thread_id: "thread-1", work_item_id: "wi-override", task_id: "task-override" },
+      run_id: "run-override",
+      work_item: {
+        id: "task-override",
+        work_item_id: "wi-override",
+        title: "Implement override dispatch",
+        description: "Dispatch with a one-off coding agent override.",
+        status: "queued",
+        target_repo: "xyn-platform",
+        target_branch: "develop",
+        runtime_run_id: "run-override",
+        task_type: "codegen",
+        priority: 0,
+        attempts: 0,
+        max_attempts: 2,
+        execution_queue: {
+          queue_ready: false,
+          dispatchable: false,
+          dispatched: true,
+          blocked: false,
+          status: "dispatched",
+          reason: "in_flight",
+          message: "Task has already been dispatched and is in progress.",
+        },
+        execution_brief_review: {
+          has_brief: true,
+          review_state: "approved",
+          revision: 1,
+          history_count: 0,
+          summary: "Implement override dispatch",
+          objective: "Use one-off override",
+          target_repository_slug: "xyn-platform",
+          target_branch: "develop",
+          gated: true,
+          ready: true,
+          blocked: false,
+          blocked_reason: null,
+          blocked_message: "Execution brief is ready for execution.",
+          review_notes: "Approved",
+          available_actions: [],
+        },
+        execution_run: {
+          has_run: true,
+          run_id: "run-override",
+          source: "runtime",
+          state: "queued",
+          raw_status: "queued",
+          validation_status: "pending",
+          summary: null,
+          error: null,
+          started_at: null,
+          finished_at: null,
+          artifact_count: 0,
+          artifact_labels: [],
+          message: "Task has been dispatched and is waiting to start.",
+          agent_selection: {
+            purpose: "coding",
+            routed_agent_id: "agent-default",
+            routed_agent_name: "Bootstrap Default Agent",
+            routed_resolution_source: "default_fallback",
+            routed_resolution_label: "Default fallback",
+            effective_agent_id: "agent-coding-alt",
+            effective_agent_name: "Claude Coding Agent",
+            effective_resolution_source: "action_override",
+            effective_resolution_label: "Action override",
+            override_agent_id: "agent-coding-alt",
+            override_applied: true,
+          },
+        },
+        execution_recovery: {
+          retryable: false,
+          requeueable: false,
+          in_flight: true,
+          failed: false,
+          blocked: false,
+          status: "in_flight",
+          reason: null,
+          message: "Execution is in progress.",
+          available_actions: [],
+        },
+        change_set: {
+          available: false,
+          status: "unavailable",
+          has_changes: false,
+          source: "workspace",
+          changed_file_count: 0,
+          files: [],
+          patch_available: false,
+          message: "No workspace change set found.",
+        },
+        publish_state: {
+          status: "idle",
+          message: "No publish action has been recorded yet.",
+          available_actions: [],
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "work-item-detail", panel_type: "detail", instance_key: "work-item:task-override", key: "work_item_detail", params: { work_item_id: "task-override" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.listAiAgents).toHaveBeenCalledWith({ purpose: "coding", enabled: true }));
+    const overrideSelect = screen.getByLabelText("Agent override");
+    await act(async () => {
+      (overrideSelect as HTMLSelectElement).value = "agent-coding-alt";
+      overrideSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Dispatch Task" }).click();
+    });
+    await waitFor(() =>
+      expect(apiMocks.dispatchWorkItem).toHaveBeenCalledWith("task-override", "ws-1", { agent_override_id: "agent-coding-alt" }),
+    );
+    expect(screen.getByText("Override Used")).toBeInTheDocument();
+    expect(screen.getByText(/Source: Action override/)).toBeInTheDocument();
   });
 
   it("shows recovery state and supports retry and requeue from work item detail", async () => {

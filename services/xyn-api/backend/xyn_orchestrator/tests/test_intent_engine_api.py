@@ -152,6 +152,44 @@ class IntentEngineApiTests(TestCase):
         self.assertTrue(any(item["field"] == "category" for item in payload.get("missing_fields", [])))
         self.assertEqual((payload.get("audit") or {}).get("context_pack_slug"), "xyn-console-default")
 
+    def test_resolve_persists_planning_agent_resolution_metadata(self):
+        ai_resolution = {
+            "purpose": "planning",
+            "resolved_agent_id": "agent-123",
+            "resolved_agent_name": "Planner Agent",
+            "resolution_source": "explicit",
+            "fallback_agent_id": "fallback-456",
+            "fallback_agent_name": "Default Agent",
+            "reason": "purpose 'planning' has an explicit default agent assignment",
+        }
+        with patch(
+            "xyn_orchestrator.intent_engine.proposal_provider.LlmIntentProposalProvider.propose",
+            return_value={
+                "action_type": "CreateDraft",
+                "artifact_type": "ArticleDraft",
+                "inferred_fields": {"title": "Draft title"},
+                "confidence": 0.93,
+                "_model": "fake",
+                "_ai_resolution": ai_resolution,
+            },
+        ):
+            response = self.client.post(
+                "/xyn/api/xyn/intent/resolve",
+                data=json.dumps({"message": "create draft"}),
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        event = AuditLog.objects.filter(message="intent.resolve").order_by("-created_at").first()
+        self.assertIsNotNone(event)
+        assert event is not None
+        proposal = event.metadata_json.get("proposal") if isinstance(event.metadata_json, dict) else {}
+        self.assertEqual((proposal or {}).get("_ai_resolution"), ai_resolution)
+        prompt_event = AuditLog.objects.filter(message="prompt_submission").order_by("-created_at").first()
+        self.assertIsNotNone(prompt_event)
+        assert prompt_event is not None
+        prompt_meta = prompt_event.metadata_json if isinstance(prompt_event.metadata_json, dict) else {}
+        self.assertEqual(prompt_meta.get("agent_resolution"), ai_resolution)
+
     def test_resolve_heuristic_create_fallback_for_low_confidence(self):
         with patch(
             "xyn_orchestrator.intent_engine.proposal_provider.LlmIntentProposalProvider.propose",
@@ -1170,6 +1208,39 @@ class IntentEngineApiTests(TestCase):
         self.assertIsNotNone(raw_panel_action)
         self.assertEqual((raw_panel_action or {}).get("panel_key"), "artifact_raw_json")
         self.assertEqual((((raw_panel_action or {}).get("params") or {}).get("slug")), "core.authn-jwt")
+
+    def test_rules_panel_commands_return_open_panel_actions(self):
+        resolve_response = self.client.post(
+            "/xyn/api/xyn/intent/resolve",
+            data=json.dumps({"message": "show editable rules"}),
+            content_type="application/json",
+        )
+        self.assertEqual(resolve_response.status_code, 200, resolve_response.content.decode())
+        payload = resolve_response.json()
+        panel_action = next((row for row in payload.get("next_actions", []) if row.get("action") == "OpenPanel"), None)
+        self.assertIsNotNone(panel_action)
+        self.assertEqual((panel_action or {}).get("panel_key"), "rules_browser")
+        self.assertEqual((((panel_action or {}).get("params") or {}).get("editable")), True)
+
+        apply_response = self.client.post(
+            "/xyn/api/xyn/intent/apply",
+            data=json.dumps(
+                {
+                    "action_type": "CreateDraft",
+                    "artifact_type": "Workspace",
+                    "payload": {
+                        "__operation": "open_artifact_panel",
+                        "panel_key": "rules_browser",
+                        "params": {"editable": True},
+                    },
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(apply_response.status_code, 200, apply_response.content.decode())
+        applied_panel_action = next((row for row in apply_response.json().get("next_actions", []) if row.get("action") == "OpenPanel"), None)
+        self.assertIsNotNone(applied_panel_action)
+        self.assertEqual((applied_panel_action or {}).get("panel_key"), "rules_browser")
 
     def test_artifact_slug_endpoints_return_full_raw_json_and_files(self):
         module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})

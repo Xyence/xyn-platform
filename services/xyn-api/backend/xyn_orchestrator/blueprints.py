@@ -5059,7 +5059,9 @@ def internal_ai_config(request: HttpRequest) -> JsonResponse:
             "warnings": warnings,
             "system_prompt": config.get("system_prompt") or "",
             "agent_slug": config.get("agent_slug"),
+            "agent_name": config.get("agent_name"),
             "purpose": config.get("purpose") or purpose,
+            "agent_resolution": config.get("agent_resolution") if isinstance(config.get("agent_resolution"), dict) else {},
         }
     )
 

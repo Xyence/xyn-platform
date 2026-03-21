@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xyence.io/schemas/watch_match_event.v1.schema.json",
+  "title": "Watch Match Event",
+  "type": "object",
+  "required": ["id", "workspace_id", "watch_id", "watch_key", "matched", "score", "reason"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "workspace_id": { "type": "string", "format": "uuid" },
+    "watch_id": { "type": "string", "format": "uuid" },
+    "watch_key": { "type": "string" },
+    "event_key": { "type": "string" },
+    "matched": { "type": "boolean" },
+    "score": { "type": "number" },
+    "reason": { "type": "string" },
+    "explanation": { "type": "object", "additionalProperties": true },
+    "event_ref": { "type": "object", "additionalProperties": true },
+    "filter_snapshot": { "type": "object", "additionalProperties": true },
+    "notification_intent": { "type": "object", "additionalProperties": true },
+    "run_id": { "type": ["string", "null"], "format": "uuid" },
+    "correlation_id": { "type": "string" },
+    "chain_id": { "type": "string" },
+    "created_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": false
+}

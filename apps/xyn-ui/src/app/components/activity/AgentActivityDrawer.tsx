@@ -89,6 +89,31 @@ function conversationRuntimeSummary(item: AiActivityEntry): string {
   return parts.join(" · ");
 }
 
+function humanizePurpose(purpose?: string): string {
+  const token = String(purpose || "").trim();
+  if (!token) return "default";
+  return token.replace(/[_-]+/g, " ");
+}
+
+function sourceLabel(source?: string, purpose?: string): string {
+  const normalizedPurpose = humanizePurpose(purpose);
+  if (source === "explicit") return `Explicit ${normalizedPurpose} assignment`;
+  if (source === "default_fallback") return "Default fallback";
+  return source || "Unknown";
+}
+
+function activityResolutionSummary(item: AiActivityEntry): { actor: string; source: string; reason: string } | null {
+  const resolution = item.agent_resolution;
+  const actor = String(resolution?.resolved_agent_name || item.agent_name || item.agent_slug || "").trim();
+  if (!actor) return null;
+  const purpose = String(resolution?.purpose || item.purpose || "").trim();
+  return {
+    actor,
+    source: sourceLabel(String(resolution?.resolution_source || "").trim(), purpose),
+    reason: String(resolution?.reason || "").trim(),
+  };
+}
+
 export default function AgentActivityDrawer({ open, onClose, workspaceId, artifactId, threadId }: Props) {
   const [items, setItems] = useState<AiActivityEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -218,6 +243,17 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
                 <Bot size={15} />
               </span>
               <div className="notification-text">
+                {(() => {
+                  const summary = activityResolutionSummary(item);
+                  if (!summary) return null;
+                  return (
+                    <>
+                      <span className="muted small">Planned with: {summary.actor}</span>
+                      <span className="muted small">Source: {summary.source}</span>
+                      {summary.reason ? <span className="muted small">{summary.reason}</span> : null}
+                    </>
+                  );
+                })()}
                 <strong>{item.summary || item.event_type}</strong>
                 {item.prompt ? <span className="muted small">{item.prompt}</span> : null}
                 {item.conversation_message?.body ? (

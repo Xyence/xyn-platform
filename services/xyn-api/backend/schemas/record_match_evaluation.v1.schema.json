@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xyence.io/schemas/record_match_evaluation.v1.schema.json",
+  "title": "Record Match Evaluation",
+  "type": "object",
+  "required": [
+    "id",
+    "workspace_id",
+    "strategy_key",
+    "score",
+    "decision",
+    "confidence",
+    "candidate_a",
+    "candidate_b",
+    "explanation"
+  ],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "workspace_id": { "type": "string", "format": "uuid" },
+    "strategy_key": { "type": "string" },
+    "score": { "type": "number" },
+    "decision": { "type": "string", "enum": ["exact_match", "probable_match", "possible_match", "non_match", "needs_review"] },
+    "confidence": { "type": "string" },
+    "candidate_a": { "type": "object", "additionalProperties": true },
+    "candidate_b": { "type": "object", "additionalProperties": true },
+    "explanation": { "type": "object", "additionalProperties": true },
+    "metadata": { "type": "object", "additionalProperties": true },
+    "extra": { "type": "object", "additionalProperties": true },
+    "run_id": { "type": ["string", "null"], "format": "uuid" },
+    "correlation_id": { "type": "string" },
+    "chain_id": { "type": "string" },
+    "created_at": { "type": ["string", "null"], "format": "date-time" },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": false
+}

@@ -8,6 +8,7 @@ from xyn_orchestrator.ai_runtime import (
     assemble_system_prompt,
     ensure_default_ai_seeds,
     invoke_model,
+    resolve_agent_routing,
     resolve_ai_config,
 )
 from xyn_orchestrator.models import AgentDefinition, AgentDefinitionPurpose, AgentPurpose, ContextPack, ModelConfig, ModelProvider, ProviderCredential
@@ -256,6 +257,10 @@ class AiRuntimeTests(TestCase):
             resolved = resolve_ai_config(purpose_slug="planning")
         self.assertEqual(resolved.get("agent_slug"), "planning-assistant")
         self.assertEqual(resolved.get("purpose"), "planning")
+        routing = resolved.get("agent_resolution") or {}
+        self.assertEqual(routing.get("purpose"), "planning")
+        self.assertEqual(routing.get("resolved_agent_name"), "Xyn Planning Assistant")
+        self.assertEqual(routing.get("resolution_source"), "explicit")
 
     def test_resolve_ai_config_prefers_coding_agent_and_falls_back_to_default(self):
         with patch.dict(
@@ -277,6 +282,33 @@ class AiRuntimeTests(TestCase):
             resolved = resolve_ai_config(purpose_slug="coding")
         self.assertEqual(resolved.get("agent_slug"), "coding-assistant")
         self.assertEqual(resolved.get("purpose"), "coding")
+        routing = resolved.get("agent_resolution") or {}
+        self.assertEqual(routing.get("purpose"), "coding")
+        self.assertEqual(routing.get("resolved_agent_name"), "Xyn Coding Assistant")
+        self.assertEqual(routing.get("resolution_source"), "explicit")
+
+    def test_resolve_agent_routing_uses_default_fallback_when_purpose_unassigned(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+        routing = resolve_agent_routing(purpose_slug="documentation")
+        self.assertEqual(routing.get("purpose"), "documentation")
+        self.assertEqual(routing.get("resolution_source"), "default_fallback")
+        self.assertEqual(routing.get("resolved_agent_name"), "Xyn Default Assistant")
+
+    def test_resolve_agent_routing_returns_unresolved_when_no_enabled_agents_exist(self):
+        AgentDefinition.objects.all().delete()
+        routing = resolve_agent_routing(purpose_slug="planning")
+        self.assertEqual(routing.get("resolution_source"), "default_fallback")
+        self.assertIsNone(routing.get("resolved_agent_id"))
+        self.assertIn("no enabled agent available", str(routing.get("reason") or ""))
 
     def test_extract_openai_response_text_from_output_content(self):
         payload = {

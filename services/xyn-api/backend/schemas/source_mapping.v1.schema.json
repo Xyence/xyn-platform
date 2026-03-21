@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xyence.io/schemas/source_mapping.v1.schema.json",
+  "title": "Source Mapping",
+  "type": "object",
+  "required": ["id", "source_id", "version", "status", "is_current", "field_mapping", "transformation_hints", "validation_state"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "source_id": { "type": "string", "format": "uuid" },
+    "version": { "type": "integer", "minimum": 1 },
+    "status": { "type": "string", "enum": ["draft", "validated", "active"] },
+    "is_current": { "type": "boolean" },
+    "field_mapping": { "type": "object", "additionalProperties": true },
+    "transformation_hints": { "type": "object", "additionalProperties": true },
+    "validation_state": { "type": "object", "additionalProperties": true },
+    "validated_at": { "type": ["string", "null"], "format": "date-time" },
+    "validated_by_id": { "type": ["string", "null"], "format": "uuid" },
+    "validation_run_id": { "type": ["string", "null"], "format": "uuid" },
+    "created_by_id": { "type": ["string", "null"], "format": "uuid" },
+    "created_at": { "type": ["string", "null"], "format": "date-time" },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": false
+}

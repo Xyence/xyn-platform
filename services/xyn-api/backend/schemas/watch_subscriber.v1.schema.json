@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xyence.io/schemas/watch_subscriber.v1.schema.json",
+  "title": "Watch Subscriber",
+  "type": "object",
+  "required": ["id", "watch_id", "subscriber_type", "subscriber_ref", "enabled"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "watch_id": { "type": "string", "format": "uuid" },
+    "subscriber_type": {
+      "type": "string",
+      "enum": ["user_identity", "delivery_target", "external_endpoint"]
+    },
+    "subscriber_ref": { "type": "string", "minLength": 1 },
+    "destination": { "type": "object", "additionalProperties": true },
+    "preferences": { "type": "object", "additionalProperties": true },
+    "enabled": { "type": "boolean" },
+    "created_by_id": { "type": ["string", "null"], "format": "uuid" },
+    "created_at": { "type": ["string", "null"], "format": "date-time" },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": false
+}

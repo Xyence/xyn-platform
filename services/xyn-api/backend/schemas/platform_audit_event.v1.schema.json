@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xyence.io/schemas/platform_audit_event.v1.schema.json",
+  "title": "Platform Audit Event",
+  "type": "object",
+  "required": ["id", "workspace_id", "event_type", "subject_type", "subject_id", "subject_ref", "created_at"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "workspace_id": { "type": "string", "format": "uuid" },
+    "event_type": { "type": "string" },
+    "subject_type": { "type": "string" },
+    "subject_id": { "type": "string" },
+    "subject_namespace": { "type": "string" },
+    "subject_ref": { "type": "object", "additionalProperties": true },
+    "actor_ref": { "type": ["object", "null"], "additionalProperties": true },
+    "cause_ref": { "type": ["object", "null"], "additionalProperties": true },
+    "summary": { "type": "string" },
+    "reason": { "type": "string" },
+    "metadata": { "type": "object", "additionalProperties": true },
+    "run_id": { "type": ["string", "null"], "format": "uuid" },
+    "correlation_id": { "type": "string" },
+    "chain_id": { "type": "string" },
+    "created_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": false
+}

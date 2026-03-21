@@ -1891,6 +1891,30 @@ export type AiBootstrapStatusResponse = {
   default_agent: AiBootstrapStatus;
 };
 
+export type AiAgentResolution = {
+  purpose: string;
+  resolved_agent_id?: string | null;
+  resolved_agent_name?: string | null;
+  resolution_source: "explicit" | "default_fallback" | string;
+  resolution_type?: "required_default" | "explicit" | "falls_back_to_default" | string;
+  explicit_agent_id?: string | null;
+  explicit_agent_name?: string | null;
+  fallback_agent_id?: string | null;
+  fallback_agent_name?: string | null;
+  reason?: string | null;
+};
+
+export type AiRoutingStatusResponse = {
+  routing: AiAgentResolution[];
+  recent_resolutions: Array<
+    AiAgentResolution & {
+      event_id?: string;
+      event_type?: string;
+      created_at?: string;
+    }
+  >;
+};
+
 export type SystemReadinessCheck = {
   component: string;
   status: "ok" | "missing" | "error";
@@ -2119,6 +2143,9 @@ export type AiActivityEntry = {
   job_id?: string | null;
   error?: string;
   agent_slug?: string;
+  agent_name?: string;
+  purpose?: string;
+  agent_resolution?: AiAgentResolution;
   provider?: "openai" | "anthropic" | "google" | string;
   model_name?: string;
   artifact_id?: string;
@@ -2417,6 +2444,19 @@ export type DevTaskSummary = {
     artifact_count: number;
     artifact_labels: string[];
     message: string;
+    agent_selection?: {
+      purpose: string;
+      routed_agent_id?: string | null;
+      routed_agent_name?: string | null;
+      routed_resolution_source?: string | null;
+      routed_resolution_label?: string | null;
+      effective_agent_id?: string | null;
+      effective_agent_name?: string | null;
+      effective_resolution_source?: string | null;
+      effective_resolution_label?: string | null;
+      override_agent_id?: string | null;
+      override_applied: boolean;
+    } | null;
   };
   execution_recovery?: {
     retryable: boolean;
@@ -2775,6 +2815,278 @@ export type ApplicationSummary = {
 export type ApplicationDetail = ApplicationSummary & {
   goals: GoalSummary[];
   portfolio_state?: GoalPortfolioState;
+};
+
+export type CampaignTypeDefinition = {
+  key: string;
+  label: string;
+  description: string;
+  icon?: string;
+  scope?: "global" | "workspace" | string;
+  workspace_id?: string | null;
+  enabled?: boolean;
+  metadata?: Record<string, unknown>;
+};
+
+export type CampaignSummary = {
+  id: string;
+  workspace_id: string;
+  slug: string;
+  name: string;
+  campaign_type: string;
+  status: "draft" | "active" | "paused" | "completed" | "archived" | string;
+  description: string;
+  archived: boolean;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CampaignDetail = CampaignSummary & {
+  campaign_type_definition?: CampaignTypeDefinition;
+  available_campaign_types?: CampaignTypeDefinition[];
+  metadata?: Record<string, unknown>;
+};
+
+export type CampaignListResponse = {
+  workspace_id: string;
+  campaigns: CampaignSummary[];
+  campaign_types: CampaignTypeDefinition[];
+};
+
+export type WatchSummary = {
+  id: string;
+  workspace_id: string;
+  key: string;
+  name: string;
+  target_kind: string;
+  target_ref: Record<string, unknown>;
+  filter_criteria: Record<string, unknown>;
+  lifecycle_state: "draft" | "active" | "paused" | "archived" | string;
+  linked_campaign_id?: string | null;
+  metadata: Record<string, unknown>;
+  active_subscriber_count: number;
+  created_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WatchSubscriber = {
+  id: string;
+  watch_id: string;
+  subscriber_type: "user_identity" | "delivery_target" | "external_endpoint" | string;
+  subscriber_ref: string;
+  destination: Record<string, unknown>;
+  preferences: Record<string, unknown>;
+  enabled: boolean;
+  created_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WatchMatchEvent = {
+  id: string;
+  workspace_id: string;
+  watch_id: string;
+  watch_key: string;
+  event_key: string;
+  matched: boolean;
+  score: number;
+  reason: string;
+  explanation: Record<string, unknown>;
+  event_ref: Record<string, unknown>;
+  filter_snapshot: Record<string, unknown>;
+  notification_intent: Record<string, unknown>;
+  run_id?: string | null;
+  correlation_id: string;
+  chain_id: string;
+  created_at: string;
+};
+
+export type WatchListResponse = {
+  workspace_id: string;
+  lifecycle_states: string[];
+  subscriber_types: string[];
+  watches: WatchSummary[];
+};
+
+export type WatchSubscribersResponse = {
+  watch_id: string;
+  workspace_id?: string;
+  subscriber_types?: string[];
+  subscribers: WatchSubscriber[];
+};
+
+export type WatchMatchesResponse = {
+  workspace_id: string;
+  matches: WatchMatchEvent[];
+};
+
+export type WatchEvaluateResponse = {
+  workspace_id: string;
+  persisted: boolean;
+  results: Array<{
+    watch_id: string;
+    watch_key: string;
+    matched: boolean;
+    score: number;
+    reason: string;
+    explanation: string[];
+    notification_intent: Record<string, unknown>;
+  }>;
+};
+
+export type SourceConnectorSummary = {
+  id: string;
+  workspace_id: string;
+  key: string;
+  name: string;
+  source_type: string;
+  source_mode: "file_upload" | "remote_url" | "api_polling" | "manual" | string;
+  lifecycle_state: "registered" | "inspected" | "mapped" | "validated" | "active" | "failing" | "paused" | string;
+  health_status: "unknown" | "healthy" | "warning" | "failing" | "paused" | string;
+  is_active: boolean;
+  refresh_cadence_seconds: number;
+  orchestration_pipeline_key: string;
+  configuration: Record<string, unknown>;
+  provenance: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  last_run_id?: string | null;
+  last_inspected_at?: string | null;
+  last_validated_at?: string | null;
+  last_success_at?: string | null;
+  last_failure_at?: string | null;
+  last_failure_reason: string;
+  current_mapping?: {
+    id: string;
+    version: number;
+    status: string;
+  } | null;
+  latest_inspection?: {
+    id: string;
+    status: string;
+    detected_format: string;
+    inspected_at?: string | null;
+  } | null;
+  readiness?: {
+    ready: boolean;
+    reasons: string[];
+    checked_at?: string | null;
+  } | null;
+  created_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SourceConnectorListResponse = {
+  workspace_id: string;
+  lifecycle_states: string[];
+  health_states: string[];
+  source_modes: string[];
+  sources: SourceConnectorSummary[];
+};
+
+export type SourceInspectionProfile = {
+  id: string;
+  source_id: string;
+  status: "ok" | "warning" | "error" | string;
+  detected_format: string;
+  discovered_fields: Array<Record<string, unknown>>;
+  sample_metadata: SourceInspectionSampleMetadata;
+  validation_findings: Array<Record<string, unknown>>;
+  inspection_run_id?: string | null;
+  inspected_by_id?: string | null;
+  inspected_at: string;
+};
+
+export type SourceInspectionGeometrySummary = {
+  present: boolean;
+  geometry_types?: string[];
+  bbox?: [number, number, number, number] | null;
+  centroid?: { x: number; y: number } | null;
+  errors?: string[];
+};
+
+export type SourceInspectionProfileSummary = {
+  row_count?: number | null;
+  discovered_fields_count?: number;
+  has_sample_rows?: boolean;
+  has_geometry?: boolean;
+};
+
+export type SourceInspectionSampleMetadata = Record<string, unknown> & {
+  sample_rows?: Array<Record<string, unknown>>;
+  profile_summary?: SourceInspectionProfileSummary;
+  geometry_summary?: SourceInspectionGeometrySummary | null;
+};
+
+export type SourceInspectionsResponse = {
+  source_id: string;
+  inspections: SourceInspectionProfile[];
+};
+
+export type SourceMappingRecord = {
+  id: string;
+  source_id: string;
+  version: number;
+  status: "draft" | "validated" | "active" | string;
+  is_current: boolean;
+  field_mapping: Record<string, unknown>;
+  transformation_hints: Record<string, unknown>;
+  validation_state: Record<string, unknown>;
+  validated_at?: string | null;
+  validated_by_id?: string | null;
+  validation_run_id?: string | null;
+  created_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SourceMappingsResponse = {
+  source_id: string;
+  mappings: SourceMappingRecord[];
+};
+
+export type RecordMatchResult = {
+  id: string;
+  workspace_id: string;
+  strategy_key: string;
+  score: number;
+  decision: "exact_match" | "probable_match" | "possible_match" | "non_match" | "needs_review" | string;
+  confidence: string;
+  candidate_a: Record<string, unknown>;
+  candidate_b: Record<string, unknown>;
+  explanation: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  extra: Record<string, unknown>;
+  run_id?: string | null;
+  correlation_id: string;
+  chain_id: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RecordMatchResultsResponse = {
+  workspace_id: string;
+  results: RecordMatchResult[];
+};
+
+export type RecordMatchEvaluateResponse = {
+  workspace_id: string;
+  evaluation: {
+    candidate_a: Record<string, unknown>;
+    candidate_b: Record<string, unknown>;
+    strategy_key: string;
+    score: number;
+    decision: string;
+    confidence: string;
+    explanation: string[];
+    signals: Array<Record<string, unknown>>;
+    metadata: Record<string, unknown>;
+  };
+  persisted: boolean;
+  available_strategy_keys: string[];
+  result?: RecordMatchResult;
 };
 
 export type ComposerAction = {
@@ -3290,6 +3602,78 @@ export type PlatformConfigResponse = {
   };
 };
 
+export type ApplicationNotification = {
+  notification_id: string;
+  recipient_row_id: string;
+  source_app_key: string;
+  category: string;
+  notification_type_key: string;
+  title: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  deep_link: string;
+  source_entity_type: string;
+  source_entity_id: string;
+  source_metadata: Record<string, unknown>;
+  workspace_id: string | null;
+  unread: boolean;
+  read_at: string | null;
+  created_at: string;
+};
+
+export type ApplicationNotificationFeedResponse = {
+  notifications: ApplicationNotification[];
+  count: number;
+  limit: number;
+  offset: number;
+  unread_count: number;
+};
+
+export type ApplicationNotificationUnreadCountResponse = {
+  unread_count: number;
+};
+
+export type ApplicationNotificationReadResponse = {
+  notification_id: string;
+  unread: boolean;
+  unread_count: number;
+};
+
+export type ApplicationNotificationReadAllResponse = {
+  updated: number;
+  unread_count: number;
+};
+
+export type NotificationDeliveryTarget = {
+  id: string;
+  owner_id: string;
+  channel: string;
+  address: string;
+  enabled: boolean;
+  verification_status: string;
+  is_primary: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NotificationDeliveryTargetsResponse = {
+  targets: NotificationDeliveryTarget[];
+};
+
+export type NotificationDeliveryTargetResponse = {
+  target: NotificationDeliveryTarget | null;
+};
+
+export type NotificationDeliveryPreference = {
+  source_app_key: string;
+  in_app_enabled: boolean;
+  email_enabled: boolean;
+};
+
+export type NotificationDeliveryPreferenceResponse = {
+  preference: NotificationDeliveryPreference;
+};
+
 export type VideoAdapterDefinition = {
   id: string;
   name: string;
@@ -3538,9 +3922,13 @@ export type ConversationAction = {
     | "create_thread"
     | "list_threads"
     | "show_thread"
+    | "show_thread_review"
     | "pause_thread"
     | "resume_thread"
     | "prioritize_thread"
+    | "create_campaign"
+    | "list_campaigns"
+    | "show_campaign"
     | string;
   source_message_id: string;
   thread_id?: string | null;
@@ -3594,6 +3982,7 @@ export type XynIntentResolutionResult = {
     llm_model?: string;
     timestamp?: string;
   };
+  _ai_resolution?: AiAgentResolution;
 };
 
 export type EmsDeviceRow = {
@@ -3755,6 +4144,86 @@ export type ArtifactConsoleFilesResponse = {
     slug: string;
   };
   files: ArtifactConsoleFileRow[];
+};
+
+export type RuleBrowserBundle = {
+  bundle_id: string;
+  title: string;
+  app_slug: string;
+  artifact_slug: string;
+  description?: string;
+  scope?: Record<string, unknown>;
+  ownership?: {
+    owner_kind?: string;
+    editable?: boolean;
+    source?: string;
+  };
+  rule_count: number;
+  compiled_rule_count: number;
+  documented_rule_count: number;
+  artifact_id?: string;
+  updated_at?: string;
+};
+
+export type RuleBrowserRule = {
+  id: string;
+  title: string;
+  name?: string;
+  description?: string;
+  family: string;
+  family_label: string;
+  enforced: boolean;
+  enforcement_status: "enforced" | "documented_only" | string;
+  enforcement_stage: string;
+  scope: string;
+  ownership: string;
+  editable: boolean;
+  summary?: string;
+  source_policy_bundle: {
+    bundle_id: string;
+    artifact_slug: string;
+    app_slug: string;
+  };
+  metadata?: Record<string, unknown>;
+};
+
+export type RuleBrowserResponse = {
+  boundary_notice?: {
+    title?: string;
+    body?: string;
+    doc_ref?: string;
+  };
+  boundary_warnings?: Array<{
+    rule_id?: string;
+    family?: string;
+    message?: string;
+    severity?: string;
+    boundary?: string;
+  }>;
+  target?: {
+    artifact_slug?: string | null;
+    app_slug?: string | null;
+    query?: string | null;
+    workspace_id?: string | null;
+    bundle_id?: string | null;
+  };
+  filters?: {
+    family?: string[];
+    editable?: boolean | null;
+    system?: boolean | null;
+  };
+  bundles: RuleBrowserBundle[];
+  groups: Array<{
+    family: string;
+    label: string;
+    count: number;
+    enforced: number;
+    documented_only: number;
+  }>;
+  rules: RuleBrowserRule[];
+  access?: {
+    filtered_out_bundles?: number;
+  };
 };
 
 export type XynIntentOptionsResponse = {

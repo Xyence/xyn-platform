@@ -192,7 +192,7 @@ class EpicDIntentEngineTests(unittest.TestCase):
         )
         self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
         self.assertEqual(envelope.intent_type, IntentType.GENERATE_APPLICATION_PLAN.value)
-        self.assertEqual(envelope.action_payload.get("factory_key"), "ai_real_estate_deal_finder")
+        self.assertEqual(envelope.action_payload.get("factory_key"), "generic_application_mvp")
         self.assertIn("deal finder", str(envelope.action_payload.get("application_name") or "").lower())
         self.assertEnvelopeStable(envelope)
 
@@ -220,7 +220,7 @@ class EpicDIntentEngineTests(unittest.TestCase):
         )
         self.assertEqual(envelope.intent_family, IntentFamily.GOAL_PLANNING.value)
         self.assertEqual(envelope.intent_type, IntentType.GENERATE_APPLICATION_PLAN.value)
-        self.assertEqual(envelope.action_payload.get("factory_key"), "ai_real_estate_deal_finder")
+        self.assertEqual(envelope.action_payload.get("factory_key"), "generic_application_mvp")
         self.assertIn("deal finder", str(envelope.action_payload.get("application_name") or "").lower())
         self.assertEnvelopeStable(envelope)
 
@@ -630,6 +630,50 @@ class EpicDIntentEngineTests(unittest.TestCase):
 
     def test_core_surface_matcher_does_not_trap_broader_platform_help_requests(self):
         self.assertIsNone(intent_api._match_core_surface_command("help me understand how platform settings work"))
+
+    def test_core_surface_matcher_accepts_campaign_navigation_commands(self):
+        self.assertEqual(
+            intent_api._match_core_surface_command("campaigns"),
+            ("campaign_list", {}),
+        )
+        self.assertEqual(
+            intent_api._match_core_surface_command("show campaigns"),
+            ("campaign_list", {}),
+        )
+
+    def test_core_surface_matcher_accepts_campaign_create_commands(self):
+        self.assertEqual(
+            intent_api._match_core_surface_command("create campaign"),
+            ("campaign_list", {"create": True}),
+        )
+        self.assertEqual(
+            intent_api._match_core_surface_command("new campaign"),
+            ("campaign_list", {"create": True}),
+        )
+
+    def test_rules_panel_matcher_supports_direct_rules_commands(self):
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show rules"),
+            ("rules_browser", {}),
+        )
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show editable rules"),
+            ("rules_browser", {"editable": True}),
+        )
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show system rules"),
+            ("rules_browser", {"system": True}),
+        )
+
+    def test_rules_panel_matcher_supports_targeted_rules_commands(self):
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show rules for Team Lunch Poll"),
+            ("rules_browser", {"q": "team lunch poll"}),
+        )
+        self.assertEqual(
+            intent_api._match_rules_panel_command("show policy bundle for app.team-lunch-poll"),
+            ("rules_browser", {"q": "app.team-lunch-poll", "app_slug": "app.team-lunch-poll"}),
+        )
 
     def test_legacy_article_intake_extracts_title_from_with_the_title_phrase(self):
         engine = IntentResolutionEngine(
@@ -2451,15 +2495,15 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual(((payload.get("next_actions") or [])[0].get("params") or {}).get("goal_id"), "goal-1")
 
     def test_execute_conversation_action_generate_application_plan_returns_plan_panel_action(self):
-        plan = SimpleNamespace(id="plan-1", name="Deal Finder", source_factory_key="ai_real_estate_deal_finder")
+        plan = SimpleNamespace(id="plan-1", name="Deal Finder", source_factory_key="generic_application_mvp")
         detail = {
             "id": "plan-1",
             "name": "Deal Finder",
             "status": "review",
-            "source_factory_key": "ai_real_estate_deal_finder",
+            "source_factory_key": "generic_application_mvp",
             "generated_goals": [{"title": "Listing and Property Foundation"}],
         }
-        factory = {"key": "ai_real_estate_deal_finder", "name": "AI Real Estate Deal Finder"}
+        factory = {"key": "generic_application_mvp", "name": "Generic Application MVP"}
         generated = SimpleNamespace(model_dump=lambda mode="json": {"application_name": "Deal Finder"})
         with patch.object(
             intent_api,
@@ -2475,7 +2519,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
                 action={
                     "action_type": "generate_application_plan",
                     "thread_id": "thread-1",
-                    "payload": {"action_payload": {"application_name": "Deal Finder", "factory_key": "ai_real_estate_deal_finder"}},
+                    "payload": {"action_payload": {"application_name": "Deal Finder", "factory_key": "generic_application_mvp"}},
                     "target_object": {"workspace_id": "ws-1"},
                 },
                 prompt="build an AI real estate deal finder",

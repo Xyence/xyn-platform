@@ -751,6 +751,65 @@ class DevTaskRuntimeBridgeTests(TestCase):
         self.assertEqual(payload["execution_run"]["state"], "queued")
         self.assertEqual(payload["result_run_detail"]["summary"], "Queued for execution")
 
+    def test_dev_task_detail_exposes_ai_agent_override_metadata_from_runtime_payload(self):
+        runtime_run_id = uuid.uuid4()
+        self.task.runtime_run_id = runtime_run_id
+        self.task.runtime_workspace_id = self.workspace.id
+        self.task.save(update_fields=["runtime_run_id", "runtime_workspace_id", "updated_at"])
+        request = self._request(f"/xyn/api/dev-tasks/{self.task.id}", method="get")
+
+        def _seed_api_request(*, method, path, workspace_id="", workspace_slug="", payload=None, timeout=20):
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}":
+                return _FakeResponse(
+                    body={
+                        "id": str(runtime_run_id),
+                        "run_id": str(runtime_run_id),
+                        "status": "queued",
+                        "summary": None,
+                        "failure_reason": None,
+                        "escalation_reason": None,
+                        "prompt_payload": {
+                            "target": {"workspace_id": str(self.workspace.id), "repo": "xyn-platform", "branch": "develop"},
+                            "context": {
+                                "metadata": {
+                                    "ai_agent_selection": {
+                                        "purpose": "coding",
+                                        "routed_agent_id": "agent-default",
+                                        "routed_agent_name": "Bootstrap Default Agent",
+                                        "routed_resolution_source": "default_fallback",
+                                        "routed_resolution_label": "Default fallback",
+                                        "effective_agent_id": "agent-alt",
+                                        "effective_agent_name": "Claude Coding Agent",
+                                        "effective_resolution_source": "action_override",
+                                        "effective_resolution_label": "Action override",
+                                        "override_agent_id": "agent-alt",
+                                        "override_applied": True,
+                                    }
+                                }
+                            },
+                        },
+                    }
+                )
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/steps":
+                return _FakeResponse(body=[])
+            if method == "GET" and path == f"/api/v1/runs/{runtime_run_id}/artifacts":
+                return _FakeResponse(body=[])
+            raise AssertionError(f"unexpected call {method} {path}")
+
+        with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2], mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request", side_effect=_seed_api_request
+        ):
+            response = dev_task_detail(request, str(self.task.id))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        selection = payload["execution_run"]["agent_selection"]
+        self.assertEqual(selection["purpose"], "coding")
+        self.assertEqual(selection["routed_agent_name"], "Bootstrap Default Agent")
+        self.assertEqual(selection["effective_agent_name"], "Claude Coding Agent")
+        self.assertTrue(selection["override_applied"])
+        self.assertEqual(selection["effective_resolution_label"], "Action override")
+
     def test_dev_task_detail_reports_not_started_execution_when_no_run_exists(self):
         request = self._request(f"/xyn/api/dev-tasks/{self.task.id}", method="get")
         with self._auth_patches()[0], self._auth_patches()[1], self._auth_patches()[2]:

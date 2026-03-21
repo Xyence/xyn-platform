@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { AlertTriangle, CheckCircle2, CircleHelp, Wrench } from "lucide-react";
+import { getAiRoutingStatus } from "../../../api/xyn";
 import { getRecentArtifacts } from "../../../api/xyn";
 import { provisionLocalXynInstance } from "../../../api/xyn";
 import { listArtifactNavSurfaces } from "../../../api/xyn";
 import { getMe } from "../../../api/xyn";
 import { executeAppPalettePrompt } from "../../../api/xyn";
-import type { PromptInterpretationClarificationOption, RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
+import type { AiAgentResolution, PromptInterpretationClarificationOption, RecentArtifactItem, XynIntentResolutionResult } from "../../../api/types";
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
 import { openViewDescriptor } from "../../navigation/openViewDescriptor";
 import { resolveCapabilityGraphContext } from "../../navigation/capabilityContext";
@@ -40,6 +41,7 @@ type ArtifactStructuredQuery = {
 
 type ResolvedPanelCommand =
   | { panelKey: "composer_detail"; params: Record<string, never> }
+  | { panelKey: "campaign_list"; params: { create?: boolean } }
   | { panelKey: "artifact_list"; params: { namespace?: string; query?: ArtifactStructuredQuery; query_error?: string } }
   | { panelKey: "workspaces"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "runs"; params: { query?: Record<string, unknown>; query_error?: string } }
@@ -206,6 +208,16 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
     || /^(open|show|go to)\s+workbench$/.test(normalized)
   ) {
     return { panelKey: "composer_detail", params: {} };
+  }
+  if (
+    /^(campaigns|show campaigns|open campaigns|list campaigns|go to campaigns)$/.test(normalized)
+  ) {
+    return { panelKey: "campaign_list", params: {} };
+  }
+  if (
+    /^(new campaign|create campaign|add campaign|start campaign)$/.test(normalized)
+  ) {
+    return { panelKey: "campaign_list", params: { create: true } };
   }
   if (/^(show|list|open)\s+drafts$/.test(normalized)) {
     return { panelKey: "drafts_list", params: {} };
@@ -410,12 +422,18 @@ export function resolveDirectPanelOpenParams(
   directPanel: ResolvedPanelCommand,
   workspaceId?: string | null,
 ): Record<string, unknown> {
-  if (directPanel.panelKey !== "composer_detail") {
-    return directPanel.params;
+  if (directPanel.panelKey === "composer_detail") {
+    return {
+      workspace_id: workspaceId || undefined,
+    };
   }
-  return {
-    workspace_id: workspaceId || undefined,
-  };
+  if (directPanel.panelKey === "campaign_list") {
+    return {
+      workspace_id: workspaceId || undefined,
+      ...(directPanel.params.create ? { create: true } : {}),
+    };
+  }
+  return directPanel.params;
 }
 
 function stringifyValue(value: unknown): string {
@@ -1087,6 +1105,62 @@ function ResolutionCard({
   const createActionLabel =
     (resolution.next_actions || []).find((item) => item.action === "CreateDraft" && String(item.label || "").trim())?.label ||
     "Create draft";
+  const [resolvedExecutionContext, setResolvedExecutionContext] = useState<AiAgentResolution | null>(
+    resolution._ai_resolution || null
+  );
+  const shouldShowExecutionContext =
+    resolution.status === "DraftReady" && Boolean(resolution.conversation_action || resolution.action_type === "CreateDraft");
+  const executionPurpose = String(
+    resolution._ai_resolution?.purpose || (resolution.action_type === "CreateDraft" ? "planning" : "default")
+  ).trim();
+
+  useEffect(() => {
+    if (!shouldShowExecutionContext) {
+      setResolvedExecutionContext(null);
+      return;
+    }
+    if (resolution._ai_resolution) {
+      setResolvedExecutionContext(resolution._ai_resolution);
+      return;
+    }
+    let active = true;
+    getAiRoutingStatus()
+      .then((payload) => {
+        if (!active) return;
+        const next =
+          (payload.routing || []).find((row) => String(row.purpose || "").trim().toLowerCase() === executionPurpose.toLowerCase()) || null;
+        setResolvedExecutionContext(next);
+      })
+      .catch(() => {
+        if (active) setResolvedExecutionContext(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [executionPurpose, resolution._ai_resolution, shouldShowExecutionContext]);
+
+  const executionContext = resolvedExecutionContext;
+  const executionSource = String(executionContext?.resolution_source || "").trim();
+  const purposeLabel = (executionPurpose || "default")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (part) => part.toUpperCase());
+  const sourceCopy =
+    executionSource === "explicit"
+      ? `Explicit ${executionPurpose || "purpose"} assignment`
+      : executionSource === "default_fallback"
+        ? "Default fallback"
+        : executionSource
+          ? executionSource
+          : "Unknown";
+  const fallbackCopy =
+    !executionContext
+      ? "Routing details unavailable."
+      :
+    executionSource === "default_fallback"
+      ? executionContext?.reason || "No purpose-specific agent is configured."
+      : executionContext?.fallback_agent_name
+        ? `${executionContext.fallback_agent_name} not used`
+        : "Default agent not used";
 
   return (
     <section className="xyn-console-card" aria-label="Resolution">
@@ -1101,6 +1175,29 @@ function ResolutionCard({
             <li key={err}>{err}</li>
           ))}
         </ul>
+      ) : null}
+      {shouldShowExecutionContext ? (
+        <div className="xyn-console-execution-context" aria-label="Execution context">
+          <h4>Execution context</h4>
+          <div className="xyn-console-metadata-grid">
+            <div>
+              <span className="field-label">Purpose</span>
+              <span className="field-value">{purposeLabel}</span>
+            </div>
+            <div>
+              <span className="field-label">Agent to use</span>
+              <span className="field-value">{executionContext?.resolved_agent_name || "Unavailable"}</span>
+            </div>
+            <div>
+              <span className="field-label">Source</span>
+              <span className="field-value">{sourceCopy}</span>
+            </div>
+            <div>
+              <span className="field-label">Fallback</span>
+              <span className="field-value">{fallbackCopy}</span>
+            </div>
+          </div>
+        </div>
       ) : null}
       <div className="inline-actions">
         {canCreate ? (

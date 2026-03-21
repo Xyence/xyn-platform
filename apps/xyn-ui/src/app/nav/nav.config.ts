@@ -75,6 +75,7 @@ export const NAV_GROUPS: NavGroup[] = [
     icon: "Rocket",
     items: [
       { id: "runs", label: "Runs", path: "/app/runs", icon: "PlayCircle", keywords: ["logs", "executions"] },
+      { id: "notifications", label: "Notifications", path: "/app/notifications", icon: "Bell", keywords: ["feed", "inbox", "unread"] },
     ],
   },
   {
@@ -82,6 +83,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Admin",
     icon: "Settings",
     items: [
+      { id: "sources", label: "Sources", path: "/app/sources", icon: "Database", keywords: ["ingest", "inspection", "mapping"] },
       { id: "platform-settings", label: "Platform Settings", path: "/app/platform/hub", icon: "SlidersHorizontal" },
     ],
   },

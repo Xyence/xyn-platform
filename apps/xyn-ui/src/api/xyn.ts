@@ -50,6 +50,21 @@ import type {
   ApplicationPlanDetail,
   ApplicationSummary,
   ApplicationDetail,
+  CampaignTypeDefinition,
+  CampaignListResponse,
+  CampaignDetail,
+  WatchListResponse,
+  WatchSummary,
+  WatchSubscribersResponse,
+  WatchMatchesResponse,
+  WatchEvaluateResponse,
+  SourceConnectorListResponse,
+  SourceConnectorSummary,
+  SourceInspectionsResponse,
+  SourceMappingsResponse,
+  RecordMatchEvaluateResponse,
+  RecordMatchResult,
+  RecordMatchResultsResponse,
   WorkQueueResponse,
   ContextPackCreatePayload,
   ContextPackDetail,
@@ -148,6 +163,7 @@ import type {
   AiModelConfig,
   AiAgent,
   AiBootstrapStatusResponse,
+  AiRoutingStatusResponse,
   SystemReadinessResponse,
   ContextualCapabilityResponse,
   CapabilityGraphResponse,
@@ -174,6 +190,7 @@ import type {
   ArtifactConsoleListResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFilesResponse,
+  RuleBrowserResponse,
   LocalProvisionResponse,
   AppIntentDraft,
   AppIntentDraftCreatePayload,
@@ -185,6 +202,13 @@ import type {
   AppBuilderArtifact,
   AppPaletteResult,
   AppJobPatchPayload,
+  ApplicationNotificationFeedResponse,
+  ApplicationNotificationUnreadCountResponse,
+  ApplicationNotificationReadResponse,
+  ApplicationNotificationReadAllResponse,
+  NotificationDeliveryTargetsResponse,
+  NotificationDeliveryTargetResponse,
+  NotificationDeliveryPreferenceResponse,
 } from "./types";
 import { authHeaders, resolveApiBaseUrl, resolveSeedBaseUrl } from "./client";
 
@@ -513,6 +537,33 @@ export async function getArtifactConsoleFilesBySlug(slug: string): Promise<Artif
     headers: buildHeaders(),
   });
   return handle<ArtifactConsoleFilesResponse>(response);
+}
+
+export async function getRulesBrowser(params?: {
+  workspaceId?: string;
+  artifactSlug?: string;
+  appSlug?: string;
+  q?: string;
+  family?: string;
+  editable?: boolean;
+  system?: boolean;
+  bundleId?: string;
+}): Promise<RuleBrowserResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/rules`);
+  if (params?.workspaceId) url.searchParams.set("workspace_id", params.workspaceId);
+  if (params?.artifactSlug) url.searchParams.set("artifact_slug", params.artifactSlug);
+  if (params?.appSlug) url.searchParams.set("app_slug", params.appSlug);
+  if (params?.q) url.searchParams.set("q", params.q);
+  if (params?.family) url.searchParams.set("family", params.family);
+  if (params?.editable !== undefined) url.searchParams.set("editable", String(params.editable));
+  if (params?.system !== undefined) url.searchParams.set("system", String(params.system));
+  if (params?.bundleId) url.searchParams.set("bundle_id", params.bundleId);
+  const response = await apiFetch(url.toString(), {
+    credentials: "include",
+    headers: buildHeaders(),
+  });
+  return handle<RuleBrowserResponse>(response);
 }
 
 export async function getRecentArtifacts(limit = 6): Promise<RecentArtifactListResponse> {
@@ -4223,6 +4274,29 @@ export async function getSystemReadiness(): Promise<SystemReadinessResponse> {
   return handle<SystemReadinessResponse>(response);
 }
 
+export async function getAiRoutingStatus(): Promise<AiRoutingStatusResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/ai/routing`, {
+    credentials: "include",
+  });
+  return handle<AiRoutingStatusResponse>(response);
+}
+
+export async function updateAiRouting(payload: {
+  default_agent_id?: string;
+  planning_agent_id?: string | null;
+  coding_agent_id?: string | null;
+}): Promise<AiRoutingStatusResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/ai/routing`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<AiRoutingStatusResponse>(response);
+}
+
 export async function getContextualCapabilities(params?: {
   context?: string;
   artifact_id?: string;
@@ -4486,6 +4560,254 @@ export async function updateApplication(id: string, payload: { status: "active" 
   return handle<ApplicationDetail>(response);
 }
 
+export async function listCampaignTypes(workspaceId: string): Promise<{ campaign_types: CampaignTypeDefinition[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/campaign-types`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<{ campaign_types: CampaignTypeDefinition[] }>(response);
+}
+
+export async function listCampaigns(
+  workspaceId: string,
+  options?: { status?: string; campaign_type?: string; include_archived?: boolean },
+): Promise<CampaignListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/campaigns`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.status) url.searchParams.set("status", options.status);
+  if (options?.campaign_type) url.searchParams.set("campaign_type", options.campaign_type);
+  if (options?.include_archived) url.searchParams.set("include_archived", "true");
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<CampaignListResponse>(response);
+}
+
+export async function createCampaign(payload: {
+  workspace_id: string;
+  name: string;
+  campaign_type?: string;
+  description?: string;
+}): Promise<CampaignDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/campaigns`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<CampaignDetail>(response);
+}
+
+export async function getCampaign(id: string, workspaceId: string): Promise<CampaignDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/campaigns/${id}`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), {
+    credentials: "include",
+  });
+  return handle<CampaignDetail>(response);
+}
+
+export async function updateCampaign(id: string, payload: Record<string, unknown> & { workspace_id: string }): Promise<CampaignDetail> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/campaigns/${id}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<CampaignDetail>(response);
+}
+
+export async function listWatches(
+  workspaceId: string,
+  options?: { lifecycle_state?: string; target_kind?: string },
+): Promise<WatchListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/watches`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.lifecycle_state) url.searchParams.set("lifecycle_state", options.lifecycle_state);
+  if (options?.target_kind) url.searchParams.set("target_kind", options.target_kind);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<WatchListResponse>(response);
+}
+
+export async function createWatch(payload: {
+  workspace_id: string;
+  key: string;
+  name: string;
+  target_kind?: string;
+  target_ref?: Record<string, unknown>;
+  filter_criteria?: Record<string, unknown>;
+  lifecycle_state?: string;
+  linked_campaign_id?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<WatchSummary> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/watches`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<WatchSummary>(response);
+}
+
+export async function listWatchSubscribers(watchId: string, workspaceId: string): Promise<WatchSubscribersResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/watches/${encodeURIComponent(watchId)}/subscribers`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<WatchSubscribersResponse>(response);
+}
+
+export async function listWatchMatches(
+  workspaceId: string,
+  options?: { watch_id?: string; event_key?: string; matched?: boolean; limit?: number },
+): Promise<WatchMatchesResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/watches/matches`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.watch_id) url.searchParams.set("watch_id", options.watch_id);
+  if (options?.event_key) url.searchParams.set("event_key", options.event_key);
+  if (typeof options?.matched === "boolean") url.searchParams.set("matched", options.matched ? "1" : "0");
+  if (typeof options?.limit === "number") url.searchParams.set("limit", String(options.limit));
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<WatchMatchesResponse>(response);
+}
+
+export async function evaluateWatchMatches(payload: {
+  workspace_id: string;
+  event_key?: string;
+  event_ref?: Record<string, unknown>;
+  watch_ids?: string[];
+  run_id?: string;
+  correlation_id?: string;
+  chain_id?: string;
+  metadata?: Record<string, unknown>;
+  persist?: boolean;
+}): Promise<WatchEvaluateResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/watches/matches/evaluate`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<WatchEvaluateResponse>(response);
+}
+
+export async function listSourceConnectors(
+  workspaceId: string,
+  options?: { lifecycle_state?: string; health_status?: string; source_mode?: string; source_type?: string; active_only?: boolean },
+): Promise<SourceConnectorListResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/source-connectors`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.lifecycle_state) url.searchParams.set("lifecycle_state", options.lifecycle_state);
+  if (options?.health_status) url.searchParams.set("health_status", options.health_status);
+  if (options?.source_mode) url.searchParams.set("source_mode", options.source_mode);
+  if (options?.source_type) url.searchParams.set("source_type", options.source_type);
+  if (options?.active_only) url.searchParams.set("active_only", "1");
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<SourceConnectorListResponse>(response);
+}
+
+export async function createSourceConnector(payload: {
+  workspace_id: string;
+  key: string;
+  name: string;
+  source_type?: string;
+  source_mode?: string;
+  refresh_cadence_seconds?: number;
+  orchestration_pipeline_key?: string;
+  configuration?: Record<string, unknown>;
+  provenance?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}): Promise<SourceConnectorSummary> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/source-connectors`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<SourceConnectorSummary>(response);
+}
+
+export async function listSourceInspections(sourceId: string, workspaceId: string): Promise<SourceInspectionsResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/source-connectors/${encodeURIComponent(sourceId)}/inspections`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<SourceInspectionsResponse>(response);
+}
+
+export async function listSourceMappings(sourceId: string, workspaceId: string): Promise<SourceMappingsResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/source-connectors/${encodeURIComponent(sourceId)}/mappings`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<SourceMappingsResponse>(response);
+}
+
+export async function evaluateRecordMatch(payload: {
+  workspace_id: string;
+  candidate_a: Record<string, unknown>;
+  candidate_b: Record<string, unknown>;
+  strategy_key?: string;
+  persist?: boolean;
+  metadata?: Record<string, unknown>;
+  run_id?: string;
+  correlation_id?: string;
+  chain_id?: string;
+}): Promise<RecordMatchEvaluateResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/record-matching/evaluate`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<RecordMatchEvaluateResponse>(response);
+}
+
+export async function listRecordMatchResults(
+  workspaceId: string,
+  options?: {
+    strategy_key?: string;
+    decision?: string;
+    correlation_id?: string;
+    chain_id?: string;
+    run_id?: string;
+    min_score?: number;
+    max_score?: number;
+    limit?: number;
+  },
+): Promise<RecordMatchResultsResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/record-matching/results`);
+  url.searchParams.set("workspace_id", workspaceId);
+  if (options?.strategy_key) url.searchParams.set("strategy_key", options.strategy_key);
+  if (options?.decision) url.searchParams.set("decision", options.decision);
+  if (options?.correlation_id) url.searchParams.set("correlation_id", options.correlation_id);
+  if (options?.chain_id) url.searchParams.set("chain_id", options.chain_id);
+  if (options?.run_id) url.searchParams.set("run_id", options.run_id);
+  if (typeof options?.min_score === "number") url.searchParams.set("min_score", String(options.min_score));
+  if (typeof options?.max_score === "number") url.searchParams.set("max_score", String(options.max_score));
+  if (typeof options?.limit === "number") url.searchParams.set("limit", String(options.limit));
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<RecordMatchResultsResponse>(response);
+}
+
+export async function getRecordMatchResult(resultId: string, workspaceId: string): Promise<RecordMatchResult> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/record-matching/results/${encodeURIComponent(resultId)}`);
+  url.searchParams.set("workspace_id", workspaceId);
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<RecordMatchResult>(response);
+}
+
 export async function listCoordinationThreads(workspaceId: string, status?: string): Promise<CoordinationThreadListResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/threads`);
@@ -4560,14 +4882,21 @@ export async function dispatchNextWorkQueueItem(workspaceId: string): Promise<{ 
 
 export async function dispatchWorkItem(
   id: string,
-  workspaceId: string
+  workspaceId: string,
+  options?: {
+    agent_override_id?: string;
+  },
 ): Promise<{ status: string; queue_item?: Record<string, unknown>; run_id?: string; work_item?: WorkItemDetail }> {
   const apiBaseUrl = resolveApiBaseUrl();
+  const payload: { workspace_id: string; agent_override_id?: string } = { workspace_id: workspaceId };
+  if (options?.agent_override_id) {
+    payload.agent_override_id = options.agent_override_id;
+  }
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/dev-tasks/${id}/dispatch`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",
-    body: JSON.stringify({ workspace_id: workspaceId }),
+    body: JSON.stringify(payload),
   });
   return handle<{ status: string; queue_item?: Record<string, unknown>; run_id?: string; work_item?: WorkItemDetail }>(response);
 }
@@ -4985,4 +5314,144 @@ export async function triggerControlPlaneRollback(payload: {
     body: JSON.stringify(payload),
   });
   return handle<{ rollback_deployment_id: string; rollback_status: string }>(response);
+}
+
+export async function listApplicationNotifications(params: {
+  limit?: number;
+  offset?: number;
+  unread_only?: boolean;
+  source_app_key?: string;
+  category?: string;
+} = {}): Promise<ApplicationNotificationFeedResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/notifications`);
+  if (params.limit !== undefined) {
+    url.searchParams.set("limit", String(params.limit));
+  }
+  if (params.offset !== undefined) {
+    url.searchParams.set("offset", String(params.offset));
+  }
+  if (params.unread_only !== undefined) {
+    url.searchParams.set("unread_only", params.unread_only ? "1" : "0");
+  }
+  if (params.source_app_key) {
+    url.searchParams.set("source_app_key", params.source_app_key);
+  }
+  if (params.category) {
+    url.searchParams.set("category", params.category);
+  }
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<ApplicationNotificationFeedResponse>(response);
+}
+
+export async function getApplicationNotificationUnreadCount(): Promise<ApplicationNotificationUnreadCountResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/unread-count`, { credentials: "include" });
+  return handle<ApplicationNotificationUnreadCountResponse>(response);
+}
+
+export async function markApplicationNotificationRead(notificationId: string): Promise<ApplicationNotificationReadResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/${encodeURIComponent(notificationId)}/read`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildHeaders(),
+  });
+  return handle<ApplicationNotificationReadResponse>(response);
+}
+
+export async function markAllApplicationNotificationsRead(): Promise<ApplicationNotificationReadAllResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/read-all`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildHeaders(),
+  });
+  return handle<ApplicationNotificationReadAllResponse>(response);
+}
+
+export async function listNotificationDeliveryTargets(workspaceId: string): Promise<NotificationDeliveryTargetsResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/notifications/targets`);
+  if (workspaceId) {
+    url.searchParams.set("workspace_id", workspaceId);
+  }
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<NotificationDeliveryTargetsResponse>(response);
+}
+
+export async function createNotificationDeliveryTarget(payload: {
+  address: string;
+  enabled?: boolean;
+  is_primary?: boolean;
+  workspace_id: string;
+}): Promise<NotificationDeliveryTargetResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildHeaders(),
+    body: JSON.stringify(payload),
+  });
+  return handle<NotificationDeliveryTargetResponse>(response);
+}
+
+export async function setNotificationDeliveryTargetEnabled(
+  targetId: string,
+  enabled: boolean,
+  workspaceId: string
+): Promise<NotificationDeliveryTargetResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/targets/${encodeURIComponent(targetId)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: buildHeaders(),
+    body: JSON.stringify({ enabled, workspace_id: workspaceId }),
+  });
+  return handle<NotificationDeliveryTargetResponse>(response);
+}
+
+export async function removeNotificationDeliveryTarget(targetId: string, workspaceId: string): Promise<{ status: string }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/notifications/targets/${encodeURIComponent(targetId)}`);
+  if (workspaceId) {
+    url.searchParams.set("workspace_id", workspaceId);
+  }
+  const response = await apiFetch(url.toString(), {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return handle<{ status: string }>(response);
+}
+
+export async function getNotificationDeliveryPreference(
+  sourceAppKey = "",
+  workspaceId = ""
+): Promise<NotificationDeliveryPreferenceResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const url = new URL(`${apiBaseUrl}/xyn/api/notifications/preferences`);
+  if (sourceAppKey.trim()) {
+    url.searchParams.set("source_app_key", sourceAppKey.trim());
+  }
+  if (workspaceId) {
+    url.searchParams.set("workspace_id", workspaceId);
+  }
+  const response = await apiFetch(url.toString(), { credentials: "include" });
+  return handle<NotificationDeliveryPreferenceResponse>(response);
+}
+
+export async function setNotificationDeliveryPreference(payload: {
+  source_app_key?: string;
+  in_app_enabled: boolean;
+  email_enabled: boolean;
+  workspace_id: string;
+}): Promise<NotificationDeliveryPreferenceResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/notifications/preferences`, {
+    method: "PUT",
+    credentials: "include",
+    headers: buildHeaders(),
+    body: JSON.stringify(payload),
+  });
+  return handle<NotificationDeliveryPreferenceResponse>(response);
 }

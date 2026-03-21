@@ -3,6 +3,7 @@ import uuid
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from django.test import RequestFactory, TestCase
 
 from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
@@ -18,6 +19,8 @@ from xyn_orchestrator.portfolio_intelligence import (
 from xyn_orchestrator.models import (
     Application,
     ApplicationPlan,
+    Campaign,
+    CampaignType,
     CoordinationEvent,
     CoordinationThread,
     DevTask,
@@ -33,6 +36,9 @@ from xyn_orchestrator.xyn_api import (
     application_plan_apply,
     application_plan_detail,
     application_plans_collection,
+    campaign_detail,
+    campaign_types_collection,
+    campaigns_collection,
     composer_state,
     goal_decompose,
     goal_detail,
@@ -128,7 +134,401 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(valid_goal_transition("decomposed", "in_progress"))
         self.assertFalse(valid_goal_transition("completed", "in_progress"))
 
-    def test_real_estate_goal_decomposition_is_deterministic_and_mvp_first(self):
+    def test_campaign_can_be_created_listed_and_updated(self):
+        create_request = self._request(
+            "/xyn/api/campaigns",
+            method="post",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "name": "Q2 Launch",
+                    "campaign_type": "generic",
+                    "description": "Baseline launch campaign",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_response = campaigns_collection(create_request)
+        self.assertEqual(create_response.status_code, 201)
+        created = json.loads(create_response.content)
+        self.assertEqual(created["name"], "Q2 Launch")
+        self.assertEqual(created["campaign_type"], "generic")
+        self.assertEqual(created["status"], "draft")
+        self.assertEqual(created["slug"], "q2-launch")
+
+        list_request = self._request("/xyn/api/campaigns", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            list_response = campaigns_collection(list_request)
+        listing = json.loads(list_response.content)
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(len(listing["campaigns"]), 1)
+        self.assertEqual(listing["campaigns"][0]["id"], created["id"])
+
+        detail_request = self._request(
+            f"/xyn/api/campaigns/{created['id']}",
+            method="patch",
+            data=json.dumps({"workspace_id": str(self.workspace.id), "status": "active", "description": "Updated description"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            detail_response = campaign_detail(detail_request, str(created["id"]))
+        updated = json.loads(detail_response.content)
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(updated["status"], "active")
+        self.assertEqual(updated["description"], "Updated description")
+
+    def test_campaign_listing_is_workspace_scoped(self):
+        other_workspace = Workspace.objects.create(name="Other Workspace", slug=f"other-workspace-{uuid.uuid4().hex[:8]}")
+        WorkspaceMembership.objects.create(
+            workspace=other_workspace,
+            user_identity=self.identity,
+            role="admin",
+            termination_authority=True,
+        )
+        Campaign.objects.create(
+            workspace=self.workspace,
+            slug="primary-campaign",
+            name="Primary Campaign",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+        Campaign.objects.create(
+            workspace=other_workspace,
+            slug="other-campaign",
+            name="Other Campaign",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+        request = self._request("/xyn/api/campaigns", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = campaigns_collection(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["name"] for row in payload["campaigns"]], ["Primary Campaign"])
+
+    def test_campaign_type_catalog_includes_generic_and_enabled_extensions(self):
+        CampaignType.objects.create(
+            key="global_marketing",
+            label="Global Marketing",
+            description="Global extension type",
+            enabled=True,
+        )
+        CampaignType.objects.create(
+            workspace=self.workspace,
+            key="workspace_ops",
+            label="Workspace Ops",
+            description="Workspace extension type",
+            enabled=True,
+        )
+        CampaignType.objects.create(
+            workspace=self.workspace,
+            key="disabled_type",
+            label="Disabled Type",
+            description="Should be filtered",
+            enabled=False,
+        )
+        request = self._request("/xyn/api/campaign-types", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = campaign_types_collection(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        keys = {row["key"] for row in payload["campaign_types"]}
+        self.assertIn("generic", keys)
+        self.assertIn("global_marketing", keys)
+        self.assertIn("workspace_ops", keys)
+        self.assertNotIn("disabled_type", keys)
+
+    def test_campaign_model_enforces_workspace_slug_uniqueness(self):
+        Campaign.objects.create(
+            workspace=self.workspace,
+            slug="shared-slug",
+            name="One",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+        with self.assertRaises(IntegrityError):
+            Campaign.objects.create(
+                workspace=self.workspace,
+                slug="shared-slug",
+                name="Two",
+                campaign_type="generic",
+                status="draft",
+                created_by=self.identity,
+            )
+
+    def test_campaign_model_allows_same_slug_in_different_workspaces(self):
+        other_workspace = Workspace.objects.create(name="Alt Workspace", slug=f"alt-workspace-{uuid.uuid4().hex[:8]}")
+        Campaign.objects.create(
+            workspace=self.workspace,
+            slug="shared-slug",
+            name="Primary Workspace Campaign",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+        Campaign.objects.create(
+            workspace=other_workspace,
+            slug="shared-slug",
+            name="Secondary Workspace Campaign",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+        self.assertEqual(Campaign.objects.filter(slug="shared-slug").count(), 2)
+
+    def test_campaign_list_supports_status_type_and_archived_filters(self):
+        CampaignType.objects.create(workspace=self.workspace, key="workspace_ops", label="Workspace Ops", enabled=True)
+        Campaign.objects.create(
+            workspace=self.workspace,
+            slug="draft-generic",
+            name="Draft Generic",
+            campaign_type="generic",
+            status="draft",
+            archived=False,
+            created_by=self.identity,
+        )
+        Campaign.objects.create(
+            workspace=self.workspace,
+            slug="active-ops",
+            name="Active Ops",
+            campaign_type="workspace_ops",
+            status="active",
+            archived=False,
+            created_by=self.identity,
+        )
+        Campaign.objects.create(
+            workspace=self.workspace,
+            slug="archived-generic",
+            name="Archived Generic",
+            campaign_type="generic",
+            status="completed",
+            archived=True,
+            created_by=self.identity,
+        )
+
+        request_default = self._request("/xyn/api/campaigns", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response_default = campaigns_collection(request_default)
+        payload_default = json.loads(response_default.content)
+        self.assertEqual(response_default.status_code, 200)
+        self.assertEqual(len(payload_default["campaigns"]), 2)
+        self.assertEqual({row["name"] for row in payload_default["campaigns"]}, {"Draft Generic", "Active Ops"})
+        self.assertTrue(any(row["key"] == "generic" for row in payload_default["campaign_types"]))
+
+        request_status = self._request("/xyn/api/campaigns", data={"workspace_id": str(self.workspace.id), "status": "active"})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response_status = campaigns_collection(request_status)
+        payload_status = json.loads(response_status.content)
+        self.assertEqual(response_status.status_code, 200)
+        self.assertEqual(len(payload_status["campaigns"]), 1)
+        self.assertEqual(payload_status["campaigns"][0]["status"], "active")
+
+        request_type = self._request("/xyn/api/campaigns", data={"workspace_id": str(self.workspace.id), "campaign_type": "workspace_ops"})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response_type = campaigns_collection(request_type)
+        payload_type = json.loads(response_type.content)
+        self.assertEqual(response_type.status_code, 200)
+        self.assertEqual(len(payload_type["campaigns"]), 1)
+        self.assertEqual(payload_type["campaigns"][0]["campaign_type"], "workspace_ops")
+
+        request_archived = self._request("/xyn/api/campaigns", data={"workspace_id": str(self.workspace.id), "include_archived": "true"})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response_archived = campaigns_collection(request_archived)
+        payload_archived = json.loads(response_archived.content)
+        self.assertEqual(response_archived.status_code, 200)
+        self.assertEqual(len(payload_archived["campaigns"]), 3)
+        self.assertTrue(any(row["archived"] for row in payload_archived["campaigns"]))
+
+    def test_campaign_create_defaults_to_generic_when_campaign_type_omitted(self):
+        request = self._request(
+            "/xyn/api/campaigns",
+            method="post",
+            data=json.dumps({"workspace_id": str(self.workspace.id), "name": "Generic Default"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = campaigns_collection(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(payload["campaign_type"], "generic")
+
+    def test_campaign_create_rejects_invalid_campaign_type(self):
+        request = self._request(
+            "/xyn/api/campaigns",
+            method="post",
+            data=json.dumps(
+                {"workspace_id": str(self.workspace.id), "name": "Invalid Type", "campaign_type": "not_registered"}
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = campaigns_collection(request)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("campaign_type", json.loads(response.content).get("error", ""))
+
+    def test_campaign_collection_rejects_inaccessible_workspace(self):
+        other_workspace = Workspace.objects.create(name="Restricted Workspace", slug=f"restricted-{uuid.uuid4().hex[:8]}")
+        request = self._request("/xyn/api/campaigns", data={"workspace_id": str(other_workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = campaigns_collection(request)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(json.loads(response.content)["error"], "forbidden")
+
+    def test_campaign_detail_read_and_patch_enforce_workspace_membership(self):
+        campaign = Campaign.objects.create(
+            workspace=self.workspace,
+            slug="workspace-campaign",
+            name="Workspace Campaign",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+        foreign_identity = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject=f"foreign-{uuid.uuid4().hex[:8]}",
+            email=f"foreign-{uuid.uuid4().hex[:8]}@example.com",
+        )
+
+        get_request = self._request(f"/xyn/api/campaigns/{campaign.id}", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            get_response = campaign_detail(get_request, str(campaign.id))
+        self.assertEqual(get_response.status_code, 200)
+
+        forbidden_get_request = self._request(f"/xyn/api/campaigns/{campaign.id}", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=foreign_identity):
+            forbidden_get_response = campaign_detail(forbidden_get_request, str(campaign.id))
+        self.assertEqual(forbidden_get_response.status_code, 403)
+
+        forbidden_patch_request = self._request(
+            f"/xyn/api/campaigns/{campaign.id}",
+            method="patch",
+            data=json.dumps({"workspace_id": str(self.workspace.id), "status": "active"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=foreign_identity):
+            forbidden_patch_response = campaign_detail(forbidden_patch_request, str(campaign.id))
+        self.assertEqual(forbidden_patch_response.status_code, 403)
+
+    def test_campaign_detail_rejects_workspace_context_mismatch(self):
+        other_workspace = Workspace.objects.create(name="Context Workspace", slug=f"context-ws-{uuid.uuid4().hex[:8]}")
+        WorkspaceMembership.objects.create(
+            workspace=other_workspace,
+            user_identity=self.identity,
+            role="admin",
+            termination_authority=True,
+        )
+        campaign = Campaign.objects.create(
+            workspace=self.workspace,
+            slug="context-campaign",
+            name="Context Campaign",
+            campaign_type="generic",
+            status="draft",
+            created_by=self.identity,
+        )
+
+        get_request = self._request(
+            f"/xyn/api/campaigns/{campaign.id}",
+            data={"workspace_id": str(other_workspace.id)},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            get_response = campaign_detail(get_request, str(campaign.id))
+        self.assertEqual(get_response.status_code, 404)
+
+        patch_request = self._request(
+            f"/xyn/api/campaigns/{campaign.id}",
+            method="patch",
+            data=json.dumps({"workspace_id": str(other_workspace.id), "status": "active"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            patch_response = campaign_detail(patch_request, str(campaign.id))
+        self.assertEqual(patch_response.status_code, 404)
+
+    def test_campaign_patch_supports_mutations_and_slug_conflict_validation(self):
+        CampaignType.objects.create(workspace=self.workspace, key="workspace_ops", label="Workspace Ops", enabled=True)
+        primary = Campaign.objects.create(
+            workspace=self.workspace,
+            slug="alpha",
+            name="Alpha",
+            campaign_type="generic",
+            status="draft",
+            archived=False,
+            created_by=self.identity,
+        )
+        Campaign.objects.create(
+            workspace=self.workspace,
+            slug="beta",
+            name="Beta",
+            campaign_type="generic",
+            status="draft",
+            archived=False,
+            created_by=self.identity,
+        )
+
+        update_request = self._request(
+            f"/xyn/api/campaigns/{primary.id}",
+            method="patch",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "description": "Updated description",
+                    "campaign_type": "workspace_ops",
+                    "status": "active",
+                    "archived": True,
+                    "slug": "alpha-updated",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            update_response = campaign_detail(update_request, str(primary.id))
+        updated = json.loads(update_response.content)
+        self.assertEqual(update_response.status_code, 200)
+        self.assertEqual(updated["description"], "Updated description")
+        self.assertEqual(updated["campaign_type"], "workspace_ops")
+        self.assertEqual(updated["status"], "active")
+        self.assertTrue(updated["archived"])
+        self.assertEqual(updated["slug"], "alpha-updated")
+
+        conflict_request = self._request(
+            f"/xyn/api/campaigns/{primary.id}",
+            method="patch",
+            data=json.dumps({"workspace_id": str(self.workspace.id), "slug": "beta"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            conflict_response = campaign_detail(conflict_request, str(primary.id))
+        self.assertEqual(conflict_response.status_code, 409)
+        self.assertIn("slug", json.loads(conflict_response.content).get("error", ""))
+
+        invalid_type_request = self._request(
+            f"/xyn/api/campaigns/{primary.id}",
+            method="patch",
+            data=json.dumps({"workspace_id": str(self.workspace.id), "campaign_type": "does_not_exist"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            invalid_type_response = campaign_detail(invalid_type_request, str(primary.id))
+        self.assertEqual(invalid_type_response.status_code, 400)
+        self.assertIn("campaign_type", json.loads(invalid_type_response.content).get("error", ""))
+
+    def test_campaign_type_catalog_does_not_leak_workspace_specific_types(self):
+        other_workspace = Workspace.objects.create(name="Scoped Workspace", slug=f"scoped-{uuid.uuid4().hex[:8]}")
+        WorkspaceMembership.objects.create(
+            workspace=other_workspace,
+            user_identity=self.identity,
+            role="admin",
+            termination_authority=True,
+        )
+        CampaignType.objects.create(workspace=self.workspace, key="workspace_only", label="Workspace Only", enabled=True)
+        CampaignType.objects.create(workspace=other_workspace, key="other_workspace_only", label="Other Workspace Only", enabled=True)
+
+        request = self._request("/xyn/api/campaign-types", data={"workspace_id": str(self.workspace.id)})
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = campaign_types_collection(request)
+        payload = json.loads(response.content)
+        keys = {row["key"] for row in payload["campaign_types"]}
+        self.assertIn("generic", keys)
+        self.assertIn("workspace_only", keys)
+        self.assertNotIn("other_workspace_only", keys)
+
+    def test_goal_decomposition_is_deterministic_and_mvp_first(self):
         goal = Goal.objects.create(
             workspace=self.workspace,
             title="AI Real Estate Deal Finder",
@@ -143,12 +543,12 @@ class GoalPlanningTests(TestCase):
 
         self.assertEqual(plan_a.model_dump(mode="json"), plan_b.model_dump(mode="json"))
         self.assertEqual([thread.title for thread in plan_a.threads[:3]], [
-            "Listing Data Ingestion",
-            "Property Model and CRUD",
-            "Comparable Analysis",
+            "Core Domain Slice",
+            "Operational Surface",
+            "Stabilization",
         ])
-        self.assertIn("smallest vertical slice", plan_a.planning_summary.lower())
-        self.assertEqual(plan_a.work_items[0].title, "Identify the first listing source and capture the ingestion contract")
+        self.assertIn("vertical slice", plan_a.planning_summary.lower())
+        self.assertEqual(plan_a.work_items[0].title, "Define the minimum durable model for the first working slice")
 
     def test_generic_goal_decomposition_starts_with_durable_xyn_records(self):
         goal = Goal.objects.create(
@@ -183,13 +583,13 @@ class GoalPlanningTests(TestCase):
         goal.refresh_from_db()
 
         self.assertEqual(goal.planning_status, "decomposed")
-        self.assertEqual(goal.threads.count(), 6)
-        self.assertEqual(goal.work_items.count(), 8)
-        self.assertEqual(len(persisted["threads"]), 6)
-        self.assertEqual(len(persisted["work_items"]), 8)
+        self.assertEqual(goal.threads.count(), 3)
+        self.assertEqual(goal.work_items.count(), 4)
+        self.assertEqual(len(persisted["threads"]), 3)
+        self.assertEqual(len(persisted["work_items"]), 4)
         self.assertTrue(all(thread.goal_id == goal.id for thread in goal.threads.all()))
         self.assertTrue(all(task.goal_id == goal.id for task in goal.work_items.all()))
-        self.assertTrue(goal.work_items.filter(coordination_thread__title="Property Model and CRUD").exists())
+        self.assertTrue(goal.work_items.filter(coordination_thread__title="Core Domain Slice").exists())
         first_task = goal.work_items.order_by("priority", "created_at", "id").first()
         self.assertIsNotNone(first_task)
         self.assertEqual((first_task.execution_brief or {}).get("schema_version"), "v1")
@@ -404,7 +804,7 @@ class GoalPlanningTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 200)
         factory_keys = [row["key"] for row in payload["factories"]]
-        self.assertIn("ai_real_estate_deal_finder", factory_keys)
+        self.assertIn("generic_application_mvp", factory_keys)
         self.assertIn("telecom_support_operations_console", factory_keys)
         self.assertIn("reseller_portal", factory_keys)
 
@@ -431,7 +831,7 @@ class GoalPlanningTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(response.status_code, 201)
         self.assertEqual(payload["status"], "review")
-        self.assertEqual(payload["source_factory_key"], "ai_real_estate_deal_finder")
+        self.assertEqual(payload["source_factory_key"], "generic_application_mvp")
         self.assertGreaterEqual(len(payload["generated_goals"]), 1)
         self.assertEqual(Application.objects.count(), applications_before)
         self.assertEqual(Goal.objects.count(), goals_before)
@@ -547,7 +947,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Reviewable plan",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="review",
@@ -559,7 +959,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Deal finder app",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="active",
@@ -604,7 +1004,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Deal finder app",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="active",
@@ -629,7 +1029,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Reviewable plan",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="review",
@@ -721,7 +1121,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Reviewable plan",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="review",
@@ -745,7 +1145,7 @@ class GoalPlanningTests(TestCase):
             workspace=self.workspace,
             name="Deal Finder",
             summary="Deal finder app",
-            source_factory_key="ai_real_estate_deal_finder",
+            source_factory_key="generic_application_mvp",
             source_conversation_id="thread-1",
             requested_by=self.identity,
             status="active",
@@ -989,9 +1389,9 @@ class GoalPlanningTests(TestCase):
         )
         persist_goal_plan(goal, decompose_goal(goal), user=self.user)
         recommendation = recommend_next_slice(goal)
-        self.assertEqual(recommendation.thread_title, "Listing Data Ingestion")
+        self.assertEqual(recommendation.thread_title, "Core Domain Slice")
         self.assertEqual(len(recommendation.recommended_work_items), 1)
-        self.assertIn("Listing Data Ingestion", recommendation.reasoning_summary)
+        self.assertIn("Core Domain Slice", recommendation.reasoning_summary)
         self.assertIsNotNone(recommendation.queue_suggestion)
         self.assertEqual(recommendation.queue_suggestion.action_type, "queue_first_slice")
         action_types = [action.type for action in recommendation.actions]

@@ -121,6 +121,51 @@ describe("AgentActivityDrawer runtime activity", () => {
     expect(streamMocks.subscribeRuntimeEventStream).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws-1", threadId: "thread-1" }));
   });
 
+  it("renders post-execution agent resolution details when provided", async () => {
+    apiMocks.listAiActivity.mockResolvedValue({
+      items: [
+        {
+          id: "audit-1",
+          event_type: "prompt_submission",
+          status: "succeeded",
+          summary: "Created work item",
+          created_at: "2026-03-11T10:00:00Z",
+          actor_id: null,
+          agent_slug: "xyn-planner",
+          agent_name: "Claude Planning Agent",
+          purpose: "planning",
+          agent_resolution: {
+            purpose: "planning",
+            resolved_agent_id: "agent-1",
+            resolved_agent_name: "Claude Planning Agent",
+            resolution_source: "explicit",
+            fallback_agent_id: "agent-default",
+            fallback_agent_name: "Default Agent",
+            reason: "purpose 'planning' has an explicit default agent assignment",
+          },
+          provider: "anthropic",
+          model_name: "claude-sonnet",
+          artifact_id: "artifact-1",
+          artifact_type: "work_item",
+          artifact_title: "",
+          request_type: "intent.resolve",
+          prompt: "",
+          workspace_id: "ws-1",
+          draft_id: null,
+          job_id: null,
+          error: "",
+          source: "audit_log",
+        },
+      ],
+    });
+
+    render(<AgentActivityDrawer open onClose={() => {}} workspaceId="ws-1" />);
+
+    await waitFor(() => expect(apiMocks.listAiActivity).toHaveBeenCalled());
+    expect(screen.getByText("Planned with: Claude Planning Agent")).toBeInTheDocument();
+    expect(screen.getByText("Source: Explicit planning assignment")).toBeInTheDocument();
+  });
+
   it("renders compact app-operation interpretation details with key fields", async () => {
     apiMocks.listAiActivity.mockResolvedValue({
       items: [

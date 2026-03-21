@@ -32,6 +32,8 @@ cryptography>=42.0,<43.0
 openai>=1.40,<2.0
 # HTML -> Markdown conversion for migrated governed articles
 markdownify>=0.12,<1.0
+# Shapefile parser backend (Python-native)
+pyshp>=2.3,<3.0
 # Database driver
 psycopg[binary]>=3.1,<4.0
 # Production server

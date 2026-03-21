@@ -40,6 +40,11 @@ class AccessExplorerApiTests(TestCase):
         self.assertIn("permissions", payload)
         self.assertIn("roles", payload)
         self.assertIn("rolePermissions", payload)
+        self.assertIn("applicationAuthorizationModel", payload)
+        self.assertEqual(
+            payload["applicationAuthorizationModel"].get("schema_version"),
+            "xyn.application_access_model.v1",
+        )
         self.assertTrue(any(p.get("key") == "manage_users" for p in payload["permissions"]))
 
     def test_access_users_roles_and_effective_endpoints(self):

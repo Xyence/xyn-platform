@@ -531,6 +531,29 @@ class XcoThreadTests(TestCase):
         self.assertEqual(payload["status"], "dispatched")
         self.assertEqual(payload["queue_item"]["work_item_id"], "wi-selected")
 
+    def test_dev_task_dispatch_endpoint_accepts_agent_override_for_single_execution(self):
+        thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": True})
+        task = self._create_task(
+            thread,
+            work_item_id="wi-selected-override",
+            execution_brief={"schema_version": "v1", "summary": "Approved handoff"},
+            execution_brief_review_state="approved",
+            execution_policy={"require_brief_approval": True},
+        )
+        request = self._request(
+            f"/xyn/api/dev-tasks/{task.id}/dispatch",
+            method="post",
+            data=json.dumps({"workspace_id": str(self.workspace.id), "agent_override_id": "agent-override-id"}),
+        )
+        with self._auth_patches()[0], self._auth_patches()[1], mock.patch(
+            "xyn_orchestrator.xyn_api._submit_dev_task_runtime_run",
+            return_value={"run_id": "run-selected-override", "status": "queued", "work_item_id": "wi-selected-override"},
+        ) as submit_mock:
+            response = dev_task_dispatch(request, str(task.id))
+        self.assertEqual(response.status_code, 200)
+        submit_mock.assert_called_once()
+        self.assertEqual(submit_mock.call_args.kwargs.get("agent_override_id"), "agent-override-id")
+
     def test_dev_task_dispatch_endpoint_dispatches_selected_task_from_queued_thread_without_auto_resume(self):
         thread = self._create_thread(status="queued", priority="high", execution_policy={"auto_resume": False})
         task = self._create_task(

@@ -9,6 +9,8 @@ Epic I adds XCO as Xyn's durable coordination layer for thread-based execution s
 - Runtime `Run`, `Step`, and `Artifact` execute and record execution details.
 - Panels inspect those same durable coordination and runtime objects.
 
+Boundary note: this document describes the runtime/work-item seam. For new data-processing ingest/import/normalize/reconcile/rule-evaluation/dispatch run history, use orchestration (`OrchestrationRun` and related orchestration models).
+
 No execution decision should be derived only from transient conversation text or UI state once a durable work object exists.
 
 ## Durable Models

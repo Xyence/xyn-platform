@@ -15,6 +15,26 @@ describe("resolveDirectPanelOpenParams", () => {
     ).toEqual({ slug: "core.authn-jwt" });
   });
 
+  it("injects workspace context for campaign list open params", () => {
+    expect(
+      resolveDirectPanelOpenParams(
+        { panelKey: "campaign_list", params: {} },
+        "ws-1",
+      )
+    ).toEqual({
+      workspace_id: "ws-1",
+    });
+    expect(
+      resolveDirectPanelOpenParams(
+        { panelKey: "campaign_list", params: { create: true } },
+        "ws-1",
+      )
+    ).toEqual({
+      workspace_id: "ws-1",
+      create: true,
+    });
+  });
+
   it("opens generic composer in neutral workspace context", () => {
     window.localStorage.setItem(
       "xyn:composer:selected-effort:ws-1",
@@ -100,6 +120,26 @@ describe("resolvePanelCommand", () => {
     expect(resolvePanelCommand("open jobs")).toEqual({
       panelKey: "jobs_list",
       params: {},
+    });
+    expect(resolvePanelCommand("campaigns")).toEqual({
+      panelKey: "campaign_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("show campaigns")).toEqual({
+      panelKey: "campaign_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("open campaigns")).toEqual({
+      panelKey: "campaign_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("new campaign")).toEqual({
+      panelKey: "campaign_list",
+      params: { create: true },
+    });
+    expect(resolvePanelCommand("create campaign")).toEqual({
+      panelKey: "campaign_list",
+      params: { create: true },
     });
 
     expect(resolvePanelCommand("list core artifacts")).toEqual({

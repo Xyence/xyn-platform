@@ -8,6 +8,8 @@ from django.utils import timezone
 from django.utils.text import slugify
 from django_ckeditor_5.fields import CKEditor5Field
 
+from .orchestration.schedule_policy import CRON_UNSUPPORTED_MESSAGE, is_supported_schedule_kind
+
 
 class Article(models.Model):
     STATUS_CHOICES = [
@@ -1221,6 +1223,13 @@ class VideoRender(models.Model):
 
 
 class WorkflowRun(models.Model):
+    """Workflow-artifact-specific execution history.
+
+    Boundary:
+    - Intended for workflow artifact execution/event timelines.
+    - Not the canonical platform run-history substrate for new ingest/data
+      processing pipelines.
+    """
     STATUS_CHOICES = [
         ("running", "Running"),
         ("completed", "Completed"),
@@ -1802,6 +1811,13 @@ class Registry(models.Model):
 
 
 class Run(models.Model):
+    """Legacy runtime/work-item execution history model.
+
+    Boundary:
+    - Retained for existing xyn-core runtime + work-item compatibility flows.
+    - Not the default substrate for new data-processing ingest/import/reconcile
+      platform work; use OrchestrationRun for those flows.
+    """
     STATUS_CHOICES = [
         ("pending", "Pending"),
         ("running", "Running"),
@@ -2369,6 +2385,104 @@ class AuditLog(models.Model):
         return self.message[:120]
 
 
+class PlatformAuditEvent(models.Model):
+    """Canonical platform audit event for reusable actor/action/object history."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="platform_audit_events")
+    event_type = models.CharField(max_length=160, db_index=True)
+    subject_type = models.CharField(max_length=120, db_index=True)
+    subject_id = models.CharField(max_length=255, db_index=True)
+    subject_namespace = models.CharField(max_length=120, blank=True, default="")
+    subject_ref_json = models.JSONField(default=dict, blank=True)
+    actor_type = models.CharField(max_length=120, blank=True, default="")
+    actor_id = models.CharField(max_length=255, blank=True, default="")
+    actor_namespace = models.CharField(max_length=120, blank=True, default="")
+    actor_ref_json = models.JSONField(default=dict, blank=True)
+    cause_type = models.CharField(max_length=120, blank=True, default="")
+    cause_id = models.CharField(max_length=255, blank=True, default="")
+    cause_namespace = models.CharField(max_length=120, blank=True, default="")
+    cause_ref_json = models.JSONField(default=dict, blank=True)
+    summary = models.CharField(max_length=280, blank=True, default="")
+    reason = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="platform_audit_events"
+    )
+    correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_platform_audit_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "event_type", "created_at"], name="ix_platform_audit_type_time"),
+            models.Index(fields=["workspace", "subject_type", "subject_id", "created_at"], name="ix_platform_audit_subject"),
+            models.Index(fields=["workspace", "correlation_id", "created_at"], name="ix_platform_audit_corr"),
+            models.Index(fields=["workspace", "chain_id", "created_at"], name="ix_platform_audit_chain"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.event_type}:{self.subject_type}:{self.subject_id}"
+
+
+class ProvenanceLink(models.Model):
+    """Thin source->target provenance linkage for reusable object derivation tracking."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="provenance_links")
+    relationship_type = models.CharField(max_length=160, db_index=True)
+    source_type = models.CharField(max_length=120, db_index=True)
+    source_id = models.CharField(max_length=255, db_index=True)
+    source_namespace = models.CharField(max_length=120, blank=True, default="")
+    source_ref_json = models.JSONField(default=dict, blank=True)
+    target_type = models.CharField(max_length=120, db_index=True)
+    target_id = models.CharField(max_length=255, db_index=True)
+    target_namespace = models.CharField(max_length=120, blank=True, default="")
+    target_ref_json = models.JSONField(default=dict, blank=True)
+    reason = models.TextField(blank=True, default="")
+    explanation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    origin_event = models.ForeignKey(
+        PlatformAuditEvent, null=True, blank=True, on_delete=models.SET_NULL, related_name="provenance_links"
+    )
+    run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="provenance_links"
+    )
+    correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_provenance_link_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "source_type", "source_id", "created_at"], name="ix_prov_source_time"),
+            models.Index(fields=["workspace", "target_type", "target_id", "created_at"], name="ix_prov_target_time"),
+            models.Index(fields=["workspace", "relationship_type", "created_at"], name="ix_prov_relationship_time"),
+            models.Index(fields=["workspace", "correlation_id", "created_at"], name="ix_prov_corr_time"),
+            models.Index(fields=["workspace", "chain_id", "created_at"], name="ix_prov_chain_time"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.relationship_type}:{self.source_type}->{self.target_type}"
+
+
 class PlatformConfigDocument(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     version = models.PositiveIntegerField(default=1)
@@ -2667,6 +2781,205 @@ class ReportAttachment(models.Model):
         return f"{self.filename} ({self.report_id})"
 
 
+class AppNotification(models.Model):
+    CATEGORY_CHOICES = [
+        ("application", "Application"),
+        ("system", "System"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        Workspace, null=True, blank=True, on_delete=models.SET_NULL, related_name="app_notifications"
+    )
+    source_app_key = models.CharField(max_length=160, db_index=True)
+    category = models.CharField(max_length=40, choices=CATEGORY_CHOICES, default="application", db_index=True)
+    notification_type_key = models.CharField(max_length=120, db_index=True)
+    title = models.CharField(max_length=240)
+    summary = models.TextField(blank=True, default="")
+    payload_json = models.JSONField(default=dict, blank=True)
+    deep_link = models.CharField(max_length=500, blank=True, default="")
+    source_entity_type = models.CharField(max_length=120, blank=True, default="")
+    source_entity_id = models.CharField(max_length=160, blank=True, default="")
+    source_metadata_json = models.JSONField(default=dict, blank=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    created_by = models.ForeignKey(
+        UserIdentity, null=True, blank=True, on_delete=models.SET_NULL, related_name="app_notifications_created"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "source_app_key", "notification_type_key", "idempotency_key"],
+                condition=Q(workspace__isnull=False, idempotency_key__gt=""),
+                name="uniq_app_notif_workspace_idempotency",
+            ),
+            models.UniqueConstraint(
+                fields=["source_app_key", "notification_type_key", "idempotency_key"],
+                condition=Q(workspace__isnull=True, idempotency_key__gt=""),
+                name="uniq_app_notif_global_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "created_at"], name="ix_app_notif_workspace_created"),
+            models.Index(fields=["source_app_key", "notification_type_key"], name="ix_app_notif_source_type"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.source_app_key}:{self.notification_type_key}:{self.title}"
+
+
+class NotificationRecipient(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    notification = models.ForeignKey(AppNotification, on_delete=models.CASCADE, related_name="recipients")
+    recipient = models.ForeignKey(UserIdentity, on_delete=models.CASCADE, related_name="notification_recipients")
+    unread = models.BooleanField(default=True, db_index=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["notification", "recipient"],
+                name="uniq_notification_recipient",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["recipient", "unread", "created_at"], name="ix_notif_recipient_feed"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.notification_id}:{self.recipient_id}:{'unread' if self.unread else 'read'}"
+
+
+class DeliveryTarget(models.Model):
+    CHANNEL_CHOICES = [
+        ("email", "Email"),
+    ]
+    VERIFICATION_STATUS_CHOICES = [
+        ("unverified", "Unverified"),
+        ("verified", "Verified"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(UserIdentity, on_delete=models.CASCADE, related_name="delivery_targets")
+    channel = models.CharField(max_length=40, choices=CHANNEL_CHOICES, default="email", db_index=True)
+    address = models.CharField(max_length=320)
+    enabled = models.BooleanField(default=True, db_index=True)
+    verification_status = models.CharField(
+        max_length=40, choices=VERIFICATION_STATUS_CHOICES, default="unverified", db_index=True
+    )
+    is_primary = models.BooleanField(default=False)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-is_primary", "-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "channel", "address"],
+                name="uniq_delivery_target_owner_channel_address",
+            ),
+            models.UniqueConstraint(
+                fields=["owner", "channel"],
+                condition=Q(is_primary=True),
+                name="uniq_primary_delivery_target_owner_channel",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["owner", "channel", "enabled"], name="ix_dlv_tgt_owner_chan_en"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.owner_id}:{self.channel}:{self.address}"
+
+
+class DeliveryPreference(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(UserIdentity, on_delete=models.CASCADE, related_name="delivery_preferences")
+    workspace = models.ForeignKey(
+        Workspace, null=True, blank=True, on_delete=models.CASCADE, related_name="delivery_preferences"
+    )
+    source_app_key = models.CharField(max_length=160, blank=True, default="")
+    notification_type_key = models.CharField(max_length=120, blank=True, default="")
+    in_app_enabled = models.BooleanField(default=True)
+    email_enabled = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["owner", "workspace", "source_app_key", "notification_type_key"],
+                condition=Q(workspace__isnull=False),
+                name="uniq_delivery_pref_owner_workspace_scope",
+            ),
+            models.UniqueConstraint(
+                fields=["owner", "source_app_key", "notification_type_key"],
+                condition=Q(workspace__isnull=True),
+                name="uniq_delivery_pref_owner_global_scope",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["owner", "workspace"], name="ix_dlv_pref_owner_ws"),
+            models.Index(fields=["owner", "source_app_key"], name="ix_dlv_pref_owner_src"),
+        ]
+
+    def __str__(self) -> str:
+        scope = str(self.workspace_id) if self.workspace_id else "global"
+        return f"{self.owner_id}:{scope}:{self.source_app_key}:{self.notification_type_key}"
+
+
+class DeliveryAttempt(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("delivered", "Delivered"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    notification = models.ForeignKey(AppNotification, on_delete=models.CASCADE, related_name="delivery_attempts")
+    recipient = models.ForeignKey(
+        NotificationRecipient, null=True, blank=True, on_delete=models.SET_NULL, related_name="delivery_attempts"
+    )
+    target = models.ForeignKey(DeliveryTarget, null=True, blank=True, on_delete=models.SET_NULL, related_name="delivery_attempts")
+    channel = models.CharField(max_length=40, choices=DeliveryTarget.CHANNEL_CHOICES, default="email", db_index=True)
+    status = models.CharField(max_length=40, choices=STATUS_CHOICES, default="pending", db_index=True)
+    retry_count = models.PositiveIntegerField(default=0)
+    dispatch_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    provider_name = models.CharField(max_length=120, blank=True, default="")
+    provider_message_id = models.CharField(max_length=240, blank=True, default="")
+    error_text = models.TextField(blank=True, default="")
+    error_details_json = models.JSONField(null=True, blank=True)
+    attempted_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-attempted_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dispatch_key"],
+                condition=Q(dispatch_key__gt=""),
+                name="uniq_delivery_attempt_dispatch_key",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["notification", "status", "attempted_at"], name="ix_dlv_attempt_notif_st"),
+            models.Index(fields=["target", "status", "attempted_at"], name="ix_dlv_attempt_tgt_st"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.notification_id}:{self.channel}:{self.status}:{self.retry_count}"
+
+
 class CoordinationThread(models.Model):
     STATUS_CHOICES = [
         ("active", "Active"),
@@ -2720,6 +3033,1547 @@ class CoordinationEvent(models.Model):
 
     def __str__(self) -> str:
         return f"{self.thread_id}:{self.event_type}"
+
+
+class CampaignType(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", null=True, blank=True, on_delete=models.CASCADE, related_name="campaign_types")
+    key = models.CharField(max_length=120)
+    label = models.CharField(max_length=160)
+    description = models.TextField(blank=True)
+    icon = models.CharField(max_length=80, blank=True, default="")
+    enabled = models.BooleanField(default=True, db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["label", "key"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="uniq_campaign_type_workspace_key"),
+            models.UniqueConstraint(
+                fields=["key"],
+                condition=Q(workspace__isnull=True),
+                name="uniq_campaign_type_global_key",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return self.label or self.key
+
+
+class Campaign(models.Model):
+    STATUS_CHOICES = [
+        ("draft", "Draft"),
+        ("active", "Active"),
+        ("paused", "Paused"),
+        ("completed", "Completed"),
+        ("archived", "Archived"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="campaigns")
+    slug = models.SlugField(max_length=120)
+    name = models.CharField(max_length=240)
+    campaign_type = models.CharField(max_length=120, default="generic")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
+    description = models.TextField(blank=True)
+    archived = models.BooleanField(default=False, db_index=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_campaigns"
+    )
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "slug"], name="uniq_campaign_workspace_slug"),
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class WatchDefinition(models.Model):
+    LIFECYCLE_CHOICES = [
+        ("draft", "Draft"),
+        ("active", "Active"),
+        ("paused", "Paused"),
+        ("archived", "Archived"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="watches")
+    key = models.CharField(max_length=120)
+    name = models.CharField(max_length=240)
+    target_kind = models.CharField(max_length=120, default="generic")
+    target_ref_json = models.JSONField(default=dict, blank=True)
+    filter_criteria_json = models.JSONField(default=dict, blank=True)
+    lifecycle_state = models.CharField(max_length=20, choices=LIFECYCLE_CHOICES, default="draft", db_index=True)
+    linked_campaign = models.ForeignKey(
+        Campaign, null=True, blank=True, on_delete=models.SET_NULL, related_name="linked_watches"
+    )
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_watches"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="uniq_watch_workspace_key"),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "lifecycle_state"], name="ix_watch_workspace_state"),
+            models.Index(fields=["workspace", "target_kind"], name="ix_watch_workspace_target"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.key}"
+
+
+class WatchSubscriber(models.Model):
+    SUBSCRIBER_TYPE_CHOICES = [
+        ("user_identity", "User Identity"),
+        ("delivery_target", "Delivery Target"),
+        ("external_endpoint", "External Endpoint"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    watch = models.ForeignKey(WatchDefinition, on_delete=models.CASCADE, related_name="subscribers")
+    subscriber_type = models.CharField(max_length=40, choices=SUBSCRIBER_TYPE_CHOICES, default="user_identity")
+    subscriber_ref = models.CharField(max_length=255)
+    destination_json = models.JSONField(default=dict, blank=True)
+    preferences_json = models.JSONField(default=dict, blank=True)
+    enabled = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_watch_subscribers"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["watch", "subscriber_type", "subscriber_ref"],
+                name="uniq_watch_subscriber_ref",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["watch", "enabled"], name="ix_watch_subscriber_enabled"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.watch_id}:{self.subscriber_type}:{self.subscriber_ref}"
+
+
+class WatchMatchEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="watch_match_events")
+    watch = models.ForeignKey(WatchDefinition, on_delete=models.CASCADE, related_name="match_events")
+    event_key = models.CharField(max_length=120, blank=True, default="")
+    matched = models.BooleanField(default=False, db_index=True)
+    score = models.FloatField(default=0.0)
+    reason = models.TextField(blank=True, default="")
+    explanation_json = models.JSONField(default=dict, blank=True)
+    event_ref_json = models.JSONField(default=dict, blank=True)
+    filter_snapshot_json = models.JSONField(default=dict, blank=True)
+    notification_intent_json = models.JSONField(default=dict, blank=True)
+    event_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="watch_match_events"
+    )
+    correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "watch", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_watch_match_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "watch", "created_at"], name="ix_watch_match_timeline"),
+            models.Index(fields=["workspace", "matched", "created_at"], name="ix_watch_match_workspace_state"),
+            models.Index(fields=["workspace", "correlation_id"], name="ix_watch_match_correlation"),
+            models.Index(fields=["workspace", "chain_id"], name="ix_watch_match_chain"),
+            models.Index(fields=["workspace", "event_key", "created_at"], name="ix_watch_match_event"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.watch_id}:{self.matched}:{self.id}"
+
+
+class LifecycleTransition(models.Model):
+    """Generic lifecycle transition history for platform-owned objects."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", null=True, blank=True, on_delete=models.SET_NULL, related_name="lifecycle_transitions")
+    lifecycle_name = models.CharField(max_length=128, db_index=True)
+    object_type = models.CharField(max_length=128, db_index=True)
+    object_id = models.CharField(max_length=255, db_index=True)
+    from_state = models.CharField(max_length=64, blank=True, default="")
+    to_state = models.CharField(max_length=64)
+    actor = models.CharField(max_length=255, blank=True, default="")
+    reason = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    correlation_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    run = models.ForeignKey("Run", null=True, blank=True, on_delete=models.SET_NULL, related_name="lifecycle_transitions")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "lifecycle_name"], name="ix_lifecycle_workspace_name"),
+            models.Index(fields=["workspace", "object_type", "object_id"], name="ix_lifecycle_object_lookup"),
+            models.Index(fields=["lifecycle_name", "object_type", "created_at"], name="ix_lifecycle_timeline"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.lifecycle_name}:{self.object_type}:{self.object_id}:{self.to_state}"
+
+
+class SourceConnector(models.Model):
+    """Workspace-scoped source registration and import lifecycle primitive."""
+
+    SOURCE_MODE_CHOICES = [
+        ("file_upload", "File Upload"),
+        ("remote_url", "Remote URL/File"),
+        ("api_polling", "API Polling"),
+        ("manual", "Manual"),
+    ]
+    LIFECYCLE_CHOICES = [
+        ("registered", "Registered"),
+        ("inspected", "Inspected"),
+        ("mapped", "Mapped"),
+        ("validated", "Validated"),
+        ("active", "Active"),
+        ("failing", "Failing"),
+        ("paused", "Paused"),
+    ]
+    HEALTH_CHOICES = [
+        ("unknown", "Unknown"),
+        ("healthy", "Healthy"),
+        ("warning", "Warning"),
+        ("failing", "Failing"),
+        ("paused", "Paused"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="source_connectors")
+    key = models.CharField(max_length=120)
+    name = models.CharField(max_length=240)
+    source_type = models.CharField(max_length=120, default="generic")
+    source_mode = models.CharField(max_length=20, choices=SOURCE_MODE_CHOICES, default="manual")
+    lifecycle_state = models.CharField(max_length=20, choices=LIFECYCLE_CHOICES, default="registered", db_index=True)
+    health_status = models.CharField(max_length=20, choices=HEALTH_CHOICES, default="unknown", db_index=True)
+    is_active = models.BooleanField(default=False, db_index=True)
+    refresh_cadence_seconds = models.PositiveIntegerField(default=0)
+    orchestration_pipeline_key = models.CharField(max_length=120, blank=True, default="")
+    configuration_json = models.JSONField(default=dict, blank=True)
+    governance_json = models.JSONField(default=dict, blank=True)
+    provenance_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    review_approved = models.BooleanField(default=False, db_index=True)
+    review_approved_at = models.DateTimeField(null=True, blank=True)
+    review_approved_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="approved_source_connectors"
+    )
+    last_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_connectors"
+    )
+    last_inspected_at = models.DateTimeField(null=True, blank=True)
+    last_validated_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_failure_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_failure_reason = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_source_connectors"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="uniq_source_connector_workspace_key"),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "lifecycle_state"], name="ix_source_connector_state"),
+            models.Index(fields=["workspace", "health_status"], name="ix_source_connector_health"),
+            models.Index(fields=["workspace", "source_type", "source_mode"], name="ix_source_connector_type_mode"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.key}"
+
+
+class SourceInspectionProfile(models.Model):
+    STATUS_CHOICES = [
+        ("ok", "OK"),
+        ("warning", "Warning"),
+        ("error", "Error"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_connector = models.ForeignKey(SourceConnector, on_delete=models.CASCADE, related_name="inspections")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="ok")
+    detected_format = models.CharField(max_length=80, blank=True, default="")
+    discovered_fields_json = models.JSONField(default=list, blank=True)
+    sample_metadata_json = models.JSONField(default=dict, blank=True)
+    validation_findings_json = models.JSONField(default=list, blank=True)
+    inspection_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    inspected_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_inspections"
+    )
+    inspection_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_inspections"
+    )
+    inspected_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-inspected_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source_connector", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_source_inspection_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["source_connector", "inspected_at"], name="ix_source_inspection_time"),
+            models.Index(fields=["source_connector", "status"], name="ix_source_inspection_status"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.source_connector_id}:{self.status}:{self.id}"
+
+
+class SourceMapping(models.Model):
+    STATUS_CHOICES = [
+        ("draft", "Draft"),
+        ("validated", "Validated"),
+        ("active", "Active"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_connector = models.ForeignKey(SourceConnector, on_delete=models.CASCADE, related_name="mappings")
+    version = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft", db_index=True)
+    is_current = models.BooleanField(default=True, db_index=True)
+    field_mapping_json = models.JSONField(default=dict, blank=True)
+    transformation_hints_json = models.JSONField(default=dict, blank=True)
+    validation_state_json = models.JSONField(default=dict, blank=True)
+    mapping_hash = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    validated_at = models.DateTimeField(null=True, blank=True)
+    validated_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="validated_source_mappings"
+    )
+    validation_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="source_mapping_validations"
+    )
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_source_mappings"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-version", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["source_connector", "version"], name="uniq_source_mapping_version"),
+            models.UniqueConstraint(
+                fields=["source_connector"],
+                condition=Q(is_current=True),
+                name="uniq_source_mapping_current",
+            ),
+            models.UniqueConstraint(
+                fields=["source_connector", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_source_mapping_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["source_connector", "status"], name="ix_source_mapping_status"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.source_connector_id}:v{self.version}:{self.status}"
+
+
+class OrchestrationPipeline(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="orchestration_pipelines")
+    key = models.CharField(max_length=120)
+    name = models.CharField(max_length=240)
+    description = models.TextField(blank=True)
+    version = models.CharField(max_length=40, default="v1")
+    enabled = models.BooleanField(default=True, db_index=True)
+    max_concurrency = models.PositiveIntegerField(default=1)
+    stale_run_timeout_seconds = models.PositiveIntegerField(default=3600)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="created_orchestration_pipelines"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "key"]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "key"], name="uniq_orchestration_pipeline_workspace_key"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.key} ({self.workspace_id})"
+
+
+class OrchestrationJobDefinition(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="job_definitions")
+    job_key = models.CharField(max_length=120)
+    stage_key = models.CharField(max_length=80)
+    name = models.CharField(max_length=240)
+    description = models.TextField(blank=True)
+    handler_key = models.CharField(max_length=160)
+    enabled = models.BooleanField(default=True, db_index=True)
+    only_if_upstream_changed = models.BooleanField(default=False)
+    runs_per_jurisdiction = models.BooleanField(default=False)
+    runs_per_source = models.BooleanField(default=False)
+    concurrency_limit = models.PositiveIntegerField(default=1)
+    retry_max_attempts = models.PositiveIntegerField(default=3)
+    backoff_initial_seconds = models.PositiveIntegerField(default=30)
+    backoff_max_seconds = models.PositiveIntegerField(default=1800)
+    backoff_multiplier = models.FloatField(default=2.0)
+    produces_artifact = models.BooleanField(default=False)
+    artifact_kind = models.CharField(max_length=120, blank=True, default="")
+    schedule_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["stage_key", "job_key"]
+        constraints = [
+            models.UniqueConstraint(fields=["pipeline", "job_key"], name="uniq_orchestration_job_definition_key"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pipeline_id}:{self.job_key}"
+
+
+class OrchestrationJobSchedule(models.Model):
+    SCHEDULE_KIND_CHOICES = [
+        ("manual", "Manual"),
+        ("interval", "Interval"),
+        ("cron", "Cron"),
+        ("event", "Event"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    job_definition = models.ForeignKey(
+        OrchestrationJobDefinition, on_delete=models.CASCADE, related_name="schedules"
+    )
+    schedule_key = models.CharField(max_length=120)
+    schedule_kind = models.CharField(max_length=20, choices=SCHEDULE_KIND_CHOICES, default="manual")
+    enabled = models.BooleanField(default=True, db_index=True)
+    cron_expression = models.CharField(max_length=120, blank=True, default="")
+    interval_seconds = models.PositiveIntegerField(default=0)
+    timezone_name = models.CharField(max_length=80, blank=True, default="UTC")
+    next_fire_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    last_fired_at = models.DateTimeField(null=True, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["schedule_key", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job_definition", "schedule_key"],
+                name="uniq_orchestration_job_schedule_key",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["enabled", "next_fire_at"], name="ix_orch_job_sched_poll"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.job_definition_id}:{self.schedule_key}"
+
+    def clean(self) -> None:
+        super().clean()
+        kind = str(self.schedule_kind or "").strip()
+        if not is_supported_schedule_kind(kind):
+            if kind == "cron":
+                raise ValidationError({"schedule_kind": CRON_UNSUPPORTED_MESSAGE})
+            raise ValidationError({"schedule_kind": f"Unsupported schedule_kind '{kind}' in orchestration v1."})
+        if kind == "interval":
+            if int(self.interval_seconds or 0) <= 0:
+                raise ValidationError({"interval_seconds": "interval_seconds must be > 0 for interval schedules."})
+            if not self.next_fire_at and bool(self.enabled):
+                raise ValidationError({"next_fire_at": "next_fire_at is required for enabled interval schedules."})
+            if str(self.cron_expression or "").strip():
+                raise ValidationError({"cron_expression": "cron_expression must be empty for interval schedules."})
+        elif kind in {"manual", "event"}:
+            if int(self.interval_seconds or 0) > 0:
+                raise ValidationError({"interval_seconds": "interval_seconds is only valid for interval schedules."})
+            if str(self.cron_expression or "").strip():
+                raise ValidationError({"cron_expression": "cron_expression is not supported in orchestration v1."})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class OrchestrationJobDependency(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="job_dependencies")
+    upstream_job = models.ForeignKey(
+        OrchestrationJobDefinition, on_delete=models.CASCADE, related_name="downstream_dependencies"
+    )
+    downstream_job = models.ForeignKey(
+        OrchestrationJobDefinition, on_delete=models.CASCADE, related_name="upstream_dependencies"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["pipeline", "upstream_job", "downstream_job"],
+                name="uniq_orchestration_job_dependency",
+            ),
+            models.CheckConstraint(
+                check=~Q(upstream_job=models.F("downstream_job")),
+                name="check_orchestration_dependency_not_self",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["pipeline", "downstream_job"], name="ix_orch_dependency_downstream"),
+            models.Index(fields=["pipeline", "upstream_job"], name="ix_orch_dependency_upstream"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.upstream_job_id}->{self.downstream_job_id}"
+
+
+class OrchestrationRun(models.Model):
+    """Canonical durable run-history record for new data-processing workflows.
+
+    Boundary:
+    - Use for new platform/app ingest, import, normalize, reconcile,
+      rule-evaluation, and notification-dispatch orchestration flows.
+    - Complements (does not replace) legacy runtime/work-item and workflow
+      subsystem run-history models.
+    """
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("queued", "Queued"),
+        ("running", "Running"),
+        ("succeeded", "Succeeded"),
+        ("failed", "Failed"),
+        ("cancelled", "Cancelled"),
+        ("stale", "Stale"),
+        ("skipped", "Skipped"),
+    ]
+    TRIGGER_CHOICES = [
+        ("scheduled", "Scheduled"),
+        ("upstream_change", "Upstream Change"),
+        ("manual", "Manual"),
+        ("retry", "Retry"),
+        ("backfill", "Backfill"),
+        ("system", "System"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="orchestration_runs")
+    pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="runs")
+    run_type = models.CharField(max_length=80, default="data_pipeline", db_index=True)
+    target_ref_json = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True)
+    trigger_cause = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default="manual", db_index=True)
+    trigger_key = models.CharField(max_length=120, blank=True, default="")
+    correlation_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=160, blank=True, default="")
+    dedupe_key = models.CharField(max_length=160, blank=True, default="")
+    initiated_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="orchestration_runs"
+    )
+    rerun_of = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.SET_NULL, related_name="rerun_children"
+    )
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    metrics_json = models.JSONField(default=dict, blank=True)
+    summary = models.CharField(max_length=240, blank=True, default="")
+    error_text = models.TextField(blank=True, default="")
+    error_details_json = models.JSONField(null=True, blank=True)
+    queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    stale_deadline_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    stale_at = models.DateTimeField(null=True, blank=True)
+    stale_reason = models.CharField(max_length=120, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "pipeline", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_orch_run_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "pipeline", "status"], name="ix_orch_run_ws_pipeline_status"),
+            models.Index(fields=["workspace", "created_at"], name="ix_orch_run_ws_created"),
+            models.Index(fields=["workspace", "status", "queued_at"], name="ix_orch_run_scheduler_poll"),
+            models.Index(fields=["workspace", "run_type", "created_at"], name="ix_orch_run_type_time"),
+            models.Index(fields=["workspace", "trigger_cause", "created_at"], name="ix_orch_run_trigger_time"),
+            models.Index(fields=["workspace", "correlation_id", "created_at"], name="ix_orch_run_corr_time"),
+            models.Index(fields=["workspace", "chain_id", "created_at"], name="ix_orch_run_chain_time"),
+            models.Index(fields=["workspace", "scope_jurisdiction", "scope_source", "status"], name="ix_orch_run_partition_status"),
+            models.Index(fields=["pipeline", "stale_deadline_at", "status"], name="ix_orch_run_stale_poll"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pipeline_id}:{self.status}:{self.id}"
+
+
+class OrchestrationJobRun(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("queued", "Queued"),
+        ("running", "Running"),
+        ("succeeded", "Succeeded"),
+        ("failed", "Failed"),
+        ("skipped", "Skipped"),
+        ("cancelled", "Cancelled"),
+        ("stale", "Stale"),
+        ("waiting_retry", "Waiting Retry"),
+    ]
+    TRIGGER_CHOICES = [
+        ("scheduled", "Scheduled"),
+        ("upstream_change", "Upstream Change"),
+        ("manual", "Manual"),
+        ("retry", "Retry"),
+        ("backfill", "Backfill"),
+        ("system", "System"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="orchestration_job_runs")
+    pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="job_runs")
+    run = models.ForeignKey(OrchestrationRun, on_delete=models.CASCADE, related_name="job_runs")
+    job_definition = models.ForeignKey(
+        OrchestrationJobDefinition, on_delete=models.CASCADE, related_name="job_runs"
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="queued", db_index=True)
+    trigger_cause = models.CharField(max_length=20, choices=TRIGGER_CHOICES, default="manual", db_index=True)
+    trigger_key = models.CharField(max_length=120, blank=True, default="")
+    correlation_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=160, blank=True, default="")
+    dedupe_key = models.CharField(max_length=160, blank=True, default="")
+    attempt_count = models.PositiveIntegerField(default=0)
+    max_attempts = models.PositiveIntegerField(default=1)
+    next_attempt_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    upstream_changed = models.BooleanField(default=False)
+    skipped_reason = models.CharField(max_length=240, blank=True, default="")
+    summary = models.CharField(max_length=240, blank=True, default="")
+    error_text = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    metrics_json = models.JSONField(default=dict, blank=True)
+    error_details_json = models.JSONField(null=True, blank=True)
+    output_change_token = models.CharField(max_length=160, blank=True, default="")
+    queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    stale_deadline_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    stale_at = models.DateTimeField(null=True, blank=True)
+    stale_reason = models.CharField(max_length=120, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["run", "job_definition"], name="uniq_orchestration_job_run_per_run"),
+            models.UniqueConstraint(
+                fields=["workspace", "job_definition", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_orch_job_run_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["run", "status"], name="ix_orch_job_run_run_status"),
+            models.Index(fields=["status", "next_attempt_at"], name="ix_orch_job_run_status_retry"),
+            models.Index(fields=["job_definition", "status", "created_at"], name="ix_orch_job_run_job_status"),
+            models.Index(fields=["workspace", "pipeline", "status", "next_attempt_at"], name="ix_orch_job_run_poll"),
+            models.Index(fields=["workspace", "scope_jurisdiction", "scope_source", "status"], name="ix_orch_jrun_part_status"),
+            models.Index(fields=["workspace", "correlation_id", "created_at"], name="ix_orch_job_run_corr_time"),
+            models.Index(fields=["workspace", "chain_id", "created_at"], name="ix_orch_job_run_chain_time"),
+            models.Index(fields=["job_definition", "scope_jurisdiction", "scope_source"], name="ix_orch_job_run_job_partition"),
+            models.Index(fields=["pipeline", "stale_deadline_at", "status"], name="ix_orch_job_run_stale_poll"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.run_id}:{self.job_definition_id}:{self.status}"
+
+
+class OrchestrationJobRunAttempt(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("queued", "Queued"),
+        ("running", "Running"),
+        ("succeeded", "Succeeded"),
+        ("failed", "Failed"),
+        ("skipped", "Skipped"),
+        ("cancelled", "Cancelled"),
+        ("stale", "Stale"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    job_run = models.ForeignKey(OrchestrationJobRun, on_delete=models.CASCADE, related_name="attempts")
+    attempt_number = models.PositiveIntegerField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending", db_index=True)
+    executor_key = models.CharField(max_length=120, blank=True, default="")
+    summary = models.CharField(max_length=240, blank=True, default="")
+    error_text = models.TextField(blank=True, default="")
+    error_details_json = models.JSONField(null=True, blank=True)
+    metrics_json = models.JSONField(default=dict, blank=True)
+    output_json = models.JSONField(default=dict, blank=True)
+    retryable = models.BooleanField(default=False)
+    queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    stale_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["attempt_number", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job_run", "attempt_number"],
+                name="uniq_orch_job_run_attempt_number",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["job_run", "status"], name="ix_orch_attempt_job_status"),
+            models.Index(fields=["status", "queued_at"], name="ix_orch_attempt_sched_poll"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.job_run_id}:attempt:{self.attempt_number}"
+
+
+class OrchestrationJobRunOutput(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    job_run = models.ForeignKey(OrchestrationJobRun, on_delete=models.CASCADE, related_name="outputs")
+    attempt = models.ForeignKey(
+        OrchestrationJobRunAttempt, null=True, blank=True, on_delete=models.SET_NULL, related_name="outputs"
+    )
+    output_key = models.CharField(max_length=120)
+    output_type = models.CharField(max_length=80, default="generic")
+    output_uri = models.TextField(blank=True, default="")
+    output_change_token = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    artifact = models.ForeignKey(
+        "Artifact", null=True, blank=True, on_delete=models.SET_NULL, related_name="orchestration_job_outputs"
+    )
+    metadata_json = models.JSONField(default=dict, blank=True)
+    payload_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job_run", "output_key"],
+                name="uniq_orch_job_run_output_key",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["job_run", "created_at"], name="ix_orch_output_job_time"),
+            models.Index(fields=["output_type", "created_at"], name="ix_orch_output_type_time"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.job_run_id}:{self.output_key}"
+
+
+class OrchestrationStagePublication(models.Model):
+    """Durable domain-stage publication marker for changed-data workflows."""
+
+    STAGE_STATE_CHOICES = [
+        ("completed", "Completed"),
+        ("published", "Published"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="orchestration_stage_publications")
+    pipeline = models.ForeignKey(OrchestrationPipeline, on_delete=models.CASCADE, related_name="stage_publications")
+    run = models.ForeignKey(OrchestrationRun, on_delete=models.CASCADE, related_name="stage_publications")
+    job_run = models.OneToOneField(
+        OrchestrationJobRun,
+        on_delete=models.CASCADE,
+        related_name="stage_publication",
+    )
+    stage_key = models.CharField(max_length=80, db_index=True)
+    stage_state = models.CharField(max_length=20, choices=STAGE_STATE_CHOICES, default="completed", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    normalized_snapshot_ref = models.TextField(blank=True, default="")
+    normalized_change_token = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    signal_set_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    publication_metadata_json = models.JSONField(default=dict, blank=True)
+    published_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-published_at", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "pipeline", "stage_key", "run", "scope_jurisdiction", "scope_source", "job_run"],
+                name="uniq_orch_stage_pub_job",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["workspace", "pipeline", "stage_key", "scope_jurisdiction", "scope_source", "published_at"],
+                name="ix_orch_stage_pub_partition",
+            ),
+            models.Index(
+                fields=["workspace", "stage_key", "published_at"],
+                name="ix_orch_stage_pub_ws_stage",
+            ),
+            models.Index(
+                fields=["workspace", "reconciled_state_version", "published_at"],
+                name="ix_orch_stage_pub_reconciled",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.pipeline_id}:{self.stage_key}:{self.job_run_id}"
+
+
+class ReconciledStateCurrentPointer(models.Model):
+    """Atomic pointer to the current published reconciled state per scope."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="current_reconciled_pointers")
+    pipeline = models.ForeignKey(
+        OrchestrationPipeline, on_delete=models.CASCADE, related_name="current_reconciled_pointers"
+    )
+    publication = models.ForeignKey(
+        OrchestrationStagePublication,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="current_reconciled_pointers",
+    )
+    reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    promoted_at = models.DateTimeField(default=timezone.now, db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-promoted_at", "-updated_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "pipeline", "scope_jurisdiction", "scope_source"],
+                name="uniq_recon_ptr_scope",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["workspace", "pipeline", "scope_jurisdiction", "scope_source", "promoted_at"],
+                name="ix_recon_ptr_scope_time",
+            ),
+            models.Index(fields=["workspace", "reconciled_state_version"], name="ix_recon_ptr_version"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.pipeline_id}:{self.reconciled_state_version}"
+
+
+class IngestArtifactRecord(models.Model):
+    """Durable metadata/provenance record for ingest-related artifacts."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="ingest_artifacts")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifacts"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifacts"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifacts"
+    )
+    artifact_id = models.UUIDField(db_index=True)
+    artifact_uri = models.TextField(blank=True, default="")
+    source_url = models.TextField(blank=True, default="")
+    final_url = models.TextField(blank=True, default="")
+    original_filename = models.CharField(max_length=255, blank=True, default="")
+    response_status = models.IntegerField(null=True, blank=True)
+    etag = models.CharField(max_length=255, blank=True, default="")
+    last_modified = models.CharField(max_length=255, blank=True, default="")
+    fetched_at = models.DateTimeField(null=True, blank=True)
+    storage_provider = models.CharField(max_length=32, blank=True, default="")
+    storage_key = models.TextField(blank=True, default="")
+    content_type = models.CharField(max_length=255, blank=True, default="")
+    byte_length = models.BigIntegerField(null=True, blank=True)
+    sha256 = models.CharField(max_length=64, blank=True, default="")
+    snapshot_type = models.CharField(max_length=64, blank=True, default="")
+    retention_class = models.CharField(max_length=32, blank=True, default="")
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["workspace", "artifact_id"], name="ix_ingest_artifact_workspace"),
+            models.Index(fields=["workspace", "snapshot_type"], name="ix_ingest_artifact_snapshot"),
+            models.Index(fields=["workspace", "retention_class"], name="ix_ingest_artifact_retention"),
+            models.Index(fields=["workspace", "created_at"], name="ix_ingest_artifact_created"),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["workspace", "artifact_id"], name="uniq_ingest_artifact_workspace"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.artifact_id}"
+
+
+class IngestArtifactMember(models.Model):
+    """Durable metadata for archive members extracted from parent artifacts."""
+
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("parsed", "Parsed"),
+        ("unsupported", "Unsupported"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="ingest_artifact_members")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifact_members"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifact_members"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_artifact_members"
+    )
+    parent_artifact = models.ForeignKey(
+        "IngestArtifactRecord", on_delete=models.CASCADE, related_name="members"
+    )
+    member_artifact = models.ForeignKey(
+        "IngestArtifactRecord", null=True, blank=True, on_delete=models.SET_NULL, related_name="member_of"
+    )
+    member_path = models.TextField(blank=True, default="")
+    member_basename = models.CharField(max_length=255, blank=True, default="")
+    group_key = models.CharField(max_length=255, blank=True, default="")
+    extension = models.CharField(max_length=32, blank=True, default="")
+    classified_type = models.CharField(max_length=64, blank=True, default="")
+    byte_length = models.BigIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="pending")
+    failure_reason = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["workspace", "parent_artifact"], name="ix_ing_member_parent"),
+            models.Index(fields=["workspace", "group_key"], name="ix_ing_member_group"),
+            models.Index(fields=["workspace", "classified_type"], name="ix_ing_member_class"),
+            models.Index(fields=["workspace", "status"], name="ix_ing_member_status"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["parent_artifact", "member_path"],
+                name="uniq_ing_member_parent_path",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.parent_artifact_id}:{self.member_path}"
+
+
+class IngestParsedRecord(models.Model):
+    """Generic normalized parsed output envelope for ingestion runtimes."""
+
+    STATUS_CHOICES = [
+        ("ok", "OK"),
+        ("warning", "Warning"),
+        ("error", "Error"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="ingest_parsed_records")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="parsed_records"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_parsed_records"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_parsed_records"
+    )
+    artifact = models.ForeignKey(
+        "IngestArtifactRecord", on_delete=models.CASCADE, related_name="parsed_records"
+    )
+    member = models.ForeignKey(
+        "IngestArtifactMember", null=True, blank=True, on_delete=models.SET_NULL, related_name="parsed_records"
+    )
+    parser_name = models.CharField(max_length=120, blank=True, default="")
+    parser_version = models.CharField(max_length=64, blank=True, default="")
+    normalization_version = models.CharField(max_length=64, blank=True, default="")
+    record_index = models.IntegerField(null=True, blank=True)
+    source_payload_json = models.JSONField(default=dict, blank=True)
+    normalized_payload_json = models.JSONField(default=dict, blank=True)
+    source_schema_json = models.JSONField(default=dict, blank=True)
+    provenance_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="ok")
+    failure_reason = models.TextField(blank=True, default="")
+    idempotency_key = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["workspace", "orchestration_run"], name="ix_ing_parsed_run"),
+            models.Index(fields=["workspace", "artifact"], name="ix_ing_parsed_artifact"),
+            models.Index(fields=["workspace", "member"], name="ix_ing_parsed_member"),
+            models.Index(fields=["workspace", "parser_name"], name="ix_ing_parsed_parser"),
+            models.Index(fields=["workspace", "status"], name="ix_ing_parsed_status"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=models.Q(idempotency_key__gt=""),
+                name="uniq_ing_parsed_idempotency",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.parser_name}:{self.id}"
+
+
+class IngestAdaptedRecord(models.Model):
+    """Source-adapted intermediate record derived from parsed ingestion outputs."""
+
+    STATUS_CHOICES = [
+        ("ok", "OK"),
+        ("warning", "Warning"),
+        ("error", "Error"),
+        ("unsupported", "Unsupported"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="ingest_adapted_records")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="adapted_records"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_adapted_records"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="ingest_adapted_records"
+    )
+    artifact = models.ForeignKey(
+        "IngestArtifactRecord", on_delete=models.CASCADE, related_name="adapted_records"
+    )
+    member = models.ForeignKey(
+        "IngestArtifactMember", null=True, blank=True, on_delete=models.SET_NULL, related_name="adapted_records"
+    )
+    parsed_record = models.ForeignKey(
+        "IngestParsedRecord", null=True, blank=True, on_delete=models.SET_NULL, related_name="adapted_records"
+    )
+    adapter_name = models.CharField(max_length=120, blank=True, default="")
+    adapter_version = models.CharField(max_length=64, blank=True, default="")
+    adapter_kind = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    source_format = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    source_subtype = models.CharField(max_length=120, blank=True, default="")
+    record_index = models.IntegerField(null=True, blank=True)
+    adapted_payload_json = models.JSONField(default=dict, blank=True)
+    geometry_payload_json = models.JSONField(default=dict, blank=True)
+    field_metadata_json = models.JSONField(default=list, blank=True)
+    schema_hints_json = models.JSONField(default=dict, blank=True)
+    source_position_json = models.JSONField(default=dict, blank=True)
+    provenance_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    findings_json = models.JSONField(default=list, blank=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="ok")
+    failure_reason = models.TextField(blank=True, default="")
+    idempotency_key = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["workspace", "source_connector", "created_at"], name="ix_ing_adapted_source_time"),
+            models.Index(fields=["workspace", "orchestration_run", "created_at"], name="ix_ing_adapted_run_time"),
+            models.Index(fields=["workspace", "adapter_kind", "created_at"], name="ix_ing_adapted_kind_time"),
+            models.Index(fields=["workspace", "source_format", "created_at"], name="ix_ing_adapted_format_time"),
+            models.Index(fields=["workspace", "status", "created_at"], name="ix_ing_adapted_status_time"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=models.Q(idempotency_key__gt=""),
+                name="uniq_ing_adapted_idempotency",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.adapter_kind}:{self.id}"
+
+
+class ParcelCanonicalIdentity(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("merged", "Merged"),
+        ("inactive", "Inactive"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="parcel_identities")
+    canonical_namespace = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    canonical_value_raw = models.CharField(max_length=255, blank=True, default="")
+    canonical_value_normalized = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active", db_index=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "canonical_namespace", "canonical_value_normalized"], name="ix_parcel_canon_lookup"),
+            models.Index(fields=["workspace", "status", "created_at"], name="ix_parcel_canon_status_time"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.canonical_namespace}:{self.canonical_value_normalized or self.id}"
+
+
+class ParcelIdentifierAlias(models.Model):
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("inactive", "Inactive"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="parcel_identifier_aliases")
+    parcel = models.ForeignKey("ParcelCanonicalIdentity", on_delete=models.CASCADE, related_name="aliases")
+    namespace = models.CharField(max_length=80, db_index=True)
+    value_raw = models.CharField(max_length=255, blank=True, default="")
+    value_normalized = models.CharField(max_length=255, db_index=True)
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="parcel_identifier_aliases"
+    )
+    is_canonical = models.BooleanField(default=False, db_index=True)
+    confidence = models.FloatField(default=1.0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active", db_index=True)
+    valid_from = models.DateTimeField(null=True, blank=True)
+    valid_to = models.DateTimeField(null=True, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "namespace", "value_normalized"], name="ix_parcel_alias_lookup"),
+            models.Index(fields=["workspace", "parcel", "namespace"], name="ix_parcel_alias_parcel_ns"),
+            models.Index(fields=["workspace", "source_connector", "created_at"], name="ix_parcel_alias_source_time"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "namespace", "value_normalized", "parcel"],
+                name="uniq_parcel_alias_value_per_parcel",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "parcel", "namespace"],
+                condition=Q(is_canonical=True),
+                name="uniq_parcel_alias_canonical_per_namespace",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.namespace}:{self.value_normalized}"
+
+
+class ParcelCrosswalkMapping(models.Model):
+    STATUS_CHOICES = [
+        ("resolved", "Resolved"),
+        ("unresolved", "Unresolved"),
+        ("deferred", "Deferred"),
+        ("superseded", "Superseded"),
+    ]
+    METHOD_CHOICES = [
+        ("deterministic_identifier", "Deterministic Identifier"),
+        ("deterministic_composite", "Deterministic Composite"),
+        ("address_fallback", "Address Fallback"),
+        ("deferred_geospatial", "Deferred Geospatial"),
+        ("unresolved", "Unresolved"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="parcel_crosswalk_mappings")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="parcel_crosswalk_mappings"
+    )
+    adapted_record = models.ForeignKey(
+        "IngestAdaptedRecord", null=True, blank=True, on_delete=models.SET_NULL, related_name="parcel_crosswalk_mappings"
+    )
+    parcel = models.ForeignKey(
+        "ParcelCanonicalIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="crosswalk_mappings"
+    )
+    record_match_evaluation = models.ForeignKey(
+        "RecordMatchEvaluation", null=True, blank=True, on_delete=models.SET_NULL, related_name="parcel_crosswalk_mappings"
+    )
+    namespace = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    identifier_value_raw = models.CharField(max_length=255, blank=True, default="")
+    identifier_value_normalized = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    composite_key_normalized = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="resolved", db_index=True)
+    resolution_method = models.CharField(max_length=40, choices=METHOD_CHOICES, default="deterministic_identifier", db_index=True)
+    confidence = models.FloatField(default=0.0)
+    reason = models.TextField(blank=True, default="")
+    explanation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    valid_from = models.DateTimeField(null=True, blank=True)
+    valid_to = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "source_connector", "created_at"], name="ix_pcl_xw_src_time"),
+            models.Index(fields=["workspace", "parcel", "created_at"], name="ix_pcl_xw_par_time"),
+            models.Index(fields=["workspace", "status", "created_at"], name="ix_pcl_xw_st_time"),
+            models.Index(fields=["workspace", "resolution_method", "created_at"], name="ix_pcl_xw_mtd_time"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_parcel_crosswalk_idempotency",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.resolution_method}:{self.status}:{self.id}"
+
+
+class GeocodeEnrichmentResult(models.Model):
+    STATUS_CHOICES = [
+        ("selected", "Selected"),
+        ("no_selection", "No Selection"),
+        ("no_candidates", "No Candidates"),
+        ("invalid_input", "Invalid Input"),
+        ("provider_not_configured", "Provider Not Configured"),
+        ("provider_error", "Provider Error"),
+        ("shape_error", "Shape Error"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="geocode_enrichment_results")
+    source_connector = models.ForeignKey(
+        "SourceConnector", null=True, blank=True, on_delete=models.SET_NULL, related_name="geocode_enrichment_results"
+    )
+    orchestration_run = models.ForeignKey(
+        "OrchestrationRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="geocode_enrichment_results"
+    )
+    job_run = models.ForeignKey(
+        "OrchestrationJobRun", null=True, blank=True, on_delete=models.SET_NULL, related_name="geocode_enrichment_results"
+    )
+    adapted_record = models.ForeignKey(
+        "IngestAdaptedRecord", null=True, blank=True, on_delete=models.SET_NULL, related_name="geocode_enrichment_results"
+    )
+    provider_kind = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    provider_name = models.CharField(max_length=120, blank=True, default="")
+    provider_version = models.CharField(max_length=64, blank=True, default="")
+    provider_endpoint_url = models.TextField(blank=True, default="")
+    input_address_raw = models.TextField(blank=True, default="")
+    input_address_normalized = models.TextField(blank=True, default="", db_index=True)
+    input_address_fields_json = models.JSONField(default=dict, blank=True)
+    request_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default="no_selection", db_index=True)
+    selected_candidate = models.ForeignKey(
+        "GeocodeEnrichmentCandidate", null=True, blank=True, on_delete=models.SET_NULL, related_name="selected_by_result_sets"
+    )
+    selection_reason = models.CharField(max_length=120, blank=True, default="")
+    request_context_json = models.JSONField(default=dict, blank=True)
+    response_context_json = models.JSONField(default=dict, blank=True)
+    failure_category = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    failure_reason = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["workspace", "source_connector", "created_at"], name="ix_geo_res_src_time"),
+            models.Index(fields=["workspace", "orchestration_run", "created_at"], name="ix_geo_res_run_time"),
+            models.Index(fields=["workspace", "adapted_record", "created_at"], name="ix_geo_res_adp_time"),
+            models.Index(fields=["workspace", "provider_kind", "created_at"], name="ix_geo_res_kind_time"),
+            models.Index(fields=["workspace", "status", "created_at"], name="ix_geo_res_status_t"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_geocode_result_idempotency",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.provider_kind}:{self.status}:{self.id}"
+
+
+class GeocodeEnrichmentCandidate(models.Model):
+    STATUS_CHOICES = [
+        ("ok", "OK"),
+        ("warning", "Warning"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    result_set = models.ForeignKey(
+        "GeocodeEnrichmentResult", on_delete=models.CASCADE, related_name="candidates"
+    )
+    candidate_rank = models.PositiveIntegerField(default=1)
+    provider_score = models.FloatField(null=True, blank=True)
+    provider_confidence = models.FloatField(null=True, blank=True)
+    matched_label = models.CharField(max_length=300, blank=True, default="")
+    matched_address = models.CharField(max_length=500, blank=True, default="")
+    geometry_json = models.JSONField(default=dict, blank=True)
+    spatial_reference_json = models.JSONField(default=dict, blank=True)
+    provider_attributes_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    is_selected = models.BooleanField(default=False, db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="ok")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["candidate_rank", "created_at"]
+        indexes = [
+            models.Index(fields=["result_set", "candidate_rank"], name="ix_geo_cand_rank"),
+            models.Index(fields=["result_set", "is_selected"], name="ix_geo_cand_sel"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["result_set", "candidate_rank"],
+                name="uniq_geocode_candidate_rank",
+            ),
+            models.UniqueConstraint(
+                fields=["result_set"],
+                condition=Q(is_selected=True),
+                name="uniq_geocode_selected_candidate",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.result_set_id}:rank:{self.candidate_rank}"
+
+
+class PlatformDomainEvent(models.Model):
+    """Thin durable outbox-style domain event emitted from publication boundaries."""
+
+    EVENT_STATUS_CHOICES = [
+        ("recorded", "Recorded"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="platform_domain_events")
+    pipeline = models.ForeignKey(
+        OrchestrationPipeline,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="domain_events",
+    )
+    run = models.ForeignKey(
+        OrchestrationRun,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="domain_events",
+    )
+    job_run = models.ForeignKey(
+        OrchestrationJobRun,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="domain_events",
+    )
+    publication = models.ForeignKey(
+        OrchestrationStagePublication,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="domain_events",
+    )
+    event_type = models.CharField(max_length=120, db_index=True)
+    event_status = models.CharField(max_length=20, choices=EVENT_STATUS_CHOICES, default="recorded", db_index=True)
+    stage_key = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_source = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    subject_ref_json = models.JSONField(default=dict, blank=True)
+    payload_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    normalized_snapshot_ref = models.TextField(blank=True, default="")
+    normalized_change_token = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    signal_set_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    correlation_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_platform_domain_event_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "event_type", "created_at"], name="ix_domain_event_type_time"),
+            models.Index(
+                fields=["workspace", "stage_key", "scope_jurisdiction", "scope_source", "created_at"],
+                name="ix_domain_event_scope_time",
+            ),
+            models.Index(fields=["workspace", "pipeline", "created_at"], name="ix_domain_event_pipeline_time"),
+            models.Index(fields=["workspace", "reconciled_state_version", "created_at"], name="ix_domain_event_reconciled"),
+            models.Index(fields=["workspace", "signal_set_version", "created_at"], name="ix_domain_event_signal"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.event_type}:{self.stage_key}"
+
+
+class RecordMatchEvaluation(models.Model):
+    """Durable, explainable record matching result for platform-level reuse."""
+
+    DECISION_CHOICES = [
+        ("exact_match", "Exact Match"),
+        ("probable_match", "Probable Match"),
+        ("possible_match", "Possible Match"),
+        ("non_match", "Non Match"),
+        ("needs_review", "Needs Review"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="record_match_evaluations")
+    candidate_a_namespace = models.CharField(max_length=120)
+    candidate_a_type = models.CharField(max_length=120)
+    candidate_a_id = models.CharField(max_length=200)
+    candidate_b_namespace = models.CharField(max_length=120)
+    candidate_b_type = models.CharField(max_length=120)
+    candidate_b_id = models.CharField(max_length=200)
+    candidate_a_ref_json = models.JSONField(default=dict, blank=True)
+    candidate_b_ref_json = models.JSONField(default=dict, blank=True)
+    strategy_key = models.CharField(max_length=120, db_index=True)
+    pair_fingerprint = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    score = models.FloatField(default=0.0)
+    decision = models.CharField(max_length=24, choices=DECISION_CHOICES, default="non_match", db_index=True)
+    confidence = models.CharField(max_length=24, default="none", db_index=True)
+    explanation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    run = models.ForeignKey(
+        "OrchestrationRun",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="record_match_evaluations",
+    )
+    correlation_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    chain_id = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    extra_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_record_match_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["workspace", "decision", "created_at"],
+                name="ix_rec_match_ws_decision_time",
+            ),
+            models.Index(
+                fields=["workspace", "strategy_key", "created_at"],
+                name="ix_rec_match_ws_strategy_time",
+            ),
+            models.Index(
+                fields=["workspace", "correlation_id", "created_at"],
+                name="ix_rec_match_ws_corr_time",
+            ),
+            models.Index(
+                fields=["workspace", "chain_id", "created_at"],
+                name="ix_rec_match_ws_chain_time",
+            ),
+            models.Index(
+                fields=["workspace", "candidate_a_namespace", "candidate_a_type", "candidate_a_id"],
+                name="ix_rec_match_ws_a_ref",
+            ),
+            models.Index(
+                fields=["workspace", "candidate_b_namespace", "candidate_b_type", "candidate_b_id"],
+                name="ix_rec_match_ws_b_ref",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.strategy_key}:{self.decision}:{self.id}"
 
 
 class Goal(models.Model):

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xyence.io/schemas/provenance_link.v1.schema.json",
+  "title": "Provenance Link",
+  "type": "object",
+  "required": [
+    "id",
+    "workspace_id",
+    "relationship_type",
+    "source_type",
+    "source_id",
+    "source_ref",
+    "target_type",
+    "target_id",
+    "target_ref",
+    "created_at"
+  ],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "workspace_id": { "type": "string", "format": "uuid" },
+    "relationship_type": { "type": "string" },
+    "source_type": { "type": "string" },
+    "source_id": { "type": "string" },
+    "source_namespace": { "type": "string" },
+    "source_ref": { "type": "object", "additionalProperties": true },
+    "target_type": { "type": "string" },
+    "target_id": { "type": "string" },
+    "target_namespace": { "type": "string" },
+    "target_ref": { "type": "object", "additionalProperties": true },
+    "reason": { "type": "string" },
+    "explanation": { "type": "object", "additionalProperties": true },
+    "origin_event_id": { "type": ["string", "null"], "format": "uuid" },
+    "run_id": { "type": ["string", "null"], "format": "uuid" },
+    "correlation_id": { "type": "string" },
+    "chain_id": { "type": "string" },
+    "created_at": { "type": ["string", "null"], "format": "date-time" }
+  },
+  "additionalProperties": false
+}
