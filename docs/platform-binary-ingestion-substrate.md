@@ -184,6 +184,10 @@ Boundary:
   - explicit unsupported/not-yet-implemented status when standalone DBF tabular payload is unavailable
 - Generic JSON HTTP adapter
   - supports top-level objects/arrays and optional `configuration_json.json_adapter.record_path`
+- ArcGIS REST JSON adapter
+  - supports feature/query-style responses with `features`, `geometryType`, `spatialReference`
+  - adapts per-feature `attributes` + `geometry`
+  - surfaces deterministic outcomes for empty features, ArcGIS error payloads, and invalid feature-list shapes
 
 ### Inspection and mapping integration
 
@@ -197,3 +201,24 @@ Boundary:
 - adapter warnings/findings
 
 This keeps source inspection and mapping anchored to the adapted contract without introducing parallel source models.
+
+### ArcGIS REST JSON configuration/selection
+
+- automatic selection occurs when JSON payloads look ArcGIS-shaped:
+  - root `features` list plus ArcGIS markers (`geometryType`, `spatialReference`, `fields`, or feature `attributes`)
+  - or ArcGIS-style `error` payloads
+- explicit selection can be forced via:
+  - `SourceConnector.configuration_json.json_adapter.adapter_kind = "arcgis_rest_json"`
+- optional ArcGIS feature list path override:
+  - `SourceConnector.configuration_json.json_adapter.features_path`
+
+Supported scope for this pass is intentionally narrow:
+
+- feature/query JSON payloads
+- per-feature attributes/geometry adaptation with schema/spatial hints
+
+Out of scope:
+
+- complete ArcGIS endpoint family support
+- service metadata crawling
+- ArcGIS-specific business/domain mapping logic

@@ -255,3 +255,163 @@ class SourceAdapterServiceTests(TestCase):
         self.assertGreater(payload["adapter_preview"]["record_count"], 0)
         self.assertIn("csv", payload["adapter_preview"]["adapter_kinds"])
         self.assertIn("adapter_profile_summary", payload["sample_metadata"])
+
+    def test_arcgis_adapter_handles_standard_feature_response(self):
+        parsed = self._parsed_row(
+            parser_name="geojson_parser",
+            normalized_payload={
+                "document": {
+                    "features": [
+                        {
+                            "attributes": {"OBJECTID": 1, "name": "Alpha"},
+                            "geometry": {"x": -97.0, "y": 30.0},
+                        }
+                    ],
+                    "geometryType": "esriGeometryPoint",
+                    "spatialReference": {"wkid": 4326},
+                    "fields": [{"name": "OBJECTID", "type": "esriFieldTypeOID"}, {"name": "name", "type": "esriFieldTypeString"}],
+                }
+            },
+            provenance={"source_format": "json"},
+            source_payload={},
+            record_index=1,
+        )
+        rows = self.service.adapt_parsed_record(source_connector=self.source, parsed_row=parsed)
+        self.assertEqual(len(rows), 1)
+        adapted = rows[0]
+        self.assertEqual(adapted.adapter_kind, "arcgis_rest_json")
+        self.assertEqual(adapted.source_format, "arcgis_rest_json")
+        self.assertEqual(adapted.schema_hints_json.get("geometry_type"), "esriGeometryPoint")
+        self.assertEqual(adapted.schema_hints_json.get("wkid"), 4326)
+        self.assertEqual(adapted.adapted_payload_json.get("attributes", {}).get("name"), "Alpha")
+        self.assertEqual(adapted.geometry_payload_json.get("x"), -97.0)
+
+    def test_arcgis_adapter_supports_attributes_only_and_geometry_only_features(self):
+        attrs_only = self._parsed_row(
+            parser_name="geojson_parser",
+            normalized_payload={"document": {"features": [{"attributes": {"id": 1}}], "geometryType": "esriGeometryPoint"}},
+            provenance={"source_format": "json"},
+            source_payload={},
+            record_index=1,
+        )
+        rows = self.service.adapt_parsed_record(source_connector=self.source, parsed_row=attrs_only)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "warning")
+        warning_codes = [item.get("code") for item in rows[0].warnings_json if isinstance(item, dict)]
+        self.assertIn("adapter.arcgis.geometry_missing", warning_codes)
+
+        geom_only = self._parsed_row(
+            parser_name="geojson_parser",
+            normalized_payload={"document": {"features": [{"geometry": {"x": -97.0, "y": 30.0}}], "geometryType": "esriGeometryPoint"}},
+            provenance={"source_format": "json"},
+            source_payload={},
+            record_index=2,
+        )
+        rows = self.service.adapt_parsed_record(source_connector=self.source, parsed_row=geom_only)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "warning")
+        warning_codes = [item.get("code") for item in rows[0].warnings_json if isinstance(item, dict)]
+        self.assertIn("adapter.arcgis.attributes_missing", warning_codes)
+
+    def test_arcgis_adapter_handles_empty_feature_set(self):
+        parsed = self._parsed_row(
+            parser_name="geojson_parser",
+            normalized_payload={"document": {"features": [], "geometryType": "esriGeometryPolygon", "spatialReference": {"wkid": 3857}}},
+            provenance={"source_format": "json"},
+            source_payload={},
+            record_index=1,
+        )
+        rows = self.service.adapt_parsed_record(source_connector=self.source, parsed_row=parsed)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "warning")
+        self.assertEqual(rows[0].schema_hints_json.get("feature_count"), 0)
+        self.assertEqual(rows[0].schema_hints_json.get("wkid"), 3857)
+
+    def test_arcgis_adapter_extracts_schema_hints_and_preview_summary(self):
+        parsed = self._parsed_row(
+            parser_name="geojson_parser",
+            normalized_payload={
+                "document": {
+                    "features": [{"attributes": {"OBJECTID": 1, "zone": "A"}, "geometry": {"x": -97.0, "y": 30.0}}],
+                    "geometryType": "esriGeometryPoint",
+                    "spatialReference": {"latestWkid": 4326},
+                    "fields": [{"name": "OBJECTID", "type": "esriFieldTypeOID"}, {"name": "zone", "type": "esriFieldTypeString"}],
+                }
+            },
+            provenance={"source_format": "json"},
+            source_payload={},
+            record_index=1,
+        )
+        self.service.adapt_parsed_record(source_connector=self.source, parsed_row=parsed)
+        self.source.last_run = self.run
+        self.source.save(update_fields=["last_run"])
+        preview = self.service.preview_for_source(source_connector=self.source, run_id=str(self.run.id))
+        self.assertIn("arcgis_rest_json", preview.get("adapter_kinds", []))
+        arcgis_summary = preview.get("arcgis_summary") or {}
+        self.assertIn("esriGeometryPoint", arcgis_summary.get("geometry_types", []))
+        self.assertIn("4326", arcgis_summary.get("wkids", []))
+        self.assertGreaterEqual(arcgis_summary.get("feature_count", 0), 1)
+
+        inspection = models.SourceInspectionProfile.objects.create(
+            source_connector=self.source,
+            status="ok",
+            detected_format="json",
+            discovered_fields_json=[],
+            sample_metadata_json={"row_count": 1},
+            validation_findings_json=[],
+            inspection_run=self.run,
+        )
+        payload = serialize_source_inspection(inspection)
+        arcgis_info = payload["sample_metadata"]["adapter_profile_summary"].get("arcgis")
+        self.assertIsNotNone(arcgis_info)
+        self.assertIn("esriGeometryPoint", arcgis_info.get("geometry_types", []))
+
+    def test_arcgis_adapter_handles_arcgis_error_payload(self):
+        parsed = self._parsed_row(
+            parser_name="geojson_parser",
+            normalized_payload={"document": {"error": {"code": 400, "message": "Bad query", "details": ["bad where"]}}},
+            provenance={"source_format": "json"},
+            source_payload={},
+            record_index=1,
+        )
+        rows = self.service.adapt_parsed_record(source_connector=self.source, parsed_row=parsed)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].adapter_kind, "arcgis_rest_json")
+        self.assertEqual(rows[0].status, "error")
+        self.assertIn("Bad query", rows[0].failure_reason)
+
+    def test_arcgis_adapter_invalid_shape_is_explicit(self):
+        parsed = self._parsed_row(
+            parser_name="geojson_parser",
+            normalized_payload={"document": {"foo": "bar"}},
+            provenance={"source_format": "json"},
+            source_payload={},
+            record_index=1,
+        )
+        self.source.configuration_json = {"json_adapter": {"adapter_kind": "arcgis_rest_json"}}
+        self.source.save(update_fields=["configuration_json"])
+        rows = self.service.adapt_parsed_record(source_connector=self.source, parsed_row=parsed)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "unsupported")
+        self.assertIn("feature list", rows[0].failure_reason)
+
+    def test_registry_selection_prefers_arcgis_for_arcgis_shape_and_json_fallback_for_generic(self):
+        arcgis_parsed = self._parsed_row(
+            parser_name="geojson_parser",
+            normalized_payload={"document": {"features": [{"attributes": {"id": 1}}], "geometryType": "esriGeometryPoint"}},
+            provenance={"source_format": "json"},
+            source_payload={},
+            record_index=1,
+        )
+        arcgis_rows = self.service.adapt_parsed_record(source_connector=self.source, parsed_row=arcgis_parsed)
+        self.assertEqual(arcgis_rows[0].adapter_kind, "arcgis_rest_json")
+
+        generic_parsed = self._parsed_row(
+            parser_name="geojson_parser",
+            normalized_payload={"document": {"payload": {"items": [{"id": 10}]}}},
+            provenance={"source_format": "json"},
+            source_payload={},
+            record_index=2,
+        )
+        generic_rows = self.service.adapt_parsed_record(source_connector=self.source, parsed_row=generic_parsed)
+        self.assertEqual(generic_rows[0].adapter_kind, "json_http")

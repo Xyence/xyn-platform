@@ -370,6 +370,14 @@ def serialize_source_inspection(row: SourceInspectionProfile) -> dict[str, Any]:
             "source_formats": list(adapter_preview.get("source_formats") or []),
             "field_hint_count": len(adapter_preview.get("field_hints") or []),
         }
+        arcgis_summary = adapter_preview.get("arcgis_summary")
+        if isinstance(arcgis_summary, dict) and arcgis_summary:
+            enriched_metadata["adapter_profile_summary"]["arcgis"] = {
+                "geometry_types": list(arcgis_summary.get("geometry_types") or []),
+                "wkids": list(arcgis_summary.get("wkids") or []),
+                "feature_count": int(arcgis_summary.get("feature_count") or 0),
+                "attribute_field_count": len(list(arcgis_summary.get("attribute_fields") or [])),
+            }
     return {
         "id": str(row.id),
         "source_id": str(row.source_connector_id),

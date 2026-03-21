@@ -108,6 +108,14 @@ Future work should plug in:
 
 without changing core source lifecycle semantics.
 
+### Adapter Config Notes (JSON / ArcGIS REST)
+
+For JSON-backed sources, adapter behavior can be steered via existing connector configuration:
+
+- `configuration_json.json_adapter.record_path` for generic JSON record extraction
+- `configuration_json.json_adapter.adapter_kind = "arcgis_rest_json"` to force ArcGIS adapter selection when payload shape is ambiguous
+- `configuration_json.json_adapter.features_path` to override where ArcGIS features are read from
+
 ## Current TODOs
 
 - add connector credential secret reference patterns and rotation workflows

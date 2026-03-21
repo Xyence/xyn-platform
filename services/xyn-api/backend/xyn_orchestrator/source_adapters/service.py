@@ -10,6 +10,7 @@ from django.db import transaction
 from xyn_orchestrator import models
 
 from .interfaces import (
+    ADAPTER_STATUS_ERROR,
     ADAPTER_STATUS_OK,
     ADAPTER_STATUS_UNSUPPORTED,
     ADAPTER_STATUS_WARNING,
@@ -56,6 +57,29 @@ def _infer_type(value: Any) -> str:
     if isinstance(value, list):
         return "array"
     return "string"
+
+
+def _collect_arcgis_field_hints(*, features: list[dict[str, Any]], field_definitions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_name: dict[str, dict[str, Any]] = {}
+    for entry in field_definitions:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        by_name[name] = {
+            "name": name,
+            "inferred_type": str(entry.get("type") or "").strip().lower() or "unknown",
+            "alias": str(entry.get("alias") or "").strip(),
+        }
+    for feature in features:
+        attrs = _safe_dict(feature.get("attributes"))
+        for key, value in attrs.items():
+            row = by_name.setdefault(str(key), {"name": str(key), "inferred_type": "unknown", "alias": ""})
+            inferred = _infer_type(value)
+            if row.get("inferred_type") in {"unknown", "", None} and inferred != "null":
+                row["inferred_type"] = inferred
+    return sorted(by_name.values(), key=lambda item: item["name"])
 
 
 @dataclass(frozen=True)
@@ -362,6 +386,216 @@ class JsonHttpAdapter:
         )
 
 
+@dataclass(frozen=True)
+class ArcGisRestJsonAdapter:
+    name: str = "arcgis_rest_json_adapter"
+    version: str = "1.0"
+    adapter_kind: str = "arcgis_rest_json"
+
+    def supports(self, *, context: AdapterContext) -> bool:
+        connector_config = _safe_dict(context.source_connector.configuration_json)
+        adapter_config = _safe_dict(connector_config.get("json_adapter"))
+        forced_kind = str(adapter_config.get("adapter_kind") or "").strip().lower()
+        if forced_kind in {"arcgis", "arcgis_rest", "arcgis_rest_json"}:
+            return True
+
+        normalized = _safe_dict(context.parsed_row.normalized_payload_json)
+        source_payload = _safe_dict(context.parsed_row.source_payload_json)
+        root_document = _safe_dict(normalized.get("document") or source_payload)
+        if not root_document:
+            return False
+        if isinstance(root_document.get("error"), dict):
+            return True
+        features = root_document.get("features")
+        if not isinstance(features, list):
+            return False
+        if "geometryType" in root_document or "spatialReference" in root_document or "fields" in root_document:
+            return True
+        for feature in features:
+            if not isinstance(feature, dict):
+                continue
+            if "attributes" in feature:
+                return True
+        return False
+
+    def adapt(self, *, context: AdapterContext) -> AdaptationOutcome:
+        connector_config = _safe_dict(context.source_connector.configuration_json)
+        adapter_config = _safe_dict(connector_config.get("json_adapter"))
+        features_path = str(adapter_config.get("features_path") or "features").strip() or "features"
+
+        normalized = _safe_dict(context.parsed_row.normalized_payload_json)
+        source_payload = _safe_dict(context.parsed_row.source_payload_json)
+        root_document = _safe_dict(normalized.get("document") or source_payload)
+        if not root_document:
+            return AdaptationOutcome(
+                adapter_name=self.name,
+                adapter_version=self.version,
+                records=(
+                    AdaptedRecordEnvelope(
+                        adapter_kind=self.adapter_kind,
+                        source_format="arcgis_rest_json",
+                        adapted_payload={},
+                        schema_hints={},
+                        source_position={"record_index": context.parsed_row.record_index},
+                        provenance={"parsed_record_id": str(context.parsed_row.id)},
+                        warnings=[{"code": "adapter.arcgis.invalid_shape", "message": "ArcGIS payload is missing a root object."}],
+                        findings=[],
+                        status=ADAPTER_STATUS_UNSUPPORTED,
+                        failure_reason="invalid ArcGIS payload shape",
+                        record_index=context.parsed_row.record_index,
+                    ),
+                ),
+                warnings=("ArcGIS payload is missing a root object.",),
+            )
+
+        error_payload = root_document.get("error")
+        if isinstance(error_payload, dict):
+            code = str(error_payload.get("code") or "arcgis.error")
+            message = str(error_payload.get("message") or "ArcGIS REST error payload encountered.").strip()
+            details = _safe_list(error_payload.get("details"))
+            return AdaptationOutcome(
+                adapter_name=self.name,
+                adapter_version=self.version,
+                records=(
+                    AdaptedRecordEnvelope(
+                        adapter_kind=self.adapter_kind,
+                        source_format="arcgis_rest_json",
+                        source_subtype="error",
+                        adapted_payload={"error": error_payload},
+                        schema_hints={},
+                        source_position={"record_index": context.parsed_row.record_index},
+                        provenance={"parsed_record_id": str(context.parsed_row.id)},
+                        warnings=[{"code": code, "message": message, "details": details}],
+                        findings=[],
+                        status=ADAPTER_STATUS_ERROR,
+                        failure_reason=message,
+                        record_index=context.parsed_row.record_index,
+                    ),
+                ),
+                warnings=(message,),
+            )
+
+        features_raw = _get_by_path(root_document, features_path)
+        features = [item for item in _safe_list(features_raw) if isinstance(item, dict)]
+        if not isinstance(features_raw, list):
+            return AdaptationOutcome(
+                adapter_name=self.name,
+                adapter_version=self.version,
+                records=(
+                    AdaptedRecordEnvelope(
+                        adapter_kind=self.adapter_kind,
+                        source_format="arcgis_rest_json",
+                        adapted_payload={"document": root_document},
+                        schema_hints={"features_path": features_path},
+                        source_position={"record_index": context.parsed_row.record_index},
+                        provenance={"parsed_record_id": str(context.parsed_row.id), "features_path": features_path},
+                        warnings=[{"code": "adapter.arcgis.features_missing", "message": "ArcGIS payload missing feature list."}],
+                        findings=[],
+                        status=ADAPTER_STATUS_UNSUPPORTED,
+                        failure_reason="arcgis feature list missing",
+                        record_index=context.parsed_row.record_index,
+                    ),
+                ),
+                warnings=("ArcGIS payload missing feature list.",),
+            )
+
+        geometry_type = str(root_document.get("geometryType") or "").strip()
+        spatial_reference = _safe_dict(root_document.get("spatialReference"))
+        wkid = spatial_reference.get("latestWkid") or spatial_reference.get("wkid")
+        field_hints = _collect_arcgis_field_hints(
+            features=features,
+            field_definitions=[item for item in _safe_list(root_document.get("fields")) if isinstance(item, dict)],
+        )
+        records: list[AdaptedRecordEnvelope] = []
+        if not features:
+            records.append(
+                AdaptedRecordEnvelope(
+                    adapter_kind=self.adapter_kind,
+                    source_format="arcgis_rest_json",
+                    source_subtype="feature_query",
+                    adapted_payload={"features": []},
+                    field_metadata=field_hints,
+                    schema_hints={
+                        "features_path": features_path,
+                        "feature_count": 0,
+                        "geometry_type": geometry_type,
+                        "spatial_reference": spatial_reference,
+                        "wkid": wkid,
+                    },
+                    source_position={"feature_index": None, "record_index": context.parsed_row.record_index},
+                    provenance={"parsed_record_id": str(context.parsed_row.id), "features_path": features_path},
+                    warnings=[{"code": "adapter.arcgis.empty_features", "message": "ArcGIS payload returned an empty feature set."}],
+                    findings=[],
+                    status=ADAPTER_STATUS_WARNING,
+                    failure_reason="empty feature set",
+                    record_index=context.parsed_row.record_index,
+                )
+            )
+            return AdaptationOutcome(
+                adapter_name=self.name,
+                adapter_version=self.version,
+                records=tuple(records),
+                warnings=("ArcGIS payload returned an empty feature set.",),
+            )
+
+        for index, feature in enumerate(features, start=1):
+            attrs = _safe_dict(feature.get("attributes"))
+            geometry = feature.get("geometry") if isinstance(feature.get("geometry"), dict) else None
+            warnings: list[dict[str, Any]] = []
+            if not attrs:
+                warnings.append({"code": "adapter.arcgis.attributes_missing", "message": "Feature has no attributes payload."})
+            if geometry is None:
+                warnings.append({"code": "adapter.arcgis.geometry_missing", "message": "Feature has no geometry payload."})
+            status = ADAPTER_STATUS_WARNING if warnings else ADAPTER_STATUS_OK
+            failure_reason = "; ".join(item["message"] for item in warnings)
+            schema_hints = {
+                "features_path": features_path,
+                "feature_count": len(features),
+                "geometry_type": geometry_type,
+                "spatial_reference": spatial_reference,
+                "wkid": wkid,
+                "display_field_name": str(root_document.get("displayFieldName") or "").strip(),
+                "object_id_field_name": str(root_document.get("objectIdFieldName") or "").strip(),
+            }
+            records.append(
+                AdaptedRecordEnvelope(
+                    adapter_kind=self.adapter_kind,
+                    source_format="arcgis_rest_json",
+                    source_subtype="feature_query",
+                    adapted_payload={
+                        "attributes": attrs,
+                        "geometry": geometry,
+                        "source_feature": feature,
+                    },
+                    geometry_payload=geometry if isinstance(geometry, dict) else None,
+                    field_metadata=field_hints,
+                    schema_hints=schema_hints,
+                    source_position={"feature_index": index, "record_index": context.parsed_row.record_index},
+                    provenance={
+                        "parsed_record_id": str(context.parsed_row.id),
+                        "features_path": features_path,
+                        "spatial_reference": spatial_reference,
+                    },
+                    warnings=warnings,
+                    findings=[],
+                    status=status,
+                    failure_reason=failure_reason,
+                    record_index=index,
+                )
+            )
+        return AdaptationOutcome(
+            adapter_name=self.name,
+            adapter_version=self.version,
+            records=tuple(records),
+            warnings=tuple(
+                item.get("message", "")
+                for record in records
+                for item in record.warnings
+                if isinstance(item, dict) and str(item.get("message") or "").strip()
+            ),
+        )
+
+
 class SourceAdapterRegistry:
     def __init__(self) -> None:
         self._adapters: list[ParsedRecordAdapter] = []
@@ -385,6 +619,7 @@ def build_default_registry() -> SourceAdapterRegistry:
     registry.register(AccessAdapter())
     registry.register(CsvAdapter())
     registry.register(DbfAdapter())
+    registry.register(ArcGisRestJsonAdapter())
     registry.register(JsonHttpAdapter())
     return registry
 
@@ -570,6 +805,33 @@ class SourceAdapterService:
             for item in field_hints.values()
         ]
         normalized_hints.sort(key=lambda item: item["name"])
+        arcgis_rows = [row for row in rows if str(row.adapter_kind or "") == "arcgis_rest_json"]
+        arcgis_summary: dict[str, Any] = {}
+        if arcgis_rows:
+            geometry_types = sorted(
+                {
+                    str(_safe_dict(row.schema_hints_json).get("geometry_type") or "").strip()
+                    for row in arcgis_rows
+                    if str(_safe_dict(row.schema_hints_json).get("geometry_type") or "").strip()
+                }
+            )
+            wkids = sorted(
+                {
+                    str(_safe_dict(row.schema_hints_json).get("wkid") or "").strip()
+                    for row in arcgis_rows
+                    if str(_safe_dict(row.schema_hints_json).get("wkid") or "").strip()
+                }
+            )
+            feature_count = max(
+                [int(_safe_dict(row.schema_hints_json).get("feature_count") or 0) for row in arcgis_rows] or [0]
+            )
+            attribute_fields = sorted({item["name"] for item in normalized_hints if item.get("name")})
+            arcgis_summary = {
+                "geometry_types": geometry_types,
+                "wkids": wkids,
+                "feature_count": feature_count,
+                "attribute_fields": attribute_fields,
+            }
         return {
             "record_count": queryset.count(),
             "sample_records": sample_records,
@@ -577,6 +839,7 @@ class SourceAdapterService:
             "warnings": warnings,
             "adapter_kinds": sorted({kind for kind in adapter_kinds if kind}),
             "source_formats": sorted({fmt for fmt in source_formats if fmt}),
+            "arcgis_summary": arcgis_summary,
         }
 
     @transaction.atomic
