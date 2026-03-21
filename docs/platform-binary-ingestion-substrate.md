@@ -40,6 +40,26 @@ Timeouts are explicit and split into:
 
 Failures are surfaced as exceptions and run failure metadata in coordinator flows.
 
+## Ingest run lifecycle semantics
+
+The ingestion coordinator writes durable run-level semantics on `OrchestrationRun`:
+
+- `status=running` when fetch begins
+- `status=skipped` when fetch succeeded but artifact content hash is unchanged (`no_op`)
+- `status=succeeded` for complete or partial parse success
+- `status=failed` for fatal fetch/parse execution failures
+
+`metadata_json.ingestion` and `metrics_json.ingestion` capture:
+
+- whether fetch was attempted
+- artifact id and sha256 observed
+- whether content changed
+- whether parsing ran
+- parse target count, parsed row count, warning/error counts, unsupported outcome count
+- final ingestion outcome (`succeeded`, `partial`, `failed`, `no_op`)
+
+This keeps unchanged-content checks and partial/deferred parse outcomes inspectable without introducing a second run model.
+
 ## Archive expansion
 
 `ZipArchiveExpander` validates member paths to prevent traversal (`..` / zip-slip), stores each member as a durable artifact, and records `IngestArtifactMember` rows.
@@ -83,6 +103,12 @@ Issue categories are machine-readable and persisted in `IngestParsedRecord.warni
 - `provenance_json`
 
 For grouped parse targets, `provenance_json` includes grouped member ids/paths so one logical parse target can be traced back to all contributing members.
+
+Idempotency behavior:
+
+- parsed output rows use deterministic idempotency keys based on source connector, artifact content hash, member path/file name, parser name, record index, and normalized payload hash
+- repeated runs with unchanged content do not create duplicate parsed rows
+- unsupported/deferred/error outcomes persist deterministic warning/error rows with machine-readable issue categories
 
 This remains ingestion-scoped and intentionally app/domain-neutral.
 

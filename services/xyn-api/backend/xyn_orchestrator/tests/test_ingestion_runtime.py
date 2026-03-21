@@ -368,7 +368,7 @@ class IngestionRuntimeTests(TestCase):
                     mocked_get.return_value = _MockHttpResponse(
                         url=f"https://example.com/{filename}",
                         headers={"content-type": "application/octet-stream"},
-                        chunks=[b"binary"],
+                        chunks=[f"binary-{filename}".encode("utf-8")],
                     )
                     result = IngestionCoordinator().ingest_from_url(
                         source_connector=self.source,
@@ -425,3 +425,118 @@ class IngestionRuntimeTests(TestCase):
             target_ref_json__object_id=str(parsed.id),
         ).first()
         self.assertIsNotNone(link)
+
+    def test_unchanged_artifact_results_in_skipped_no_op_run(self):
+        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/data.csv",
+                headers={"content-type": "text/csv"},
+                chunks=[b"id,name\n1,alpha\n"],
+            )
+            first = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/data.csv",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+            second = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/data.csv",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        self.assertEqual(first.parsed_record_count, 1)
+        self.assertEqual(second.parsed_record_count, 0)
+        second_run = models.OrchestrationRun.objects.get(id=second.run_id)
+        self.assertEqual(second_run.status, "skipped")
+        self.assertEqual(second_run.metadata_json.get("ingestion", {}).get("outcome"), "no_op")
+        self.assertFalse(second_run.metadata_json.get("ingestion", {}).get("content_changed", True))
+        self.assertEqual(second_run.metrics_json.get("ingestion", {}).get("parse_targets"), 0)
+
+    def test_repeated_identical_run_does_not_duplicate_parsed_records(self):
+        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/data.csv",
+                headers={"content-type": "text/csv"},
+                chunks=[b"id,name\n1,alpha\n2,beta\n"],
+            )
+            first = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/data.csv",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+            second = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/data.csv",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        self.assertEqual(first.parsed_record_count, 2)
+        self.assertEqual(second.parsed_record_count, 0)
+        self.assertEqual(
+            models.IngestParsedRecord.objects.filter(source_connector=self.source, parser_name="csv_tsv_parser").count(),
+            2,
+        )
+
+    def test_partial_run_with_mixed_success_and_unsupported_outcomes(self):
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("bundle/rows.csv", "id,name\n1,alpha\n")
+            archive.writestr("bundle/shape.shp", b"fake-shp")
+            archive.writestr("bundle/shape.dbf", b"fake-dbf")
+            archive.writestr("bundle/shape.shx", b"fake-shx")
+        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/mixed.zip",
+                headers={"content-type": "application/zip"},
+                chunks=[zip_buf.getvalue()],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/mixed.zip",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        run = models.OrchestrationRun.objects.get(id=result.run_id)
+        self.assertEqual(run.status, "succeeded")
+        self.assertEqual(run.metadata_json.get("ingestion", {}).get("outcome"), "partial")
+        self.assertEqual(run.metrics_json.get("ingestion", {}).get("parsed_records_created"), 1)
+        self.assertGreaterEqual(run.metrics_json.get("ingestion", {}).get("unsupported_outcomes"), 1)
+
+    def test_parsed_provenance_marks_direct_member_and_grouped_targets(self):
+        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/data.csv",
+                headers={"content-type": "text/csv"},
+                chunks=[b"id,name\n1,alpha\n"],
+            )
+            result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/data.csv",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        direct = models.IngestParsedRecord.objects.filter(orchestration_run_id=result.run_id, status="ok").first()
+        self.assertEqual(direct.provenance_json.get("target_type"), "file")
+
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("parcel/blocks.shp", b"fake-shp")
+            archive.writestr("parcel/blocks.dbf", b"fake-dbf")
+            archive.writestr("parcel/blocks.shx", b"fake-shx")
+        with mock.patch("xyn_orchestrator.ingestion.fetch.requests.get") as mocked_get:
+            mocked_get.return_value = _MockHttpResponse(
+                url="https://example.com/parcel.zip",
+                headers={"content-type": "application/zip"},
+                chunks=[zip_buf.getvalue()],
+            )
+            grouped_result = IngestionCoordinator().ingest_from_url(
+                source_connector=self.source,
+                source_url="https://example.com/parcel.zip",
+                jurisdiction="tx-travis-county",
+                source_scope="county",
+            )
+        grouped = models.IngestParsedRecord.objects.filter(orchestration_run_id=grouped_result.run_id, status="warning").first()
+        self.assertEqual(grouped.provenance_json.get("target_type"), "grouped")
+        self.assertTrue(grouped.provenance_json.get("group_member_ids"))
