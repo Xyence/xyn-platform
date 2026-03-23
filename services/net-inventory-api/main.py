@@ -113,7 +113,7 @@ def _platform_call(
 
 def _render_kv_table(rows: list[dict[str, Any]], *, columns: list[tuple[str, str]]) -> str:
     if not rows:
-        return "<p><em>No records found.</em></p>"
+        return "<p class='empty'>No records found for the current filter.</p>"
     header_html = "".join(f"<th>{escape(label)}</th>" for _, label in columns)
     body_parts: list[str] = []
     for row in rows:
@@ -122,7 +122,11 @@ def _render_kv_table(rows: list[dict[str, Any]], *, columns: list[tuple[str, str
         tds = []
         for key, _ in columns:
             value = row.get(key)
-            if isinstance(value, (dict, list)):
+            if isinstance(value, dict) and str(value.get("href") or "").strip():
+                href = str(value.get("href") or "").strip()
+                label = str(value.get("label") or href).strip()
+                rendered = f"<a href='{escape(href)}'>{escape(label)}</a>"
+            elif isinstance(value, (dict, list)):
                 rendered = escape(json.dumps(value, separators=(",", ":"))[:220])
             else:
                 rendered = escape(str(value if value is not None else ""))
@@ -130,12 +134,28 @@ def _render_kv_table(rows: list[dict[str, Any]], *, columns: list[tuple[str, str
         body_parts.append(f"<tr>{''.join(tds)}</tr>")
     return (
         "<div style='overflow:auto;'>"
-        "<table style='width:100%;border-collapse:collapse'>"
+        "<table class='kv-table'>"
         f"<thead><tr>{header_html}</tr></thead>"
         f"<tbody>{''.join(body_parts)}</tbody>"
         "</table>"
         "</div>"
     )
+
+
+def _render_stat_cards(items: list[tuple[str, Any, str]]) -> str:
+    cards: list[str] = []
+    for label, value, tone in items:
+        cards.append(
+            "<article class='stat-card'>"
+            f"<p class='stat-label'>{escape(str(label))}</p>"
+            f"<p class='stat-value tone-{escape(str(tone))}'>{escape(str(value))}</p>"
+            "</article>"
+        )
+    return f"<section class='stats-grid'>{''.join(cards)}</section>"
+
+
+def _surface_link(route: str, label: str) -> dict[str, str]:
+    return {"href": route, "label": label}
 
 
 def _postgres_type(field_type: str) -> str:
@@ -333,10 +353,31 @@ def _render_ui_shell(*, ui: dict[str, Any], heading: str, body_html: str) -> str
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>{escape(APP_TITLE)}</title>
         <style>
-          body {{ margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #08111f; color: #e7edf7; }}
-          main {{ max-width: 980px; margin: 32px auto; padding: 20px; }}
+          body {{ margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: radial-gradient(1400px circle at top left, #1e2b47 0%, #08111f 55%, #07101b 100%); color: #e7edf7; }}
+          main {{ max-width: 1160px; margin: 30px auto; padding: 18px; }}
           .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }}
-          .card {{ background: linear-gradient(180deg, #10203b 0%, #0b1628 100%); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 14px; padding: 16px; }}
+          .card {{ background: linear-gradient(180deg, #132744 0%, #0b1628 100%); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 14px; padding: 16px; box-shadow: 0 10px 30px rgba(3,8,16,0.3); }}
+          .card > h2 {{ margin-top: 0; }}
+          .toolbar {{ display:flex; gap:8px; flex-wrap:wrap; align-items:end; margin: 10px 0 14px; }}
+          .toolbar label {{ display:flex; flex-direction:column; gap:4px; font-size:12px; color:#8fb6d9; }}
+          input, select, button {{ border-radius: 8px; border: 1px solid rgba(148,163,184,0.35); background:#0a1423; color:#e7edf7; padding:8px 10px; font-size: 13px; }}
+          input::placeholder {{ color:#8ba4c0; }}
+          button {{ background: linear-gradient(180deg,#1f5ea8,#15457b); cursor:pointer; border-color: rgba(95,161,232,0.65); }}
+          button.secondary {{ background: #0f1c2f; border-color: rgba(148,163,184,0.4); }}
+          .section {{ margin-top: 12px; }}
+          .subtle {{ color:#9fb4cc; font-size: 13px; }}
+          .empty {{ color:#9ab0c6; border:1px dashed rgba(148,163,184,0.35); border-radius:10px; padding: 12px; }}
+          .kv-table {{ width:100%; border-collapse: collapse; min-width: 640px; }}
+          .kv-table thead th {{ position: sticky; top:0; background: rgba(9, 20, 36, 0.95); color:#9ec7f1; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; }}
+          .kv-table th, .kv-table td {{ border-bottom: 1px solid rgba(148,163,184,0.22); padding: 8px 9px; text-align: left; vertical-align: top; font-size: 13px; }}
+          .kv-table tbody tr:hover {{ background: rgba(125, 211, 252, 0.06); }}
+          .stats-grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap:10px; margin: 8px 0 14px; }}
+          .stat-card {{ border:1px solid rgba(148,163,184,0.28); border-radius: 10px; padding: 10px 12px; background: rgba(10,19,33,0.75); }}
+          .stat-label {{ margin:0; color:#8eb2d4; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }}
+          .stat-value {{ margin:6px 0 0; font-size:20px; font-weight:700; color:#e8f1fc; }}
+          .tone-good {{ color:#79e0ad; }} .tone-warn {{ color:#ffd166; }} .tone-danger {{ color:#ff8b8b; }} .tone-info {{ color:#7dd3fc; }}
+          .jump-links {{ display:flex; flex-wrap:wrap; gap:10px; margin-top: 8px; }}
+          .jump-links a {{ display:inline-block; padding:6px 10px; border:1px solid rgba(148,163,184,0.3); border-radius:999px; font-size:12px; color:#a7d9ff; background: rgba(15,25,40,0.7); }}
           h1 {{ margin: 0 0 8px; font-size: 28px; }}
           h2 {{ margin: 0 0 8px; font-size: 18px; }}
           p, li {{ color: #c5d0df; line-height: 1.45; }}
@@ -444,31 +485,65 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
     def index():
         return _render_ui_shell(
             ui=ui_scaffold,
-            heading="Generated workflow scaffold surface. Use this shell to navigate campaign/user and admin/operator routes.",
+            heading="Real Estate Deal Finder runtime surface with canonical campaign, source, watch, and signal integrations.",
             body_html="""
                 <h2>Runtime Access</h2>
-                <ul>
-                  <li><a href="/app">/app</a> application scaffold home</li>
-                  <li><a href="/health">/health</a> for service health</li>
-                  <li><a href="/docs">/docs</a> for interactive API docs</li>
-                </ul>
+                <p class="subtle">Use the links below to validate operator and investor workflows using live platform data.</p>
+                <div class="jump-links">
+                  <a href="/app">Open App Home</a>
+                  <a href="/app/admin">Admin / Operator</a>
+                  <a href="/app/campaigns">Campaigns</a>
+                  <a href="/app/signals">Signals</a>
+                  <a href="/app/surfaces">Surface Directory</a>
+                  <a href="/docs">API Docs</a>
+                </div>
             """,
         )
 
     @app.get("/app", response_class=HTMLResponse)
     def app_home():
+        body = [
+            "<h2>Workflow Overview</h2>",
+            "<p class='subtle'>This generated app is organized around two paths: operator source operations and investor campaign monitoring.</p>",
+            "<div class='grid'>",
+            "<article class='card'><h2>Operator / Source Operations</h2><p>Inspect source health, view funnel status, and trigger unresolved row re-resolution.</p><div class='jump-links'><a href='/app/admin'>Open Admin</a><a href='/app/sources'>Open Sources</a></div></article>",
+            "<article class='card'><h2>Campaign Monitoring</h2><p>Review campaigns and inspect watch matches and linked signals by campaign.</p><div class='jump-links'><a href='/app/campaigns'>Open Campaigns</a></div></article>",
+            "<article class='card'><h2>Signal Review</h2><p>Review parcel-linked signals and drill into signal details, severity, and context.</p><div class='jump-links'><a href='/app/signals'>Open Signal Feed</a></div></article>",
+            "</div>",
+        ]
         return _render_ui_shell(
             ui=ui_scaffold,
-            heading="Application workflow scaffold generated from entity contracts and workflow hints.",
-            body_html="""
-                <h2>Scaffold Notes</h2>
-                <p>These pages are generic scaffolds generated from workflow/entity metadata. Domain logic remains API-driven.</p>
-            """,
+            heading="Application navigation and workflow entry point.",
+            body_html="".join(body),
         )
 
     @app.get("/app/surfaces")
-    def app_surfaces():
-        return ui_scaffold
+    def app_surfaces(request: Request):
+        accept = str(request.headers.get("accept") or "").lower()
+        wants_html = "text/html" in accept or str(request.query_params.get("view") or "").strip().lower() == "html"
+        if not wants_html:
+            return ui_scaffold
+        rows: list[dict[str, Any]] = []
+        for section_key, label in (("campaign_user", "Campaign/User"), ("admin_operator", "Admin/Operator")):
+            for item in (ui_scaffold.get("groups", {}).get(section_key) or []):
+                if isinstance(item, dict):
+                    rows.append(
+                        {
+                            "area": label,
+                            "title": str(item.get("title") or ""),
+                            "route": _surface_link(str(item.get("route") or ""), str(item.get("route") or "")),
+                        }
+                    )
+        html = _render_ui_shell(
+            ui=ui_scaffold,
+            heading="Surface directory and navigation map.",
+            body_html=(
+                "<h2>Available Surfaces</h2>"
+                "<p class='subtle'>Generated routes grouped by workflow area.</p>"
+                + _render_kv_table(rows, columns=[("area", "Area"), ("title", "Surface"), ("route", "Route")])
+            ),
+        )
+        return HTMLResponse(content=html)
 
     @app.get("/app/admin", response_class=HTMLResponse)
     def admin_home(
@@ -518,12 +593,15 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
         ]
         body = [
             "<h2>Admin/Operator Scope</h2>",
-            "<p>Live operational context from canonical source, funnel, watch, and signal endpoints.</p>",
-            "<form method='get' action='/app/admin' style='display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;'>"
-            f"<label>workspace_id <input name='workspace_id' value='{escape(workspace_token)}' style='min-width:320px;'/></label>"
-            f"<label>source_id <input name='source_id' value='{escape(source_token)}' style='min-width:320px;'/></label>"
+            "<p class='subtle'>Live operational context from canonical source, funnel, watch, and signal endpoints.</p>",
+            "<form method='get' action='/app/admin' class='toolbar'>"
+            f"<label>workspace_id <input name='workspace_id' value='{escape(workspace_token)}' style='min-width:300px;'/></label>"
+            f"<label>source_id <input name='source_id' value='{escape(source_token)}' style='min-width:300px;'/></label>"
             "<button type='submit'>Refresh</button>"
             "</form>",
+            "<div class='jump-links'><a href='/app/sources'>Source List</a><a href='/app/signals"
+            + (f"?workspace_id={escape(workspace_token)}" if workspace_token else "")
+            + "'>Signal Feed</a></div>",
         ]
         if not workspace_token:
             body.append("<p><em>Provide workspace_id to load source governance and funnel status.</em></p>")
@@ -536,6 +614,17 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
             body.append(_render_kv_table(source_rows, columns=[("name", "Name"), ("source_type", "Type"), ("lifecycle_state", "State"), ("is_active", "Active"), ("health_status", "Health"), ("id", "Source ID")]))
         if isinstance(funnel_counts, dict) and funnel_counts:
             body.append("<h3>Monitoring Funnel</h3>")
+            body.append(
+                _render_stat_cards(
+                    [
+                        ("Adapted Rows", funnel_counts.get("adapted_rows", 0), "info"),
+                        ("Crosswalk Resolved", funnel_counts.get("crosswalk_resolved", 0), "good"),
+                        ("Crosswalk Unresolved", funnel_counts.get("crosswalk_unresolved", 0), "warn"),
+                        ("Watch Matches", funnel_counts.get("watch_matches_matched", 0), "info"),
+                        ("Signal Rows", funnel_counts.get("signal_projection_rows", 0), "good"),
+                    ]
+                )
+            )
             body.append(_render_kv_table([funnel_counts], columns=[("adapted_rows", "Adapted"), ("geocode_selected", "Geocode Selected"), ("crosswalk_resolved", "Crosswalk Resolved"), ("crosswalk_unresolved", "Crosswalk Unresolved"), ("watch_matches_matched", "Watch Matched"), ("signal_projection_rows", "Signal Rows")]))
         unresolved_rows = [row for row in (unresolved or []) if isinstance(row, dict)]
         if unresolved_rows:
@@ -543,9 +632,10 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
             body.append(_render_kv_table(unresolved_rows, columns=[("reason", "Reason"), ("count", "Count")]))
         body.append(
             "<h3>Re-resolve Unresolved Rows</h3>"
-            "<form method='post' action='/app/operator/reresolve-source' style='display:flex;gap:8px;flex-wrap:wrap;'>"
+            "<p class='subtle'>Retries unresolved crosswalk rows using canonical resolver/geocode evidence. Use after new mapping/geocoding runs.</p>"
+            "<form method='post' action='/app/operator/reresolve-source' class='toolbar'>"
             f"<input type='hidden' name='workspace_id' value='{escape(workspace_token)}' />"
-            f"<label>source_id <input name='source_id' value='{escape(source_token)}' style='min-width:320px;'/></label>"
+            f"<label>source_id <input name='source_id' value='{escape(source_token)}' style='min-width:280px;'/></label>"
             "<label>limit <input type='number' name='limit' min='1' max='5000' value='250' /></label>"
             "<label><input type='checkbox' name='require_selected_geocode' value='1' checked /> require selected geocode</label>"
             "<button type='submit'>Run Re-resolution</button>"
@@ -599,6 +689,7 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
         }
         body = [
             "<h2>Re-resolution Result</h2>",
+            "<p class='subtle'>Canonical re-resolution completed. Review the summary and sample rows below.</p>",
             _render_kv_table([summary_row], columns=[("status", "HTTP"), ("count", "Rows Processed"), ("before_unresolved", "Before Unresolved"), ("after_unresolved", "After Unresolved")]),
         ]
         if not result.get("ok"):
@@ -629,11 +720,25 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
             workspace_token = _workspace_id_from_request(request)
             body_parts = [
                 f"<h2>{escape(plural_label)} List</h2>",
-                f"<p>Entity API endpoint: <code>/{escape(entity_key)}?workspace_id=&lt;workspace_id&gt;</code></p>",
+                f"<p class='subtle'>Entity API endpoint: <code>/{escape(entity_key)}?workspace_id=&lt;workspace_id&gt;</code></p>",
             ]
             if not workspace_token:
                 body_parts.append("<p><em>Provide workspace_id in query params to load canonical data.</em></p>")
             if workspace_token and entity_key == "signals":
+                body_parts.append(
+                    "<form method='get' action='/app/signals' class='toolbar'>"
+                    f"<label>workspace_id <input name='workspace_id' value='{escape(workspace_token)}' style='min-width:280px;'/></label>"
+                    f"<label>campaign_id <input name='campaign_id' value='{escape(str(request.query_params.get('campaign_id') or ''))}' /></label>"
+                    f"<label>watch_id <input name='watch_id' value='{escape(str(request.query_params.get('watch_id') or ''))}' /></label>"
+                    f"<label>handle <input name='handle' value='{escape(str(request.query_params.get('handle') or ''))}' /></label>"
+                    f"<label>status <input name='status' value='{escape(str(request.query_params.get('status') or ''))}' /></label>"
+                    f"<label>severity <input name='severity' value='{escape(str(request.query_params.get('severity') or ''))}' /></label>"
+                    "<button type='submit'>Apply Filters</button>"
+                    "<a class='secondary' href='/app/signals?workspace_id="
+                    + escape(workspace_token)
+                    + "' style='display:inline-block;padding:8px 10px;border-radius:8px;'>Clear</a>"
+                    "</form>"
+                )
                 params: dict[str, Any] = {"workspace_id": workspace_token, "limit": 100}
                 for token in ("campaign_id", "watch_id", "handle", "status", "severity", "source_key"):
                     raw = str(request.query_params.get(token) or "").strip()
@@ -656,9 +761,10 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
                             "campaign_id": row.get("campaign_id"),
                             "watch_id": row.get("watch_id"),
                             "parcel_handle_normalized": row.get("parcel_handle_normalized"),
+                            "detail": _surface_link(f"/app/signals/{row.get('id')}?workspace_id={workspace_token}", "View"),
                         }
                     )
-                body_parts.append(_render_kv_table(normalized, columns=[("title", "Title"), ("severity", "Severity"), ("status", "Status"), ("campaign_id", "Campaign"), ("watch_id", "Watch"), ("parcel_handle_normalized", "Handle"), ("id", "Signal ID")]))
+                body_parts.append(_render_kv_table(normalized, columns=[("title", "Title"), ("severity", "Severity"), ("status", "Status"), ("campaign_id", "Campaign"), ("watch_id", "Watch"), ("parcel_handle_normalized", "Handle"), ("id", "Signal ID"), ("detail", "Detail")]))
             if workspace_token and entity_key == "sources":
                 result = _platform_call(
                     request,
@@ -681,9 +787,10 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
                             "is_active": row.get("is_active"),
                             "health_status": row.get("health_status"),
                             "id": row.get("id"),
+                            "open_admin": _surface_link(f"/app/admin?workspace_id={workspace_token}&source_id={row.get('id')}", "Open"),
                         }
                     )
-                body_parts.append(_render_kv_table(normalized, columns=[("name", "Name"), ("source_type", "Type"), ("lifecycle_state", "State"), ("is_active", "Active"), ("health_status", "Health"), ("id", "Source ID")]))
+                body_parts.append(_render_kv_table(normalized, columns=[("name", "Name"), ("source_type", "Type"), ("lifecycle_state", "State"), ("is_active", "Active"), ("health_status", "Health"), ("id", "Source ID"), ("open_admin", "Admin")]))
             if workspace_token and entity_key == "campaigns":
                 result = _platform_call(
                     request,
@@ -704,12 +811,13 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
                             "slug": row.get("slug"),
                             "status": row.get("status"),
                             "id": row.get("id"),
+                            "open": _surface_link(f"/app/campaigns/{row.get('id')}?workspace_id={workspace_token}", "Open"),
                         }
                     )
-                body_parts.append(_render_kv_table(normalized, columns=[("name", "Name"), ("slug", "Slug"), ("status", "Status"), ("id", "Campaign ID")]))
+                body_parts.append(_render_kv_table(normalized, columns=[("name", "Name"), ("slug", "Slug"), ("status", "Status"), ("id", "Campaign ID"), ("open", "Detail")]))
             return _render_ui_shell(
                 ui=ui_scaffold,
-                heading=f"{plural_label} list scaffold.",
+                heading=f"{plural_label} list and navigation.",
                 body_html="".join(body_parts),
             )
 
@@ -728,7 +836,7 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
             body_parts = [
                 f"<h2>{escape(singular_label)} Detail</h2>",
                 f"<p>Record ref: <code>{escape(record_ref)}</code></p>",
-                f"<p>Entity API endpoint: <code>/{escape(entity_key)}/{escape(record_ref)}?workspace_id=&lt;workspace_id&gt;</code></p>",
+                f"<p class='subtle'>Entity API endpoint: <code>/{escape(entity_key)}/{escape(record_ref)}?workspace_id=&lt;workspace_id&gt;</code></p>",
             ]
             if workspace_token and entity_key == "campaigns":
                 campaign_result = _platform_call(
@@ -780,9 +888,10 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
                                     "score": row.get("score"),
                                     "event_key": row.get("event_key"),
                                     "reason": row.get("reason"),
+                                    "occurred_at": row.get("occurred_at"),
                                 }
                             )
-                    body_parts.append(_render_kv_table(rows, columns=[("watch_id", "Watch"), ("matched", "Matched"), ("score", "Score"), ("event_key", "Event Key"), ("reason", "Reason")]))
+                    body_parts.append(_render_kv_table(rows, columns=[("watch_id", "Watch"), ("matched", "Matched"), ("score", "Score"), ("event_key", "Event Key"), ("reason", "Reason"), ("occurred_at", "Occurred")]))
                 if signal_result.get("ok"):
                     signals = list((signal_result.get("data") or {}).get("signals") or []) if isinstance(signal_result.get("data"), dict) else []
                     body_parts.append("<h3>Signals</h3>")
@@ -796,9 +905,10 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
                                     "status": row.get("status"),
                                     "watch_id": row.get("watch_id"),
                                     "id": row.get("id"),
+                                    "open": _surface_link(f"/app/signals/{row.get('id')}?workspace_id={workspace_token}", "View"),
                                 }
                             )
-                    body_parts.append(_render_kv_table(rows, columns=[("title", "Title"), ("severity", "Severity"), ("status", "Status"), ("watch_id", "Watch"), ("id", "Signal ID")]))
+                    body_parts.append(_render_kv_table(rows, columns=[("title", "Title"), ("severity", "Severity"), ("status", "Status"), ("watch_id", "Watch"), ("id", "Signal ID"), ("open", "Detail")]))
             if workspace_token and entity_key == "signals":
                 signal_result = _platform_call(
                     request,
@@ -809,6 +919,7 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
                 if signal_result.get("ok"):
                     row = signal_result.get("data") if isinstance(signal_result.get("data"), dict) else {}
                     body_parts.append("<h3>Signal Detail</h3>")
+                    body_parts.append(_render_stat_cards([("Severity", row.get("severity") or "n/a", "warn"), ("Status", row.get("status") or "n/a", "info"), ("Signal Type", row.get("signal_type") or "n/a", "info")]))
                     body_parts.append(_render_kv_table([{
                         "title": row.get("title"),
                         "severity": row.get("severity"),
@@ -818,11 +929,23 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
                         "parcel_handle_normalized": row.get("parcel_handle_normalized"),
                         "event_key": row.get("event_key"),
                     }], columns=[("title", "Title"), ("severity", "Severity"), ("status", "Status"), ("campaign_id", "Campaign"), ("watch_id", "Watch"), ("parcel_handle_normalized", "Handle"), ("event_key", "Event Key")]))
+                    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                    body_parts.append("<h3>Signal Metadata</h3>")
+                    body_parts.append(_render_kv_table([{"occurred_at": row.get("occurred_at"), "source_key": row.get("source_key"), "reconciled_state_version": row.get("reconciled_state_version"), "signal_set_version": row.get("signal_set_version")}], columns=[("occurred_at", "Occurred At"), ("source_key", "Source"), ("reconciled_state_version", "Reconciled Version"), ("signal_set_version", "Signal Set Version")]))
+                    if metadata:
+                        body_parts.append("<details><summary>Projection Metadata</summary>")
+                        body_parts.append(_render_kv_table([metadata], columns=[(key, key.replace("_", " ").title()) for key in sorted(metadata.keys())[:8]]))
+                        body_parts.append("</details>")
+                    if payload:
+                        body_parts.append("<details><summary>Signal Payload</summary>")
+                        body_parts.append(_render_kv_table([payload], columns=[(key, key.replace("_", " ").title()) for key in sorted(payload.keys())[:10]]))
+                        body_parts.append("</details>")
                 else:
                     body_parts.append(f"<p><strong>Signal detail error:</strong> {escape(str(signal_result.get('error') or 'unknown'))}</p>")
             return _render_ui_shell(
                 ui=ui_scaffold,
-                heading=f"{singular_label} detail scaffold.",
+                heading=f"{singular_label} detail and context.",
                 body_html="".join(body_parts),
             )
 
