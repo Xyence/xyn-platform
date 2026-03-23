@@ -352,7 +352,7 @@ class WatchService:
                             ]
                         ).encode("utf-8")
                     ).hexdigest()
-                    DomainEventService().record(
+                    event_row = DomainEventService().record(
                         DomainEventInput(
                             workspace_id=workspace_id,
                             event_type="signal.watch_match_detected",
@@ -385,6 +385,13 @@ class WatchService:
                             },
                         )
                     )
+                    try:
+                        from xyn_orchestrator.signal_read_model import SignalReadProjectionService
+
+                        SignalReadProjectionService().project_domain_event(event=event_row)
+                    except Exception:
+                        # Projection is a read-model concern; retain canonical match/domain-event durability.
+                        pass
             results.append(result)
         return results
 

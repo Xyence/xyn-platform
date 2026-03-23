@@ -26,7 +26,7 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.validators import validate_email
 from django.core.paginator import Paginator
 from django.db import models, transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -159,6 +159,7 @@ from .models import (
     Report,
     ReportAttachment,
     IngestArtifactRecord,
+    SignalReadModel,
 )
 from .matching import (
     DjangoMatchResultRepository,
@@ -204,6 +205,7 @@ from .parcel_identity import (
     serialize_parcel_identity,
 )
 from .geocoding import GeocodingService, serialize_geocode_result
+from .signal_read_model import SignalReadProjectionService, serialize_signal_read
 from .orchestration import AppNotificationFailureNotifier
 from .orchestration.domain_events import DomainEventQuery, DomainEventService
 from .orchestration.publication import StagePublicationService
@@ -391,6 +393,7 @@ from .app_authorization import (
     CAP_NOTIFICATIONS_READ,
     CAP_PROVENANCE_READ,
     CAP_REFRESHES_RUN,
+    CAP_SIGNALS_REVIEW,
     CAP_SOURCES_MANAGE,
     CAP_SUBSCRIBERS_MANAGE,
     CAP_WATCHES_MANAGE,
@@ -31267,10 +31270,15 @@ def watch_matches_collection(request: HttpRequest) -> JsonResponse:
         workspace, _ = _watch_queryset(identity, workspace_id)
     except PermissionDenied:
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     qs = WatchMatchEvent.objects.filter(workspace=workspace).select_related("watch", "run").order_by("-created_at", "-id")
     watch_id = str(request.GET.get("watch_id") or "").strip()
     if watch_id:
         qs = qs.filter(watch_id=watch_id)
+    campaign_id = str(request.GET.get("campaign_id") or "").strip()
+    if campaign_id:
+        qs = qs.filter(watch__linked_campaign_id=campaign_id)
     event_key = str(request.GET.get("event_key") or "").strip()
     if event_key:
         qs = qs.filter(event_key=event_key)
@@ -31291,6 +31299,138 @@ def watch_matches_collection(request: HttpRequest) -> JsonResponse:
     limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
     rows = [serialize_watch_match(item) for item in qs[:limit]]
     return JsonResponse({"workspace_id": str(workspace.id), "matches": rows})
+
+
+def _signal_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[SignalReadModel]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = (
+        SignalReadModel.objects.filter(workspace=workspace)
+        .select_related("watch", "campaign", "parcel_identity", "watch_match_event", "domain_event")
+        .order_by("-occurred_at", "-last_observed_at", "-id")
+    )
+    return workspace, qs
+
+
+@csrf_exempt
+@login_required
+def signals_project_domain_events(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _signal_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity,
+        str(workspace.id),
+        [CAP_SIGNALS_REVIEW, CAP_WATCHES_MANAGE],
+        require_all=False,
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    try:
+        limit = int(payload.get("limit") or 500)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "limit must be an integer"}, status=400)
+    since_event_id = str(payload.get("since_event_id") or "").strip()
+    rows = SignalReadProjectionService().project_workspace_events(
+        workspace_id=str(workspace.id),
+        limit=limit,
+        since_event_id=since_event_id,
+    )
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "count": len(rows),
+            "signals": [serialize_signal_read(item) for item in rows],
+        },
+        status=200,
+    )
+
+
+@login_required
+def signals_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _signal_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ, CAP_SIGNALS_REVIEW], require_all=False):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    status = str(request.GET.get("status") or "").strip().lower()
+    if status:
+        qs = qs.filter(status=status)
+    severity = str(request.GET.get("severity") or "").strip().lower()
+    if severity:
+        qs = qs.filter(severity=severity)
+    signal_type = str(request.GET.get("signal_type") or "").strip().lower()
+    if signal_type:
+        qs = qs.filter(signal_type=signal_type)
+    watch_id = str(request.GET.get("watch_id") or "").strip()
+    if watch_id:
+        qs = qs.filter(watch_id=watch_id)
+    campaign_id = str(request.GET.get("campaign_id") or "").strip()
+    if campaign_id:
+        qs = qs.filter(campaign_id=campaign_id)
+    parcel_id = str(request.GET.get("parcel_id") or "").strip()
+    if parcel_id:
+        qs = qs.filter(parcel_identity_id=parcel_id)
+    handle = str(request.GET.get("handle") or "").strip()
+    if handle:
+        normalized = "".join(ch for ch in handle.lower() if ch.isalnum())
+        qs = qs.filter(parcel_handle_normalized=normalized)
+    source_key = str(request.GET.get("source_key") or "").strip()
+    if source_key:
+        qs = qs.filter(source_key=source_key)
+    event_key = str(request.GET.get("event_key") or "").strip()
+    if event_key:
+        qs = qs.filter(event_key=event_key)
+    reconciled_state_version = str(request.GET.get("reconciled_state_version") or "").strip()
+    if reconciled_state_version:
+        qs = qs.filter(reconciled_state_version=reconciled_state_version)
+    limit = max(1, min(500, int(str(request.GET.get("limit") or "50"))))
+    rows = [serialize_signal_read(item) for item in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "signals": rows}, status=200)
+
+
+@login_required
+def signal_detail(request: HttpRequest, signal_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    row = get_object_or_404(
+        SignalReadModel.objects.select_related("workspace", "watch", "campaign", "parcel_identity", "watch_match_event", "domain_event"),
+        id=signal_id,
+    )
+    if workspace_id != str(row.workspace_id):
+        return JsonResponse({"error": "signal not found in workspace context"}, status=404)
+    if not _workspace_membership(identity, str(row.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(row.workspace_id), [CAP_APP_READ, CAP_SIGNALS_REVIEW], require_all=False):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse(serialize_signal_read(row), status=200)
 
 
 def _provenance_workspace(identity: UserIdentity, workspace_id: str) -> Workspace:
@@ -32298,6 +32438,70 @@ def parcel_crosswalks_resolve_source(request: HttpRequest) -> JsonResponse:
     )
 
 
+@csrf_exempt
+@login_required
+def parcel_crosswalks_reresolve_source(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    source_id = str(payload.get("source_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if not source_id:
+        return JsonResponse({"error": "source_id is required"}, status=400)
+    try:
+        workspace, _ = _parcel_crosswalk_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity, str(workspace.id), [CAP_SOURCES_MANAGE, CAP_CAMPAIGNS_MANAGE], require_all=False
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    source = SourceConnector.objects.filter(workspace_id=workspace.id, id=source_id).first()
+    if source is None:
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    try:
+        limit = int(payload.get("limit") or 500)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "limit must be an integer"}, status=400)
+    require_selected_geocode = bool(payload.get("require_selected_geocode", False))
+
+    before_qs = ParcelCrosswalkMapping.objects.filter(workspace_id=workspace.id, source_connector_id=source_id)
+    before_unresolved = before_qs.filter(status="unresolved").count()
+    before_resolved = before_qs.filter(status="resolved").count()
+    service = ParcelIdentityResolverService()
+    rows = service.reresolve_unresolved_for_source(
+        workspace_id=str(workspace.id),
+        source_id=source_id,
+        limit=limit,
+        require_selected_geocode=require_selected_geocode,
+    )
+    after_qs = ParcelCrosswalkMapping.objects.filter(workspace_id=workspace.id, source_connector_id=source_id)
+    after_unresolved = after_qs.filter(status="unresolved").count()
+    after_resolved = after_qs.filter(status="resolved").count()
+    method_counts = list(
+        after_qs.values("resolution_method", "status")
+        .annotate(count=Count("id"))
+        .order_by("resolution_method", "status")
+    )
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source_id": str(source.id),
+            "count": len(rows),
+            "before": {"resolved": int(before_resolved), "unresolved": int(before_unresolved)},
+            "after": {"resolved": int(after_resolved), "unresolved": int(after_unresolved)},
+            "method_counts": method_counts,
+            "crosswalks": [serialize_parcel_crosswalk(row) for row in rows],
+        },
+        status=200,
+    )
+
+
 @login_required
 def geocode_results_collection(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
@@ -32460,6 +32664,80 @@ def geocode_results_resolve_source(request: HttpRequest) -> JsonResponse:
             "source_id": source_id,
             "count": len(rows),
             "results": [serialize_geocode_result(row, include_candidates=True) for row in rows],
+        },
+        status=200,
+    )
+
+
+@login_required
+def monitoring_funnel_summary(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _parcel_crosswalk_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ, CAP_MATCH_REVIEW], require_all=False):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    source_id = str(request.GET.get("source_id") or "").strip()
+    adapted_qs = IngestAdaptedRecord.objects.filter(workspace_id=workspace.id)
+    geocode_qs = GeocodeEnrichmentResult.objects.filter(workspace_id=workspace.id)
+    crosswalk_qs = ParcelCrosswalkMapping.objects.filter(workspace_id=workspace.id)
+    if source_id:
+        adapted_qs = adapted_qs.filter(source_connector_id=source_id)
+        geocode_qs = geocode_qs.filter(source_connector_id=source_id)
+        crosswalk_qs = crosswalk_qs.filter(source_connector_id=source_id)
+
+    unresolved_reason_counts = list(
+        crosswalk_qs.filter(status="unresolved")
+        .exclude(reason="")
+        .values("reason")
+        .annotate(count=Count("id"))
+        .order_by("-count", "reason")[:10]
+    )
+    crosswalk_method_counts = list(
+        crosswalk_qs.values("resolution_method", "status")
+        .annotate(count=Count("id"))
+        .order_by("resolution_method", "status")
+    )
+    watch_match_qs = WatchMatchEvent.objects.filter(workspace_id=workspace.id)
+    signal_event_qs = PlatformDomainEvent.objects.filter(workspace_id=workspace.id, event_type="signal.watch_match_detected")
+    signal_projection_qs = SignalReadModel.objects.filter(workspace_id=workspace.id)
+    if source_id:
+        signal_event_qs = signal_event_qs.filter(scope_source=source_id)
+        signal_projection_qs = signal_projection_qs.filter(source_key=source_id)
+
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source_id": source_id or None,
+            "counts": {
+                "adapted_rows": int(adapted_qs.count()),
+                "geocode_results": int(geocode_qs.count()),
+                "geocode_selected": int(geocode_qs.filter(status="selected").count()),
+                "crosswalk_rows": int(crosswalk_qs.count()),
+                "crosswalk_resolved": int(crosswalk_qs.filter(status="resolved").count()),
+                "crosswalk_unresolved": int(crosswalk_qs.filter(status="unresolved").count()),
+                "watch_matches": int(watch_match_qs.count()),
+                "watch_matches_matched": int(watch_match_qs.filter(matched=True).count()),
+                "signal_domain_events": int(signal_event_qs.count()),
+                "signal_projection_rows": int(signal_projection_qs.count()),
+            },
+            "crosswalk_method_counts": crosswalk_method_counts,
+            "unresolved_reasons": unresolved_reason_counts,
+            "signal_projection_by_status": list(
+                signal_projection_qs.values("status").annotate(count=Count("id")).order_by("status")
+            ),
+            "signal_projection_by_type": list(
+                signal_projection_qs.values("signal_type").annotate(count=Count("id")).order_by("signal_type")
+            ),
         },
         status=200,
     )

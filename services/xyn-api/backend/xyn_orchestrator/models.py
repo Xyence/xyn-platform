@@ -4494,6 +4494,105 @@ class PlatformDomainEvent(models.Model):
         return f"{self.workspace_id}:{self.event_type}:{self.stage_key}"
 
 
+class SignalReadModel(models.Model):
+    """Durable signal projection for app/runtime query surfaces."""
+
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("dismissed", "Dismissed"),
+        ("resolved", "Resolved"),
+    ]
+    SEVERITY_CHOICES = [
+        ("info", "Info"),
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+        ("critical", "Critical"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="signal_read_models")
+    domain_event = models.OneToOneField(
+        "PlatformDomainEvent",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_model",
+    )
+    watch_match_event = models.ForeignKey(
+        "WatchMatchEvent",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_models",
+    )
+    watch = models.ForeignKey(
+        "WatchDefinition",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_models",
+    )
+    campaign = models.ForeignKey(
+        "Campaign",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_models",
+    )
+    parcel_identity = models.ForeignKey(
+        "ParcelCanonicalIdentity",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_models",
+    )
+    parcel_handle_normalized = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    signal_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    signal_type = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active", db_index=True)
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default="info", db_index=True)
+    title = models.CharField(max_length=240, blank=True, default="")
+    summary = models.TextField(blank=True, default="")
+    event_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    source_key = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    signal_set_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    occurred_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    payload_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    first_observed_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    last_observed_at = models.DateTimeField(auto_now=True, db_index=True)
+
+    class Meta:
+        ordering = ["-occurred_at", "-last_observed_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "signal_key"],
+                condition=Q(signal_key__gt=""),
+                name="uniq_signal_read_signal_key",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_signal_read_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "status", "last_observed_at"], name="ix_signal_read_status"),
+            models.Index(fields=["workspace", "signal_type", "last_observed_at"], name="ix_signal_read_type"),
+            models.Index(fields=["workspace", "parcel_handle_normalized", "last_observed_at"], name="ix_signal_read_handle"),
+            models.Index(fields=["workspace", "watch", "last_observed_at"], name="ix_signal_read_watch"),
+            models.Index(fields=["workspace", "campaign", "last_observed_at"], name="ix_signal_read_campaign"),
+            models.Index(fields=["workspace", "source_key", "last_observed_at"], name="ix_signal_read_source"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.signal_type}:{self.id}"
+
+
 class RecordMatchEvaluation(models.Model):
     """Durable, explainable record matching result for platform-level reuse."""
 

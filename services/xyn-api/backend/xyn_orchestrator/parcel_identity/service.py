@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from django.db import transaction
@@ -923,6 +924,54 @@ class ParcelIdentityResolverService:
             queryset = queryset.filter(orchestration_run_id=run_id)
         rows = list(queryset[: max(1, min(5000, int(limit or 500)))])
         return [self.resolve_adapted_record(adapted_record_id=str(row.id)) for row in rows]
+
+    @transaction.atomic
+    def reresolve_unresolved_for_source(
+        self,
+        *,
+        workspace_id: str,
+        source_id: str,
+        limit: int = 500,
+        require_selected_geocode: bool = False,
+    ) -> list[models.ParcelCrosswalkMapping]:
+        now_token = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        unresolved_qs = (
+            models.ParcelCrosswalkMapping.objects.filter(
+                workspace_id=workspace_id,
+                source_connector_id=source_id,
+                status="unresolved",
+            )
+            .exclude(adapted_record_id__isnull=True)
+            .order_by("-created_at", "-id")
+        )
+        adapted_ids: list[str] = []
+        seen: set[str] = set()
+        for row in unresolved_qs.iterator(chunk_size=300):
+            adapted_id = str(row.adapted_record_id or "").strip()
+            if not adapted_id or adapted_id in seen:
+                continue
+            if require_selected_geocode:
+                has_selected = models.GeocodeEnrichmentResult.objects.filter(
+                    workspace_id=workspace_id,
+                    source_connector_id=source_id,
+                    adapted_record_id=adapted_id,
+                    status="selected",
+                ).exists()
+                if not has_selected:
+                    continue
+            seen.add(adapted_id)
+            adapted_ids.append(adapted_id)
+            if len(adapted_ids) >= max(1, min(5000, int(limit or 500))):
+                break
+        rows: list[models.ParcelCrosswalkMapping] = []
+        for index, adapted_id in enumerate(adapted_ids, start=1):
+            rows.append(
+                self.resolve_adapted_record(
+                    adapted_record_id=adapted_id,
+                    idempotency_key=f"parcel-reresolve:{workspace_id}:{source_id}:{adapted_id}:{now_token}:{index}",
+                )
+            )
+        return rows
 
     def lookup_by_identifier(self, *, workspace_id: str, namespace: str, value: str) -> models.ParcelCanonicalIdentity | None:
         normalized = self._normalize_identifier(namespace=namespace, raw_value=value)
