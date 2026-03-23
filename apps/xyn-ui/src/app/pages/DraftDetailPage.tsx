@@ -980,6 +980,22 @@ export default function DraftDetailPage({
         return;
       }
       if (actionId === "open_generated_environment") {
+        if (applicationId) {
+          primeWorkbenchContext();
+          openPanel({
+            key: "application_detail",
+            params: {
+              workspace_id: workspaceId,
+              application_id: applicationId,
+            },
+            open_in: "new_panel",
+            title: `${draftDescriptor.title || "Application"} Workspace`,
+          });
+          if (!isWorkbenchRoute) navigate(toWorkspacePath(workspaceId, "workbench"));
+          return;
+        }
+        // TODO(platform): add a first-class shell-mounted generated-runtime route
+        // (for example /w/:workspaceId/apps/:appSlug) so direct runtime URLs are no longer needed.
         openGeneratedEnvironment();
         return;
       }

@@ -7,11 +7,12 @@ import uuid
 from datetime import datetime, timezone
 from html import escape
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 import psycopg2
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from psycopg2.extras import RealDictCursor
 from psycopg2 import sql
 
@@ -33,6 +34,7 @@ PLATFORM_API_BASE_URL = str(os.getenv("XYN_PLATFORM_API_BASE_URL", "") or "").st
 PLATFORM_API_TIMEOUT_SECONDS = float(os.getenv("XYN_PLATFORM_API_TIMEOUT_SECONDS", "10.0"))
 PLATFORM_INTERNAL_TOKEN = str(os.getenv("XYENCE_INTERNAL_TOKEN", "") or "").strip()
 PLATFORM_API_HOST_HEADER = str(os.getenv("XYN_PLATFORM_API_HOST_HEADER", "") or "").strip()
+SHELL_BASE_URL = str(os.getenv("XYN_SHELL_BASE_URL", "") or "").strip().rstrip("/")
 
 
 def utc_now() -> str:
@@ -109,6 +111,39 @@ def _platform_call(
             "error": f"{exc}",
             "url": url,
         }
+
+
+def _workspace_id_hint() -> str:
+    raw = str(os.getenv("GENERATED_POLICY_BUNDLE_JSON", "") or "").strip()
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("workspace_id") or "").strip()
+
+
+def _shell_base_url(request: Request) -> str:
+    if SHELL_BASE_URL:
+        return SHELL_BASE_URL
+    referer = str(request.headers.get("referer") or "").strip()
+    if not referer:
+        return ""
+    parsed = urlsplit(referer)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _shell_workbench_url(request: Request) -> str:
+    workspace_id = _workspace_id_hint()
+    shell_base = _shell_base_url(request)
+    if not workspace_id or not shell_base:
+        return ""
+    return f"{shell_base}/w/{workspace_id}/workbench"
 
 
 def _render_kv_table(rows: list[dict[str, Any]], *, columns: list[tuple[str, str]]) -> str:
@@ -482,13 +517,24 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
         return {"status": "ok", "service": SERVICE_NAME, "time": utc_now()}
 
     @app.get("/", response_class=HTMLResponse)
-    def index():
+    def index(request: Request, view: Optional[str] = Query(default=None)):
+        wants_runtime = str(view or "").strip().lower() == "runtime"
+        shell_url = _shell_workbench_url(request)
+        if shell_url and not wants_runtime:
+            return RedirectResponse(url=shell_url, status_code=307)
+        return _runtime_launcher(ui_scaffold)
+
+    @app.get("/runtime", response_class=HTMLResponse)
+    def runtime_launcher():
+        return _runtime_launcher(ui_scaffold)
+
+    def _runtime_launcher(ui_scaffold: dict[str, Any]) -> str:
         return _render_ui_shell(
             ui=ui_scaffold,
-            heading="Real Estate Deal Finder runtime surface with canonical campaign, source, watch, and signal integrations.",
+            heading="Generated runtime dev surface (use shell/workbench as the primary user entrypoint).",
             body_html="""
-                <h2>Runtime Access</h2>
-                <p class="subtle">Use the links below to validate operator and investor workflows using live platform data.</p>
+                <h2>Runtime Dev Access</h2>
+                <p class="subtle">This page is retained for low-level runtime diagnostics. For normal use, open the app through the Xyn shell/workbench.</p>
                 <div class="jump-links">
                   <a href="/app">Open App Home</a>
                   <a href="/app/admin">Admin / Operator</a>
