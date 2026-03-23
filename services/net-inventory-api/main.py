@@ -8,8 +8,9 @@ from datetime import datetime, timezone
 from html import escape
 from typing import Any, Optional
 
+import httpx
 import psycopg2
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from psycopg2.extras import RealDictCursor
 from psycopg2 import sql
@@ -28,6 +29,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://xyn:xyn_dev_password@loca
 PORT = int(os.getenv("PORT", "8080"))
 SERVICE_NAME = str(os.getenv("SERVICE_NAME", "generated-app-api") or "generated-app-api").strip() or "generated-app-api"
 APP_TITLE = str(os.getenv("APP_TITLE", "Generated Application API") or "Generated Application API").strip() or "Generated Application API"
+PLATFORM_API_BASE_URL = str(os.getenv("XYN_PLATFORM_API_BASE_URL", "") or "").strip()
+PLATFORM_API_TIMEOUT_SECONDS = float(os.getenv("XYN_PLATFORM_API_TIMEOUT_SECONDS", "10.0"))
+PLATFORM_INTERNAL_TOKEN = str(os.getenv("XYENCE_INTERNAL_TOKEN", "") or "").strip()
 
 
 def utc_now() -> str:
@@ -36,6 +40,99 @@ def utc_now() -> str:
 
 def get_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+
+
+def _resolved_platform_api_base_url() -> str:
+    base = str(PLATFORM_API_BASE_URL or "").strip()
+    if base:
+        return base.rstrip("/")
+    return "http://xyn-api-backend-1:8000"
+
+
+def _platform_headers(request: Request) -> dict[str, str]:
+    headers: dict[str, str] = {"Accept": "application/json"}
+    cookie = str(request.headers.get("cookie") or "").strip()
+    if cookie:
+        headers["Cookie"] = cookie
+    auth = str(request.headers.get("authorization") or "").strip()
+    if auth:
+        headers["Authorization"] = auth
+    csrf = str(request.headers.get("x-csrftoken") or "").strip()
+    if csrf:
+        headers["X-CSRFToken"] = csrf
+    if PLATFORM_INTERNAL_TOKEN:
+        headers["X-Internal-Token"] = PLATFORM_INTERNAL_TOKEN
+    return headers
+
+
+def _platform_call(
+    request: Request,
+    *,
+    method: str,
+    path: str,
+    params: Optional[dict[str, Any]] = None,
+    payload: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    url = f"{_resolved_platform_api_base_url()}{path}"
+    try:
+        with httpx.Client(timeout=PLATFORM_API_TIMEOUT_SECONDS) as client:
+            response = client.request(
+                method=method.upper(),
+                url=url,
+                params=params or None,
+                json=payload or None,
+                headers=_platform_headers(request),
+            )
+        body_text = str(response.text or "")
+        data: dict[str, Any] = {}
+        if body_text:
+            try:
+                parsed = response.json()
+                data = parsed if isinstance(parsed, dict) else {"items": parsed}
+            except json.JSONDecodeError:
+                data = {}
+        return {
+            "ok": 200 <= int(response.status_code) < 300,
+            "status": int(response.status_code),
+            "data": data,
+            "error": str(data.get("error") or "").strip() or (body_text[:280] if body_text else ""),
+            "url": url,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": 0,
+            "data": {},
+            "error": f"{exc}",
+            "url": url,
+        }
+
+
+def _render_kv_table(rows: list[dict[str, Any]], *, columns: list[tuple[str, str]]) -> str:
+    if not rows:
+        return "<p><em>No records found.</em></p>"
+    header_html = "".join(f"<th>{escape(label)}</th>" for _, label in columns)
+    body_parts: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tds = []
+        for key, _ in columns:
+            value = row.get(key)
+            if isinstance(value, (dict, list)):
+                rendered = escape(json.dumps(value, separators=(",", ":"))[:220])
+            else:
+                rendered = escape(str(value if value is not None else ""))
+            tds.append(f"<td>{rendered}</td>")
+        body_parts.append(f"<tr>{''.join(tds)}</tr>")
+    return (
+        "<div style='overflow:auto;'>"
+        "<table style='width:100%;border-collapse:collapse'>"
+        f"<thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{''.join(body_parts)}</tbody>"
+        "</table>"
+        "</div>"
+    )
 
 
 def _postgres_type(field_type: str) -> str:
@@ -371,14 +468,86 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
         return ui_scaffold
 
     @app.get("/app/admin", response_class=HTMLResponse)
-    def admin_home():
+    def admin_home(
+        request: Request,
+        workspace_id: Optional[str] = Query(default=None),
+        source_id: Optional[str] = Query(default=None),
+    ):
+        workspace_token = str(workspace_id or "").strip()
+        source_token = str(source_id or "").strip()
+        sources_result: dict[str, Any] | None = None
+        funnel_result: dict[str, Any] | None = None
+        if workspace_token:
+            sources_result = _platform_call(
+                request,
+                method="GET",
+                path="/xyn/api/source-connectors",
+                params={"workspace_id": workspace_token},
+            )
+            funnel_params: dict[str, Any] = {"workspace_id": workspace_token}
+            if source_token:
+                funnel_params["source_id"] = source_token
+            funnel_result = _platform_call(
+                request,
+                method="GET",
+                path="/xyn/api/monitoring/funnel-summary",
+                params=funnel_params,
+            )
+
+        sources = list((sources_result or {}).get("data", {}).get("sources") or [])
+        funnel_counts = (funnel_result or {}).get("data", {}).get("counts") if isinstance((funnel_result or {}).get("data"), dict) else {}
+        unresolved = (funnel_result or {}).get("data", {}).get("unresolved_reasons") if isinstance((funnel_result or {}).get("data"), dict) else []
+        source_rows = [
+            {
+                "id": str(item.get("id") or ""),
+                "name": str(item.get("name") or ""),
+                "source_type": str(item.get("source_type") or ""),
+                "lifecycle_state": str(item.get("lifecycle_state") or ""),
+                "is_active": str(bool(item.get("is_active"))),
+                "health_status": str(item.get("health_status") or ""),
+            }
+            for item in sources
+            if isinstance(item, dict)
+        ]
+        body = [
+            "<h2>Admin/Operator Scope</h2>",
+            "<p>Live operational context from canonical source, funnel, watch, and signal endpoints.</p>",
+            "<form method='get' action='/app/admin' style='display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;'>"
+            f"<label>workspace_id <input name='workspace_id' value='{escape(workspace_token)}' style='min-width:320px;'/></label>"
+            f"<label>source_id <input name='source_id' value='{escape(source_token)}' style='min-width:320px;'/></label>"
+            "<button type='submit'>Refresh</button>"
+            "</form>",
+        ]
+        if not workspace_token:
+            body.append("<p><em>Provide workspace_id to load source governance and funnel status.</em></p>")
+        if sources_result and not sources_result.get("ok"):
+            body.append(f"<p><strong>Source API error:</strong> {escape(str(sources_result.get('error') or 'unknown'))}</p>")
+        if funnel_result and not funnel_result.get("ok"):
+            body.append(f"<p><strong>Funnel API error:</strong> {escape(str(funnel_result.get('error') or 'unknown'))}</p>")
+        if source_rows:
+            body.append("<h3>Sources</h3>")
+            body.append(_render_kv_table(source_rows, columns=[("name", "Name"), ("source_type", "Type"), ("lifecycle_state", "State"), ("is_active", "Active"), ("health_status", "Health"), ("id", "Source ID")]))
+        if isinstance(funnel_counts, dict) and funnel_counts:
+            body.append("<h3>Monitoring Funnel</h3>")
+            body.append(_render_kv_table([funnel_counts], columns=[("adapted_rows", "Adapted"), ("geocode_selected", "Geocode Selected"), ("crosswalk_resolved", "Crosswalk Resolved"), ("crosswalk_unresolved", "Crosswalk Unresolved"), ("watch_matches_matched", "Watch Matched"), ("signal_projection_rows", "Signal Rows")]))
+        unresolved_rows = [row for row in unresolved if isinstance(row, dict)]
+        if unresolved_rows:
+            body.append("<h3>Unresolved Reasons</h3>")
+            body.append(_render_kv_table(unresolved_rows, columns=[("reason", "Reason"), ("count", "Count")]))
+        body.append(
+            "<h3>Re-resolve Unresolved Rows</h3>"
+            "<form method='post' action='/app/operator/reresolve-source' style='display:flex;gap:8px;flex-wrap:wrap;'>"
+            f"<input type='hidden' name='workspace_id' value='{escape(workspace_token)}' />"
+            f"<label>source_id <input name='source_id' value='{escape(source_token)}' style='min-width:320px;'/></label>"
+            "<label>limit <input type='number' name='limit' min='1' max='5000' value='250' /></label>"
+            "<label><input type='checkbox' name='require_selected_geocode' value='1' checked /> require selected geocode</label>"
+            "<button type='submit'>Run Re-resolution</button>"
+            "</form>"
+        )
         return _render_ui_shell(
             ui=ui_scaffold,
             heading="Admin/operator scaffold area.",
-            body_html="""
-                <h2>Admin/Operator Scope</h2>
-                <p>Source and operational surfaces are grouped here to keep them separate from campaign-user flows.</p>
-            """,
+            body_html="".join(body),
         )
 
     @app.get("/app/map-selection", response_class=HTMLResponse)
@@ -397,18 +566,144 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
 
     _register_entity_routes(app, service)
 
+    @app.post("/app/operator/reresolve-source", response_class=HTMLResponse)
+    async def operator_reresolve_source(
+        request: Request,
+        workspace_id: str = Form(default=""),
+        source_id: str = Form(default=""),
+        limit: int = Form(default=250),
+        require_selected_geocode: Optional[str] = Form(default=""),
+    ):
+        workspace_token = str(workspace_id or "").strip()
+        source_token = str(source_id or "").strip()
+        payload = {
+            "workspace_id": workspace_token,
+            "source_id": source_token,
+            "limit": int(limit or 250),
+            "require_selected_geocode": bool(str(require_selected_geocode or "").strip()),
+        }
+        result = _platform_call(request, method="POST", path="/xyn/api/parcel-crosswalks/reresolve-source", payload=payload)
+        rows = list(result.get("data", {}).get("crosswalks") or []) if isinstance(result.get("data"), dict) else []
+        summary_row = {
+            "status": result.get("status"),
+            "count": (result.get("data") or {}).get("count", 0) if isinstance(result.get("data"), dict) else 0,
+            "before_unresolved": ((result.get("data") or {}).get("before") or {}).get("unresolved", 0) if isinstance(result.get("data"), dict) else 0,
+            "after_unresolved": ((result.get("data") or {}).get("after") or {}).get("unresolved", 0) if isinstance(result.get("data"), dict) else 0,
+        }
+        body = [
+            "<h2>Re-resolution Result</h2>",
+            _render_kv_table([summary_row], columns=[("status", "HTTP"), ("count", "Rows Processed"), ("before_unresolved", "Before Unresolved"), ("after_unresolved", "After Unresolved")]),
+        ]
+        if not result.get("ok"):
+            body.append(f"<p><strong>Error:</strong> {escape(str(result.get('error') or 'unknown'))}</p>")
+        if rows:
+            preview = []
+            for row in rows[:20]:
+                if isinstance(row, dict):
+                    preview.append(
+                        {
+                            "id": row.get("id"),
+                            "status": row.get("status"),
+                            "resolution_method": row.get("resolution_method"),
+                            "confidence": row.get("confidence"),
+                            "reason": row.get("reason"),
+                        }
+                    )
+            body.append("<h3>Crosswalk Preview</h3>")
+            body.append(_render_kv_table(preview, columns=[("id", "Crosswalk"), ("status", "Status"), ("resolution_method", "Method"), ("confidence", "Confidence"), ("reason", "Reason")]))
+        body.append(f"<p><a href='/app/admin?workspace_id={escape(workspace_token)}&source_id={escape(source_token)}'>Back to Admin</a></p>")
+        return _render_ui_shell(ui=ui_scaffold, heading="Canonical parcel crosswalk re-resolution executed.", body_html="".join(body))
+
     for entity_key, contract in service.contracts.items():
         plural_label = _titleize(str(contract.get("plural_label") or entity_key))
         singular_label = _titleize(str(contract.get("singular_label") or entity_key.rstrip("s")))
 
-        async def entity_list_surface(entity_key: str = entity_key, plural_label: str = plural_label):
+        async def entity_list_surface(request: Request, entity_key: str = entity_key, plural_label: str = plural_label):
+            workspace_token = _workspace_id_from_request(request)
+            body_parts = [
+                f"<h2>{escape(plural_label)} List</h2>",
+                f"<p>Entity API endpoint: <code>/{escape(entity_key)}?workspace_id=&lt;workspace_id&gt;</code></p>",
+            ]
+            if not workspace_token:
+                body_parts.append("<p><em>Provide workspace_id in query params to load canonical data.</em></p>")
+            if workspace_token and entity_key == "signals":
+                params: dict[str, Any] = {"workspace_id": workspace_token, "limit": 100}
+                for token in ("campaign_id", "watch_id", "handle", "status", "severity", "source_key"):
+                    raw = str(request.query_params.get(token) or "").strip()
+                    if raw:
+                        params[token] = raw
+                result = _platform_call(request, method="GET", path="/xyn/api/signals", params=params)
+                if not result.get("ok"):
+                    body_parts.append(f"<p><strong>Signal feed error:</strong> {escape(str(result.get('error') or 'unknown'))}</p>")
+                rows = list((result.get("data") or {}).get("signals") or []) if isinstance(result.get("data"), dict) else []
+                normalized = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    normalized.append(
+                        {
+                            "id": row.get("id"),
+                            "title": row.get("title"),
+                            "severity": row.get("severity"),
+                            "status": row.get("status"),
+                            "campaign_id": row.get("campaign_id"),
+                            "watch_id": row.get("watch_id"),
+                            "parcel_handle_normalized": row.get("parcel_handle_normalized"),
+                        }
+                    )
+                body_parts.append(_render_kv_table(normalized, columns=[("title", "Title"), ("severity", "Severity"), ("status", "Status"), ("campaign_id", "Campaign"), ("watch_id", "Watch"), ("parcel_handle_normalized", "Handle"), ("id", "Signal ID")]))
+            if workspace_token and entity_key == "sources":
+                result = _platform_call(
+                    request,
+                    method="GET",
+                    path="/xyn/api/source-connectors",
+                    params={"workspace_id": workspace_token},
+                )
+                if not result.get("ok"):
+                    body_parts.append(f"<p><strong>Source list error:</strong> {escape(str(result.get('error') or 'unknown'))}</p>")
+                rows = list((result.get("data") or {}).get("sources") or []) if isinstance(result.get("data"), dict) else []
+                normalized = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    normalized.append(
+                        {
+                            "name": row.get("name"),
+                            "source_type": row.get("source_type"),
+                            "lifecycle_state": row.get("lifecycle_state"),
+                            "is_active": row.get("is_active"),
+                            "health_status": row.get("health_status"),
+                            "id": row.get("id"),
+                        }
+                    )
+                body_parts.append(_render_kv_table(normalized, columns=[("name", "Name"), ("source_type", "Type"), ("lifecycle_state", "State"), ("is_active", "Active"), ("health_status", "Health"), ("id", "Source ID")]))
+            if workspace_token and entity_key == "campaigns":
+                result = _platform_call(
+                    request,
+                    method="GET",
+                    path="/xyn/api/campaigns",
+                    params={"workspace_id": workspace_token},
+                )
+                if not result.get("ok"):
+                    body_parts.append(f"<p><strong>Campaign list error:</strong> {escape(str(result.get('error') or 'unknown'))}</p>")
+                rows = list((result.get("data") or {}).get("campaigns") or []) if isinstance(result.get("data"), dict) else []
+                normalized = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    normalized.append(
+                        {
+                            "name": row.get("name"),
+                            "slug": row.get("slug"),
+                            "status": row.get("status"),
+                            "id": row.get("id"),
+                        }
+                    )
+                body_parts.append(_render_kv_table(normalized, columns=[("name", "Name"), ("slug", "Slug"), ("status", "Status"), ("id", "Campaign ID")]))
             return _render_ui_shell(
                 ui=ui_scaffold,
                 heading=f"{plural_label} list scaffold.",
-                body_html=(
-                    f"<h2>{escape(plural_label)} List</h2>"
-                    f"<p>API endpoint: <code>/{escape(entity_key)}?workspace_id=&lt;workspace_id&gt;</code></p>"
-                ),
+                body_html="".join(body_parts),
             )
 
         async def entity_create_surface(entity_key: str = entity_key, singular_label: str = singular_label):
@@ -421,15 +716,107 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
                 ),
             )
 
-        async def entity_detail_surface(record_ref: str, entity_key: str = entity_key, singular_label: str = singular_label):
+        async def entity_detail_surface(request: Request, record_ref: str, entity_key: str = entity_key, singular_label: str = singular_label):
+            workspace_token = _workspace_id_from_request(request)
+            body_parts = [
+                f"<h2>{escape(singular_label)} Detail</h2>",
+                f"<p>Record ref: <code>{escape(record_ref)}</code></p>",
+                f"<p>Entity API endpoint: <code>/{escape(entity_key)}/{escape(record_ref)}?workspace_id=&lt;workspace_id&gt;</code></p>",
+            ]
+            if workspace_token and entity_key == "campaigns":
+                campaign_result = _platform_call(
+                    request,
+                    method="GET",
+                    path=f"/xyn/api/campaigns/{record_ref}",
+                    params={"workspace_id": workspace_token},
+                )
+                if campaign_result.get("ok"):
+                    campaign_payload = campaign_result.get("data") if isinstance(campaign_result.get("data"), dict) else {}
+                    body_parts.append("<h3>Campaign</h3>")
+                    body_parts.append(
+                        _render_kv_table(
+                            [
+                                {
+                                    "name": campaign_payload.get("name"),
+                                    "slug": campaign_payload.get("slug"),
+                                    "status": campaign_payload.get("status"),
+                                    "type": campaign_payload.get("campaign_type"),
+                                }
+                            ],
+                            columns=[("name", "Name"), ("slug", "Slug"), ("status", "Status"), ("type", "Type")],
+                        )
+                    )
+                else:
+                    body_parts.append(f"<p><strong>Campaign detail error:</strong> {escape(str(campaign_result.get('error') or 'unknown'))}</p>")
+                match_result = _platform_call(
+                    request,
+                    method="GET",
+                    path="/xyn/api/watches/matches",
+                    params={"workspace_id": workspace_token, "campaign_id": record_ref, "limit": 50},
+                )
+                signal_result = _platform_call(
+                    request,
+                    method="GET",
+                    path="/xyn/api/signals",
+                    params={"workspace_id": workspace_token, "campaign_id": record_ref, "limit": 50},
+                )
+                if match_result.get("ok"):
+                    matches = list((match_result.get("data") or {}).get("matches") or []) if isinstance(match_result.get("data"), dict) else []
+                    body_parts.append("<h3>Watch Matches</h3>")
+                    rows = []
+                    for row in matches:
+                        if isinstance(row, dict):
+                            rows.append(
+                                {
+                                    "watch_id": row.get("watch_id"),
+                                    "matched": row.get("matched"),
+                                    "score": row.get("score"),
+                                    "event_key": row.get("event_key"),
+                                    "reason": row.get("reason"),
+                                }
+                            )
+                    body_parts.append(_render_kv_table(rows, columns=[("watch_id", "Watch"), ("matched", "Matched"), ("score", "Score"), ("event_key", "Event Key"), ("reason", "Reason")]))
+                if signal_result.get("ok"):
+                    signals = list((signal_result.get("data") or {}).get("signals") or []) if isinstance(signal_result.get("data"), dict) else []
+                    body_parts.append("<h3>Signals</h3>")
+                    rows = []
+                    for row in signals:
+                        if isinstance(row, dict):
+                            rows.append(
+                                {
+                                    "title": row.get("title"),
+                                    "severity": row.get("severity"),
+                                    "status": row.get("status"),
+                                    "watch_id": row.get("watch_id"),
+                                    "id": row.get("id"),
+                                }
+                            )
+                    body_parts.append(_render_kv_table(rows, columns=[("title", "Title"), ("severity", "Severity"), ("status", "Status"), ("watch_id", "Watch"), ("id", "Signal ID")]))
+            if workspace_token and entity_key == "signals":
+                signal_result = _platform_call(
+                    request,
+                    method="GET",
+                    path=f"/xyn/api/signals/{record_ref}",
+                    params={"workspace_id": workspace_token},
+                )
+                if signal_result.get("ok"):
+                    row = signal_result.get("data") if isinstance(signal_result.get("data"), dict) else {}
+                    body_parts.append("<h3>Signal Detail</h3>")
+                    body_parts.append(_render_kv_table([{
+                        "title": row.get("title"),
+                        "severity": row.get("severity"),
+                        "status": row.get("status"),
+                        "campaign_id": row.get("campaign_id"),
+                        "watch_id": row.get("watch_id"),
+                        "parcel_handle_normalized": row.get("parcel_handle_normalized"),
+                        "event_key": row.get("event_key"),
+                    }], columns=[("title", "Title"), ("severity", "Severity"), ("status", "Status"), ("campaign_id", "Campaign"), ("watch_id", "Watch"), ("parcel_handle_normalized", "Handle"), ("event_key", "Event Key")]))
+                else:
+                    body_parts.append(f"<p><strong>Signal detail error:</strong> {escape(str(signal_result.get('error') or 'unknown'))}</p>")
             return _render_ui_shell(
                 ui=ui_scaffold,
                 heading=f"{singular_label} detail scaffold.",
-                body_html=(
-                    f"<h2>{escape(singular_label)} Detail</h2>"
-                    f"<p>Record ref: <code>{escape(record_ref)}</code></p>"
-                    f"<p>API endpoint: <code>/{escape(entity_key)}/{escape(record_ref)}?workspace_id=&lt;workspace_id&gt;</code></p>"
-                ),
+                body_html="".join(body_parts),
             )
 
         app.add_api_route(f"/app/{entity_key}", entity_list_surface, methods=["GET"], response_class=HTMLResponse, name=f"ui-{entity_key}-list")
