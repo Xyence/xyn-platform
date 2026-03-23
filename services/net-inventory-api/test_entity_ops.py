@@ -929,6 +929,91 @@ class NetInventoryCrudTests(unittest.TestCase):
         self.assertEqual(first.status_code, 201, first.text)
         self.assertEqual(second.status_code, 201, second.text)
 
+    def test_app_surface_scaffold_exposes_entity_and_admin_sections(self):
+        contracts = [
+            {
+                "key": "campaigns",
+                "singular_label": "campaign",
+                "plural_label": "campaigns",
+                "collection_path": "/campaigns",
+                "item_path_template": "/campaigns/{id}",
+                "operations": {
+                    "list": {"declared": True, "method": "GET", "path": "/campaigns"},
+                    "get": {"declared": True, "method": "GET", "path": "/campaigns/{id}"},
+                    "create": {"declared": True, "method": "POST", "path": "/campaigns"},
+                    "update": {"declared": True, "method": "PATCH", "path": "/campaigns/{id}"},
+                    "delete": {"declared": True, "method": "DELETE", "path": "/campaigns/{id}"},
+                },
+                "fields": [
+                    {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                    {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                    {"name": "name", "type": "string", "required": True, "readable": True, "writable": True, "identity": True},
+                ],
+                "presentation": {"default_list_fields": ["name"], "default_detail_fields": ["id", "name"], "title_field": "name"},
+                "validation": {"required_on_create": ["workspace_id", "name"], "allowed_on_update": ["name"]},
+                "relationships": [],
+            },
+            {
+                "key": "sources",
+                "singular_label": "source",
+                "plural_label": "sources",
+                "collection_path": "/sources",
+                "item_path_template": "/sources/{id}",
+                "operations": {
+                    "list": {"declared": True, "method": "GET", "path": "/sources"},
+                    "get": {"declared": True, "method": "GET", "path": "/sources/{id}"},
+                    "create": {"declared": True, "method": "POST", "path": "/sources"},
+                    "update": {"declared": True, "method": "PATCH", "path": "/sources/{id}"},
+                    "delete": {"declared": True, "method": "DELETE", "path": "/sources/{id}"},
+                },
+                "fields": [
+                    {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                    {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                    {"name": "name", "type": "string", "required": True, "readable": True, "writable": True, "identity": True},
+                ],
+                "presentation": {"default_list_fields": ["name"], "default_detail_fields": ["id", "name"], "title_field": "name"},
+                "validation": {"required_on_create": ["workspace_id", "name"], "allowed_on_update": ["name"]},
+                "relationships": [],
+            },
+        ]
+        service = GenericEntityOperationsService(entity_contracts=contracts, storage_adapter=InMemoryStorageAdapter())
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GENERATED_WORKFLOW_DEFINITIONS_JSON": json.dumps(
+                    [
+                        {"workflow_key": "end-user", "description": "campaign with map rectangle selection"},
+                        {"workflow_key": "admin-operator", "description": "source inspection and activation"},
+                    ]
+                ),
+                "GENERATED_UI_SURFACES_TEXT": "campaign list view; map selection view; admin/operator source-management area",
+                "GENERATED_REQUIRES_PRIMITIVES_JSON": json.dumps(["geospatial"]),
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app(entity_service=service, initialize_schema=False))
+            home = client.get("/app")
+            self.assertEqual(home.status_code, 200, home.text)
+            self.assertIn("/app/campaigns", home.text)
+            self.assertIn("/app/sources", home.text)
+            self.assertIn("/app/admin", home.text)
+
+            surfaces = client.get("/app/surfaces")
+            self.assertEqual(surfaces.status_code, 200, surfaces.text)
+            payload = surfaces.json()
+            self.assertTrue(payload.get("flags", {}).get("admin_grouping"))
+            self.assertTrue(payload.get("flags", {}).get("map_selection_scaffold"))
+
+            map_scaffold = client.get("/app/map-selection")
+            self.assertEqual(map_scaffold.status_code, 200, map_scaffold.text)
+            self.assertIn("rectangle/box selection", map_scaffold.text.lower())
+
+    def test_reports_routes_only_register_when_entities_exist(self):
+        service = GenericEntityOperationsService(entity_contracts=_lunch_poll_contracts(), storage_adapter=InMemoryStorageAdapter())
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        self.assertEqual(client.get("/reports/devices-by-status", params={"workspace_id": self.workspace_id}).status_code, 404)
+        self.assertEqual(client.get("/reports/interfaces-by-status", params={"workspace_id": self.workspace_id}).status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -179,6 +179,7 @@ from .sources import (
     serialize_source_mapping,
 )
 from .source_governance import SourceGovernanceService, normalize_governance_policy
+from .ingestion import IngestionCoordinator
 from .watching import (
     WATCH_LIFECYCLE_STATES,
     WATCH_SUBSCRIBER_TYPES,
@@ -18260,25 +18261,36 @@ def _direct_panel_prompt_interpretation(
 def _extract_app_intent_fields(message: str) -> Dict[str, Any]:
     text = str(message or "")
     lower = text.lower()
+    def _contains_token(*tokens: str) -> bool:
+        return any(re.search(rf"(?<!\w){re.escape(token)}(?!\w)", lower) for token in tokens if token)
+
     requested_entities: List[str] = []
-    if "devices" in lower:
-        requested_entities.append("devices")
-    if "interfaces" in lower:
-        requested_entities.append("interfaces")
-    if "vlans" in lower or "vlan" in lower:
-        requested_entities.append("vlans")
-    if "ip addresses" in lower or "ip_address" in lower or "ip address" in lower:
-        requested_entities.append("ip_addresses")
-    if "locations" in lower or "location" in lower:
-        requested_entities.append("locations")
-    if "racks" in lower or "rack" in lower:
-        requested_entities.append("racks")
+    entity_token_map: List[Tuple[str, Tuple[str, ...]]] = [
+        ("devices", ("device", "devices")),
+        ("interfaces", ("interface", "interfaces")),
+        ("vlans", ("vlan", "vlans")),
+        ("ip_addresses", ("ip address", "ip addresses", "ip_address", "ip_addresses")),
+        ("locations", ("location", "locations", "site", "sites")),
+        ("racks", ("rack", "racks")),
+        ("campaigns", ("campaign", "campaigns")),
+        ("properties", ("property", "properties", "parcel", "parcels")),
+        ("signals", ("signal", "signals")),
+        ("sources", ("source", "sources")),
+        ("watches", ("watch", "watches", "subscription", "subscriptions")),
+        ("subscribers", ("subscriber", "subscribers", "notification target", "notification targets")),
+    ]
+    for slug, tokens in entity_token_map:
+        if _contains_token(*tokens):
+            requested_entities.append(slug)
+    requested_entities = _normalize_unique_strings(requested_entities)
 
     phase_1_scope: List[str] = []
     if re.search(r"start\s+with\s+devices?\s+and\s+locations?", lower):
         phase_1_scope = ["devices", "locations"]
-    elif "devices" in lower and ("locations" in lower or "location" in lower):
+    elif _contains_token("devices", "device") and _contains_token("locations", "location"):
         phase_1_scope = ["devices", "locations"]
+    elif "campaigns" in requested_entities and "properties" in requested_entities:
+        phase_1_scope = ["campaigns", "properties", "signals"]
 
     requested_visuals: List[str] = []
     if re.search(r"devices?\s+by\s+status", lower):
@@ -18286,9 +18298,29 @@ def _extract_app_intent_fields(message: str) -> Dict[str, Any]:
     if re.search(r"interfaces?\s+by\s+status", lower):
         requested_visuals.append("interfaces_by_status_chart")
 
-    app_kind = "network_inventory" if ("network inventory" in lower or "devices" in lower) else "custom_app"
-    workspace_scoped = "workspace" in lower
-    title = "Network Inventory App" if app_kind == "network_inventory" else "New App"
+    app_kind = (
+        "network_inventory"
+        if ("network inventory" in lower or ("devices" in requested_entities and ("network" in lower or "inventory" in lower)))
+        else "custom_app"
+    )
+    workspace_scoped = _contains_token("workspace", "workspace-scoped")
+    title_patterns = [
+        re.compile(r'named\s+[“"]([^”"]+)[”"]', re.IGNORECASE),
+        re.compile(r'called\s+[“"]([^”"]+)[”"]', re.IGNORECASE),
+        re.compile(r'named\s+([^.;\\n]+)', re.IGNORECASE),
+        re.compile(r'called\s+([^.;\\n]+)', re.IGNORECASE),
+    ]
+    title = ""
+    for pattern in title_patterns:
+        match = pattern.search(text)
+        if not match:
+            continue
+        candidate = str(match.group(1) or "").strip().strip(".")
+        if candidate:
+            title = candidate
+            break
+    if not title:
+        title = "Network Inventory App" if app_kind == "network_inventory" else "Generated App"
     return {
         "title": title,
         "app_kind": app_kind,
@@ -31720,6 +31752,119 @@ def source_connector_health_update(request: HttpRequest, source_id: str) -> Json
         return JsonResponse({"error": str(exc)}, status=400)
     readiness = service.validate_readiness(source_id=str(source.id))
     return JsonResponse(serialize_source_connector(source, readiness=readiness))
+
+
+@csrf_exempt
+@login_required
+def source_connector_refresh(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity,
+        str(source.workspace_id),
+        [CAP_SOURCES_MANAGE, CAP_REFRESHES_RUN],
+        require_all=False,
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    if not bool(source.is_active):
+        return JsonResponse({"error": "source must be active before refresh/import runs"}, status=409)
+
+    governance_decision = SourceGovernanceService().evaluate(source=source, action="run_source")
+    if governance_decision.decision != "allow":
+        SourceGovernanceService().emit_audit_event(
+            source=source,
+            decision=governance_decision,
+            actor_id=str(identity.id),
+            metadata={"route": "source_connector_refresh"},
+        )
+        return JsonResponse(
+            {
+                "error": governance_decision.message,
+                "governance_decision": governance_decision.as_dict(),
+            },
+            status=409 if governance_decision.decision == "defer" else 403,
+        )
+
+    source_url = str(payload.get("source_url") or "").strip()
+    if not source_url:
+        cfg = source.configuration_json if isinstance(source.configuration_json, dict) else {}
+        source_url = str(cfg.get("url") or "").strip()
+    if not source_url:
+        return JsonResponse({"error": "source configuration must include a url for refresh/import"}, status=400)
+
+    raw_jurisdiction = str(payload.get("jurisdiction") or "").strip()
+    if not raw_jurisdiction:
+        cfg = source.configuration_json if isinstance(source.configuration_json, dict) else {}
+        raw_jurisdiction = str(cfg.get("jurisdiction") or "").strip()
+    jurisdiction = ""
+    if raw_jurisdiction:
+        try:
+            jurisdiction = require_canonical_jurisdiction(raw_jurisdiction, context="jurisdiction")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+
+    source_scope = str(payload.get("source") or "").strip() or str(source.key)
+    try:
+        timeout_seconds = int(payload.get("timeout_seconds") or 60)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "timeout_seconds must be an integer"}, status=400)
+    timeout_seconds = max(5, min(timeout_seconds, 600))
+    reprocess_unchanged = bool(payload.get("reprocess_unchanged"))
+
+    coordinator = IngestionCoordinator()
+    service = SourceConnectorService()
+    try:
+        result = coordinator.ingest_from_url(
+            source_connector=source,
+            source_url=source_url,
+            jurisdiction=jurisdiction,
+            source_scope=source_scope,
+            timeout_seconds=timeout_seconds,
+            reprocess_unchanged=reprocess_unchanged,
+        )
+        run = OrchestrationRun.objects.select_related("pipeline").filter(id=result.run_id).first()
+        if run is not None:
+            service.update_health(
+                SourceHealthUpdate(
+                    source_id=str(source.id),
+                    health_status="healthy",
+                    lifecycle_state="active",
+                    success=True,
+                    run_id=str(run.id),
+                )
+            )
+        source.refresh_from_db()
+        readiness = service.validate_readiness(source_id=str(source.id))
+        return JsonResponse(
+            {
+                "source": serialize_source_connector(source, readiness=readiness),
+                "run": _serialize_orchestration_run_summary(run) if run is not None else {"id": result.run_id},
+                "artifact_record_id": result.artifact_record_id,
+                "parsed_record_count": int(result.parsed_record_count),
+                "warnings": list(result.warnings),
+            },
+            status=200,
+        )
+    except Exception as exc:
+        service.update_health(
+            SourceHealthUpdate(
+                source_id=str(source.id),
+                health_status="failing",
+                lifecycle_state="failing",
+                success=False,
+                failure_reason=str(exc),
+            )
+        )
+        return JsonResponse({"error": "source refresh/import failed", "details": str(exc)}, status=502)
 
 
 def _record_matching_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[RecordMatchEvaluation]]:

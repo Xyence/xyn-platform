@@ -32,21 +32,42 @@ class ArcGisGeocoderProvider(GeocodeProvider):
             )
         timeout_seconds = int(config.get("timeout_seconds") or 15)
         default_params = _safe_dict(config.get("params"))
-        single_line_field = str(config.get("single_line_field") or "SingleLine").strip() or "SingleLine"
+        single_line_field = str(config.get("single_line_field") or "").strip()
+        if not single_line_field:
+            try:
+                metadata_response = requests.get(endpoint, params={"f": "json"}, timeout=(5, max(5, timeout_seconds)))
+                metadata = _safe_dict(metadata_response.json())
+                single_line_field = str(_safe_dict(metadata.get("singleLineAddressField")).get("name") or "").strip()
+            except Exception:
+                single_line_field = ""
+        if not single_line_field:
+            single_line_field = "SingleLine"
         params: dict[str, Any] = {
             **default_params,
             single_line_field: request.normalized_address or request.raw_address,
             "f": "json",
         }
+        params.setdefault("outFields", "*")
+        used_endpoint = endpoint
+
+        def _call(url: str) -> tuple[int, dict[str, Any]]:
+            response = requests.get(url, params=params, timeout=(5, max(5, timeout_seconds)))
+            return int(response.status_code), _safe_dict(response.json())
+
         request_context = {
             "endpoint": endpoint,
             "params": {str(k): str(v) for k, v in params.items()},
             "timeout_seconds": timeout_seconds,
         }
         try:
-            response = requests.get(endpoint, params=params, timeout=(5, max(5, timeout_seconds)))
-            status_code = int(response.status_code)
-            payload = _safe_dict(response.json())
+            status_code, payload = _call(endpoint)
+            candidate_rows = payload.get("candidates")
+            if not isinstance(candidate_rows, list) and not str(endpoint).rstrip("/").endswith("findAddressCandidates"):
+                retry_endpoint = f"{str(endpoint).rstrip('/')}/findAddressCandidates"
+                retry_status_code, retry_payload = _call(retry_endpoint)
+                if isinstance(retry_payload.get("candidates"), list):
+                    used_endpoint = retry_endpoint
+                    status_code, payload = retry_status_code, retry_payload
         except requests.RequestException as exc:
             return GeocodeProviderResponse(
                 status="provider_error",
@@ -62,6 +83,7 @@ class ArcGisGeocoderProvider(GeocodeProvider):
                 error_message="geocoder response is not valid JSON",
             )
 
+        request_context["endpoint"] = used_endpoint
         response_context = {"status_code": status_code, "payload": payload}
         error_payload = _safe_dict(payload.get("error"))
         if error_payload:
@@ -118,4 +140,3 @@ class ArcGisGeocoderProvider(GeocodeProvider):
             request_context=request_context,
             response_context=response_context,
         )
-

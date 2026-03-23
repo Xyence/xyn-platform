@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import io
 import logging
+import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from xyn_orchestrator import models
-from xyn_orchestrator.orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
+from xyn_orchestrator.orchestration.definitions import STAGE_PROPERTY_GRAPH_REBUILD
+from xyn_orchestrator.orchestration.interfaces import ExecutionScope, OutputRecord, RunCreateRequest, RunTrigger
 from xyn_orchestrator.orchestration.lifecycle import OrchestrationLifecycleService
 from xyn_orchestrator.provenance import ProvenanceLinkInput, ProvenanceService, object_ref
 from xyn_orchestrator.source_governance import SourceGovernanceService
@@ -82,7 +84,131 @@ class IngestionCoordinator:
             key=key,
             defaults={"name": "Ingestion Runtime", "enabled": True},
         )
+        job_definition, _ = models.OrchestrationJobDefinition.objects.get_or_create(
+            pipeline=pipeline,
+            job_key="source_refresh",
+            defaults={
+                "stage_key": STAGE_PROPERTY_GRAPH_REBUILD,
+                "name": "Source Refresh",
+                "description": "Canonical source refresh/import execution entrypoint.",
+                "handler_key": "platform.jobs.refresh_source",
+                "enabled": True,
+                "only_if_upstream_changed": False,
+                "runs_per_jurisdiction": True,
+                "runs_per_source": True,
+                "concurrency_limit": 1,
+                "retry_max_attempts": 1,
+                "backoff_initial_seconds": 10,
+                "backoff_max_seconds": 60,
+                "backoff_multiplier": 2.0,
+                "produces_artifact": True,
+                "artifact_kind": "dataset_snapshot",
+                "schedule_json": {"seeded": True, "kind": "manual"},
+                "metadata_json": {"seeded_by": "IngestionCoordinator._ensure_pipeline"},
+            },
+        )
+        if str(job_definition.stage_key or "") != STAGE_PROPERTY_GRAPH_REBUILD:
+            job_definition.stage_key = STAGE_PROPERTY_GRAPH_REBUILD
+            job_definition.save(update_fields=["stage_key", "updated_at"])
+        models.OrchestrationJobSchedule.objects.get_or_create(
+            job_definition=job_definition,
+            schedule_key="manual_refresh",
+            defaults={
+                "schedule_kind": "manual",
+                "enabled": True,
+                "metadata_json": {"seeded_by": "IngestionCoordinator._ensure_pipeline"},
+            },
+        )
         return pipeline
+
+    def _expire_stale_runs(
+        self,
+        *,
+        workspace: models.Workspace,
+        source_scope: str,
+        exclude_run_id: str = "",
+        stale_after_seconds: int = 1800,
+    ) -> None:
+        threshold = datetime.now(timezone.utc) - timedelta(seconds=max(60, int(stale_after_seconds)))
+        qs = (
+            models.OrchestrationRun.objects.filter(
+                workspace=workspace,
+                run_type="ingest.binary",
+                status="running",
+                scope_source=str(source_scope or "").strip(),
+                started_at__lt=threshold,
+            )
+            .order_by("started_at")
+        )
+        if str(exclude_run_id or "").strip():
+            qs = qs.exclude(id=str(exclude_run_id).strip())
+        lifecycle = OrchestrationLifecycleService()
+        for stale in qs:
+            last_seen = stale.heartbeat_at or stale.updated_at or stale.started_at or stale.created_at
+            if last_seen and last_seen >= threshold:
+                continue
+            job_rows = list(
+                models.OrchestrationJobRun.objects.filter(run=stale).exclude(
+                    status__in=["succeeded", "failed", "cancelled", "skipped", "stale"]
+                )
+            )
+            if job_rows:
+                for row in job_rows:
+                    try:
+                        lifecycle.mark_job_stale(job_run_id=str(row.id), reason="runtime_interrupted")
+                    except Exception:
+                        continue
+                stale.refresh_from_db(fields=["status"])
+                if stale.status != "running":
+                    continue
+            stale.status = "stale"
+            stale.summary = "ingestion marked stale after runtime interruption"
+            stale.completed_at = datetime.now(timezone.utc)
+            stale.save(update_fields=["status", "summary", "completed_at", "updated_at"])
+
+    def _job_run_for_source_refresh(self, *, run: models.OrchestrationRun) -> models.OrchestrationJobRun | None:
+        return (
+            models.OrchestrationJobRun.objects.filter(
+                run=run,
+                job_definition__job_key="source_refresh",
+            )
+            .select_related("job_definition")
+            .first()
+        )
+
+    def _persist_ingestion_progress(
+        self,
+        *,
+        run: models.OrchestrationRun,
+        source_refresh_job: models.OrchestrationJobRun | None,
+        ingest_meta: dict[str, Any],
+        parsed_count: int,
+        stats: IngestionProcessingStats,
+        phase: str,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        run.summary = (
+            f"ingestion {phase} ({parsed_count} parsed, "
+            f"{stats.warning_rows_created} warnings, {stats.error_rows_created} errors, "
+            f"{stats.unsupported_outcomes} unsupported)"
+        )[:240]
+        run.heartbeat_at = now
+        run.metadata_json = {
+            **(run.metadata_json if isinstance(run.metadata_json, dict) else {}),
+            "ingestion": ingest_meta,
+        }
+        run.save(update_fields=["summary", "heartbeat_at", "metadata_json", "updated_at"])
+        if source_refresh_job is not None:
+            try:
+                OrchestrationLifecycleService().mark_job_running(
+                    job_run_id=str(source_refresh_job.id),
+                    summary=run.summary,
+                )
+            except Exception:
+                logger.exception(
+                    "ingestion.coordinator.job_progress_heartbeat_failed",
+                    extra={"job_run_id": str(source_refresh_job.id), "run_id": str(run.id)},
+                )
 
     def create_ingest_run(
         self,
@@ -116,15 +242,22 @@ class IngestionCoordinator:
         jurisdiction: str,
         source_scope: str,
         timeout_seconds: int = 60,
+        reprocess_unchanged: bool = False,
     ) -> IngestionExecutionResult:
         started_at = datetime.now(timezone.utc)
         workspace = source_connector.workspace
+        self._expire_stale_runs(
+            workspace=workspace,
+            source_scope=source_scope,
+            stale_after_seconds=max(300, int(timeout_seconds or 60) * 3),
+        )
         run = self.create_ingest_run(
             workspace=workspace,
             source_connector=source_connector,
             jurisdiction=jurisdiction,
             source_scope=source_scope,
         )
+        source_refresh_job = self._job_run_for_source_refresh(run=run)
         run.status = "running"
         run.started_at = run.started_at or started_at
         run.metadata_json = {
@@ -138,6 +271,11 @@ class IngestionCoordinator:
             },
         }
         run.save(update_fields=["status", "started_at", "metadata_json", "updated_at"])
+        if source_refresh_job is not None:
+            try:
+                OrchestrationLifecycleService().mark_job_running(job_run_id=str(source_refresh_job.id), summary="source refresh in progress")
+            except Exception:
+                logger.exception("ingestion.coordinator.job_running_failed", extra={"job_run_id": str(source_refresh_job.id)})
         warnings: list[str] = []
         stats = IngestionProcessingStats()
         parsed_count = 0
@@ -203,8 +341,10 @@ class IngestionCoordinator:
             ingest_meta["content_changed"] = previous is None
             ingest_meta["deduped_from_artifact_id"] = str(previous.id) if previous else ""
             run.metadata_json = {**(run.metadata_json if isinstance(run.metadata_json, dict) else {}), "ingestion": ingest_meta}
+            run.heartbeat_at = datetime.now(timezone.utc)
+            run.save(update_fields=["metadata_json", "heartbeat_at", "updated_at"])
 
-            if previous is not None:
+            if previous is not None and not reprocess_unchanged:
                 ingest_meta["no_op_reason"] = "unchanged_artifact_sha256"
                 ingest_meta["parse_ran"] = False
                 ingest_meta["outcome"] = "no_op"
@@ -224,12 +364,24 @@ class IngestionCoordinator:
                 }
                 run.completed_at = datetime.now(timezone.utc)
                 run.save(update_fields=["status", "summary", "metadata_json", "metrics_json", "completed_at", "updated_at"])
+                if source_refresh_job is not None:
+                    try:
+                        OrchestrationLifecycleService().mark_job_skipped(
+                            job_run_id=str(source_refresh_job.id),
+                            reason="unchanged_artifact_sha256",
+                            summary="Skipped because artifact content is unchanged.",
+                        )
+                    except Exception:
+                        logger.exception("ingestion.coordinator.job_skipped_failed", extra={"job_run_id": str(source_refresh_job.id)})
                 return IngestionExecutionResult(
                     run_id=str(run.id),
                     artifact_record_id=str(artifact_row.id),
                     parsed_record_count=0,
                     warnings=tuple(),
                 )
+            if previous is not None and reprocess_unchanged:
+                ingest_meta["content_changed"] = False
+                ingest_meta["no_op_reason"] = "unchanged_artifact_sha256_reprocessed"
 
             classified = classify_file(filename=fetch_result.original_filename, content_type=fetch_result.content_type)
             with open(fetch_result.local_path, "rb") as fp:
@@ -246,7 +398,12 @@ class IngestionCoordinator:
                 grouped: dict[str, list[Any]] = {}
                 for member in members:
                     grouped.setdefault(member.group_key or member.member_path, []).append(member)
+                max_parse_targets = max(0, int(os.getenv("XYN_INGEST_MAX_PARSE_TARGETS", "0") or "0"))
+                parse_target_limit_hit = False
                 for _, rows in grouped.items():
+                    if max_parse_targets and stats.parse_targets >= max_parse_targets:
+                        parse_target_limit_hit = True
+                        break
                     shp_member = next((row for row in rows if row.classified_type == FILE_KIND_SHP), None)
                     if shp_member is not None:
                         result = self._parse_grouped_shapefile(
@@ -259,8 +416,19 @@ class IngestionCoordinator:
                         )
                         stats = stats.add(result)
                         parsed_count += result.parsed_records_created
+                        self._persist_ingestion_progress(
+                            run=run,
+                            source_refresh_job=source_refresh_job,
+                            ingest_meta=ingest_meta,
+                            parsed_count=parsed_count,
+                            stats=stats,
+                            phase="parsing grouped members",
+                        )
                         continue
                     for row in rows:
+                        if max_parse_targets and stats.parse_targets >= max_parse_targets:
+                            parse_target_limit_hit = True
+                            break
                         result = self._parse_member(
                             workspace=workspace,
                             run=run,
@@ -272,6 +440,20 @@ class IngestionCoordinator:
                         )
                         stats = stats.add(result)
                         parsed_count += result.parsed_records_created
+                        self._persist_ingestion_progress(
+                            run=run,
+                            source_refresh_job=source_refresh_job,
+                            ingest_meta=ingest_meta,
+                            parsed_count=parsed_count,
+                            stats=stats,
+                            phase="parsing members",
+                        )
+                    if parse_target_limit_hit:
+                        break
+                if parse_target_limit_hit:
+                    warnings.append(
+                        f"zip parse truncated after {max_parse_targets} parse targets"
+                    )
             else:
                 result = self._parse_root_artifact(
                     workspace=workspace,
@@ -285,6 +467,14 @@ class IngestionCoordinator:
                 )
                 stats = stats.add(result)
                 parsed_count += result.parsed_records_created
+                self._persist_ingestion_progress(
+                    run=run,
+                    source_refresh_job=source_refresh_job,
+                    ingest_meta=ingest_meta,
+                    parsed_count=parsed_count,
+                    stats=stats,
+                    phase="parsing artifact",
+                )
 
             if parsed_count == 0 and (stats.warning_rows_created > 0 or stats.error_rows_created > 0):
                 run.status = "failed" if stats.error_rows_created > 0 else "succeeded"
@@ -315,6 +505,36 @@ class IngestionCoordinator:
             run.metadata_json = {**(run.metadata_json if isinstance(run.metadata_json, dict) else {}), "ingestion": ingest_meta}
             run.completed_at = datetime.now(timezone.utc)
             run.save(update_fields=["status", "summary", "metrics_json", "metadata_json", "completed_at", "updated_at"])
+            if source_refresh_job is not None:
+                try:
+                    OrchestrationLifecycleService().mark_job_succeeded(
+                        job_run_id=str(source_refresh_job.id),
+                        summary=run.summary,
+                        metrics=run.metrics_json.get("ingestion") if isinstance(run.metrics_json, dict) else {},
+                        output_change_token=str(artifact_row.sha256 or ""),
+                        outputs=[
+                            OutputRecord(
+                                output_key="reconciled_state",
+                                output_type="reconciled_state",
+                                output_uri=str(artifact_row.artifact_uri or ""),
+                                output_change_token=str(artifact_row.sha256 or ""),
+                                metadata={
+                                    "ingest_artifact_id": str(artifact_row.id),
+                                    "source_connector_id": str(source_connector.id),
+                                    "runtime_artifact_id": str(artifact_row.artifact_id),
+                                },
+                                payload={
+                                    "reconciled_state_version": str(artifact_row.sha256 or ""),
+                                    "normalized_snapshot_ref": str(artifact_row.artifact_uri or ""),
+                                    "normalized_change_token": str(artifact_row.sha256 or ""),
+                                    "artifact_record_id": str(artifact_row.id),
+                                    "source_connector_id": str(source_connector.id),
+                                },
+                            )
+                        ],
+                    )
+                except Exception:
+                    logger.exception("ingestion.coordinator.job_success_failed", extra={"job_run_id": str(source_refresh_job.id)})
             return IngestionExecutionResult(
                 run_id=str(run.id),
                 artifact_record_id=str(artifact_row.id),
@@ -334,6 +554,17 @@ class IngestionCoordinator:
                 ingest_meta["artifact_record_id"] = str(artifact_row.id)
             run.metadata_json = {**meta, "ingestion": ingest_meta}
             run.save(update_fields=["status", "error_text", "summary", "metadata_json", "completed_at", "updated_at"])
+            if source_refresh_job is not None:
+                try:
+                    OrchestrationLifecycleService().mark_job_failed(
+                        job_run_id=str(source_refresh_job.id),
+                        summary="source refresh failed",
+                        error_text=str(exc),
+                        error_details={"exception": str(exc)},
+                        retryable=False,
+                    )
+                except Exception:
+                    logger.exception("ingestion.coordinator.job_failed_failed", extra={"job_run_id": str(source_refresh_job.id)})
             logger.exception("ingestion.coordinator.failed", extra={"run_id": str(run.id), "source_connector_id": str(source_connector.id)})
             raise
 
@@ -587,7 +818,10 @@ class IngestionCoordinator:
             for issue in getattr(outcome, "issues", tuple())
         ]
         has_error_issue = any(str(item.get("severity")) == "error" for item in issue_payload)
+        heartbeat_interval = 500
+        processed_count = 0
         for record in outcome.records:
+            processed_count += 1
             normalized_hash = hashlib.sha256(str(record.normalized_payload).encode("utf-8")).hexdigest()
             key_raw = "|".join(
                 [
@@ -625,36 +859,47 @@ class IngestionCoordinator:
                     "status": "error" if has_error_issue else str(record.status or "ok"),
                 },
             )
-            source_family = "ingest_artifact_member" if member_row else "ingest_artifact"
-            source_id = str(member_row.id) if member_row else str(artifact_row.id)
-            ProvenanceService().record_provenance_link(
-                ProvenanceLinkInput(
-                    workspace_id=str(workspace.id),
-                    relationship_type="ingest_parsed_from",
-                    source_ref=object_ref(
-                        object_family=source_family,
-                        object_id=source_id,
-                        workspace_id=str(workspace.id),
-                    ),
-                    target_ref=object_ref(
-                        object_family="ingest_parsed_record",
-                        object_id=str(parsed_row.id),
-                        workspace_id=str(workspace.id),
-                    ),
-                    reason="parsed output persisted",
-                    metadata={
-                        "parser_name": str(outcome.parser_name),
-                        "parser_version": str(outcome.parser_version),
-                        "normalization_version": str(outcome.normalization_version),
-                        "orchestration_run_id": str(run.id),
-                    },
-                    run_id=str(run.id),
-                    idempotency_key=f"parsed_link:{parsed_row.id}",
-                )
-            )
             if created:
+                source_family = "ingest_artifact_member" if member_row else "ingest_artifact"
+                source_id = str(member_row.id) if member_row else str(artifact_row.id)
+                ProvenanceService().record_provenance_link(
+                    ProvenanceLinkInput(
+                        workspace_id=str(workspace.id),
+                        relationship_type="ingest_parsed_from",
+                        source_ref=object_ref(
+                            object_family=source_family,
+                            object_id=source_id,
+                            workspace_id=str(workspace.id),
+                        ),
+                        target_ref=object_ref(
+                            object_family="ingest_parsed_record",
+                            object_id=str(parsed_row.id),
+                            workspace_id=str(workspace.id),
+                        ),
+                        reason="parsed output persisted",
+                        metadata={
+                            "parser_name": str(outcome.parser_name),
+                            "parser_version": str(outcome.parser_version),
+                            "normalization_version": str(outcome.normalization_version),
+                            "orchestration_run_id": str(run.id),
+                        },
+                        run_id=str(run.id),
+                        idempotency_key=f"parsed_link:{parsed_row.id}",
+                    )
+                )
                 parsed_created += 1
                 self._adapters.adapt_parsed_record(source_connector=source_connector, parsed_row=parsed_row)
+            if processed_count % heartbeat_interval == 0:
+                now = datetime.now(timezone.utc)
+                summary = (
+                    f"ingestion persisting parsed rows ({processed_count} processed, {parsed_created} new, "
+                    f"{warning_rows_created} warnings, {error_rows_created} errors)"
+                )[:240]
+                models.OrchestrationRun.objects.filter(id=run.id, status="running").update(
+                    summary=summary,
+                    heartbeat_at=now,
+                    updated_at=now,
+                )
         if member_row is not None:
             member_row.status = "parsed"
             member_row.failure_reason = ""

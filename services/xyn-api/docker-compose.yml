@@ -67,6 +67,9 @@ services:
       - /home/ubuntu/central-xyence-io-9d049e62e994.json:/secrets/gcp-speech.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - xyn_core_shared
 
   worker:
     build:
@@ -106,6 +109,9 @@ services:
       - backend_media:/app/media
       - backend_workspaces:/app/workspaces
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - default
+      - xyn_core_shared
 
 volumes:
   postgres_data:
@@ -120,3 +126,8 @@ volumes:
   backend_static:
     name: xyence-web_backend_static
     external: true
+
+networks:
+  xyn_core_shared:
+    external: true
+    name: xyn_default

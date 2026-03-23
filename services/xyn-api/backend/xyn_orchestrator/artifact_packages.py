@@ -783,7 +783,10 @@ def install_package(
                     )
                     artifact = existing
                 else:
-                    package_source_ref = f"{package.id}:{artifact_json_path}"
+                    # Keep source_ref_id stable, unique-per-artifact, and bounded
+                    # for DB constraints; the full artifact path remains in
+                    # content_ref for provenance/debugging.
+                    package_source_ref = f"{package.id}:{hashlib.sha1(artifact_json_path.encode('utf-8')).hexdigest()[:16]}"
                     artifact = Artifact.objects.create(
                         workspace=workspace,
                         type=type_row,

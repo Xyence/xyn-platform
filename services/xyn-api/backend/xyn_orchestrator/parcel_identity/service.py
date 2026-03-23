@@ -44,24 +44,42 @@ class IdentifierCandidate:
 
 
 class ParcelIdentityResolverService:
+    def __init__(self) -> None:
+        self._parcel_geometry_cache: dict[str, list[dict[str, Any]]] = {}
+        self._geocode_extent_cache: dict[str, tuple[float, float, float, float] | None] = {}
+
     DEFAULT_IDENTIFIER_FIELDS: tuple[tuple[str, str], ...] = (
         ("handle", "attributes.HANDLE"),
         ("handle", "attributes.handle"),
+        ("handle", "attributes.Handle"),
         ("handle", "record.HANDLE"),
         ("handle", "record.handle"),
+        ("handle", "record.Handle"),
         ("parcel", "attributes.PARCEL"),
         ("parcel", "attributes.parcel"),
+        ("parcel", "attributes.Parcel"),
         ("parcel", "record.PARCEL"),
         ("parcel", "record.parcel"),
+        ("parcel", "record.Parcel"),
         ("cityblock", "attributes.CITYBLOCK"),
         ("cityblock", "attributes.cityblock"),
+        ("cityblock", "attributes.CityBlock"),
         ("cityblock", "record.CITYBLOCK"),
         ("cityblock", "record.cityblock"),
+        ("cityblock", "record.CityBlock"),
         ("ref_id", "attributes.Ref_ID"),
         ("ref_id", "attributes.REF_ID"),
         ("ref_id", "attributes.ref_id"),
+        ("ref_id", "attributes.RefId"),
         ("ref_id", "record.Ref_ID"),
         ("ref_id", "record.REF_ID"),
+        ("ref_id", "record.RefId"),
+        ("ref_id", "record.AsrParcelId"),
+        ("ref_id", "record.ASRPARCELID"),
+        ("ref_id", "record.asrparcelid"),
+        ("ref_id", "attributes.AsrParcelId"),
+        ("ref_id", "attributes.ASRPARCELID"),
+        ("ref_id", "attributes.asrparcelid"),
         ("source_key", "record.id"),
         ("source_key", "record.source_key"),
     )
@@ -74,8 +92,12 @@ class ParcelIdentityResolverService:
         ("address", "attributes.SITEADDR"),
         ("address", "record.address"),
         ("address", "record.ADDRESS"),
+        ("address", "record.Address"),
         ("address", "record.site_address"),
         ("address", "record.SITEADDR"),
+        ("address", "record.PROBADDRESS"),
+        ("address", "record.ProbAddress"),
+        ("address", "record.probaddress"),
     )
     DEFAULT_COMPOSITES: tuple[dict[str, Any], ...] = (
         {
@@ -83,6 +105,22 @@ class ParcelIdentityResolverService:
             "parts": (
                 {"namespace": "cityblock", "path": "attributes.CITYBLOCK"},
                 {"namespace": "parcel", "path": "attributes.PARCEL"},
+            ),
+            "delimiter": "|",
+        },
+        {
+            "namespace": "cityblock_parcel",
+            "parts": (
+                {"namespace": "cityblock", "path": "record.CityBlock"},
+                {"namespace": "parcel", "path": "record.Parcel"},
+            ),
+            "delimiter": "|",
+        },
+        {
+            "namespace": "cityblock_parcel",
+            "parts": (
+                {"namespace": "cityblock", "path": "record.CITYBLOCK"},
+                {"namespace": "parcel", "path": "record.PARCEL"},
             ),
             "delimiter": "|",
         },
@@ -142,6 +180,7 @@ class ParcelIdentityResolverService:
                 )
             )
 
+        composite_candidates: list[IdentifierCandidate] = []
         for row in composites:
             if not isinstance(row, dict):
                 continue
@@ -171,7 +210,7 @@ class ParcelIdentityResolverService:
                 part_rows.append({"namespace": part_ns, "path": path, "raw": raw_value, "normalized": normalized})
             if not part_rows:
                 continue
-            identifiers.append(
+            composite_candidates.append(
                 IdentifierCandidate(
                     namespace=namespace,
                     raw_value=delimiter.join(raw_parts),
@@ -181,6 +220,8 @@ class ParcelIdentityResolverService:
                     parts=tuple(part_rows),
                 )
             )
+        if composite_candidates:
+            identifiers = [*composite_candidates, *identifiers]
 
         addresses: list[IdentifierCandidate] = []
         for row in address_fields:
@@ -218,6 +259,269 @@ class ParcelIdentityResolverService:
             .first()
         )
         return alias.parcel if alias else None
+
+    @staticmethod
+    def _point_in_ring(x: float, y: float, ring: list[list[float]]) -> bool:
+        inside = False
+        if len(ring) < 3:
+            return False
+        j = len(ring) - 1
+        for i in range(len(ring)):
+            xi, yi = float(ring[i][0]), float(ring[i][1])
+            xj, yj = float(ring[j][0]), float(ring[j][1])
+            intersects = (yi > y) != (yj > y)
+            if intersects:
+                slope = (xj - xi) / ((yj - yi) or 1e-12)
+                x_at_y = slope * (y - yi) + xi
+                if x < x_at_y:
+                    inside = not inside
+            j = i
+        return inside
+
+    @classmethod
+    def _point_in_geometry(cls, *, x: float, y: float, geometry: dict[str, Any]) -> bool:
+        geom = _safe_dict(geometry)
+        geom_type = str(geom.get("type") or "").strip()
+        coords = geom.get("coordinates")
+        if not isinstance(coords, list):
+            return False
+        if geom_type == "Polygon":
+            rings = [ring for ring in coords if isinstance(ring, list)]
+            if not rings:
+                return False
+            if not cls._point_in_ring(x, y, rings[0]):
+                return False
+            for hole in rings[1:]:
+                if cls._point_in_ring(x, y, hole):
+                    return False
+            return True
+        if geom_type == "MultiPolygon":
+            for polygon in coords:
+                if not isinstance(polygon, list) or not polygon:
+                    continue
+                if cls._point_in_geometry(x=x, y=y, geometry={"type": "Polygon", "coordinates": polygon}):
+                    return True
+        return False
+
+    @classmethod
+    def _geometry_bbox(cls, geometry: dict[str, Any]) -> tuple[float, float, float, float] | None:
+        geom = _safe_dict(geometry)
+        geom_type = str(geom.get("type") or "").strip()
+        coords = geom.get("coordinates")
+        if not isinstance(coords, list):
+            return None
+        points: list[tuple[float, float]] = []
+        if geom_type == "Polygon":
+            for ring in coords:
+                if isinstance(ring, list):
+                    for item in ring:
+                        try:
+                            points.append((float(item[0]), float(item[1])))
+                        except Exception:
+                            continue
+        elif geom_type == "MultiPolygon":
+            for polygon in coords:
+                if not isinstance(polygon, list):
+                    continue
+                for ring in polygon:
+                    if isinstance(ring, list):
+                        for item in ring:
+                            try:
+                                points.append((float(item[0]), float(item[1])))
+                            except Exception:
+                                continue
+        if not points:
+            return None
+        xs = [item[0] for item in points]
+        ys = [item[1] for item in points]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def _parcel_geometry_candidates(self, *, workspace: models.Workspace) -> list[dict[str, Any]]:
+        cache_key = str(workspace.id)
+        cached = self._parcel_geometry_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        rows: list[dict[str, Any]] = []
+        queryset = (
+            models.IngestAdaptedRecord.objects.filter(
+                workspace=workspace,
+                source_connector__source_type="parcel_geometry",
+                adapter_kind="shapefile",
+            )
+            .order_by("created_at", "id")
+            .only("id", "adapted_payload_json", "geometry_payload_json")
+        )
+        for row in queryset.iterator(chunk_size=200):
+            geom = _safe_dict(row.geometry_payload_json)
+            if not geom:
+                continue
+            bbox = self._geometry_bbox(geom)
+            if bbox is None:
+                continue
+            payload = _safe_dict(row.adapted_payload_json)
+            attrs = _safe_dict(payload.get("attributes"))
+            handle_raw = str(attrs.get("HANDLE") or attrs.get("handle") or attrs.get("Handle") or "").strip()
+            if not handle_raw:
+                continue
+            handle_normalized = self._normalize_identifier(namespace="handle", raw_value=handle_raw)
+            if not handle_normalized:
+                continue
+            rows.append(
+                {
+                    "geometry": geom,
+                    "bbox": bbox,
+                    "handle_raw": handle_raw,
+                    "handle_normalized": handle_normalized,
+                    "source_path": f"parcel_geometry:{row.id}",
+                }
+            )
+        self._parcel_geometry_cache[cache_key] = rows
+        return rows
+
+    def _parcel_geometry_extent(self, *, workspace: models.Workspace) -> tuple[float, float, float, float] | None:
+        rows = self._parcel_geometry_candidates(workspace=workspace)
+        if not rows:
+            return None
+        min_x = min(item["bbox"][0] for item in rows)
+        min_y = min(item["bbox"][1] for item in rows)
+        max_x = max(item["bbox"][2] for item in rows)
+        max_y = max(item["bbox"][3] for item in rows)
+        return (float(min_x), float(min_y), float(max_x), float(max_y))
+
+    def _geocode_selected_extent(
+        self,
+        *,
+        workspace: models.Workspace,
+        wkid: int | None,
+    ) -> tuple[float, float, float, float] | None:
+        normalized_wkid = int(wkid or 0)
+        cache_key = f"{workspace.id}:{normalized_wkid}"
+        if cache_key in self._geocode_extent_cache:
+            return self._geocode_extent_cache.get(cache_key)
+        queryset = models.GeocodeEnrichmentCandidate.objects.filter(
+            result_set__workspace=workspace,
+            is_selected=True,
+        )
+        if normalized_wkid > 0:
+            queryset = queryset.filter(
+                spatial_reference_json__wkid=normalized_wkid
+            ) | queryset.filter(spatial_reference_json__latestWkid=normalized_wkid)
+        min_x = float("inf")
+        min_y = float("inf")
+        max_x = float("-inf")
+        max_y = float("-inf")
+        count = 0
+        for row in queryset.only("geometry_json").iterator(chunk_size=250):
+            point = _safe_dict(row.geometry_json)
+            try:
+                point_x = float(point.get("x"))
+                point_y = float(point.get("y"))
+            except (TypeError, ValueError):
+                continue
+            min_x = min(min_x, point_x)
+            min_y = min(min_y, point_y)
+            max_x = max(max_x, point_x)
+            max_y = max(max_y, point_y)
+            count += 1
+        if count < 3:
+            self._geocode_extent_cache[cache_key] = None
+            return None
+        extent = (float(min_x), float(min_y), float(max_x), float(max_y))
+        self._geocode_extent_cache[cache_key] = extent
+        return extent
+
+    def _extent_calibrated_point(
+        self,
+        *,
+        workspace: models.Workspace,
+        x: float,
+        y: float,
+        wkid: int | None,
+    ) -> tuple[float, float] | None:
+        geocode_extent = self._geocode_selected_extent(workspace=workspace, wkid=wkid)
+        parcel_extent = self._parcel_geometry_extent(workspace=workspace)
+        if geocode_extent is None or parcel_extent is None:
+            return None
+        g_min_x, g_min_y, g_max_x, g_max_y = geocode_extent
+        p_min_x, p_min_y, p_max_x, p_max_y = parcel_extent
+        g_width = float(g_max_x - g_min_x)
+        g_height = float(g_max_y - g_min_y)
+        p_width = float(p_max_x - p_min_x)
+        p_height = float(p_max_y - p_min_y)
+        if g_width <= 0.0 or g_height <= 0.0 or p_width <= 0.0 or p_height <= 0.0:
+            return None
+        scale_x = p_width / g_width
+        scale_y = p_height / g_height
+        # Safety guard: only apply if scales are reasonably close to projected-space parity.
+        if scale_x < 0.5 or scale_x > 1.5 or scale_y < 0.5 or scale_y > 1.5:
+            return None
+        transformed_x = ((x - g_min_x) * scale_x) + p_min_x
+        transformed_y = ((y - g_min_y) * scale_y) + p_min_y
+        return (float(transformed_x), float(transformed_y))
+
+    def _resolve_parcel_from_geocode_point(
+        self,
+        *,
+        workspace: models.Workspace,
+        x: float,
+        y: float,
+        wkid: int | None = None,
+    ) -> tuple[models.ParcelCanonicalIdentity | None, IdentifierCandidate | None, tuple[float, float] | None]:
+        matches: list[dict[str, Any]] = []
+        for candidate_row in self._parcel_geometry_candidates(workspace=workspace):
+            min_x, min_y, max_x, max_y = candidate_row["bbox"]
+            if x < min_x or x > max_x or y < min_y or y > max_y:
+                continue
+            geom = _safe_dict(candidate_row.get("geometry"))
+            if not self._point_in_geometry(x=x, y=y, geometry=geom):
+                continue
+            matches.append(candidate_row)
+            if len(matches) > 1:
+                break
+        if len(matches) == 1:
+            candidate_row = matches[0]
+            handle_raw = str(candidate_row.get("handle_raw") or "")
+            normalized = str(candidate_row.get("handle_normalized") or "")
+            parcel = self._find_by_alias(workspace=workspace, namespace="handle", normalized_value=normalized)
+            candidate = IdentifierCandidate(
+                namespace="handle",
+                raw_value=handle_raw,
+                normalized_value=normalized,
+                    source_path=str(candidate_row.get("source_path") or "parcel_geometry"),
+            )
+            if parcel is None:
+                parcel = self._create_canonical(workspace=workspace, candidate=candidate)
+            return parcel, candidate, None
+        calibrated = self._extent_calibrated_point(workspace=workspace, x=x, y=y, wkid=wkid)
+        if calibrated is None:
+            return None, None, None
+        calibrated_x, calibrated_y = calibrated
+        calibrated_matches: list[dict[str, Any]] = []
+        for candidate_row in self._parcel_geometry_candidates(workspace=workspace):
+            min_x, min_y, max_x, max_y = candidate_row["bbox"]
+            if calibrated_x < min_x or calibrated_x > max_x or calibrated_y < min_y or calibrated_y > max_y:
+                continue
+            geom = _safe_dict(candidate_row.get("geometry"))
+            if not self._point_in_geometry(x=calibrated_x, y=calibrated_y, geometry=geom):
+                continue
+            calibrated_matches.append(candidate_row)
+            if len(calibrated_matches) > 1:
+                break
+        if len(calibrated_matches) != 1:
+            return None, None, None
+        candidate_row = calibrated_matches[0]
+        handle_raw = str(candidate_row.get("handle_raw") or "")
+        normalized = str(candidate_row.get("handle_normalized") or "")
+        parcel = self._find_by_alias(workspace=workspace, namespace="handle", normalized_value=normalized)
+        candidate = IdentifierCandidate(
+            namespace="handle",
+            raw_value=handle_raw,
+            normalized_value=normalized,
+            source_path=f"{str(candidate_row.get('source_path') or 'parcel_geometry')}:calibrated_extent",
+        )
+        if parcel is None:
+            parcel = self._create_canonical(workspace=workspace, candidate=candidate)
+        return parcel, candidate, (calibrated_x, calibrated_y)
 
     def _create_canonical(self, *, workspace: models.Workspace, candidate: IdentifierCandidate | None) -> models.ParcelCanonicalIdentity:
         namespace = _normalized_namespace(candidate.namespace if candidate else "")
@@ -323,8 +627,13 @@ class ParcelIdentityResolverService:
             from xyn_orchestrator.geocoding.service import GeocodingService
 
             geocode_result = GeocodingService().selected_for_adapted_record(adapted_record_id=str(adapted.id))
+            if geocode_result is None and addresses:
+                geocode_candidate = GeocodingService().geocode_adapted_record(adapted_record_id=str(adapted.id))
+                if str(geocode_candidate.status or "") == "selected":
+                    geocode_result = geocode_candidate
         except Exception:
             geocode_result = None
+        geocode_identifier_candidates: list[IdentifierCandidate] = []
         if geocode_result is not None:
             selected = geocode_result.selected_candidate
             explanation["geocoding_evidence"] = {
@@ -335,14 +644,119 @@ class ParcelIdentityResolverService:
                 "selected_score": float(selected.provider_score) if selected and selected.provider_score is not None else None,
                 "selected_address": str(selected.matched_address or "") if selected else "",
             }
+            if selected is not None:
+                attrs = _safe_dict(selected.provider_attributes_json)
+                geocode_key_map = {
+                    "ref_id": "ref_id",
+                    "refid": "ref_id",
+                    "handle": "handle",
+                    "parcel": "parcel",
+                    "parcelid": "parcel",
+                    "parcel_id": "parcel",
+                    "cityblock": "cityblock",
+                    "city_block": "cityblock",
+                }
+                for raw_key, raw_value in attrs.items():
+                    normalized_key = _normalized_namespace(raw_key).replace("-", "_")
+                    namespace = geocode_key_map.get(normalized_key)
+                    if not namespace:
+                        continue
+                    normalized_value = self._normalize_identifier(
+                        namespace=namespace,
+                        raw_value=raw_value,
+                        jurisdiction=str(getattr(adapted.orchestration_run, "scope_jurisdiction", "") or ""),
+                    )
+                    raw_text = str(raw_value or "").strip()
+                    if not normalized_value or not raw_text:
+                        continue
+                    geocode_identifier_candidates.append(
+                        IdentifierCandidate(
+                            namespace=namespace,
+                            raw_value=raw_text,
+                            normalized_value=normalized_value,
+                            source_path=f"geocode.attributes.{raw_key}",
+                        )
+                    )
+                matched_address = str(selected.matched_address or "").strip()
+                if matched_address:
+                    normalized_address = self._normalize_identifier(
+                        namespace="address",
+                        raw_value=matched_address,
+                        jurisdiction=str(getattr(adapted.orchestration_run, "scope_jurisdiction", "") or ""),
+                    )
+                    if normalized_address and all(
+                        existing.normalized_value != normalized_address or existing.namespace != "address"
+                        for existing in addresses
+                    ):
+                        addresses.append(
+                            IdentifierCandidate(
+                                namespace="address",
+                                raw_value=matched_address,
+                                normalized_value=normalized_address,
+                                source_path="geocode.selected_candidate.matched_address",
+                            )
+                        )
+                point = _safe_dict(selected.geometry_json)
+                point_x = point.get("x")
+                point_y = point.get("y")
+                try:
+                    point_x_f = float(point_x)
+                    point_y_f = float(point_y)
+                except (TypeError, ValueError):
+                    point_x_f = None
+                    point_y_f = None
+                if point_x_f is not None and point_y_f is not None:
+                    wkid_value = _safe_dict(selected.spatial_reference_json).get("latestWkid")
+                    if wkid_value in (None, ""):
+                        wkid_value = _safe_dict(selected.spatial_reference_json).get("wkid")
+                    try:
+                        wkid_int = int(wkid_value) if wkid_value not in (None, "") else None
+                    except (TypeError, ValueError):
+                        wkid_int = None
+                    parcel_from_point, point_candidate, calibrated_point = self._resolve_parcel_from_geocode_point(
+                        workspace=workspace,
+                        x=point_x_f,
+                        y=point_y_f,
+                        wkid=wkid_int,
+                    )
+                    explanation["geocoding_evidence"]["selected_point"] = {
+                        "x": point_x_f,
+                        "y": point_y_f,
+                        "spatial_reference": _safe_dict(selected.spatial_reference_json),
+                    }
+                    if calibrated_point is not None:
+                        explanation["geocoding_evidence"]["calibrated_point"] = {
+                            "x": float(calibrated_point[0]),
+                            "y": float(calibrated_point[1]),
+                            "method": "extent_affine_transform",
+                        }
+                    if parcel_from_point is not None and point_candidate is not None and parcel is None:
+                        parcel = parcel_from_point
+                        primary_candidate = point_candidate
+                        method = (
+                            "geocode_point_containment_calibrated"
+                            if calibrated_point is not None
+                            else "geocode_point_containment"
+                        )
+                        status = "resolved"
+                        confidence = 0.72 if calibrated_point is not None else 0.9
+                        reason = (
+                            "resolved via calibrated selected geocode point within canonical parcel geometry"
+                            if calibrated_point is not None
+                            else "resolved via selected geocode point within canonical parcel geometry"
+                        )
 
-        for candidate in identifiers:
+        for candidate in [*geocode_identifier_candidates, *identifiers]:
             found = self._find_by_alias(workspace=workspace, namespace=candidate.namespace, normalized_value=candidate.normalized_value)
             if found is not None:
                 parcel = found
-                method = "deterministic_composite" if candidate.is_composite else "deterministic_identifier"
+                if candidate in geocode_identifier_candidates:
+                    method = "geocode_identifier_lookup"
+                    confidence = 0.85
+                else:
+                    method = "deterministic_composite" if candidate.is_composite else "deterministic_identifier"
+                    confidence = 1.0
                 status = "resolved"
-                confidence = 1.0
                 reason = "matched existing parcel alias"
                 primary_candidate = candidate
                 break

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
 from datetime import datetime, timezone
+from html import escape
 from typing import Any, Optional
 
 import psycopg2
@@ -125,6 +127,149 @@ def _build_entity_service() -> GenericEntityOperationsService:
     )
 
 
+def _load_json_env(name: str, default: Any) -> Any:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return default
+    return parsed
+
+
+def _titleize(value: str) -> str:
+    return str(value or "").replace("_", " ").strip().title()
+
+
+def _is_admin_entity(entity_key: str) -> bool:
+    lowered = str(entity_key or "").lower()
+    return any(token in lowered for token in ("source", "connector", "mapping", "inspection", "dataset", "import"))
+
+
+def _build_ui_scaffold(service: GenericEntityOperationsService) -> dict[str, Any]:
+    entities: list[dict[str, Any]] = []
+    manage: list[dict[str, str]] = []
+    admin: list[dict[str, str]] = []
+    workflow_defs = _load_json_env("GENERATED_WORKFLOW_DEFINITIONS_JSON", [])
+    primitive_composition = _load_json_env("GENERATED_PLATFORM_PRIMITIVE_COMPOSITION_JSON", [])
+    requires_primitives = _load_json_env("GENERATED_REQUIRES_PRIMITIVES_JSON", [])
+    ui_surfaces_text = str(os.getenv("GENERATED_UI_SURFACES_TEXT", "") or "").strip().lower()
+    workflow_blob = " ".join(
+        str(row.get("description") or "")
+        for row in workflow_defs
+        if isinstance(row, dict)
+    ).lower()
+    primitive_blob = " ".join(
+        " ".join(
+            str(item).lower()
+            for item in (
+                row.get("workflow_key"),
+                row.get("workflow_label"),
+                row.get("description"),
+                " ".join(str(token) for token in (row.get("requires_primitives") or [])),
+            )
+        )
+        for row in primitive_composition
+        if isinstance(row, dict)
+    )
+    requires_set = {str(token or "").strip().lower() for token in requires_primitives if str(token or "").strip()}
+    map_required = any(token in workflow_blob for token in ("map", "rectangle", "box", "bounding")) or any(
+        token in ui_surfaces_text for token in ("map", "rectangle", "box")
+    ) or "geospatial" in requires_set or "geospatial" in primitive_blob
+    admin_required = any(token in workflow_blob for token in ("admin", "operator", "source")) or any(
+        token in ui_surfaces_text for token in ("admin", "operator", "source")
+    )
+
+    for entity_key, contract in service.contracts.items():
+        plural_label = str(contract.get("plural_label") or entity_key).strip() or entity_key
+        singular_label = str(contract.get("singular_label") or entity_key.rstrip("s")).strip() or entity_key.rstrip("s")
+        row = {
+            "entity_key": entity_key,
+            "title": _titleize(plural_label),
+            "list_route": f"/app/{entity_key}",
+            "create_route": f"/app/{entity_key}/new",
+            "detail_route_template": f"/app/{entity_key}/{{record_ref}}",
+        }
+        entities.append(row)
+        target_group = admin if _is_admin_entity(entity_key) else manage
+        target_group.append({"title": f"{_titleize(plural_label)} List", "route": row["list_route"]})
+        target_group.append({"title": f"Create {_titleize(singular_label)}", "route": row["create_route"]})
+
+    if map_required:
+        manage.insert(0, {"title": "Map Selection", "route": "/app/map-selection"})
+    if admin_required:
+        admin.insert(0, {"title": "Admin / Operator", "route": "/app/admin"})
+    return {
+        "app_title": APP_TITLE,
+        "entities": entities,
+        "groups": {
+            "campaign_user": manage,
+            "admin_operator": admin,
+        },
+        "flags": {
+            "map_selection_scaffold": map_required,
+            "admin_grouping": admin_required or bool(admin),
+        },
+    }
+
+
+def _render_ui_shell(*, ui: dict[str, Any], heading: str, body_html: str) -> str:
+    user_links = "".join(
+        f'<li><a href="{escape(str(item.get("route") or ""))}">{escape(str(item.get("title") or ""))}</a></li>'
+        for item in (ui.get("groups", {}).get("campaign_user") or [])
+        if isinstance(item, dict)
+    )
+    admin_links = "".join(
+        f'<li><a href="{escape(str(item.get("route") or ""))}">{escape(str(item.get("title") or ""))}</a></li>'
+        for item in (ui.get("groups", {}).get("admin_operator") or [])
+        if isinstance(item, dict)
+    )
+    return f"""
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{escape(APP_TITLE)}</title>
+        <style>
+          body {{ margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #08111f; color: #e7edf7; }}
+          main {{ max-width: 980px; margin: 32px auto; padding: 20px; }}
+          .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }}
+          .card {{ background: linear-gradient(180deg, #10203b 0%, #0b1628 100%); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 14px; padding: 16px; }}
+          h1 {{ margin: 0 0 8px; font-size: 28px; }}
+          h2 {{ margin: 0 0 8px; font-size: 18px; }}
+          p, li {{ color: #c5d0df; line-height: 1.45; }}
+          code {{ background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 6px; padding: 2px 6px; }}
+          a {{ color: #7dd3fc; text-decoration: none; }}
+          ul {{ margin: 8px 0 0; padding-left: 18px; }}
+        </style>
+      </head>
+      <body>
+        <main>
+          <section class="card">
+            <h1>{escape(APP_TITLE)}</h1>
+            <p>{escape(heading)}</p>
+          </section>
+          <section class="grid" style="margin-top: 14px;">
+            <article class="card">
+              <h2>Campaign/User Workflows</h2>
+              <ul>{user_links or "<li>No campaign surfaces declared.</li>"}</ul>
+            </article>
+            <article class="card">
+              <h2>Admin/Operator Workflows</h2>
+              <ul>{admin_links or "<li>No admin/operator surfaces declared.</li>"}</ul>
+            </article>
+          </section>
+          <section class="card" style="margin-top: 14px;">
+            {body_html}
+          </section>
+        </main>
+      </body>
+    </html>
+    """
+
+
 def _register_entity_routes(app: FastAPI, service: GenericEntityOperationsService) -> None:
     for entity_key, contract in service.contracts.items():
         collection_path = str(contract.get("collection_path") or f"/{entity_key}")
@@ -184,6 +329,7 @@ def _register_entity_routes(app: FastAPI, service: GenericEntityOperationsServic
 def create_app(*, entity_service: Optional[GenericEntityOperationsService] = None, initialize_schema: bool = True) -> FastAPI:
     app = FastAPI(title=SERVICE_NAME, version="0.2.0")
     service = entity_service or _build_entity_service()
+    ui_scaffold = _build_ui_scaffold(service)
 
     if initialize_schema:
         @app.on_event("startup")
@@ -196,78 +342,145 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return """
-        <!doctype html>
-        <html lang="en">
-          <head>
-            <meta charset="utf-8" />
-            <meta name="viewport" content="width=device-width, initial-scale=1" />
-            <title>Net Inventory API</title>
-            <style>
-              body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; background: #08111f; color: #e7edf7; }
-              main { max-width: 760px; margin: 48px auto; padding: 24px; }
-              .card { background: linear-gradient(180deg, #10203b 0%, #0b1628 100%); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 18px; padding: 24px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28); }
-              h1 { margin: 0 0 12px; font-size: 28px; }
-              p, li { color: #c5d0df; line-height: 1.5; }
-              code { background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(148, 163, 184, 0.2); border-radius: 8px; padding: 2px 6px; }
-              a { color: #7dd3fc; }
-            </style>
-          </head>
-          <body>
-            <main>
-              <section class="card">
-                <h1>__APP_TITLE__</h1>
-                <p>This deployment is running and ready to serve workspace-scoped generated application data through contract-driven CRUD endpoints.</p>
+        return _render_ui_shell(
+            ui=ui_scaffold,
+            heading="Generated workflow scaffold surface. Use this shell to navigate campaign/user and admin/operator routes.",
+            body_html="""
+                <h2>Runtime Access</h2>
                 <ul>
+                  <li><a href="/app">/app</a> application scaffold home</li>
                   <li><a href="/health">/health</a> for service health</li>
-                  <li>Entity collection routes are derived from the generated application contract.</li>
                   <li><a href="/docs">/docs</a> for interactive API docs</li>
                 </ul>
-              </section>
-            </main>
-          </body>
-        </html>
-        """.replace("__APP_TITLE__", APP_TITLE)
+            """,
+        )
+
+    @app.get("/app", response_class=HTMLResponse)
+    def app_home():
+        return _render_ui_shell(
+            ui=ui_scaffold,
+            heading="Application workflow scaffold generated from entity contracts and workflow hints.",
+            body_html="""
+                <h2>Scaffold Notes</h2>
+                <p>These pages are generic scaffolds generated from workflow/entity metadata. Domain logic remains API-driven.</p>
+            """,
+        )
+
+    @app.get("/app/surfaces")
+    def app_surfaces():
+        return ui_scaffold
+
+    @app.get("/app/admin", response_class=HTMLResponse)
+    def admin_home():
+        return _render_ui_shell(
+            ui=ui_scaffold,
+            heading="Admin/operator scaffold area.",
+            body_html="""
+                <h2>Admin/Operator Scope</h2>
+                <p>Source and operational surfaces are grouped here to keep them separate from campaign-user flows.</p>
+            """,
+        )
+
+    @app.get("/app/map-selection", response_class=HTMLResponse)
+    def map_selection():
+        if not bool((ui_scaffold.get("flags") or {}).get("map_selection_scaffold")):
+            raise HTTPException(status_code=404, detail="map scaffold not declared")
+        return _render_ui_shell(
+            ui=ui_scaffold,
+            heading="Map/area selection scaffold.",
+            body_html="""
+                <h2>Map Selection (Scaffold)</h2>
+                <p>Map-driven campaign area selection is declared for this app. This placeholder route is generated to anchor map workflow integration.</p>
+                <p>Expected behavior: rectangle/box selection over geospatial data.</p>
+            """,
+        )
 
     _register_entity_routes(app, service)
 
-    @app.get("/reports/devices-by-status")
-    def report_devices_by_status(workspace_id: uuid.UUID = Query(...)):
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT status, COUNT(*)::int AS total
-                    FROM devices
-                    WHERE workspace_id = %s
-                    GROUP BY status
-                    ORDER BY status ASC
-                    """,
-                    (str(workspace_id),),
-                )
-                rows = cur.fetchall()
-        labels = [str(row.get("status") or "unknown") for row in rows]
-        values = [int(row.get("total") or 0) for row in rows]
-        return {"labels": labels, "values": values}
+    for entity_key, contract in service.contracts.items():
+        plural_label = _titleize(str(contract.get("plural_label") or entity_key))
+        singular_label = _titleize(str(contract.get("singular_label") or entity_key.rstrip("s")))
 
-    @app.get("/reports/interfaces-by-status")
-    def report_interfaces_by_status(workspace_id: uuid.UUID = Query(...)):
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT status, COUNT(*)::int AS total
-                    FROM interfaces
-                    WHERE workspace_id = %s
-                    GROUP BY status
-                    ORDER BY status ASC
-                    """,
-                    (str(workspace_id),),
-                )
-                rows = cur.fetchall()
-        labels = [str(row.get("status") or "unknown") for row in rows]
-        values = [int(row.get("total") or 0) for row in rows]
-        return {"labels": labels, "values": values}
+        async def entity_list_surface(entity_key: str = entity_key, plural_label: str = plural_label):
+            return _render_ui_shell(
+                ui=ui_scaffold,
+                heading=f"{plural_label} list scaffold.",
+                body_html=(
+                    f"<h2>{escape(plural_label)} List</h2>"
+                    f"<p>API endpoint: <code>/{escape(entity_key)}?workspace_id=&lt;workspace_id&gt;</code></p>"
+                ),
+            )
+
+        async def entity_create_surface(entity_key: str = entity_key, singular_label: str = singular_label):
+            return _render_ui_shell(
+                ui=ui_scaffold,
+                heading=f"Create {singular_label} scaffold.",
+                body_html=(
+                    f"<h2>Create {escape(singular_label)}</h2>"
+                    f"<p>API endpoint: <code>POST /{escape(entity_key)}</code></p>"
+                ),
+            )
+
+        async def entity_detail_surface(record_ref: str, entity_key: str = entity_key, singular_label: str = singular_label):
+            return _render_ui_shell(
+                ui=ui_scaffold,
+                heading=f"{singular_label} detail scaffold.",
+                body_html=(
+                    f"<h2>{escape(singular_label)} Detail</h2>"
+                    f"<p>Record ref: <code>{escape(record_ref)}</code></p>"
+                    f"<p>API endpoint: <code>/{escape(entity_key)}/{escape(record_ref)}?workspace_id=&lt;workspace_id&gt;</code></p>"
+                ),
+            )
+
+        app.add_api_route(f"/app/{entity_key}", entity_list_surface, methods=["GET"], response_class=HTMLResponse, name=f"ui-{entity_key}-list")
+        app.add_api_route(f"/app/{entity_key}/new", entity_create_surface, methods=["GET"], response_class=HTMLResponse, name=f"ui-{entity_key}-create")
+        app.add_api_route(
+            f"/app/{entity_key}/{{record_ref}}",
+            entity_detail_surface,
+            methods=["GET"],
+            response_class=HTMLResponse,
+            name=f"ui-{entity_key}-detail",
+        )
+
+    if "devices" in service.contracts:
+        @app.get("/reports/devices-by-status")
+        def report_devices_by_status(workspace_id: uuid.UUID = Query(...)):
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT status, COUNT(*)::int AS total
+                        FROM devices
+                        WHERE workspace_id = %s
+                        GROUP BY status
+                        ORDER BY status ASC
+                        """,
+                        (str(workspace_id),),
+                    )
+                    rows = cur.fetchall()
+            labels = [str(row.get("status") or "unknown") for row in rows]
+            values = [int(row.get("total") or 0) for row in rows]
+            return {"labels": labels, "values": values}
+
+    if "interfaces" in service.contracts:
+        @app.get("/reports/interfaces-by-status")
+        def report_interfaces_by_status(workspace_id: uuid.UUID = Query(...)):
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT status, COUNT(*)::int AS total
+                        FROM interfaces
+                        WHERE workspace_id = %s
+                        GROUP BY status
+                        ORDER BY status ASC
+                        """,
+                        (str(workspace_id),),
+                    )
+                    rows = cur.fetchall()
+            labels = [str(row.get("status") or "unknown") for row in rows]
+            values = [int(row.get("total") or 0) for row in rows]
+            return {"labels": labels, "values": values}
 
     return app
 

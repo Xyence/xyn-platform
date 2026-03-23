@@ -288,6 +288,60 @@ class ArtifactPackagesApiTests(TestCase):
         self.assertEqual(str(app_artifact.type).lower(), "application")
         self.assertEqual(str(app_artifact.slug), "app.team-lunch-poll")
 
+    def test_generated_artifact_import_handles_long_application_slug_without_source_ref_overflow(self):
+        app_slug = "app.real-estate-deal-finder-fidelity-validation-4"
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "application",
+                    "slug": app_slug,
+                    "version": "0.0.1-dev",
+                    "title": "Real Estate Deal Finder",
+                    "content": {
+                        "artifact": {
+                            "id": app_slug,
+                            "type": "application",
+                            "slug": app_slug,
+                            "version": "0.0.1-dev",
+                        }
+                    },
+                },
+                {
+                    "type": "policy_bundle",
+                    "slug": "policy.real-estate-deal-finder-fidelity-validation-4",
+                    "version": "0.0.1-dev",
+                    "title": "Real Estate Deal Finder Policy Bundle",
+                    "content": {
+                        "schema_version": "xyn.policy_bundle.v0",
+                        "bundle_id": "policy.real-estate-deal-finder-fidelity-validation-4",
+                        "app_slug": "real-estate-deal-finder-fidelity-validation-4",
+                        "workspace_id": "workspace-1",
+                        "title": "Real Estate Deal Finder Policy Bundle",
+                        "scope": {"artifact_slug": app_slug, "applies_to": ["generated_runtime"]},
+                        "ownership": {"owner_kind": "generated_application", "editable": True, "source": "generated_from_prompt"},
+                        "policy_families": ["validation_policies"],
+                        "policies": {
+                            "validation_policies": [],
+                            "relation_constraints": [],
+                            "transition_policies": [],
+                            "derived_policies": [],
+                            "trigger_policies": [],
+                        },
+                        "configurable_parameters": [],
+                        "explanation": {"summary": "Generated policy scaffold.", "coverage": {"documented_policy_count": 0}, "future_capabilities": ["render_policy_bundle"]},
+                    },
+                },
+            ],
+            package_name=app_slug,
+            package_version="0.0.1-dev",
+        )
+        imported = self._import_package(blob)
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+        package_id = imported.json()["package"]["id"]
+        artifact = Artifact.objects.get(slug=app_slug)
+        self.assertTrue(str(artifact.source_ref_id or "").startswith(f"{package_id}:"))
+        self.assertLessEqual(len(artifact.source_ref_id or ""), 120)
+
     def test_policy_bundle_artifact_type_is_importable_and_registered(self):
         blob = self._package_blob(
             artifacts=[
