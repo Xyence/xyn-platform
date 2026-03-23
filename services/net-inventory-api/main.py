@@ -32,6 +32,7 @@ APP_TITLE = str(os.getenv("APP_TITLE", "Generated Application API") or "Generate
 PLATFORM_API_BASE_URL = str(os.getenv("XYN_PLATFORM_API_BASE_URL", "") or "").strip()
 PLATFORM_API_TIMEOUT_SECONDS = float(os.getenv("XYN_PLATFORM_API_TIMEOUT_SECONDS", "10.0"))
 PLATFORM_INTERNAL_TOKEN = str(os.getenv("XYENCE_INTERNAL_TOKEN", "") or "").strip()
+PLATFORM_API_HOST_HEADER = str(os.getenv("XYN_PLATFORM_API_HOST_HEADER", "") or "").strip()
 
 
 def utc_now() -> str:
@@ -62,6 +63,8 @@ def _platform_headers(request: Request) -> dict[str, str]:
         headers["X-CSRFToken"] = csrf
     if PLATFORM_INTERNAL_TOKEN:
         headers["X-Internal-Token"] = PLATFORM_INTERNAL_TOKEN
+    if PLATFORM_API_HOST_HEADER:
+        headers["Host"] = PLATFORM_API_HOST_HEADER
     return headers
 
 
@@ -496,7 +499,11 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
 
         sources = list((sources_result or {}).get("data", {}).get("sources") or [])
         funnel_counts = (funnel_result or {}).get("data", {}).get("counts") if isinstance((funnel_result or {}).get("data"), dict) else {}
-        unresolved = (funnel_result or {}).get("data", {}).get("unresolved_reasons") if isinstance((funnel_result or {}).get("data"), dict) else []
+        unresolved = (
+            (funnel_result or {}).get("data", {}).get("unresolved_reasons")
+            if isinstance((funnel_result or {}).get("data"), dict)
+            else []
+        )
         source_rows = [
             {
                 "id": str(item.get("id") or ""),
@@ -530,7 +537,7 @@ def create_app(*, entity_service: Optional[GenericEntityOperationsService] = Non
         if isinstance(funnel_counts, dict) and funnel_counts:
             body.append("<h3>Monitoring Funnel</h3>")
             body.append(_render_kv_table([funnel_counts], columns=[("adapted_rows", "Adapted"), ("geocode_selected", "Geocode Selected"), ("crosswalk_resolved", "Crosswalk Resolved"), ("crosswalk_unresolved", "Crosswalk Unresolved"), ("watch_matches_matched", "Watch Matched"), ("signal_projection_rows", "Signal Rows")]))
-        unresolved_rows = [row for row in unresolved if isinstance(row, dict)]
+        unresolved_rows = [row for row in (unresolved or []) if isinstance(row, dict)]
         if unresolved_rows:
             body.append("<h3>Unresolved Reasons</h3>")
             body.append(_render_kv_table(unresolved_rows, columns=[("reason", "Reason"), ("count", "Count")]))
