@@ -9274,6 +9274,7 @@ def _serialize_unified_artifact(artifact: Artifact, source_record: Any = None) -
         "id": str(artifact.id),
         "artifact_id": str(artifact.id),
         "artifact_type": artifact.type.slug,
+        "scope_classification": _artifact_scope_classification(artifact),
         "artifact_state": artifact.artifact_state,
         "title": artifact.title,
         "summary": artifact.summary or "",
@@ -9313,6 +9314,7 @@ ARTIFACTS_DATASET_COLUMNS: List[Dict[str, Any]] = [
     {"key": "namespace", "label": "Namespace", "type": "string", "filterable": True, "sortable": True, "searchable": True},
     {"key": "name", "label": "Name", "type": "string", "filterable": True, "sortable": True, "searchable": True},
     {"key": "kind", "label": "Kind", "type": "string", "filterable": True, "sortable": True, "enum": ["module", "article", "workflow", "app"]},
+    {"key": "scope", "label": "Scope", "type": "string", "filterable": True, "sortable": True, "enum": ["solution", "shared", "platform"]},
     {"key": "version", "label": "Version", "type": "integer", "filterable": True, "sortable": True},
     {"key": "roles", "label": "Roles", "type": "string[]", "filterable": True},
     {"key": "surfaces_count", "label": "Surfaces", "type": "integer", "filterable": False, "sortable": True},
@@ -9323,6 +9325,7 @@ ARTIFACTS_DATASET_COLUMNS: List[Dict[str, Any]] = [
 
 ARTIFACTS_DATASET_SCHEMA_BY_KEY: Dict[str, Dict[str, Any]] = {str(col.get("key")): col for col in ARTIFACTS_DATASET_COLUMNS}
 ARTIFACTS_FILTER_OPS = {"eq", "neq", "contains", "in", "gte", "lte", "gt", "lt"}
+ARTIFACT_SCOPE_CLASSIFICATIONS: Set[str] = {"solution", "shared", "platform"}
 
 
 def _iso_utc(dt_value: Any) -> Optional[str]:
@@ -9343,6 +9346,37 @@ def _artifact_namespace_from_slug(slug: str) -> str:
     if not token or "." not in token:
         return ""
     return token.split(".", 1)[0].strip().lower()
+
+
+def _normalize_artifact_scope_classification(value: Any) -> Optional[str]:
+    token = str(value or "").strip().lower()
+    if token in ARTIFACT_SCOPE_CLASSIFICATIONS:
+        return token
+    if token in {"global", "core"}:
+        return "platform"
+    return None
+
+
+def _artifact_scope_classification(artifact: Artifact) -> str:
+    scope = artifact.scope_json if isinstance(artifact.scope_json, dict) else {}
+    explicit = _normalize_artifact_scope_classification(scope.get("scope_classification"))
+    if explicit:
+        return explicit
+    explicit = _normalize_artifact_scope_classification(scope.get("artifact_scope"))
+    if explicit:
+        return explicit
+
+    type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+    slug = str(_artifact_slug(artifact) or "").strip().lower()
+    namespace = _artifact_namespace_from_slug(slug)
+
+    if type_slug in {"application", "policy_bundle"} or slug.startswith("app.") or slug.startswith("policy."):
+        return "solution"
+    if type_slug in {"app_shell", "auth_login"}:
+        return "platform"
+    if slug in {"xyn-ui", "xyn-api"} or slug.startswith("core.") or namespace == "core":
+        return "platform"
+    return "shared"
 
 
 def _resolve_relative_time_value(raw_value: Any) -> Optional[timezone.datetime]:
@@ -9466,6 +9500,7 @@ def _artifact_table_row(artifact: Artifact, *, workspace_id: Optional[str], inst
         "namespace": _artifact_namespace_from_slug(slug),
         "name": artifact.title,
         "kind": artifact.type.slug if artifact.type_id else "",
+        "scope": _artifact_scope_classification(artifact),
         "version": int(artifact.version or 0),
         "roles": [str(entry) for entry in roles if str(entry or "").strip()],
         "surfaces_count": len(nav) + len(manage) + len(docs),
@@ -10262,6 +10297,10 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
         return staff_error
     if request.method == "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
+    scope_filter = _normalize_artifact_scope_classification(request.GET.get("scope"))
+    if str(request.GET.get("scope") or "").strip() and not scope_filter:
+        return JsonResponse({"error": "invalid scope"}, status=400)
+
     if request.method == "GET" and (
         str(request.GET.get("entity") or "").strip().lower() == "artifacts"
         or bool(str(request.GET.get("filters") or "").strip())
@@ -10283,6 +10322,8 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
                 ).only("artifact_id")
             }
         artifacts = _dedupe_artifacts_for_dataset(artifacts, installed_ids=installed_ids)
+        if scope_filter:
+            artifacts = [artifact for artifact in artifacts if _artifact_scope_classification(artifact) == scope_filter]
         rows = [_artifact_table_row(artifact, workspace_id=workspace_id, installed_ids=installed_ids) for artifact in artifacts]
         for filter_row in structured_query.get("filters") or []:
             field = str(filter_row.get("field") or "").strip()
@@ -10349,6 +10390,8 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
     qs = qs.order_by("-updated_at", "-created_at")
     total = qs.count()
     items = list(qs)
+    if scope_filter:
+        items = [artifact for artifact in items if _artifact_scope_classification(artifact) == scope_filter]
     total = len(items)
     items = items[offset : offset + limit]
     blueprint_ids = [item.source_ref_id for item in items if item.source_ref_type == "Blueprint" and item.source_ref_id]
@@ -28249,6 +28292,7 @@ def _serialize_application_artifact_membership(member: ApplicationArtifactMember
             "id": str(artifact.id),
             "workspace_id": str(artifact.workspace_id),
             "type": artifact.type.slug if artifact.type_id else "",
+            "scope_classification": _artifact_scope_classification(artifact),
             "title": artifact.title,
             "slug": _artifact_slug(artifact),
             "status": artifact.status,

@@ -1093,6 +1093,7 @@ export async function getWorkspaceArtifact(workspaceId: string, artifactId: stri
 export async function listArtifacts(params: {
   type?: UnifiedArtifactType;
   state?: "provisional" | "canonical" | "immutable" | "deprecated";
+  scope?: "solution" | "shared" | "platform";
   query?: string;
   owner?: string;
   limit?: number;
@@ -1102,6 +1103,7 @@ export async function listArtifacts(params: {
   const url = new URL(`${apiBaseUrl}/xyn/api/artifacts`);
   if (params.type) url.searchParams.set("type", params.type);
   if (params.state) url.searchParams.set("state", params.state);
+  if (params.scope) url.searchParams.set("scope", params.scope);
   if (params.query) url.searchParams.set("query", params.query);
   if (params.owner) url.searchParams.set("owner", params.owner);
   if (typeof params.limit === "number") url.searchParams.set("limit", String(params.limit));

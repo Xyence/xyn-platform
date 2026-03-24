@@ -93,6 +93,7 @@ describe("Solution panels", () => {
     render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={onOpenPanel} />);
 
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    expect(apiMocks.listArtifacts).toHaveBeenCalledWith({ limit: 200, scope: "solution" });
     await userEvent.click(screen.getByRole("button", { name: "Stage Coordinated Apply" }));
     await waitFor(() => expect(apiMocks.stageSolutionChangeApply).toHaveBeenCalledWith("app-1", "scs-1"));
     await waitFor(() => expect(apiMocks.listSolutionChangeSessions).toHaveBeenCalledTimes(2));
@@ -185,5 +186,23 @@ describe("Solution panels", () => {
     render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
     await waitFor(() => expect(screen.getByText("Session preview build: reused existing runtime")).toBeInTheDocument());
     expect(screen.getByText("Reuse reason: missing_app_container_bindings")).toBeInTheDocument();
+  });
+
+  it("allows broadening membership candidates beyond solution-scoped artifacts", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.listArtifacts).toHaveBeenCalledWith({ limit: 200, scope: "solution" }));
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Candidate scope" }), "all");
+    await waitFor(() => expect(apiMocks.listArtifacts).toHaveBeenLastCalledWith({ limit: 200 }));
   });
 });

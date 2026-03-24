@@ -156,6 +156,7 @@ export function SolutionDetailPanel({
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
   const [artifactId, setArtifactId] = useState<string>("");
+  const [artifactScopeMode, setArtifactScopeMode] = useState<"solution" | "all">("solution");
   const [role, setRole] = useState<ApplicationArtifactMembership["role"]>("supporting");
   const [responsibilitySummary, setResponsibilitySummary] = useState<string>("");
   const [saving, setSaving] = useState<boolean>(false);
@@ -188,10 +189,11 @@ export function SolutionDetailPanel({
       setLoading(true);
       setError("");
       try {
+        const artifactParams = artifactScopeMode === "solution" ? { limit: 200, scope: "solution" as const } : { limit: 200 };
         const [app, memberPayload, artifactPayload, sessionPayload] = await Promise.all([
           getApplication(applicationId),
           listApplicationArtifactMemberships(applicationId),
-          listArtifacts({ limit: 200 }),
+          listArtifacts(artifactParams),
           listSolutionChangeSessions(applicationId),
         ]);
         if (ignore) return;
@@ -214,7 +216,7 @@ export function SolutionDetailPanel({
     return () => {
       ignore = true;
     };
-  }, [applicationId]);
+  }, [applicationId, artifactScopeMode]);
 
   const activeSession = useMemo(
     () => sessions.find((item) => item.id === activeSessionId) || null,
@@ -705,6 +707,20 @@ export function SolutionDetailPanel({
         <h4>Add Artifact Membership</h4>
         <p className="muted">Assign coordinated artifacts under this solution.</p>
         <form className="stack" onSubmit={(event) => void handleAddMembership(event)}>
+          <label className="field">
+            <span className="field-label">Candidate scope</span>
+            <select
+              aria-label="Candidate scope"
+              value={artifactScopeMode}
+              onChange={(event) => {
+                setArtifactId("");
+                setArtifactScopeMode(event.target.value === "all" ? "all" : "solution");
+              }}
+            >
+              <option value="solution">Solution-scoped artifacts</option>
+              <option value="all">All artifacts (include shared/platform)</option>
+            </select>
+          </label>
           <label className="field">
             <span className="field-label">Artifact</span>
             <select aria-label="Artifact" value={artifactId} onChange={(event) => setArtifactId(event.target.value)} required>

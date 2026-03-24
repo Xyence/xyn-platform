@@ -1148,6 +1148,7 @@ export type UnifiedArtifact = {
   id: string;
   artifact_id: string;
   artifact_type: UnifiedArtifactType | string;
+  scope_classification?: "solution" | "shared" | "platform" | string;
   artifact_state: UnifiedArtifactState | string;
   title: string;
   summary?: string;
@@ -2842,6 +2843,7 @@ export type ApplicationArtifactMembership = {
     id: string;
     workspace_id: string;
     type: string;
+    scope_classification?: "solution" | "shared" | "platform" | string;
     title: string;
     slug?: string;
     status?: string;
