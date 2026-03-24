@@ -9,7 +9,7 @@ from django.test import RequestFactory, TestCase
 from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
 from xyn_orchestrator.development_intelligence import compute_goal_development_insights, compute_goal_diagnostic
 from xyn_orchestrator.goal_planning import decompose_goal, persist_goal_plan, recommend_next_slice, valid_goal_transition
-from xyn_orchestrator.application_factories import apply_application_plan, create_or_get_application_plan
+from xyn_orchestrator.application_factories import apply_application_plan, create_or_get_application_plan, infer_application_name
 from xyn_orchestrator.portfolio_intelligence import (
     build_goal_portfolio_row,
     build_goal_portfolio_state,
@@ -637,6 +637,29 @@ class GoalPlanningTests(TestCase):
         self.assertIn("Lunch Option", generated.generated_goals[0].description)
         self.assertEqual(generated.generated_goals[0].work_items[0].title, "Define the Poll, Lunch Option, and Vote entity model")
         self.assertIn("vote counts", generated.generated_goals[0].work_items[2].description.lower())
+
+    def test_infer_application_name_prefers_named_clause_over_full_objective_text(self):
+        objective = (
+            "Build an application named \"Real Estate Deal Finder\". "
+            "Purpose: identify distressed properties in St. Louis City and surface investor signals."
+        )
+        self.assertEqual(infer_application_name(objective), "Real Estate Deal Finder")
+
+    def test_application_plan_uses_concise_name_and_preserves_full_request_objective(self):
+        objective = (
+            "Build an application named \"Real Estate Deal Finder\". "
+            "Purpose: identify distressed properties in St. Louis City and surface investor signals. "
+            "Requirements: include campaigns, map selection, source governance, and signal feed."
+        )
+        plan, _definition, generated, created = create_or_get_application_plan(
+            workspace=self.workspace,
+            objective=objective,
+            requested_by=self.identity,
+        )
+        self.assertTrue(created)
+        self.assertEqual(plan.name, "Real Estate Deal Finder")
+        self.assertEqual(generated.application_name, "Real Estate Deal Finder")
+        self.assertEqual(plan.request_objective, objective)
 
     def test_apply_application_plan_uses_work_item_description_as_execution_objective(self):
         objective = (

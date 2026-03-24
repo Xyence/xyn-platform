@@ -3796,6 +3796,97 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.queryByRole("button", { name: "Composer" })).not.toBeInTheDocument();
   });
 
+  it("generates a plan without forcing full objective text into application_name", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "factory_discovery",
+      context: {
+        factory_key: "generic_application_mvp",
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [
+        {
+          key: "generic_application_mvp",
+          name: "Generic Application MVP",
+          description: "MVP-first planning template",
+          intended_use_case: "fallback",
+          generated_goal_families: [],
+          assumptions: [],
+        },
+      ],
+      selected_factory: {
+        key: "generic_application_mvp",
+        name: "Generic Application MVP",
+        description: "MVP-first planning template",
+        intended_use_case: "fallback",
+        generated_goal_families: [],
+        assumptions: [],
+      },
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+    apiMocks.generateApplicationPlan.mockResolvedValue({
+      id: "plan-1",
+      workspace_id: "ws-1",
+      application_id: null,
+      name: "Real Estate Deal Finder",
+      summary: "Reviewable plan",
+      source_factory_key: "generic_application_mvp",
+      status: "review",
+      request_objective: "Build an application named \"Real Estate Deal Finder\"",
+      generated_goal_count: 0,
+      created_at: "2026-03-15T10:00:00Z",
+      updated_at: "2026-03-15T10:00:00Z",
+      generated_plan: {
+        application_name: "Real Estate Deal Finder",
+        application_summary: "Reviewable plan",
+        source_factory_key: "generic_application_mvp",
+        request_objective: "Build an application named \"Real Estate Deal Finder\"",
+        ordering_hints: [],
+        dependency_hints: [],
+        resolution_notes: [],
+        generated_goals: [],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-generate", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    fireEvent.change(screen.getByPlaceholderText("Describe the application you want Xyn to plan."), {
+      target: { value: "Build an application named \"Real Estate Deal Finder\" for parcel monitoring." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Build plan" }));
+
+    await waitFor(() =>
+      expect(apiMocks.generateApplicationPlan).toHaveBeenCalledWith({
+        workspace_id: "ws-1",
+        objective: "Build an application named \"Real Estate Deal Finder\" for parcel monitoring.",
+        factory_key: "generic_application_mvp",
+      }),
+    );
+    expect(apiMocks.generateApplicationPlan.mock.calls[0][0]).not.toHaveProperty("application_name");
+  });
+
   it("auto-selects the only viable composer effort when no explicit focus is provided", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.getComposerState.mockResolvedValue({

@@ -11378,6 +11378,140 @@ def _serialize_artifact_install_receipt(receipt: ArtifactInstallReceipt) -> Dict
     }
 
 
+def _generated_solution_key_for_artifact(*, artifact: Artifact) -> Optional[str]:
+    slug = str(artifact.slug or "").strip().lower()
+    type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+    if type_slug == "application" and slug.startswith("app."):
+        return slug[4:] or None
+    if type_slug == "policy_bundle" and slug.startswith("policy."):
+        return slug[7:] or None
+    return None
+
+
+def _generated_solution_title_for_key(*, solution_key: str, app_artifact: Optional[Artifact], policy_artifact: Optional[Artifact]) -> str:
+    if app_artifact and str(app_artifact.title or "").strip():
+        app_title = str(app_artifact.title or "").strip()
+        app_slug = str(app_artifact.slug or "").strip().lower()
+        normalized_title = app_title.lower()
+        if normalized_title not in {app_slug, f"app.{solution_key}".lower()}:
+            return app_title[:240]
+    if policy_artifact and str(policy_artifact.title or "").strip():
+        policy_title = str(policy_artifact.title or "").strip()
+        policy_slug = str(policy_artifact.slug or "").strip().lower()
+        if policy_title.lower() in {policy_slug, f"policy.{solution_key}".lower()}:
+            policy_title = ""
+        title = re.sub(r"\s+policy\s+bundle$", "", policy_title, flags=re.IGNORECASE).strip()
+        if title:
+            return title[:240]
+    fallback = str(solution_key or "").replace("-", " ").replace("_", " ").strip()
+    if not fallback:
+        return "Generated Application"
+    words = [word for word in fallback.split(" ") if word]
+    return " ".join(word[:1].upper() + word[1:] for word in words)[:240]
+
+
+def _link_generated_artifacts_to_solution(*, artifacts: List[Artifact]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for artifact in artifacts:
+        if artifact is None or artifact.workspace_id is None or artifact.type_id is None:
+            continue
+        solution_key = _generated_solution_key_for_artifact(artifact=artifact)
+        if not solution_key:
+            continue
+        group_key = (str(artifact.workspace_id), solution_key)
+        bucket = grouped.setdefault(
+            group_key,
+            {
+                "workspace_id": str(artifact.workspace_id),
+                "solution_key": solution_key,
+                "application_artifact": None,
+                "policy_artifact": None,
+                "artifacts": [],
+            },
+        )
+        bucket["artifacts"].append(artifact)
+        type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+        if type_slug == "application":
+            bucket["application_artifact"] = artifact
+        elif type_slug == "policy_bundle":
+            bucket["policy_artifact"] = artifact
+
+    linked_rows: List[Dict[str, Any]] = []
+    for bucket in grouped.values():
+        workspace_id = str(bucket.get("workspace_id") or "").strip()
+        solution_key = str(bucket.get("solution_key") or "").strip()
+        if not workspace_id or not solution_key:
+            continue
+        workspace = Workspace.objects.filter(id=workspace_id).first()
+        if workspace is None:
+            continue
+        app_artifact = bucket.get("application_artifact")
+        policy_artifact = bucket.get("policy_artifact")
+        title = _generated_solution_title_for_key(
+            solution_key=solution_key,
+            app_artifact=app_artifact,
+            policy_artifact=policy_artifact,
+        )
+        application = (
+            Application.objects.filter(
+                workspace=workspace,
+                metadata_json__generated_artifact_key=solution_key,
+            )
+            .order_by("-updated_at", "-created_at")
+            .first()
+        )
+        if application is None:
+            application = Application.objects.create(
+                workspace=workspace,
+                name=title,
+                summary=str(getattr(app_artifact, "summary", "") or "").strip(),
+                source_factory_key="generated_artifact_import",
+                source_conversation_id="",
+                status="active",
+                request_objective="",
+                metadata_json={
+                    "generated_artifact_key": solution_key,
+                    "origin": "artifact_import",
+                },
+            )
+        elif title and application.name != title:
+            application.name = title
+            application.save(update_fields=["name", "updated_at"])
+
+        for artifact in bucket.get("artifacts") or []:
+            if artifact.workspace_id != application.workspace_id:
+                continue
+            type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+            role = "primary_ui" if type_slug == "application" else "supporting"
+            responsibility_summary = (
+                "Primary generated application artifact imported from package."
+                if type_slug == "application"
+                else "Generated policy bundle imported from package."
+            )
+            sort_order = 10 if type_slug == "application" else 20
+            ApplicationArtifactMembership.objects.update_or_create(
+                application=application,
+                artifact=artifact,
+                defaults={
+                    "workspace": application.workspace,
+                    "role": role,
+                    "responsibility_summary": responsibility_summary,
+                    "metadata_json": {"origin": "artifact_import"},
+                    "sort_order": sort_order,
+                },
+            )
+        linked_rows.append(
+            {
+                "application_id": str(application.id),
+                "workspace_id": str(application.workspace_id),
+                "name": application.name,
+                "solution_key": solution_key,
+                "artifact_ids": [str(item.id) for item in bucket.get("artifacts") or [] if item is not None],
+            }
+        )
+    return linked_rows
+
+
 @csrf_exempt
 @login_required
 def artifact_bindings_collection(request: HttpRequest) -> JsonResponse:
@@ -11523,15 +11657,19 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
         installed_by=request.user if request.user.is_authenticated else None,
     )
     status = 200 if receipt.status == "success" else 400
+    artifact_ids_from_receipt = [
+        str(change.get("artifact_id") or "").strip()
+        for change in (receipt.artifact_changes if isinstance(receipt.artifact_changes, list) else [])
+        if isinstance(change, dict) and str(change.get("artifact_id") or "").strip()
+    ]
+    receipt_artifacts = list(
+        Artifact.objects.filter(id__in=artifact_ids_from_receipt).select_related("type")
+    ) if artifact_ids_from_receipt else []
+    artifact_by_id = {str(item.id): item for item in receipt_artifacts}
     imported_rows: List[Dict[str, Any]] = []
-    for item in artifacts:
-        if not isinstance(item, dict):
-            continue
-        artifact = Artifact.objects.filter(
-            type__slug=str(item.get("type") or "").strip(),
-            slug=str(item.get("slug") or "").strip(),
-        ).order_by("-updated_at", "-created_at").first()
-        if not artifact:
+    for artifact_id in artifact_ids_from_receipt:
+        artifact = artifact_by_id.get(artifact_id)
+        if artifact is None:
             continue
         imported_rows.append(
             {
@@ -11542,12 +11680,37 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
                 "title": artifact.title,
             }
         )
+    if not imported_rows:
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            artifact = Artifact.objects.filter(
+                type__slug=str(item.get("type") or "").strip(),
+                slug=str(item.get("slug") or "").strip(),
+            ).order_by("-updated_at", "-created_at").first()
+            if not artifact:
+                continue
+            imported_rows.append(
+                {
+                    "id": str(artifact.id),
+                    "slug": _artifact_slug(artifact),
+                    "type": artifact.type.slug if artifact.type_id else "",
+                    "package_version": str(artifact.package_version or ""),
+                    "title": artifact.title,
+                }
+            )
+    solution_links = _link_generated_artifacts_to_solution(artifacts=receipt_artifacts or [
+        Artifact.objects.filter(id=row.get("id")).select_related("type").first()
+        for row in imported_rows
+        if isinstance(row, dict)
+    ])
     return JsonResponse(
         {
             "package": _serialize_artifact_package(package),
             "created": created,
             "receipt": _serialize_artifact_install_receipt(receipt),
             "artifacts": imported_rows,
+            "solution_links": solution_links,
         },
         status=status,
     )

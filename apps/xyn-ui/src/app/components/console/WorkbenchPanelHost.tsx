@@ -4341,7 +4341,6 @@ function ComposerDetailPanel({
         workspace_id: workspaceId,
         objective: objectiveText,
         factory_key: targetFactoryKey || factoryKey || undefined,
-        application_name: payload?.selected_factory?.name ? objectiveText : undefined,
       });
       setMessage(`Generated reviewable plan for ${response.name}.`);
       openComposer({

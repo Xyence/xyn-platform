@@ -7,6 +7,8 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 
 from xyn_orchestrator.models import (
+    Application,
+    ApplicationArtifactMembership,
     Artifact,
     ArtifactBindingValue,
     ArtifactInstallReceipt,
@@ -176,6 +178,14 @@ class ArtifactPackagesApiTests(TestCase):
             Artifact.objects.filter(slug="app.net-inventory", package_version="0.0.1-dev").count(),
             1,
         )
+        application_rows = Application.objects.filter(
+            workspace=Artifact.objects.get(slug="app.net-inventory", package_version="0.0.1-dev").workspace,
+            metadata_json__generated_artifact_key="net-inventory",
+        )
+        self.assertEqual(application_rows.count(), 1)
+        app = application_rows.first()
+        self.assertIsNotNone(app)
+        self.assertEqual(ApplicationArtifactMembership.objects.filter(application=app).count(), 1)
 
     def test_generated_artifact_import_preserves_manifest_summary_in_workspace_registry(self):
         blob = self._package_blob(
@@ -285,8 +295,24 @@ class ArtifactPackagesApiTests(TestCase):
         self.assertTrue(Artifact.objects.filter(slug="app.team-lunch-poll").exists())
         self.assertTrue(Artifact.objects.filter(slug="policy.team-lunch-poll").exists())
         app_artifact = Artifact.objects.get(slug="app.team-lunch-poll")
+        policy_artifact = Artifact.objects.get(slug="policy.team-lunch-poll")
         self.assertEqual(str(app_artifact.type).lower(), "application")
         self.assertEqual(str(app_artifact.slug), "app.team-lunch-poll")
+        application = Application.objects.get(
+            workspace=app_artifact.workspace,
+            metadata_json__generated_artifact_key="team-lunch-poll",
+        )
+        self.assertEqual(application.name, "Team Lunch Poll")
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=application).select_related("artifact").order_by("sort_order", "created_at")
+        )
+        self.assertEqual(len(memberships), 2)
+        self.assertEqual({member.artifact.slug for member in memberships}, {"app.team-lunch-poll", "policy.team-lunch-poll"})
+        app_membership = next(member for member in memberships if member.artifact.slug == "app.team-lunch-poll")
+        policy_membership = next(member for member in memberships if member.artifact.slug == "policy.team-lunch-poll")
+        self.assertEqual(app_membership.role, "primary_ui")
+        self.assertEqual(policy_membership.role, "supporting")
+        self.assertEqual(str(policy_artifact.workspace_id), str(application.workspace_id))
 
     def test_generated_artifact_import_handles_long_application_slug_without_source_ref_overflow(self):
         app_slug = "app.real-estate-deal-finder-fidelity-validation-4"
