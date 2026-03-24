@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SolutionDetailPanel, SolutionListPanel } from "./SolutionPanels";
 
@@ -35,6 +35,10 @@ vi.mock("../../../api/xyn", () => ({
 }));
 
 describe("Solution panels", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("renders solution list in panel and opens solution detail panel", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.listApplications.mockResolvedValue({
@@ -103,5 +107,83 @@ describe("Solution panels", () => {
       }),
       { open_in: "new_panel" }
     );
+  });
+
+  it("renders session-built preview evidence when concrete launch details exist", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({
+      sessions: [
+        {
+          id: "scs-1",
+          title: "Session 1",
+          status: "planned",
+          selected_artifact_ids: [],
+          analysis: {},
+          plan: {},
+          staged_changes: {},
+          preview: {
+            status: "ready",
+            mode: "coordinated_multi_artifact_preview",
+            newly_built_for_session: true,
+            session_build: {
+              status: "succeeded",
+              launched_containers: ["xyn-preview-deal-finder-runtime"],
+            },
+          },
+          validation: {},
+        },
+      ],
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    expect(screen.getByText("Session preview build: newly built/deployed for this session")).toBeInTheDocument();
+    expect(screen.getByText(/Launch evidence:/)).toBeInTheDocument();
+  });
+
+  it("renders preview reuse state when session-specific build evidence is unavailable", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({
+      sessions: [
+        {
+          id: "scs-2",
+          title: "Session 2",
+          status: "planned",
+          selected_artifact_ids: [],
+          analysis: {},
+          plan: {},
+          staged_changes: {},
+          preview: {
+            status: "ready",
+            mode: "coordinated_multi_artifact_preview",
+            newly_built_for_session: false,
+            session_build: {
+              status: "reused",
+              reason: "missing_app_container_bindings",
+            },
+          },
+          validation: {},
+        },
+      ],
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText("Session preview build: reused existing runtime")).toBeInTheDocument());
+    expect(screen.getByText("Reuse reason: missing_app_container_bindings")).toBeInTheDocument();
   });
 });

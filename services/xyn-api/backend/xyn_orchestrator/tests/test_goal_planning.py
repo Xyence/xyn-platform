@@ -1345,6 +1345,10 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(preview_payload["session"]["execution_status"], "preview_ready")
         self.assertEqual((preview_payload["session"].get("preview") or {}).get("status"), "ready")
         self.assertTrue((preview_payload["session"].get("preview") or {}).get("preview_urls"))
+        preview = preview_payload["session"].get("preview") or {}
+        self.assertFalse(bool(preview.get("newly_built_for_session")))
+        self.assertTrue(bool(preview.get("reused_existing_runtime")))
+        self.assertEqual(((preview.get("session_build") or {}).get("status")), "reused")
 
         validate_request = self._request(
             f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/validate",
@@ -1425,6 +1429,195 @@ class GoalPlanningTests(TestCase):
         self.assertFalse(preview_payload["prepared"])
         self.assertEqual(preview_payload["session"]["execution_status"], "failed")
         self.assertEqual((preview_payload["session"].get("preview") or {}).get("status"), "failed")
+
+    def test_solution_change_session_prepare_preview_marks_session_built_when_sibling_launch_succeeds(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug=ui_artifact.slug.replace("app.", "", 1),
+            customer_name="Preview",
+            fqdn=f"preview-{uuid.uuid4().hex[:6]}.internal",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://deal-finder-runtime:8080",
+                    "public_app_url": "http://localhost:32822",
+                    "compose_project": "xyn-preview",
+                    "app_slug": ui_artifact.slug.replace("app.", "", 1),
+                    "source_build_job_id": "job-123",
+                    "app_container_name": "xyn-preview-deal-finder-runtime",
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Campaign UX update",
+            request_text="Update campaign UX",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={"per_artifact_work": [{"artifact_id": str(ui_artifact.id), "planned_work": ["Update shell UI"]}]},
+            staged_changes_json={
+                "artifact_states": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "artifact_title": ui_artifact.title,
+                        "role": "primary_ui",
+                        "apply_state": "proposed",
+                    }
+                ]
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._runtime_target_request", return_value=mock.Mock(status_code=200)
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api.subprocess.run",
+            side_effect=[
+                mock.Mock(returncode=0, stdout="24.0.0", stderr=""),
+                mock.Mock(returncode=0, stdout="restarted", stderr=""),
+            ],
+        ):
+            preview_response = application_solution_change_session_prepare_preview(
+                preview_request, str(application.id), str(session.id)
+            )
+        preview_payload = json.loads(preview_response.content)
+        self.assertEqual(preview_response.status_code, 200)
+        self.assertTrue(preview_payload["prepared"])
+        preview = preview_payload["session"].get("preview") or {}
+        self.assertEqual(preview.get("status"), "ready")
+        self.assertTrue(preview.get("newly_built_for_session"))
+        self.assertFalse(preview.get("reused_existing_runtime"))
+        session_build = preview.get("session_build") if isinstance(preview.get("session_build"), dict) else {}
+        self.assertEqual(session_build.get("status"), "succeeded")
+        self.assertTrue(session_build.get("launched_containers"))
+
+    def test_solution_change_session_prepare_preview_fails_when_session_launch_fails(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug=ui_artifact.slug.replace("app.", "", 1),
+            customer_name="Preview",
+            fqdn=f"preview-{uuid.uuid4().hex[:6]}.internal",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://deal-finder-runtime:8080",
+                    "public_app_url": "http://localhost:32822",
+                    "compose_project": "xyn-preview",
+                    "app_slug": ui_artifact.slug.replace("app.", "", 1),
+                    "source_build_job_id": "job-123",
+                    "app_container_name": "xyn-preview-deal-finder-runtime",
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Campaign UX update",
+            request_text="Update campaign UX",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={"per_artifact_work": [{"artifact_id": str(ui_artifact.id), "planned_work": ["Update shell UI"]}]},
+            staged_changes_json={
+                "artifact_states": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "artifact_title": ui_artifact.title,
+                        "role": "primary_ui",
+                        "apply_state": "proposed",
+                    }
+                ]
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._runtime_target_request", return_value=mock.Mock(status_code=200)
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api.subprocess.run",
+            side_effect=[
+                mock.Mock(returncode=0, stdout="24.0.0", stderr=""),
+                mock.Mock(returncode=1, stdout="", stderr="restart failed"),
+            ],
+        ):
+            preview_response = application_solution_change_session_prepare_preview(
+                preview_request, str(application.id), str(session.id)
+            )
+        preview_payload = json.loads(preview_response.content)
+        self.assertEqual(preview_response.status_code, 409)
+        self.assertFalse(preview_payload["prepared"])
+        preview = preview_payload["session"].get("preview") or {}
+        self.assertEqual(preview.get("status"), "failed")
+        self.assertFalse(bool(preview.get("newly_built_for_session")))
+        self.assertEqual((preview.get("error") or {}).get("reason"), "docker_restart_failed")
 
     def test_application_plan_detail_patch_updates_plan_status(self):
         plan = ApplicationPlan.objects.create(

@@ -8,6 +8,7 @@ import os
 import re
 import html
 import secrets
+import subprocess
 import time
 import uuid
 import hashlib
@@ -28383,6 +28384,107 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             "error": last_error,
         }
 
+    def _run_command(cmd: List[str], *, timeout_seconds: int = 90) -> Tuple[int, str, str]:
+        try:
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = str(exc.stdout or "").strip()
+            stderr = str(exc.stderr or "").strip()
+            return 124, stdout, stderr or f"command timed out after {timeout_seconds}s"
+        except Exception as exc:  # pragma: no cover - defensive
+            return 1, "", str(exc)
+        return int(proc.returncode or 0), str(proc.stdout or "").strip(), str(proc.stderr or "").strip()
+
+    def _launch_preview_for_session(
+        *,
+        artifact_rows: List[Dict[str, Any]],
+        compose_projects: set[str],
+    ) -> Dict[str, Any]:
+        launched_at = timezone.now().isoformat()
+        if len(compose_projects) != 1:
+            return {
+                "attempted": False,
+                "supported": False,
+                "status": "reused",
+                "reason": "multiple_compose_projects",
+                "started_at": launched_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        containers: List[str] = []
+        runtime_target_ids: List[str] = []
+        for item in artifact_rows:
+            if not isinstance(item, dict):
+                continue
+            container_name = str(item.get("app_container_name") or "").strip()
+            if container_name and container_name not in containers:
+                containers.append(container_name)
+            runtime_target_id = str(item.get("runtime_target_id") or "").strip()
+            if runtime_target_id and runtime_target_id not in runtime_target_ids:
+                runtime_target_ids.append(runtime_target_id)
+        if not containers:
+            return {
+                "attempted": False,
+                "supported": False,
+                "status": "reused",
+                "reason": "missing_app_container_bindings",
+                "runtime_target_ids": runtime_target_ids,
+                "started_at": launched_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        docker_probe_code, _docker_probe_out, docker_probe_err = _run_command(["docker", "version", "--format", "{{.Server.Version}}"])
+        if docker_probe_code != 0:
+            return {
+                "attempted": False,
+                "supported": False,
+                "status": "reused",
+                "reason": "docker_unavailable",
+                "details": docker_probe_err or "docker CLI unavailable",
+                "runtime_target_ids": runtime_target_ids,
+                "started_at": launched_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        commands: List[Dict[str, Any]] = []
+        for container_name in containers:
+            code, out, err = _run_command(["docker", "restart", container_name], timeout_seconds=120)
+            commands.append(
+                {
+                    "container": container_name,
+                    "command": ["docker", "restart", container_name],
+                    "status_code": code,
+                    "stdout": out,
+                    "stderr": err,
+                }
+            )
+            if code != 0:
+                return {
+                    "attempted": True,
+                    "supported": True,
+                    "status": "failed",
+                    "reason": "docker_restart_failed",
+                    "details": err or out or f"failed to restart {container_name}",
+                    "launched_containers": containers,
+                    "runtime_target_ids": runtime_target_ids,
+                    "command_results": commands,
+                    "started_at": launched_at,
+                    "completed_at": timezone.now().isoformat(),
+                }
+        return {
+            "attempted": True,
+            "supported": True,
+            "status": "succeeded",
+            "launched_containers": containers,
+            "runtime_target_ids": runtime_target_ids,
+            "command_results": commands,
+            "started_at": launched_at,
+            "completed_at": timezone.now().isoformat(),
+        }
+
     artifact_rows: List[Dict[str, Any]] = []
     selected_artifact_ids: List[str] = []
     compose_projects: set[str] = set()
@@ -28420,6 +28522,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             continue
         runtime_record = _workspace_runtime_target(session.workspace, app_slug)
         runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record, dict) else {}
+        runtime_instance = runtime_record.get("instance") if isinstance(runtime_record, dict) else None
         runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip()
         public_app_url = str(runtime_target.get("public_app_url") or "").strip()
         compose_project = str(runtime_target.get("compose_project") or "").strip()
@@ -28451,6 +28554,8 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 "runtime_base_url": runtime_base_url,
                 "public_app_url": public_app_url,
                 "compose_project": compose_project,
+                "runtime_target_id": str(getattr(runtime_instance, "id", "") or "").strip(),
+                "app_container_name": str(runtime_target.get("app_container_name") or "").strip(),
                 "source_build_job_id": str(runtime_target.get("source_build_job_id") or "").strip(),
                 "probe": probe,
             }
@@ -28468,12 +28573,25 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         if url and url not in preview_urls:
             preview_urls.append(url)
 
-    status = "ready" if all_bound and bool(preview_urls) else "failed"
+    session_build = _launch_preview_for_session(artifact_rows=artifact_rows, compose_projects=compose_projects)
+    build_status = str(session_build.get("status") or "").strip().lower()
+    built_for_session = bool(session_build.get("attempted")) and build_status == "succeeded"
+    reused_existing_runtime = not built_for_session
+    if build_status == "failed":
+        for artifact_row in artifact_rows:
+            if not isinstance(artifact_row, dict):
+                continue
+            runtime_base_url = str(artifact_row.get("runtime_base_url") or "").strip()
+            artifact_row["probe"] = _probe_runtime(runtime_base_url) if runtime_base_url else {"ok": False, "status_code": 0, "path": "/health"}
+            artifact_row["status"] = "ready" if bool((artifact_row.get("probe") or {}).get("ok")) else "failed"
+    status = "ready" if all_bound and bool(preview_urls) and build_status != "failed" else "failed"
     preview_payload: Dict[str, Any] = {
         "preview_id": str(uuid.uuid4()),
         "status": status,
         "mode": "coordinated_multi_artifact_preview",
         "prepared_at": now_iso,
+        "newly_built_for_session": built_for_session,
+        "reused_existing_runtime": reused_existing_runtime,
         "selected_artifact_ids": selected_artifact_ids,
         "artifact_count": len(selected_artifact_ids),
         "artifacts": artifact_rows,
@@ -28481,6 +28599,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         "primary_url": preview_urls[0] if preview_urls else "",
         "compose_projects": sorted(compose_projects),
         "single_preview_environment": single_preview_environment,
+        "session_build": session_build,
         "build_deploy_evidence": {
             "runtime_owner": "sibling",
             "source_build_job_ids": sorted(
@@ -28491,6 +28610,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 }
             ),
             "verified_at": now_iso,
+            "session_build": session_build,
         },
         "handoff": {
             "workbench_path": (
@@ -28501,9 +28621,15 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         },
     }
     if status != "ready":
+        if build_status == "failed":
+            reason = str(session_build.get("reason") or "session_preview_launch_failed").strip() or "session_preview_launch_failed"
+            details = str(session_build.get("details") or "Failed to launch session preview for selected artifacts.").strip()
+        else:
+            reason = "preview_environment_unavailable"
+            details = "Selected artifacts must resolve to healthy sibling runtime targets in one compose project."
         preview_payload["error"] = {
-            "reason": "preview_environment_unavailable",
-            "details": "Selected artifacts must resolve to healthy sibling runtime targets in one compose project.",
+            "reason": reason,
+            "details": details,
         }
 
     staged["overall_state"] = "preview_ready" if status == "ready" else "preview_failed"

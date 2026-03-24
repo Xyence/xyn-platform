@@ -355,6 +355,13 @@ export function SolutionDetailPanel({
   const previewState = (activeSession?.preview as Record<string, unknown> | undefined) || {};
   const previewUrls = (previewState?.preview_urls as unknown[] | undefined)?.map((item) => String(item || "")).filter(Boolean) || [];
   const previewArtifacts = (previewState?.artifacts as Array<Record<string, unknown>> | undefined) || [];
+  const sessionBuild = (previewState?.session_build as Record<string, unknown> | undefined) || {};
+  const launchedContainers = (sessionBuild?.launched_containers as unknown[] | undefined) || [];
+  const builtForSession =
+    Boolean(previewState?.newly_built_for_session) &&
+    String(sessionBuild?.status || "").toLowerCase() === "succeeded" &&
+    launchedContainers.length > 0;
+  const reusedRuntime = !builtForSession;
   const validationState = (activeSession?.validation as Record<string, unknown> | undefined) || {};
   const validationChecks = (validationState?.checks as Array<Record<string, unknown>> | undefined) || [];
 
@@ -595,7 +602,21 @@ export function SolutionDetailPanel({
               <p className="muted">
                 Status: {String(previewState.status || "unknown")} · Mode: {String(previewState.mode || "n/a")}
               </p>
+              <p className="muted">
+                Session preview build: {builtForSession ? "newly built/deployed for this session" : "reused existing runtime"}
+              </p>
               <p className="muted">Prepared at: {String(previewState.prepared_at || "—")}</p>
+              {builtForSession ? (
+                <p className="muted">
+                  Launch evidence: {launchedContainers.map((item) => String(item || "")).filter(Boolean).join(", ") || "containers not listed"}
+                </p>
+              ) : null}
+              {Boolean(previewState?.newly_built_for_session) && !builtForSession ? (
+                <p className="danger">Preview marked as session-built but concrete launch evidence is missing.</p>
+              ) : null}
+              {reusedRuntime && sessionBuild?.reason ? (
+                <p className="muted">Reuse reason: {String(sessionBuild.reason)}</p>
+              ) : null}
               {String(previewState.primary_url || "").trim() ? (
                 <p>
                   Primary preview URL:{" "}
@@ -725,4 +746,3 @@ export function SolutionDetailPanel({
     </div>
   );
 }
-
