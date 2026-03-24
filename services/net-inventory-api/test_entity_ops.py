@@ -1032,6 +1032,21 @@ class NetInventoryCrudTests(unittest.TestCase):
             self.assertEqual(runtime_surface.status_code, 200, runtime_surface.text)
             self.assertIn("Runtime Dev Access", runtime_surface.text)
 
+    def test_root_redirects_to_shell_when_shell_base_env_is_set(self):
+        service = GenericEntityOperationsService(entity_contracts=_contracts(), storage_adapter=InMemoryStorageAdapter())
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GENERATED_POLICY_BUNDLE_JSON": json.dumps({"workspace_id": self.workspace_id}),
+                "SHELL_BASE_URL": "http://localhost:3000",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app(entity_service=service, initialize_schema=False))
+            response = client.get("/", follow_redirects=False)
+            self.assertEqual(response.status_code, 307, response.text)
+            self.assertEqual(response.headers.get("location"), f"http://localhost:3000/w/{self.workspace_id}/workbench")
+
     def test_signal_surface_binds_to_canonical_signal_feed(self):
         contracts = [
             {

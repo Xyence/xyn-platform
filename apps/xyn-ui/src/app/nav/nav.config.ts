@@ -67,7 +67,9 @@ export const NAV_GROUPS: NavGroup[] = [
     id: "apps",
     label: "Apps",
     icon: "Sparkles",
-    items: [],
+    items: [
+      { id: "solutions", label: "Solutions", path: "/app/solutions", icon: "PanelsTopLeft", keywords: ["applications", "multi-artifact", "composer"] },
+    ],
   },
   {
     id: "run",

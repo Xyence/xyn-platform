@@ -4762,6 +4762,106 @@ class Application(models.Model):
         return self.name
 
 
+class ApplicationArtifactMembership(models.Model):
+    ROLE_CHOICES = [
+        ("primary_ui", "Primary UI"),
+        ("primary_api", "Primary API"),
+        ("integration_adapter", "Integration Adapter"),
+        ("worker", "Worker"),
+        ("runtime_service", "Runtime Service"),
+        ("shared_library", "Shared Library"),
+        ("supporting", "Supporting"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="application_artifact_memberships")
+    application = models.ForeignKey("Application", on_delete=models.CASCADE, related_name="artifact_memberships")
+    artifact = models.ForeignKey("Artifact", on_delete=models.CASCADE, related_name="application_memberships")
+    role = models.CharField(max_length=40, choices=ROLE_CHOICES, default="supporting")
+    responsibility_summary = models.TextField(blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["application", "artifact"],
+                name="uniq_application_artifact_membership",
+            ),
+        ]
+
+    def clean(self):
+        if self.application_id and self.workspace_id and self.application.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match application workspace")
+        if self.artifact_id and self.workspace_id and self.artifact.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match artifact workspace")
+
+    def save(self, *args, **kwargs):
+        if self.application_id and not self.workspace_id:
+            self.workspace_id = self.application.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.application_id}:{self.artifact_id}:{self.role}"
+
+
+class SolutionChangeSession(models.Model):
+    STATUS_CHOICES = [
+        ("draft", "Draft"),
+        ("planned", "Planned"),
+        ("archived", "Archived"),
+    ]
+    EXECUTION_STATUS_CHOICES = [
+        ("not_started", "Not Started"),
+        ("staged", "Staged"),
+        ("preview_preparing", "Preview Preparing"),
+        ("preview_ready", "Preview Ready"),
+        ("validating", "Validating"),
+        ("ready_for_promotion", "Ready for Promotion"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_change_sessions")
+    application = models.ForeignKey("Application", on_delete=models.CASCADE, related_name="solution_change_sessions")
+    title = models.CharField(max_length=240)
+    request_text = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="solution_change_sessions"
+    )
+    analysis_json = models.JSONField(default=dict, blank=True)
+    selected_artifact_ids_json = models.JSONField(default=list, blank=True)
+    plan_json = models.JSONField(default=dict, blank=True)
+    execution_status = models.CharField(max_length=32, choices=EXECUTION_STATUS_CHOICES, default="not_started")
+    staged_changes_json = models.JSONField(default=dict, blank=True)
+    preview_json = models.JSONField(default=dict, blank=True)
+    validation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+
+    def clean(self):
+        if self.application_id and self.workspace_id and self.application.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match application workspace")
+
+    def save(self, *args, **kwargs):
+        if self.application_id and not self.workspace_id:
+            self.workspace_id = self.application.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.application_id}:{self.title}"
+
+
 class ApplicationPlan(models.Model):
     STATUS_CHOICES = [
         ("review", "Review"),

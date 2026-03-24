@@ -5,28 +5,19 @@ import type { ArtifactSurfaceResolveResponse } from "../../api/types";
 import ArtifactsArticlesPage from "./ArtifactsArticlesPage";
 import ArtifactsWorkflowsPage from "./ArtifactsWorkflowsPage";
 import ArtifactDetailPage from "./ArtifactDetailPage";
+import CampaignMapWorkflowPage from "./CampaignMapWorkflowPage";
+import { resolveShellSurfaceRenderer } from "./shellSurfaceRenderers";
 
-type SurfaceRenderTarget =
-  | { kind: "articles_index" }
-  | { kind: "workflows_index" }
-  | { kind: "artifact_detail" };
-
-function resolveSurfaceRenderTarget(payload: ArtifactSurfaceResolveResponse): SurfaceRenderTarget | null {
-  const surface = payload.surface || ({} as ArtifactSurfaceResolveResponse["surface"]);
-  const renderer = (surface.renderer || {}) as Record<string, unknown>;
-  const rendererType = String(renderer.type || "").trim().toLowerCase();
-  const rendererPayload = (renderer.payload || {}) as Record<string, unknown>;
-  const componentKey = String(rendererPayload.component_key || "").trim().toLowerCase();
-
-  if (rendererType === "ui_component_ref") {
-    if (componentKey === "articles.index") return { kind: "articles_index" };
-    if (componentKey === "workflows.index") return { kind: "workflows_index" };
-    if (componentKey === "articles.draft_editor") return { kind: "artifact_detail" };
-    if (componentKey === "workflows.editor" || componentKey === "workflows.visualizer") return { kind: "artifact_detail" };
+export function toSurfaceResolvePath(pathname: string): string {
+  const raw = String(pathname || "").trim();
+  if (!raw) return "/";
+  const workspaceScoped = raw.match(/^\/w\/[^/]+\/a(\/.*)?$/);
+  if (workspaceScoped) {
+    const rest = String(workspaceScoped[1] || "").trim();
+    if (!rest) return "/app";
+    return `/app${rest}`;
   }
-
-  if (rendererType === "article_editor" || rendererType === "workflow_visualizer") return { kind: "artifact_detail" };
-  return null;
+  return raw;
 }
 
 export default function ArtifactSurfaceRoutePage({
@@ -45,7 +36,7 @@ export default function ArtifactSurfaceRoutePage({
   const [error, setError] = useState<string | null>(null);
   const [resolved, setResolved] = useState<ArtifactSurfaceResolveResponse | null>(null);
 
-  const requestPath = useMemo(() => location.pathname, [location.pathname]);
+  const requestPath = useMemo(() => toSurfaceResolvePath(location.pathname), [location.pathname]);
 
   useEffect(() => {
     let mounted = true;
@@ -86,7 +77,7 @@ export default function ArtifactSurfaceRoutePage({
     );
   }
 
-  const target = resolved ? resolveSurfaceRenderTarget(resolved) : null;
+  const target = resolved ? resolveShellSurfaceRenderer(resolved) : null;
   if (target?.kind === "articles_index") {
     return <ArtifactsArticlesPage workspaceId={workspaceId} canCreate={canCreate} />;
   }
@@ -100,6 +91,23 @@ export default function ArtifactSurfaceRoutePage({
         workspaceRole={workspaceRole}
         canManageArticleLifecycle={canManageArticleLifecycle}
       />
+    );
+  }
+  if (target?.kind === "registered_shell_renderer") {
+    if (target.rendererKey === "campaign_map_workflow") {
+      const campaignParam = String(target.rendererConfig.campaign_id_param || "id").trim() || "id";
+      const campaignId = String(target.params?.[campaignParam] || "").trim() || undefined;
+      return <CampaignMapWorkflowPage workspaceId={workspaceId} campaignId={campaignId} />;
+    }
+  }
+  if (target?.kind === "unknown_shell_renderer") {
+    return (
+      <div className="card stack">
+        <h2>{resolved?.surface?.title || "Artifact surface"}</h2>
+        <p className="danger">
+          Unknown shell renderer key: <code>{target.rendererKey}</code>
+        </p>
+      </div>
     );
   }
 

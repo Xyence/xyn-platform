@@ -50,6 +50,7 @@ function mapLegacyAppRestToWorkspaceSubpath(rest: string): string {
   if (normalized === "catalog") return "build/catalog";
   if (normalized === "artifacts") return "build/artifacts";
   if (normalized === "artifacts/all") return "build/artifacts";
+  if (normalized === "solutions" || normalized.startsWith("solutions/")) return normalized;
   if (normalized === "artifacts/library" || normalized === "build/artifacts/library") return "build/catalog";
   if (normalized.startsWith("artifacts/")) {
     const suffix = normalized.replace(/^artifacts\//, "");
@@ -62,7 +63,7 @@ function mapLegacyAppRestToWorkspaceSubpath(rest: string): string {
     return normalized;
   }
 
-  return DEFAULT_WORKSPACE_SUBPATH;
+  return `a/${normalized}`;
 }
 
 export function toWorkspaceScopedPath(pathname: string, workspaceId: string): string | null {

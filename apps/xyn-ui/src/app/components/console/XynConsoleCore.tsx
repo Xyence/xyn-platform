@@ -11,7 +11,7 @@ import type { AiAgentResolution, PromptInterpretationClarificationOption, Recent
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
 import { openViewDescriptor } from "../../navigation/openViewDescriptor";
 import { resolveCapabilityGraphContext } from "../../navigation/capabilityContext";
-import { toWorkspacePath } from "../../routing/workspaceRouting";
+import { toWorkspacePath, withWorkspaceInNavPath } from "../../routing/workspaceRouting";
 import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import { emitEntityChange, inferEntityChangeFromPrompt } from "../../utils/entityChangeEvents";
@@ -208,16 +208,6 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
     || /^(open|show|go to)\s+workbench$/.test(normalized)
   ) {
     return { panelKey: "composer_detail", params: {} };
-  }
-  if (
-    /^(campaigns|show campaigns|open campaigns|list campaigns|go to campaigns)$/.test(normalized)
-  ) {
-    return { panelKey: "campaign_list", params: {} };
-  }
-  if (
-    /^(new campaign|create campaign|add campaign|start campaign)$/.test(normalized)
-  ) {
-    return { panelKey: "campaign_list", params: { create: true } };
   }
   if (/^(show|list|open)\s+drafts$/.test(normalized)) {
     return { panelKey: "drafts_list", params: {} };
@@ -1582,7 +1572,11 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
           if (isOverlay) setOpen(false);
           return;
         }
-        navigate(surfacedTarget.route);
+        const surfacedRoute =
+          surfacedTarget.scope === "workspace" && workspaceIdFromPath
+            ? withWorkspaceInNavPath(surfacedTarget.route, workspaceIdFromPath)
+            : surfacedTarget.route;
+        navigate(surfacedRoute);
         clearSessionResolution();
         if (isOverlay) setOpen(false);
         return;

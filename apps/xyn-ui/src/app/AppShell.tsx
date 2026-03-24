@@ -4,8 +4,9 @@ import { Bot } from "lucide-react";
 import { getAuthMode, getMe, getMyProfile, getTenantBranding, listArtifactNavSurfaces, listWorkspaces } from "../api/xyn";
 import { setRuntimeAuthMode } from "../api/client";
 import type { ArtifactSurface } from "../api/types";
-import { CREATE_ACTIONS, NAV_GROUPS, NAV_MOVE_TOAST_STORAGE_KEY, NavGroup, NavItem, NavUserContext } from "./nav/nav.config";
+import { CREATE_ACTIONS, NAV_GROUPS, NAV_MOVE_TOAST_STORAGE_KEY, NavGroup, NavUserContext } from "./nav/nav.config";
 import { getBreadcrumbs, visibleNav } from "./nav/nav.utils";
+import { withArtifactSurfaceNav } from "./nav/artifactSurfaceNav";
 import Sidebar from "./components/nav/Sidebar";
 const BlueprintsPage = lazy(() => import("./pages/BlueprintsPage"));
 const InstancesPage = lazy(() => import("./pages/InstancesPage"));
@@ -38,6 +39,9 @@ const SeedPacksPage = lazy(() => import("./pages/SeedPacksPage"));
 const ArtifactsRegistryPage = lazy(() => import("./pages/ArtifactsRegistryPage"));
 const ArtifactsLibraryPage = lazy(() => import("./pages/ArtifactsLibraryPage"));
 const ArtifactDetailPage = lazy(() => import("./pages/ArtifactDetailPage"));
+const ArtifactComposerPage = lazy(() => import("./pages/ArtifactComposerPage"));
+const SolutionsPage = lazy(() => import("./pages/SolutionsPage"));
+const SolutionDetailPage = lazy(() => import("./pages/SolutionDetailPage"));
 const ArtifactSurfaceRoutePage = lazy(() => import("./pages/ArtifactSurfaceRoutePage"));
 const ArticleSurfaceEditorRedirectPage = lazy(() => import("./pages/ArticleSurfaceEditorRedirectPage"));
 const ArticleSurfaceDocsPage = lazy(() => import("./pages/ArticleSurfaceDocsPage"));
@@ -740,61 +744,7 @@ export default function AppShell() {
 
   const navUser: NavUserContext = useMemo(() => ({ roles: effectiveRoles, permissions }), [effectiveRoles, permissions]);
   const navGroups: NavGroup[] = useMemo(() => {
-    const mapNavPath = (path: string, scope?: string): string => {
-      if (String(scope || "").trim().toLowerCase() === "global") return path;
-      if (!activeWorkspaceId) return path;
-      return withWorkspaceInNavPath(path, activeWorkspaceId);
-    };
-    const baseGroups = NAV_GROUPS.map((group) => ({
-      ...group,
-      items: group.items ? group.items.map((item) => ({ ...item, path: mapNavPath(item.path) })) : [],
-      subgroups: group.subgroups
-        ? group.subgroups.map((subgroup) => ({
-            ...subgroup,
-            items: subgroup.items.map((item) => ({ ...item, path: mapNavPath(item.path) })),
-          }))
-        : [],
-    }));
-    const appsGroup = baseGroups.find((group) => group.id === "apps");
-    if (!appsGroup) return baseGroups;
-
-    const pathSeen = new Set<string>();
-    baseGroups.forEach((group) => {
-      (group.items || []).forEach((item) => pathSeen.add(item.path));
-      (group.subgroups || []).forEach((subgroup) => subgroup.items.forEach((item) => pathSeen.add(item.path)));
-    });
-
-    const appItems: Array<{ sortOrder: number; item: NavItem }> = [];
-    (surfaceNavItems || [])
-      .filter((surface) => String(surface.nav_visibility || "").toLowerCase() === "always")
-      .forEach((surface) => {
-        const route = String(surface.route || "").trim();
-        if (!route || pathSeen.has(route)) return;
-        const permissionsSpec = (surface.permissions || {}) as Record<string, unknown>;
-        const requiredRoles = Array.isArray(permissionsSpec.required_roles)
-          ? permissionsSpec.required_roles.map((entry) => String(entry).trim()).filter(Boolean)
-          : [];
-        const requiredPermissions = Array.isArray(permissionsSpec.required_permissions)
-          ? permissionsSpec.required_permissions.map((entry) => String(entry).trim()).filter(Boolean)
-          : [];
-        const navItem: NavItem = {
-          id: `surface-${surface.id}`,
-          label: String(surface.nav_label || surface.title || "Surface"),
-          path: mapNavPath(route, String(surface.ui_mount_scope || "")),
-          icon: String(surface.nav_icon || "").trim() || "Sparkles",
-          requiredRoles: requiredRoles.length ? requiredRoles : undefined,
-          requiredPermissions: requiredPermissions.length ? requiredPermissions : undefined,
-        };
-        appItems.push({ sortOrder: Number(surface.sort_order || 0), item: navItem });
-        pathSeen.add(route);
-      });
-
-    appsGroup.items = appItems
-      .sort((a, b) => (a.sortOrder - b.sortOrder) || a.item.label.localeCompare(b.item.label))
-      .map((entry) => entry.item);
-    appsGroup.subgroups = [];
-
-    return baseGroups;
+    return withArtifactSurfaceNav(NAV_GROUPS, surfaceNavItems || [], activeWorkspaceId || "");
   }, [activeWorkspaceId, surfaceNavItems]);
   const createActions = useMemo(
     () =>
@@ -1059,6 +1009,8 @@ export default function AppShell() {
             <Route path="console" element={<Navigate to={workspaceScopedTarget(DEFAULT_WORKSPACE_SUBPATH)} replace />} />
             <Route path="apps/articles/edit" element={<ArticleSurfaceEditorRedirectPage />} />
             <Route path="apps/articles/docs" element={<ArticleSurfaceDocsPage />} />
+            <Route path="solutions" element={<SolutionsPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} />} />
+            <Route path="solutions/:applicationId" element={<SolutionDetailPage workspaceId={activeWorkspace?.id || ""} />} />
             <Route
               path="a/*"
               element={
@@ -1075,6 +1027,10 @@ export default function AppShell() {
             <Route path="build/artifacts/library" element={<Navigate to={workspaceScopedTarget("build/catalog")} replace />} />
             <Route
               path="build/artifacts/:artifactId"
+              element={<ArtifactComposerPage workspaceId={activeWorkspace?.id || ""} />}
+            />
+            <Route
+              path="build/artifacts/:artifactId/detail"
               element={
                 <ArtifactDetailPage
                   workspaceId={activeWorkspace?.id || ""}

@@ -601,6 +601,73 @@ class ArtifactPackagesApiTests(TestCase):
         self.assertEqual(surface.route, "/app/a/ems/dashboard")
         self.assertTrue(runtime_role.enabled)
 
+    def test_install_registers_generated_dashboard_and_editor_surfaces(self):
+        self._grant_debug_view()
+        workspace = Workspace.objects.create(slug="deal-finder-shell", name="Deal Finder Shell")
+        WorkspaceMembership.objects.create(workspace=workspace, user_identity=self.identity, role="admin", termination_authority=True)
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "application",
+                    "slug": "app.generated-deal-finder",
+                    "version": "0.0.1-dev",
+                    "content": {"artifact": {"id": "app.generated-deal-finder"}, "surfaces": {"manage": [], "docs": [], "nav": []}},
+                    "surfaces": [
+                        {
+                            "key": "campaigns-list",
+                            "title": "Campaigns",
+                            "surface_kind": "dashboard",
+                            "route": "/app/campaigns",
+                            "nav_visibility": "always",
+                            "nav_label": "Campaigns",
+                            "nav_group": "apps",
+                            "renderer": {"type": "generic_dashboard"},
+                            "sort_order": 100,
+                        },
+                        {
+                            "key": "campaigns-create",
+                            "title": "Create Campaign",
+                            "surface_kind": "editor",
+                            "route": "/app/campaigns/new",
+                            "nav_visibility": "always",
+                            "nav_label": "Create Campaign",
+                            "nav_group": "apps",
+                            "renderer": {"type": "generic_editor", "payload": {"shell_renderer_key": "campaign_map_workflow", "mode": "create"}},
+                            "sort_order": 101,
+                        },
+                    ],
+                }
+            ]
+        )
+        imported = self._import_package(blob)
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+        package_id = imported.json()["package"]["id"]
+        install = self.client.post(f"/xyn/api/artifacts/packages/{package_id}/install", data=json.dumps({}), content_type="application/json")
+        self.assertEqual(install.status_code, 200, install.content.decode())
+
+        artifact = Artifact.objects.get(type__slug="application", slug="app.generated-deal-finder")
+        WorkspaceArtifactBinding.objects.create(
+            workspace=workspace,
+            artifact=artifact,
+            installed_state="installed",
+            enabled=True,
+        )
+        rows = list(ArtifactSurface.objects.filter(artifact=artifact).order_by("sort_order"))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0].surface_kind, "dashboard")
+        self.assertEqual(rows[0].route, "/app/campaigns")
+        self.assertEqual((rows[0].renderer or {}).get("type"), "generic_dashboard")
+        self.assertEqual(rows[1].surface_kind, "editor")
+        self.assertEqual((rows[1].renderer or {}).get("type"), "generic_editor")
+        self.assertEqual(((rows[1].renderer or {}).get("payload") or {}).get("shell_renderer_key"), "campaign_map_workflow")
+
+        nav = self.client.get(f"/xyn/api/artifact-surfaces/nav?workspace_id={workspace.id}")
+        self.assertEqual(nav.status_code, 200, nav.content.decode())
+        nav_rows = nav.json().get("surfaces") or []
+        nav_labels = [str(item.get("nav_label") or "") for item in nav_rows if isinstance(item, dict)]
+        self.assertIn("Campaigns", nav_labels)
+        self.assertIn("Create Campaign", nav_labels)
+
     def test_surface_resolve_endpoint_matches_declared_route(self):
         self._grant_debug_view()
         blob = self._package_blob(

@@ -50,6 +50,8 @@ import type {
   ApplicationPlanDetail,
   ApplicationSummary,
   ApplicationDetail,
+  ApplicationArtifactMembership,
+  SolutionChangeSession,
   CampaignTypeDefinition,
   CampaignListResponse,
   CampaignDetail,
@@ -4466,6 +4468,7 @@ export async function getComposerState(params: {
   application_id?: string;
   goal_id?: string;
   thread_id?: string;
+  solution_change_session_id?: string;
 }): Promise<ComposerState> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/composer/state`);
@@ -4475,6 +4478,7 @@ export async function getComposerState(params: {
   if (params.application_id) url.searchParams.set("application_id", params.application_id);
   if (params.goal_id) url.searchParams.set("goal_id", params.goal_id);
   if (params.thread_id) url.searchParams.set("thread_id", params.thread_id);
+  if (params.solution_change_session_id) url.searchParams.set("solution_change_session_id", params.solution_change_session_id);
   const response = await apiFetch(url.toString(), { credentials: "include" });
   return handle<ComposerState>(response);
 }
@@ -4560,6 +4564,131 @@ export async function updateApplication(id: string, payload: { status: "active" 
   return handle<ApplicationDetail>(response);
 }
 
+export async function listApplicationArtifactMemberships(
+  applicationId: string
+): Promise<{ application_id: string; workspace_id: string; memberships: ApplicationArtifactMembership[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/artifacts`, {
+    credentials: "include",
+  });
+  return handle<{ application_id: string; workspace_id: string; memberships: ApplicationArtifactMembership[] }>(response);
+}
+
+export async function upsertApplicationArtifactMembership(
+  applicationId: string,
+  payload: {
+    artifact_id: string;
+    role: ApplicationArtifactMembership["role"];
+    responsibility_summary?: string;
+    metadata?: Record<string, unknown>;
+    sort_order?: number;
+  }
+): Promise<{ created: boolean; membership: ApplicationArtifactMembership }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/artifacts`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<{ created: boolean; membership: ApplicationArtifactMembership }>(response);
+}
+
+export async function listSolutionChangeSessions(
+  applicationId: string
+): Promise<{ application_id: string; workspace_id: string; sessions: SolutionChangeSession[] }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions`, {
+    credentials: "include",
+  });
+  return handle<{ application_id: string; workspace_id: string; sessions: SolutionChangeSession[] }>(response);
+}
+
+export async function createSolutionChangeSession(
+  applicationId: string,
+  payload: { title?: string; request_text: string }
+): Promise<{ created: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<{ created: boolean; session: SolutionChangeSession }>(response);
+}
+
+export async function updateSolutionChangeSession(
+  applicationId: string,
+  sessionId: string,
+  payload: {
+    title?: string;
+    status?: "draft" | "planned" | "archived" | string;
+    selected_artifact_ids?: string[];
+  }
+): Promise<SolutionChangeSession> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<SolutionChangeSession>(response);
+}
+
+export async function generateSolutionChangePlan(
+  applicationId: string,
+  sessionId: string
+): Promise<{ planned: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/plan`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ planned: boolean; session: SolutionChangeSession }>(response);
+}
+
+export async function stageSolutionChangeApply(
+  applicationId: string,
+  sessionId: string
+): Promise<{ staged: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/stage-apply`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ staged: boolean; session: SolutionChangeSession }>(response);
+}
+
+export async function prepareSolutionChangePreview(
+  applicationId: string,
+  sessionId: string
+): Promise<{ prepared: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/prepare-preview`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ prepared: boolean; session: SolutionChangeSession }>(response);
+}
+
+export async function validateSolutionChangeSession(
+  applicationId: string,
+  sessionId: string
+): Promise<{ validated: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/validate`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ validated: boolean; session: SolutionChangeSession }>(response);
+}
+
 export async function listCampaignTypes(workspaceId: string): Promise<{ campaign_types: CampaignTypeDefinition[] }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/campaign-types`);
@@ -4587,6 +4716,7 @@ export async function createCampaign(payload: {
   name: string;
   campaign_type?: string;
   description?: string;
+  metadata?: Record<string, unknown>;
 }): Promise<CampaignDetail> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/campaigns`, {

@@ -91,6 +91,8 @@ from .models import (
     PlatformDomainEvent,
     Goal,
     Application,
+    ApplicationArtifactMembership,
+    SolutionChangeSession,
     ApplicationPlan,
     Environment,
     EnvironmentAppState,
@@ -28040,6 +28042,7 @@ def _serialize_application_plan_detail(plan: ApplicationPlan) -> Dict[str, Any]:
 def _serialize_application_summary(application: Application) -> Dict[str, Any]:
     goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
     portfolio = _build_goal_portfolio_payload(goals)
+    member_count = application.artifact_memberships.count() if hasattr(application, "artifact_memberships") else 0
     return {
         "id": str(application.id),
         "workspace_id": str(application.workspace_id),
@@ -28053,19 +28056,521 @@ def _serialize_application_summary(application: Application) -> Dict[str, Any]:
         "status": application.status,
         "request_objective": application.request_objective or "",
         "goal_count": len(goals),
+        "artifact_member_count": member_count,
         "portfolio_state": portfolio,
         "created_at": application.created_at,
         "updated_at": application.updated_at,
     }
 
 
+def _serialize_application_artifact_membership(member: ApplicationArtifactMembership) -> Dict[str, Any]:
+    artifact = member.artifact
+    return {
+        "id": str(member.id),
+        "workspace_id": str(member.workspace_id),
+        "application_id": str(member.application_id),
+        "artifact_id": str(member.artifact_id),
+        "role": member.role,
+        "responsibility_summary": member.responsibility_summary or "",
+        "metadata": member.metadata_json if isinstance(member.metadata_json, dict) else {},
+        "sort_order": int(member.sort_order or 0),
+        "created_at": member.created_at,
+        "updated_at": member.updated_at,
+        "artifact": {
+            "id": str(artifact.id),
+            "workspace_id": str(artifact.workspace_id),
+            "type": artifact.type.slug if artifact.type_id else "",
+            "title": artifact.title,
+            "slug": _artifact_slug(artifact),
+            "status": artifact.status,
+            "version": artifact.version,
+            "updated_at": artifact.updated_at,
+        },
+    }
+
+
+def _solution_change_session_selected_artifact_ids(session: SolutionChangeSession) -> List[str]:
+    raw = session.selected_artifact_ids_json if isinstance(session.selected_artifact_ids_json, list) else []
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
+
+
+def _analyze_solution_impacted_artifacts(
+    *, application: Application, request_text: str, memberships: List[ApplicationArtifactMembership]
+) -> Dict[str, Any]:
+    text = str(request_text or "").strip().lower()
+    tokens = [token for token in re.findall(r"[a-z0-9_]+", text) if len(token) >= 3]
+    role_signals: Dict[str, List[str]] = {
+        "primary_ui": ["ui", "ux", "frontend", "view", "screen", "page", "shell", "workbench"],
+        "primary_api": ["api", "endpoint", "contract", "schema", "backend", "service", "orchestrator"],
+        "integration_adapter": ["adapter", "integration", "connector", "bridge", "import"],
+        "worker": ["worker", "job", "queue", "async", "batch"],
+        "runtime_service": ["runtime", "deploy", "container", "service", "ops"],
+        "shared_library": ["shared", "library", "sdk", "types", "common"],
+    }
+    matched_roles: set[str] = set()
+    for role, words in role_signals.items():
+        if any(word in text for word in words):
+            matched_roles.add(role)
+    impacted_rows: List[Dict[str, Any]] = []
+    for member in memberships:
+        artifact = member.artifact
+        score = 0
+        reasons: List[str] = []
+        if member.role in matched_roles:
+            score += 4
+            reasons.append(f"request mentions {member.role.replace('_', ' ')} concerns")
+        haystack = " ".join(
+            [
+                str(member.role or ""),
+                str(member.responsibility_summary or ""),
+                str(artifact.title or ""),
+                str(getattr(artifact.type, "slug", "") or ""),
+                str(getattr(artifact, "summary", "") or ""),
+            ]
+        ).lower()
+        token_hits = [token for token in tokens if token in haystack]
+        if token_hits:
+            score += min(3, len(token_hits))
+            reasons.append(f"matched request terms: {', '.join(sorted(set(token_hits))[:3])}")
+        if member.role in {"primary_ui", "primary_api"}:
+            score += 1
+            reasons.append("primary role default weighting")
+        if score <= 0:
+            continue
+        impacted_rows.append(
+            {
+                "membership_id": str(member.id),
+                "artifact_id": str(artifact.id),
+                "artifact_title": artifact.title,
+                "artifact_type": artifact.type.slug if artifact.type_id else "",
+                "role": member.role,
+                "score": score,
+                "reasons": reasons,
+            }
+        )
+    impacted_rows.sort(key=lambda row: (-int(row.get("score") or 0), str(row.get("artifact_title") or "")))
+    if not impacted_rows:
+        fallback_members = [m for m in memberships if m.role in {"primary_ui", "primary_api"}] or memberships[:2]
+        for member in fallback_members:
+            impacted_rows.append(
+                {
+                    "membership_id": str(member.id),
+                    "artifact_id": str(member.artifact_id),
+                    "artifact_title": member.artifact.title,
+                    "artifact_type": member.artifact.type.slug if member.artifact.type_id else "",
+                    "role": member.role,
+                    "score": 1,
+                    "reasons": ["defaulted to primary solution artifacts"],
+                }
+            )
+    suggested_artifact_ids = [str(row.get("artifact_id") or "") for row in impacted_rows if str(row.get("artifact_id") or "").strip()]
+    return {
+        "request_text": request_text,
+        "token_count": len(tokens),
+        "impacted_artifacts": impacted_rows,
+        "suggested_artifact_ids": suggested_artifact_ids,
+    }
+
+
+def _generate_solution_change_plan(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> Dict[str, Any]:
+    selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
+    if not selected_members:
+        selected_members = memberships
+    per_artifact: List[Dict[str, Any]] = []
+    for member in selected_members:
+        artifact = member.artifact
+        role = member.role
+        focus = "maintain compatibility with adjacent artifacts"
+        if role == "primary_ui":
+            focus = "update shell views and interaction flows for the requested change"
+        elif role == "primary_api":
+            focus = "extend API contracts and validation paths required by the change"
+        elif role == "worker":
+            focus = "update worker orchestration and async execution paths"
+        elif role == "integration_adapter":
+            focus = "adjust integration adapter contracts and transformation seams"
+        per_artifact.append(
+            {
+                "artifact_id": str(artifact.id),
+                "artifact_title": artifact.title,
+                "artifact_type": artifact.type.slug if artifact.type_id else "",
+                "role": role,
+                "planned_work": [
+                    focus,
+                    "add/adjust tests for changed behavior",
+                    "document any contract changes for consuming artifacts",
+                ],
+            }
+        )
+    return {
+        "session_id": str(session.id),
+        "application_id": str(session.application_id),
+        "title": session.title,
+        "request_text": session.request_text or "",
+        "generated_at": timezone.now().isoformat(),
+        "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
+        "per_artifact_work": per_artifact,
+        "shared_contracts": [
+            "Cross-artifact API/schema compatibility",
+            "Event/payload shape compatibility where artifacts exchange runtime data",
+            "Generated surface/action metadata consistency for shell navigation",
+        ],
+        "validation_plan": [
+            "Run artifact-local unit tests for each changed artifact",
+            "Run integration tests covering cross-artifact contract seams",
+            "Run shell/workbench smoke route checks for affected user paths",
+        ],
+        "preview_implications": [
+            "Preview instance should include all changed artifacts in one sibling deploy set",
+            "Cross-artifact regression checks are required before promotion",
+        ],
+    }
+
+
+def _serialize_solution_change_session(
+    session: SolutionChangeSession,
+    *,
+    memberships_by_artifact_id: Optional[Dict[str, ApplicationArtifactMembership]] = None,
+) -> Dict[str, Any]:
+    memberships_by_artifact_id = memberships_by_artifact_id or {}
+    selected_ids = _solution_change_session_selected_artifact_ids(session)
+    selected_artifacts: List[Dict[str, Any]] = []
+    for artifact_id in selected_ids:
+        member = memberships_by_artifact_id.get(artifact_id)
+        if not member:
+            continue
+        selected_artifacts.append(
+            {
+                "artifact_id": artifact_id,
+                "artifact_title": member.artifact.title,
+                "artifact_type": member.artifact.type.slug if member.artifact.type_id else "",
+                "role": member.role,
+            }
+        )
+    return {
+        "id": str(session.id),
+        "workspace_id": str(session.workspace_id),
+        "application_id": str(session.application_id),
+        "title": session.title,
+        "request_text": session.request_text or "",
+        "status": session.status,
+        "created_by": str(session.created_by_id) if session.created_by_id else None,
+        "analysis": session.analysis_json if isinstance(session.analysis_json, dict) else {},
+        "selected_artifact_ids": selected_ids,
+        "selected_artifacts": selected_artifacts,
+        "plan": session.plan_json if isinstance(session.plan_json, dict) else {},
+        "execution_status": session.execution_status or "not_started",
+        "staged_changes": session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {},
+        "preview": session.preview_json if isinstance(session.preview_json, dict) else {},
+        "validation": session.validation_json if isinstance(session.validation_json, dict) else {},
+        "metadata": session.metadata_json if isinstance(session.metadata_json, dict) else {},
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    }
+
+
+def _stage_solution_change_session(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> Dict[str, Any]:
+    selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
+    if not selected_members:
+        selected_members = memberships
+    plan = session.plan_json if isinstance(session.plan_json, dict) else {}
+    planned_work_by_artifact: Dict[str, List[str]] = {}
+    for row in (plan.get("per_artifact_work") if isinstance(plan.get("per_artifact_work"), list) else []):
+        if not isinstance(row, dict):
+            continue
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        if not artifact_id:
+            continue
+        planned_work_by_artifact[artifact_id] = [
+            str(item).strip()
+            for item in (row.get("planned_work") if isinstance(row.get("planned_work"), list) else [])
+            if str(item).strip()
+        ]
+    staged_artifacts: List[Dict[str, Any]] = []
+    for member in selected_members:
+        artifact = member.artifact
+        artifact_id = str(artifact.id)
+        staged_artifacts.append(
+            {
+                "artifact_id": artifact_id,
+                "artifact_title": artifact.title,
+                "artifact_type": artifact.type.slug if artifact.type_id else "",
+                "role": member.role,
+                "state": "staged",
+                "apply_state": "proposed",
+                "validation_state": "pending",
+                "planned_work": planned_work_by_artifact.get(artifact_id) or [],
+                "updated_at": timezone.now().isoformat(),
+            }
+        )
+    staged_payload: Dict[str, Any] = {
+        "operation_id": str(uuid.uuid4()),
+        "staged_at": timezone.now().isoformat(),
+        "overall_state": "staged",
+        "artifact_count": len(staged_artifacts),
+        "artifact_states": staged_artifacts,
+        "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
+        "shared_contracts": plan.get("shared_contracts") if isinstance(plan.get("shared_contracts"), list) else [],
+        "validation_plan": plan.get("validation_plan") if isinstance(plan.get("validation_plan"), list) else [],
+        "preview_implications": plan.get("preview_implications") if isinstance(plan.get("preview_implications"), list) else [],
+    }
+    session.staged_changes_json = staged_payload
+    session.preview_json = {}
+    session.validation_json = {}
+    session.execution_status = "staged"
+    if session.status == "draft":
+        session.status = "planned"
+    session.save(update_fields=["staged_changes_json", "preview_json", "validation_json", "execution_status", "status", "updated_at"])
+    return staged_payload
+
+
+def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[str, Any]:
+    staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+    artifact_states = staged.get("artifact_states") if isinstance(staged.get("artifact_states"), list) else []
+    workspace_id = str(session.workspace_id)
+    application_id = str(session.application_id)
+    now_iso = timezone.now().isoformat()
+
+    def _artifact_preview_app_slug(artifact: Artifact) -> str:
+        slug = str(getattr(artifact, "slug", "") or "").strip()
+        if slug.startswith("app."):
+            return slug[4:]
+        metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
+        runtime = metadata.get("runtime_target") if isinstance(metadata.get("runtime_target"), dict) else {}
+        runtime_app_slug = str(runtime.get("app_slug") or metadata.get("app_slug") or "").strip()
+        return runtime_app_slug
+
+    def _probe_runtime(base_url: str) -> Dict[str, Any]:
+        probe_paths = ["/healthz", "/health", "/xyn/api/health"]
+        last_error = ""
+        for probe_path in probe_paths:
+            try:
+                response = _runtime_target_request(
+                    base_url=base_url,
+                    method="GET",
+                    path=probe_path,
+                    timeout=8,
+                )
+                return {
+                    "ok": response.status_code < 400,
+                    "status_code": int(response.status_code),
+                    "path": probe_path,
+                }
+            except Exception as exc:
+                last_error = str(exc)
+        return {
+            "ok": False,
+            "status_code": 0,
+            "path": probe_paths[-1],
+            "error": last_error,
+        }
+
+    artifact_rows: List[Dict[str, Any]] = []
+    selected_artifact_ids: List[str] = []
+    compose_projects: set[str] = set()
+    all_bound = True
+    for row in artifact_states:
+        if not isinstance(row, dict):
+            continue
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        if not artifact_id:
+            continue
+        selected_artifact_ids.append(artifact_id)
+        artifact = Artifact.objects.filter(id=artifact_id).first()
+        if artifact is None:
+            all_bound = False
+            artifact_rows.append(
+                {
+                    "artifact_id": artifact_id,
+                    "status": "failed",
+                    "reason": "artifact_not_found",
+                }
+            )
+            continue
+        app_slug = _artifact_preview_app_slug(artifact)
+        if not app_slug:
+            all_bound = False
+            artifact_rows.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_title": artifact.title,
+                    "artifact_slug": artifact.slug,
+                    "status": "failed",
+                    "reason": "preview_app_slug_unresolved",
+                }
+            )
+            continue
+        runtime_record = _workspace_runtime_target(session.workspace, app_slug)
+        runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record, dict) else {}
+        runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip()
+        public_app_url = str(runtime_target.get("public_app_url") or "").strip()
+        compose_project = str(runtime_target.get("compose_project") or "").strip()
+        if not runtime_base_url or not compose_project:
+            all_bound = False
+            artifact_rows.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_title": artifact.title,
+                    "artifact_slug": artifact.slug,
+                    "app_slug": app_slug,
+                    "status": "failed",
+                    "reason": "runtime_target_missing",
+                }
+            )
+            continue
+        probe = _probe_runtime(runtime_base_url)
+        if not probe.get("ok"):
+            all_bound = False
+        compose_projects.add(compose_project)
+        artifact_rows.append(
+            {
+                "artifact_id": artifact_id,
+                "artifact_title": artifact.title,
+                "artifact_slug": artifact.slug,
+                "app_slug": app_slug,
+                "status": "ready" if probe.get("ok") else "failed",
+                "runtime_owner": str(runtime_target.get("runtime_owner") or "sibling"),
+                "runtime_base_url": runtime_base_url,
+                "public_app_url": public_app_url,
+                "compose_project": compose_project,
+                "source_build_job_id": str(runtime_target.get("source_build_job_id") or "").strip(),
+                "probe": probe,
+            }
+        )
+
+    single_preview_environment = len(compose_projects) == 1
+    if not single_preview_environment:
+        all_bound = False
+
+    preview_urls: List[str] = []
+    for artifact_row in artifact_rows:
+        if not isinstance(artifact_row, dict):
+            continue
+        url = str(artifact_row.get("public_app_url") or "").strip()
+        if url and url not in preview_urls:
+            preview_urls.append(url)
+
+    status = "ready" if all_bound and bool(preview_urls) else "failed"
+    preview_payload: Dict[str, Any] = {
+        "preview_id": str(uuid.uuid4()),
+        "status": status,
+        "mode": "coordinated_multi_artifact_preview",
+        "prepared_at": now_iso,
+        "selected_artifact_ids": selected_artifact_ids,
+        "artifact_count": len(selected_artifact_ids),
+        "artifacts": artifact_rows,
+        "preview_urls": preview_urls,
+        "primary_url": preview_urls[0] if preview_urls else "",
+        "compose_projects": sorted(compose_projects),
+        "single_preview_environment": single_preview_environment,
+        "build_deploy_evidence": {
+            "runtime_owner": "sibling",
+            "source_build_job_ids": sorted(
+                {
+                    str(item.get("source_build_job_id") or "").strip()
+                    for item in artifact_rows
+                    if isinstance(item, dict) and str(item.get("source_build_job_id") or "").strip()
+                }
+            ),
+            "verified_at": now_iso,
+        },
+        "handoff": {
+            "workbench_path": (
+                f"/w/{workspace_id}/workbench?panel=composer_detail&application_id={application_id}"
+                f"&solution_change_session_id={session.id}"
+            ),
+            "solution_path": f"/w/{workspace_id}/solutions/{application_id}",
+        },
+    }
+    if status != "ready":
+        preview_payload["error"] = {
+            "reason": "preview_environment_unavailable",
+            "details": "Selected artifacts must resolve to healthy sibling runtime targets in one compose project.",
+        }
+
+    staged["overall_state"] = "preview_ready" if status == "ready" else "preview_failed"
+    staged["preview_prepared_at"] = now_iso
+    for row in artifact_states:
+        if isinstance(row, dict):
+            row["state"] = "preview_ready" if status == "ready" else "preview_failed"
+            row["updated_at"] = now_iso
+    session.staged_changes_json = staged
+    session.preview_json = preview_payload
+    session.execution_status = "preview_ready" if status == "ready" else "failed"
+    session.save(update_fields=["staged_changes_json", "preview_json", "execution_status", "updated_at"])
+    return preview_payload
+
+
+def _validate_solution_change_session(*, session: SolutionChangeSession) -> Dict[str, Any]:
+    plan = session.plan_json if isinstance(session.plan_json, dict) else {}
+    staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+    preview = session.preview_json if isinstance(session.preview_json, dict) else {}
+    artifact_states = staged.get("artifact_states") if isinstance(staged.get("artifact_states"), list) else []
+    checks = [
+        {
+            "key": "plan_generated",
+            "label": "Structured cross-artifact plan generated",
+            "status": "passed" if bool(plan.get("per_artifact_work")) else "failed",
+        },
+        {
+            "key": "staged_artifacts_present",
+            "label": "Selected artifacts are staged",
+            "status": "passed" if bool(artifact_states) else "failed",
+        },
+        {
+            "key": "preview_prepared",
+            "label": "Preview orchestration handoff prepared",
+            "status": "passed" if str(preview.get("status") or "").strip().lower() == "ready" else "failed",
+        },
+    ]
+    all_passed = all(str(item.get("status") or "") == "passed" for item in checks)
+    for row in artifact_states:
+        if isinstance(row, dict):
+            row["validation_state"] = "passed" if all_passed else "failed"
+            row["updated_at"] = timezone.now().isoformat()
+    staged["artifact_states"] = artifact_states
+    staged["overall_state"] = "validated" if all_passed else "validation_failed"
+    validation_payload: Dict[str, Any] = {
+        "validation_id": str(uuid.uuid4()),
+        "validated_at": timezone.now().isoformat(),
+        "status": "passed" if all_passed else "failed",
+        "checks": checks,
+        "artifact_count": len(artifact_states),
+    }
+    session.staged_changes_json = staged
+    session.validation_json = validation_payload
+    session.execution_status = "ready_for_promotion" if all_passed else "failed"
+    session.save(update_fields=["staged_changes_json", "validation_json", "execution_status", "updated_at"])
+    return validation_payload
+
+
 def _serialize_application_detail(application: Application) -> Dict[str, Any]:
     goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
     factory_definition = get_application_factory(application.source_factory_key)
+    members = list(application.artifact_memberships.select_related("artifact", "artifact__type").order_by("sort_order", "created_at"))
     return {
         **_serialize_application_summary(application),
         "factory": _serialize_application_factory_summary(factory_definition) if factory_definition else None,
         "goals": [_serialize_goal_summary(goal) for goal in goals],
+        "artifact_memberships": [_serialize_application_artifact_membership(member) for member in members],
         "metadata": application.metadata_json if isinstance(application.metadata_json, dict) else {},
     }
 
@@ -28143,6 +28648,7 @@ def _serialize_composer_state(
     application: Optional[Application] = None,
     goal: Optional[Goal] = None,
     thread: Optional[CoordinationThread] = None,
+    solution_change_session: Optional[SolutionChangeSession] = None,
 ) -> Dict[str, Any]:
     if thread is not None and goal is None and thread.goal_id:
         goal = thread.goal
@@ -28232,6 +28738,43 @@ def _serialize_composer_state(
                 target_id=str(application.id),
             )
         )
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="open_solution_change_sessions",
+                label="Open Solution Change Sessions",
+                target_kind="application",
+                target_id=str(application.id),
+            )
+        )
+    if solution_change_session is not None:
+        session_execution_status = str(solution_change_session.execution_status or "not_started")
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="stage_solution_change",
+                label="Stage Coordinated Change",
+                enabled=bool(solution_change_session.plan_json),
+                target_kind="solution_change_session",
+                target_id=str(solution_change_session.id),
+            )
+        )
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="prepare_solution_preview",
+                label="Prepare Preview Handoff",
+                enabled=session_execution_status in {"staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion"},
+                target_kind="solution_change_session",
+                target_id=str(solution_change_session.id),
+            )
+        )
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="validate_solution_change",
+                label="Validate Staged Change",
+                enabled=session_execution_status in {"preview_ready", "validating", "ready_for_promotion"},
+                target_kind="solution_change_session",
+                target_id=str(solution_change_session.id),
+            )
+        )
     if goal is not None and isinstance((_serialize_goal_detail(goal).get("recommendation") or {}), dict):
         goal_detail = _serialize_goal_detail(goal)
         recommendation = goal_detail.get("recommendation") if isinstance(goal_detail.get("recommendation"), dict) else {}
@@ -28264,6 +28807,7 @@ def _serialize_composer_state(
             "application_id": str(application.id) if application else None,
             "goal_id": str(goal.id) if goal else None,
             "thread_id": str(thread.id) if thread else None,
+            "solution_change_session_id": str(solution_change_session.id) if solution_change_session else None,
         },
         "factory_catalog": factory_catalog,
         "selected_factory": _serialize_application_factory_summary(selected_factory) if selected_factory else None,
@@ -28271,6 +28815,33 @@ def _serialize_composer_state(
         "applications": [_serialize_application_summary(app) for app in recent_applications],
         "application_plan": _serialize_application_plan_detail(application_plan) if application_plan else None,
         "application": _serialize_application_detail(application) if application else None,
+        "solution_change_sessions": [
+            _serialize_solution_change_session(
+                item,
+                memberships_by_artifact_id={
+                    str(member.artifact_id): member
+                    for member in ApplicationArtifactMembership.objects.filter(application=item.application)
+                    .select_related("artifact", "artifact__type")
+                    .all()
+                },
+            )
+            for item in (
+                SolutionChangeSession.objects.filter(application=application).order_by("-updated_at", "-created_at")[:10]
+                if application is not None
+                else []
+            )
+        ],
+        "solution_change_session": _serialize_solution_change_session(
+            solution_change_session,
+            memberships_by_artifact_id={
+                str(member.artifact_id): member
+                for member in ApplicationArtifactMembership.objects.filter(application=solution_change_session.application)
+                .select_related("artifact", "artifact__type")
+                .all()
+            },
+        )
+        if solution_change_session is not None
+        else None,
         "goal": _serialize_goal_detail(goal) if goal else None,
         "thread": _coordination_thread_detail(thread) if thread else None,
         "related_goals": related_goals,
@@ -30746,6 +31317,391 @@ def application_detail(request: HttpRequest, application_id: str) -> JsonRespons
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
     return JsonResponse(_serialize_application_detail(application))
+
+
+@csrf_exempt
+@login_required
+def application_artifact_memberships_collection(request: HttpRequest, application_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        rows = list(
+            ApplicationArtifactMembership.objects.filter(application=application)
+            .select_related("artifact", "artifact__type")
+            .order_by("sort_order", "created_at")
+        )
+        return JsonResponse(
+            {
+                "application_id": str(application.id),
+                "workspace_id": str(application.workspace_id),
+                "memberships": [_serialize_application_artifact_membership(row) for row in rows],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    artifact_id = str(payload.get("artifact_id") or "").strip()
+    if not artifact_id:
+        return JsonResponse({"error": "artifact_id is required"}, status=400)
+    artifact = Artifact.objects.filter(id=artifact_id, workspace_id=application.workspace_id).select_related("type").first()
+    if not artifact:
+        return JsonResponse({"error": "artifact must exist in application workspace"}, status=400)
+    allowed_roles = {choice for choice, _label in ApplicationArtifactMembership.ROLE_CHOICES}
+    role = str(payload.get("role") or "supporting").strip().lower() or "supporting"
+    if role not in allowed_roles:
+        return JsonResponse({"error": f"role must be one of {', '.join(sorted(allowed_roles))}"}, status=400)
+    responsibility_summary = str(payload.get("responsibility_summary") or "").strip()
+    metadata = payload.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return JsonResponse({"error": "metadata must be an object"}, status=400)
+    sort_order_value = payload.get("sort_order")
+    sort_order = 0
+    if sort_order_value is not None:
+        try:
+            sort_order = int(sort_order_value)
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "sort_order must be an integer"}, status=400)
+
+    member, created = ApplicationArtifactMembership.objects.update_or_create(
+        application=application,
+        artifact=artifact,
+        defaults={
+            "workspace_id": application.workspace_id,
+            "role": role,
+            "responsibility_summary": responsibility_summary,
+            "metadata_json": metadata if isinstance(metadata, dict) else {},
+            "sort_order": sort_order,
+        },
+    )
+    member.refresh_from_db()
+    return JsonResponse(
+        {
+            "created": created,
+            "membership": _serialize_application_artifact_membership(member),
+        },
+        status=201 if created else 200,
+    )
+
+
+@csrf_exempt
+@login_required
+def application_artifact_membership_detail(
+    request: HttpRequest, application_id: str, membership_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    membership = get_object_or_404(
+        ApplicationArtifactMembership.objects.select_related("artifact", "artifact__type"),
+        id=membership_id,
+        application=application,
+    )
+    if request.method == "DELETE":
+        if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        payload = _serialize_application_artifact_membership(membership)
+        membership.delete()
+        return JsonResponse({"deleted": True, "membership": payload})
+    if request.method != "PATCH":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    updates: Dict[str, Any] = {}
+    if "role" in payload:
+        allowed_roles = {choice for choice, _label in ApplicationArtifactMembership.ROLE_CHOICES}
+        role = str(payload.get("role") or "").strip().lower()
+        if role not in allowed_roles:
+            return JsonResponse({"error": f"role must be one of {', '.join(sorted(allowed_roles))}"}, status=400)
+        updates["role"] = role
+    if "responsibility_summary" in payload:
+        updates["responsibility_summary"] = str(payload.get("responsibility_summary") or "").strip()
+    if "metadata" in payload:
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return JsonResponse({"error": "metadata must be an object"}, status=400)
+        updates["metadata_json"] = metadata if isinstance(metadata, dict) else {}
+    if "sort_order" in payload:
+        try:
+            updates["sort_order"] = int(payload.get("sort_order"))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "sort_order must be an integer"}, status=400)
+    if updates:
+        for key, value in updates.items():
+            setattr(membership, key, value)
+        membership.save()
+        membership.refresh_from_db()
+    return JsonResponse(_serialize_application_artifact_membership(membership))
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_sessions_collection(
+    request: HttpRequest, application_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    if request.method == "GET":
+        sessions = list(
+            SolutionChangeSession.objects.filter(application=application)
+            .select_related("created_by")
+            .order_by("-updated_at", "-created_at")
+        )
+        return JsonResponse(
+            {
+                "application_id": str(application.id),
+                "workspace_id": str(application.workspace_id),
+                "sessions": [
+                    _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id)
+                    for session in sessions
+                ],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    request_text = str(payload.get("request_text") or "").strip()
+    if not request_text:
+        return JsonResponse({"error": "request_text is required"}, status=400)
+    title = str(payload.get("title") or "").strip() or f"Change Session {timezone.now().strftime('%Y-%m-%d %H:%M')}"
+    analysis = _analyze_solution_impacted_artifacts(
+        application=application,
+        request_text=request_text,
+        memberships=memberships,
+    )
+    session = SolutionChangeSession.objects.create(
+        workspace_id=application.workspace_id,
+        application=application,
+        title=title,
+        request_text=request_text,
+        created_by=identity,
+        analysis_json=analysis,
+        selected_artifact_ids_json=analysis.get("suggested_artifact_ids") if isinstance(analysis.get("suggested_artifact_ids"), list) else [],
+    )
+    session.refresh_from_db()
+    return JsonResponse(
+        {
+            "created": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        },
+        status=201,
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_detail(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(
+        SolutionChangeSession.objects.select_related("created_by"),
+        id=session_id,
+        application=application,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    if request.method == "GET":
+        return JsonResponse(_serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id))
+    if request.method != "PATCH":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if "title" in payload:
+        session.title = str(payload.get("title") or "").strip() or session.title
+    if "status" in payload:
+        status_value = str(payload.get("status") or "").strip().lower()
+        allowed_statuses = {choice for choice, _label in SolutionChangeSession.STATUS_CHOICES}
+        if status_value not in allowed_statuses:
+            return JsonResponse({"error": "invalid status"}, status=400)
+        session.status = status_value
+    if "selected_artifact_ids" in payload:
+        raw = payload.get("selected_artifact_ids")
+        if not isinstance(raw, list):
+            return JsonResponse({"error": "selected_artifact_ids must be a list"}, status=400)
+        allowed_ids = set(memberships_by_artifact_id.keys())
+        selected_ids: List[str] = []
+        for item in raw:
+            token = str(item or "").strip()
+            if token and token in allowed_ids and token not in selected_ids:
+                selected_ids.append(token)
+        session.selected_artifact_ids_json = selected_ids
+    session.save()
+    session.refresh_from_db()
+    return JsonResponse(_serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id))
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_plan(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    plan = _generate_solution_change_plan(session=session, memberships=memberships)
+    session.plan_json = plan
+    session.status = "planned"
+    session.save(update_fields=["plan_json", "status", "updated_at"])
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "planned": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_stage_apply(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    if not isinstance(session.plan_json, dict) or not session.plan_json:
+        return JsonResponse({"error": "solution change session must have a generated plan before staging"}, status=409)
+    _stage_solution_change_session(session=session, memberships=memberships)
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "staged": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_prepare_preview(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+    artifact_states = staged.get("artifact_states") if isinstance(staged.get("artifact_states"), list) else []
+    if not artifact_states:
+        return JsonResponse({"error": "stage apply must run before preview preparation"}, status=409)
+    preview_payload = _prepare_solution_change_preview(session=session)
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    response_payload = {
+        "prepared": str(preview_payload.get("status") or "").strip().lower() == "ready",
+        "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+    }
+    if not response_payload["prepared"]:
+        return JsonResponse(response_payload, status=409)
+    return JsonResponse(
+        {
+            "prepared": True,
+            "session": response_payload["session"],
+        },
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_validate(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    preview = session.preview_json if isinstance(session.preview_json, dict) else {}
+    if str(preview.get("status") or "").strip().lower() != "ready":
+        return JsonResponse({"error": "preview must be prepared before validation"}, status=409)
+    _validate_solution_change_session(session=session)
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    return JsonResponse(
+        {
+            "validated": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
 
 
 @login_required
@@ -33884,10 +34840,12 @@ def composer_state(request: HttpRequest) -> JsonResponse:
     application_id = str(request.GET.get("application_id") or "").strip()
     goal_id = str(request.GET.get("goal_id") or "").strip()
     thread_id = str(request.GET.get("thread_id") or "").strip()
+    solution_change_session_id = str(request.GET.get("solution_change_session_id") or "").strip()
     application_plan: Optional[ApplicationPlan] = None
     application: Optional[Application] = None
     goal: Optional[Goal] = None
     thread: Optional[CoordinationThread] = None
+    solution_change_session: Optional[SolutionChangeSession] = None
     if application_plan_id:
         application_plan = (
             ApplicationPlan.objects.filter(id=application_plan_id, workspace=workspace)
@@ -33915,6 +34873,17 @@ def composer_state(request: HttpRequest) -> JsonResponse:
             .prefetch_related("work_items")
             .first()
         )
+    if solution_change_session_id:
+        solution_change_session = (
+            SolutionChangeSession.objects.filter(
+                id=solution_change_session_id,
+                workspace=workspace,
+            )
+            .select_related("application", "created_by")
+            .first()
+        )
+        if solution_change_session and application is None:
+            application = solution_change_session.application
     return JsonResponse(
         _serialize_composer_state(
             workspace=workspace,
@@ -33923,6 +34892,7 @@ def composer_state(request: HttpRequest) -> JsonResponse:
             application=application,
             goal=goal,
             thread=thread,
+            solution_change_session=solution_change_session,
         )
     )
 
@@ -35574,6 +36544,8 @@ def _resolved_manifest_surfaces(resolved: Dict[str, Any], workspace_id: Optional
         if not isinstance(view, dict):
             continue
         surface = str(view.get("surface") or "").strip().lower()
+        if surface == "admin":
+            surface = "nav"
         if surface not in surfaces:
             continue
         path = _resolve_manifest_surface_path(
@@ -35989,12 +36961,12 @@ def artifact_surfaces_nav(request: HttpRequest) -> JsonResponse:
 def artifact_surface_resolve(request: HttpRequest) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
     path = _normalize_surface_path(request.GET.get("path") or "")
     if not path:
         return JsonResponse({"error": "path is required"}, status=400)
-    identity = _identity_from_user(request.user)
     matches: List[Dict[str, Any]] = []
     surfaces = ArtifactSurface.objects.select_related("artifact", "artifact__type").all()
     for surface in surfaces:

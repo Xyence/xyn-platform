@@ -121,26 +121,11 @@ describe("resolvePanelCommand", () => {
       panelKey: "jobs_list",
       params: {},
     });
-    expect(resolvePanelCommand("campaigns")).toEqual({
-      panelKey: "campaign_list",
-      params: {},
-    });
-    expect(resolvePanelCommand("show campaigns")).toEqual({
-      panelKey: "campaign_list",
-      params: {},
-    });
-    expect(resolvePanelCommand("open campaigns")).toEqual({
-      panelKey: "campaign_list",
-      params: {},
-    });
-    expect(resolvePanelCommand("new campaign")).toEqual({
-      panelKey: "campaign_list",
-      params: { create: true },
-    });
-    expect(resolvePanelCommand("create campaign")).toEqual({
-      panelKey: "campaign_list",
-      params: { create: true },
-    });
+    expect(resolvePanelCommand("campaigns")).toBeNull();
+    expect(resolvePanelCommand("show campaigns")).toBeNull();
+    expect(resolvePanelCommand("open campaigns")).toBeNull();
+    expect(resolvePanelCommand("new campaign")).toBeNull();
+    expect(resolvePanelCommand("create campaign")).toBeNull();
 
     expect(resolvePanelCommand("list core artifacts")).toEqual({
       panelKey: "artifact_list",

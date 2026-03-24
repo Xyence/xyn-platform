@@ -18,7 +18,11 @@ from xyn_orchestrator.portfolio_intelligence import (
 )
 from xyn_orchestrator.models import (
     Application,
+    ApplicationArtifactMembership,
     ApplicationPlan,
+    SolutionChangeSession,
+    Artifact,
+    ArtifactType,
     Campaign,
     CampaignType,
     CoordinationEvent,
@@ -28,9 +32,18 @@ from xyn_orchestrator.models import (
     ManagedRepository,
     UserIdentity,
     Workspace,
+    WorkspaceAppInstance,
     WorkspaceMembership,
 )
 from xyn_orchestrator.xyn_api import (
+    application_artifact_membership_detail,
+    application_artifact_memberships_collection,
+    application_solution_change_session_detail,
+    application_solution_change_session_plan,
+    application_solution_change_session_prepare_preview,
+    application_solution_change_session_stage_apply,
+    application_solution_change_session_validate,
+    application_solution_change_sessions_collection,
     application_detail,
     application_factories_collection,
     application_plan_apply,
@@ -1024,6 +1037,395 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(application.status, "archived")
         self.assertEqual(payload["status"], "archived")
 
+    def test_application_detail_includes_artifact_memberships(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder API",
+            slug=f"deal-finder-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=artifact,
+            role="primary_api",
+            responsibility_summary="Primary domain API",
+        )
+        request = self._request(f"/xyn/api/applications/{application.id}")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_detail(request, str(application.id))
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["artifact_member_count"], 1)
+        self.assertEqual(len(payload.get("artifact_memberships") or []), 1)
+        self.assertEqual(payload["artifact_memberships"][0]["role"], "primary_api")
+        self.assertEqual(payload["artifact_memberships"][0]["artifact"]["id"], str(artifact.id))
+
+    def test_application_artifact_memberships_collection_create_and_update(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-ui-{uuid.uuid4().hex[:6]}", name="Generated UI")
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"deal-finder-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/artifacts",
+            method="post",
+            data=json.dumps(
+                {
+                    "artifact_id": str(artifact.id),
+                    "role": "primary_ui",
+                    "responsibility_summary": "Shell-hosted workflow UI",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_response = application_artifact_memberships_collection(create_request, str(application.id))
+        create_payload = json.loads(create_response.content)
+        self.assertEqual(create_response.status_code, 201)
+        self.assertEqual(create_payload["membership"]["role"], "primary_ui")
+        membership_id = create_payload["membership"]["id"]
+
+        list_request = self._request(f"/xyn/api/applications/{application.id}/artifacts")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            list_response = application_artifact_memberships_collection(list_request, str(application.id))
+        list_payload = json.loads(list_response.content)
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(len(list_payload["memberships"]), 1)
+
+        patch_request = self._request(
+            f"/xyn/api/applications/{application.id}/artifacts/{membership_id}",
+            method="patch",
+            data=json.dumps({"role": "supporting"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            patch_response = application_artifact_membership_detail(patch_request, str(application.id), membership_id)
+        patch_payload = json.loads(patch_response.content)
+        self.assertEqual(patch_response.status_code, 200)
+        self.assertEqual(patch_payload["role"], "supporting")
+
+    def test_solution_change_session_create_and_impacted_artifacts(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"df-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder API",
+            slug=f"df-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "Campaign UX update", "request_text": "Update UI and API for campaign flow"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(payload["created"])
+        self.assertEqual(payload["session"]["title"], "Campaign UX update")
+        self.assertTrue(payload["session"]["selected_artifact_ids"])
+        impacted = ((payload["session"].get("analysis") or {}).get("impacted_artifacts") or [])
+        self.assertGreaterEqual(len(impacted), 1)
+
+    def test_solution_change_session_update_and_plan_generation(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"df-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Campaign UX update",
+            request_text="Update campaign UX",
+            created_by=self.identity,
+            analysis_json={"impacted_artifacts": [], "suggested_artifact_ids": [str(ui_artifact.id)]},
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+        )
+        patch_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}",
+            method="patch",
+            data=json.dumps({"selected_artifact_ids": [str(ui_artifact.id)]}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            patch_response = application_solution_change_session_detail(patch_request, str(application.id), str(session.id))
+        patch_payload = json.loads(patch_response.content)
+        self.assertEqual(patch_response.status_code, 200)
+        self.assertEqual(patch_payload["selected_artifact_ids"], [str(ui_artifact.id)])
+
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        plan_payload = json.loads(plan_response.content)
+        self.assertEqual(plan_response.status_code, 200)
+        self.assertTrue(plan_payload["planned"])
+        self.assertIn("per_artifact_work", plan_payload["session"]["plan"])
+
+    def test_solution_change_session_stage_preview_and_validate_flow(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug=ui_artifact.slug.replace("app.", "", 1),
+            customer_name="Preview",
+            fqdn=f"preview-{uuid.uuid4().hex[:6]}.internal",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://deal-finder-runtime:8080",
+                    "public_app_url": "http://localhost:32822",
+                    "compose_project": "xyn-preview",
+                    "app_slug": ui_artifact.slug.replace("app.", "", 1),
+                    "source_build_job_id": "job-123",
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Campaign UX update",
+            request_text="Update campaign UX",
+            created_by=self.identity,
+            analysis_json={"impacted_artifacts": [], "suggested_artifact_ids": [str(ui_artifact.id)]},
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={
+                "per_artifact_work": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "planned_work": ["Update shell views and interaction flows"],
+                    }
+                ]
+            },
+        )
+
+        stage_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/stage-apply",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            stage_response = application_solution_change_session_stage_apply(stage_request, str(application.id), str(session.id))
+        stage_payload = json.loads(stage_response.content)
+        self.assertEqual(stage_response.status_code, 200)
+        self.assertTrue(stage_payload["staged"])
+        self.assertEqual(stage_payload["session"]["execution_status"], "staged")
+        self.assertEqual(len((stage_payload["session"].get("staged_changes") or {}).get("artifact_states") or []), 1)
+
+        preview_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._runtime_target_request", return_value=mock.Mock(status_code=200)
+        ):
+            preview_response = application_solution_change_session_prepare_preview(
+                preview_request, str(application.id), str(session.id)
+            )
+        preview_payload = json.loads(preview_response.content)
+        self.assertEqual(preview_response.status_code, 200)
+        self.assertTrue(preview_payload["prepared"])
+        self.assertEqual(preview_payload["session"]["execution_status"], "preview_ready")
+        self.assertEqual((preview_payload["session"].get("preview") or {}).get("status"), "ready")
+        self.assertTrue((preview_payload["session"].get("preview") or {}).get("preview_urls"))
+
+        validate_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/validate",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            validate_response = application_solution_change_session_validate(
+                validate_request, str(application.id), str(session.id)
+            )
+        validate_payload = json.loads(validate_response.content)
+        self.assertEqual(validate_response.status_code, 200)
+        self.assertTrue(validate_payload["validated"])
+        self.assertEqual(validate_payload["session"]["execution_status"], "ready_for_promotion")
+        checks = ((validate_payload["session"].get("validation") or {}).get("checks") or [])
+        self.assertTrue(checks)
+        self.assertTrue(all(item.get("status") == "passed" for item in checks if isinstance(item, dict)))
+
+    def test_solution_change_session_prepare_preview_fails_without_runtime_evidence(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Campaign UX update",
+            request_text="Update campaign UX",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={"per_artifact_work": [{"artifact_id": str(ui_artifact.id), "planned_work": ["Update shell UI"]}]},
+            staged_changes_json={
+                "artifact_states": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "artifact_title": ui_artifact.title,
+                        "role": "primary_ui",
+                        "apply_state": "proposed",
+                    }
+                ]
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            preview_response = application_solution_change_session_prepare_preview(
+                preview_request, str(application.id), str(session.id)
+            )
+        preview_payload = json.loads(preview_response.content)
+        self.assertEqual(preview_response.status_code, 409)
+        self.assertFalse(preview_payload["prepared"])
+        self.assertEqual(preview_payload["session"]["execution_status"], "failed")
+        self.assertEqual((preview_payload["session"].get("preview") or {}).get("status"), "failed")
+
     def test_application_plan_detail_patch_updates_plan_status(self):
         plan = ApplicationPlan.objects.create(
             workspace=self.workspace,
@@ -1207,6 +1609,62 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(thread_response.status_code, 200)
         self.assertEqual(thread_payload["stage"], "thread_focus")
         self.assertEqual((thread_payload["thread"] or {}).get("id"), str(thread.id))
+
+    def test_composer_state_includes_solution_execution_actions(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"df-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            source_conversation_id="thread-1",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Execution Session",
+            request_text="Coordinate UI/API updates",
+            created_by=self.identity,
+            status="planned",
+            plan_json={"per_artifact_work": [{"artifact_id": str(ui_artifact.id), "planned_work": ["Update shell UI"]}]},
+            execution_status="staged",
+        )
+        request = self._request(
+            "/xyn/api/composer/state",
+            data={
+                "workspace_id": str(self.workspace.id),
+                "application_id": str(application.id),
+                "solution_change_session_id": str(session.id),
+            },
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = composer_state(request)
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 200)
+        actions = payload.get("available_actions") or []
+        action_types = {str(item.get("type") or "") for item in actions if isinstance(item, dict)}
+        self.assertIn("stage_solution_change", action_types)
+        self.assertIn("prepare_solution_preview", action_types)
+        self.assertIn("validate_solution_change", action_types)
 
     def test_composer_state_default_workspace_view_excludes_archived_application_work(self):
         archived_application = Application.objects.create(

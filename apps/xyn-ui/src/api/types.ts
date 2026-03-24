@@ -2807,6 +2807,7 @@ export type ApplicationSummary = {
   status: "active" | "completed" | "archived" | string;
   request_objective: string;
   goal_count: number;
+  artifact_member_count?: number;
   created_at: string;
   updated_at: string;
   portfolio_state?: GoalPortfolioState;
@@ -2815,6 +2816,72 @@ export type ApplicationSummary = {
 export type ApplicationDetail = ApplicationSummary & {
   goals: GoalSummary[];
   portfolio_state?: GoalPortfolioState;
+  artifact_memberships?: ApplicationArtifactMembership[];
+};
+
+export type ApplicationArtifactMembership = {
+  id: string;
+  workspace_id: string;
+  application_id: string;
+  artifact_id: string;
+  role:
+    | "primary_ui"
+    | "primary_api"
+    | "integration_adapter"
+    | "worker"
+    | "runtime_service"
+    | "shared_library"
+    | "supporting"
+    | string;
+  responsibility_summary: string;
+  metadata?: Record<string, unknown>;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  artifact: {
+    id: string;
+    workspace_id: string;
+    type: string;
+    title: string;
+    slug?: string;
+    status?: string;
+    version?: number;
+    updated_at?: string;
+  };
+};
+
+export type SolutionChangeSession = {
+  id: string;
+  workspace_id: string;
+  application_id: string;
+  title: string;
+  request_text: string;
+  status: "draft" | "planned" | "archived" | string;
+  execution_status?:
+    | "not_started"
+    | "staged"
+    | "preview_preparing"
+    | "preview_ready"
+    | "validating"
+    | "ready_for_promotion"
+    | "failed"
+    | string;
+  created_by?: string | null;
+  analysis?: Record<string, unknown>;
+  selected_artifact_ids: string[];
+  selected_artifacts?: Array<{
+    artifact_id: string;
+    artifact_title: string;
+    artifact_type: string;
+    role: string;
+  }>;
+  plan?: Record<string, unknown>;
+  staged_changes?: Record<string, unknown>;
+  preview?: Record<string, unknown>;
+  validation?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
 };
 
 export type CampaignTypeDefinition = {
@@ -3121,6 +3188,7 @@ export type ComposerState = {
     application_id?: string | null;
     goal_id?: string | null;
     thread_id?: string | null;
+    solution_change_session_id?: string | null;
   };
   factory_catalog: ApplicationFactorySummary[];
   selected_factory?: ApplicationFactorySummary | null;
@@ -3128,6 +3196,8 @@ export type ComposerState = {
   applications: ApplicationSummary[];
   application_plan?: ApplicationPlanDetail | null;
   application?: ApplicationDetail | null;
+  solution_change_sessions?: SolutionChangeSession[];
+  solution_change_session?: SolutionChangeSession | null;
   goal?: GoalDetail | null;
   thread?: CoordinationThreadDetail | null;
   related_goals: GoalSummary[];

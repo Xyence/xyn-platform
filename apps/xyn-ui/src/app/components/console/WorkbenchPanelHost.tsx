@@ -4210,6 +4210,7 @@ function ComposerDetailPanel({
   applicationId,
   goalId,
   threadId,
+  solutionChangeSessionId,
   onOpenPanel,
   onTitleChange,
 }: {
@@ -4219,6 +4220,7 @@ function ComposerDetailPanel({
   applicationId?: string;
   goalId?: string;
   threadId?: string;
+  solutionChangeSessionId?: string;
   onTitleChange?: (title: string) => void;
 } & PanelProps) {
   const [payload, setPayload] = useState<ComposerState | null>(null);
@@ -4257,6 +4259,7 @@ function ComposerDetailPanel({
       application_id: applicationId,
       goal_id: goalId,
       thread_id: threadId,
+      ...(solutionChangeSessionId ? { solution_change_session_id: solutionChangeSessionId } : {}),
     });
     setPayload(next);
     return next;
@@ -4275,6 +4278,7 @@ function ComposerDetailPanel({
           application_id: applicationId,
           goal_id: goalId,
           thread_id: threadId,
+          ...(solutionChangeSessionId ? { solution_change_session_id: solutionChangeSessionId } : {}),
         });
         if (!active) return;
         setPayload(next);
@@ -4288,7 +4292,7 @@ function ComposerDetailPanel({
     return () => {
       active = false;
     };
-  }, [applicationId, applicationPlanId, factoryKey, goalId, threadId, workspaceId]);
+  }, [applicationId, applicationPlanId, factoryKey, goalId, solutionChangeSessionId, threadId, workspaceId]);
 
   useEffect(() => {
     onTitleChange?.("Composer");
@@ -5025,6 +5029,49 @@ function ComposerDetailPanel({
         </section>
       ) : null}
 
+      {currentApplication && Array.isArray(payload?.solution_change_sessions) && payload.solution_change_sessions.length ? (
+        <section className="card">
+          <div className="field-label">Solution change sessions</div>
+          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
+            Application-level cross-artifact planning sessions. Open one to continue impacted-artifact review in Composer context.
+          </p>
+          <div className="canvas-table-wrap">
+            <table className="canvas-table">
+              <thead>
+                <tr>
+                  <th>Session</th>
+                  <th>Status</th>
+                  <th>Selected Artifacts</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {payload.solution_change_sessions.map((session: any) => (
+                  <tr key={String(session.id)}>
+                    <td>{String(session.title || "Change Session")}</td>
+                    <td>{titleCaseLabel(String(session.status || "draft"))}</td>
+                    <td>{Array.isArray(session.selected_artifact_ids) ? session.selected_artifact_ids.length : 0}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        onClick={() =>
+                          openComposer({
+                            application_id: currentApplication.id,
+                            solution_change_session_id: String(session.id || ""),
+                          })}
+                      >
+                        Open session
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
       {selectedContainerGoals.length ? (
         <section className="card">
           <div className="field-label">Work goals for this application</div>
@@ -5400,6 +5447,7 @@ export default function WorkbenchPanelHost({
           applicationId={String(panel.params?.application_id || "") || undefined}
           goalId={String(panel.params?.goal_id || "") || undefined}
           threadId={String(panel.params?.thread_id || "") || undefined}
+          solutionChangeSessionId={String(panel.params?.solution_change_session_id || "") || undefined}
           onOpenPanel={openPanel}
           onTitleChange={setResolvedTitle}
         />
