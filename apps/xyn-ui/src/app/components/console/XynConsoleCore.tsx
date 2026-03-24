@@ -42,6 +42,7 @@ type ArtifactStructuredQuery = {
 type ResolvedPanelCommand =
   | { panelKey: "composer_detail"; params: Record<string, never> }
   | { panelKey: "campaign_list"; params: { create?: boolean } }
+  | { panelKey: "solution_list"; params: { solution_name?: string } }
   | { panelKey: "artifact_list"; params: { namespace?: string; query?: ArtifactStructuredQuery; query_error?: string } }
   | { panelKey: "workspaces"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "runs"; params: { query?: Record<string, unknown>; query_error?: string } }
@@ -141,6 +142,8 @@ function explicitAppBuilderArtifactKind(input: string): string {
 }
 
 export function resolvePanelCommand(input: string): ResolvedPanelCommand | null {
+  // Guardrail: resolve user navigation requests into panel intents.
+  // New capability UX should not depend on route-owned page flows.
   const raw = String(input || "").trim();
   if (!raw) return null;
   const normalized = raw
@@ -199,6 +202,18 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
           limit: 50,
           offset: 0,
         },
+      },
+    };
+  }
+  if (/^(show|list|open)\s+solutions?$/.test(normalized)) {
+    return { panelKey: "solution_list", params: {} };
+  }
+  match = normalized.match(/^(open|show|go to)\s+solution\s+(.+)$/);
+  if (match && match[2]) {
+    return {
+      panelKey: "solution_list",
+      params: {
+        solution_name: String(match[2] || "").trim(),
       },
     };
   }
@@ -421,6 +436,12 @@ export function resolveDirectPanelOpenParams(
     return {
       workspace_id: workspaceId || undefined,
       ...(directPanel.params.create ? { create: true } : {}),
+    };
+  }
+  if (directPanel.panelKey === "solution_list") {
+    return {
+      workspace_id: workspaceId || undefined,
+      ...directPanel.params,
     };
   }
   return directPanel.params;

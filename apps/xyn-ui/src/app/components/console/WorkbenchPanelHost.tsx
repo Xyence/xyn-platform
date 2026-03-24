@@ -109,6 +109,7 @@ import PlatformDeploySettingsPage from "../../pages/PlatformDeploySettingsPage";
 import PlatformBrandingPage from "../../pages/PlatformBrandingPage";
 import RulesBrowserPanel from "../rules/RulesBrowserPanel";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
+import { SolutionDetailPanel, SolutionListPanel } from "../solutions/SolutionPanels";
 
 export type ConsolePanelKey =
   | "platform_settings"
@@ -117,6 +118,8 @@ export type ConsolePanelKey =
   | "goal_detail"
   | "application_plan_detail"
   | "application_detail"
+  | "solution_list"
+  | "solution_detail"
   | "campaign_list"
   | "campaign_detail"
   | "workspaces"
@@ -5313,6 +5316,8 @@ const PANEL_TITLES: Record<ConsolePanelKey, string> = {
   campaign_detail: "Campaign",
   application_plan_detail: "Application Plan",
   application_detail: "Application",
+  solution_list: "Solutions",
+  solution_detail: "Solution",
   thread_list: "Threads",
   thread_detail: "Thread",
   runs: "Runs",
@@ -5531,6 +5536,27 @@ export default function WorkbenchPanelHost({
             }
             openPanel("record_detail", { ...target, row }, { open_in: "new_panel", return_to_panel_id: panel.panel_id });
           }}
+        />
+      );
+    }
+
+    if (panel.key === "solution_list") {
+      return (
+        <SolutionListPanel
+          workspaceId={workspaceId}
+          workspaceName={String(panel.params?.workspace_name || "")}
+          solutionNameQuery={String(panel.params?.solution_name || "") || undefined}
+          onOpenPanel={openPanel}
+        />
+      );
+    }
+
+    if (panel.key === "solution_detail") {
+      return (
+        <SolutionDetailPanel
+          workspaceId={workspaceId}
+          applicationId={String(panel.params?.application_id || "")}
+          onOpenPanel={openPanel}
         />
       );
     }

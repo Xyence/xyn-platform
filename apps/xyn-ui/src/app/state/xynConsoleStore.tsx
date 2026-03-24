@@ -862,6 +862,13 @@ export function XynConsoleProvider({ children }: { children: ReactNode }) {
       return `${String(params?.entity_type || "record")}:${String(params?.entity_id || "")}`;
     }
     if (key === "artifact_list") return "artifacts";
+    if (key === "solution_list") {
+      const scopedWorkspaceId = String(params?.workspace_id || workspaceId || "").trim();
+      return `solutions:${scopedWorkspaceId || "workspace"}`;
+    }
+    if (key === "solution_detail") {
+      return `solution:${String(params?.application_id || "")}`;
+    }
     if (key.startsWith("ems_")) {
       if (key === "ems_dataset_schema") return `dataset_schema:${String(params?.dataset || "ems_devices")}`;
       if (key === "ems_registrations_timeseries") return "ems_registrations_timeseries";

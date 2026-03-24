@@ -47,6 +47,8 @@ const DEFAULT_PANEL_DEFINITIONS = [
   { panel_type: "campaign_detail", console_key: "campaign_detail", title: "Campaign", affinity: panelAffinityForKey("campaign_detail") },
   { panel_type: "application_plan_detail", console_key: "application_plan_detail", title: "Application Plan", affinity: panelAffinityForKey("application_plan_detail") },
   { panel_type: "application_detail", console_key: "application_detail", title: "Application", affinity: panelAffinityForKey("application_detail") },
+  { panel_type: "solution_list", console_key: "solution_list", title: "Solutions", affinity: panelAffinityForKey("solution_list") },
+  { panel_type: "solution_detail", console_key: "solution_detail", title: "Solution", affinity: panelAffinityForKey("solution_detail") },
   { panel_type: "thread_list", console_key: "thread_list", title: "Threads", affinity: panelAffinityForKey("thread_list") },
   { panel_type: "thread_detail", console_key: "thread_detail", title: "Thread", affinity: panelAffinityForKey("thread_detail") },
   { panel_type: "run_detail", console_key: "run_detail", title: "Run Detail", affinity: panelAffinityForKey("run_detail") },

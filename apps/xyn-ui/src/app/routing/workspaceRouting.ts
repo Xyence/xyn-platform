@@ -43,27 +43,50 @@ export function swapWorkspaceInPath(pathname: string, workspaceId: string): stri
 
 function mapLegacyAppRestToWorkspaceSubpath(rest: string): string {
   const normalized = String(rest || "").replace(/^\/+/, "");
-  if (!normalized || normalized === "home" || normalized === "workbench" || normalized === "console" || normalized === "initiate") {
-    return DEFAULT_WORKSPACE_SUBPATH;
+  const [basePartRaw, queryPartRaw] = normalized.split("?", 2);
+  const basePart = String(basePartRaw || "").trim();
+  const queryPart = String(queryPartRaw || "").trim();
+  const withQuery = (path: string): string => {
+    if (!queryPart) return path;
+    return path.includes("?") ? `${path}&${queryPart}` : `${path}?${queryPart}`;
+  };
+  if (!basePart || basePart === "home" || basePart === "workbench" || basePart === "console" || basePart === "initiate") {
+    return withQuery(DEFAULT_WORKSPACE_SUBPATH);
   }
 
-  if (normalized === "catalog") return "build/catalog";
-  if (normalized === "artifacts") return "build/artifacts";
-  if (normalized === "artifacts/all") return "build/artifacts";
-  if (normalized === "solutions" || normalized.startsWith("solutions/")) return normalized;
-  if (normalized === "artifacts/library" || normalized === "build/artifacts/library") return "build/catalog";
-  if (normalized.startsWith("artifacts/")) {
-    const suffix = normalized.replace(/^artifacts\//, "");
-    if (suffix === "library") return "build/catalog";
-    if (suffix === "all") return "build/artifacts";
-    return `build/artifacts/${suffix}`;
+  if (basePart === "catalog") return withQuery("build/catalog");
+  if (basePart === "artifacts") return withQuery("build/artifacts");
+  if (basePart === "artifacts/all") return withQuery("build/artifacts");
+  // Guardrail: route-like solution URLs should resolve to workbench panel state.
+  // Keep /w/:workspaceId/solutions compatibility routes as thin redirect shims only.
+  if (basePart === "solutions") return withQuery("workbench?panel=solution_list");
+  if (basePart.startsWith("solutions/")) {
+    const applicationId = String(basePart.replace(/^solutions\//, "") || "").trim();
+    if (!applicationId) return withQuery("workbench?panel=solution_list");
+    return withQuery(`workbench?panel=solution_detail&application_id=${encodeURIComponent(applicationId)}`);
+  }
+  if (basePart === "artifacts/library" || basePart === "build/artifacts/library") return withQuery("build/catalog");
+  if (basePart.startsWith("artifacts/")) {
+    const suffix = basePart.replace(/^artifacts\//, "");
+    if (suffix === "library") return withQuery("build/catalog");
+    if (suffix === "all") return withQuery("build/artifacts");
+    return withQuery(`build/artifacts/${suffix}`);
   }
 
-  if (normalized.startsWith("build/") || normalized.startsWith("run/") || normalized.startsWith("package/") || normalized.startsWith("govern/") || normalized.startsWith("platform/") || normalized.startsWith("settings") || normalized.startsWith("apps/") || normalized.startsWith("a/")) {
-    return normalized;
+  if (
+    basePart.startsWith("build/")
+    || basePart.startsWith("run/")
+    || basePart.startsWith("package/")
+    || basePart.startsWith("govern/")
+    || basePart.startsWith("platform/")
+    || basePart.startsWith("settings")
+    || basePart.startsWith("apps/")
+    || basePart.startsWith("a/")
+  ) {
+    return withQuery(basePart);
   }
 
-  return `a/${normalized}`;
+  return withQuery(`a/${basePart}`);
 }
 
 export function toWorkspaceScopedPath(pathname: string, workspaceId: string): string | null {

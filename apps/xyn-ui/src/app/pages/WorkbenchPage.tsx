@@ -128,6 +128,9 @@ export default function WorkbenchPage({
   useEffect(() => {
     const panelKey = String(searchParams.get("panel") || "").trim().toLowerCase();
     if (!panelKey) return;
+    // Deep-link bridge into panel state only.
+    // New capability UX should be expressed as panel intents/palette commands,
+    // with route-level wrappers kept as compatibility redirects.
     if (panelKey === "platform_settings") {
       if (!activePanel || activePanel.key !== "platform_settings") {
         openPanel({
@@ -136,6 +139,38 @@ export default function WorkbenchPage({
           open_in: "current_panel",
         });
       }
+    } else if (panelKey === "solution_list") {
+      const nextParams: Record<string, unknown> = {};
+      const solutionName = String(searchParams.get("solution_name") || "").trim();
+      if (solutionName) nextParams.solution_name = solutionName;
+      if (!activePanel || activePanel.key !== "solution_list") {
+        openPanel({
+          key: "solution_list",
+          params: nextParams,
+          open_in: "current_panel",
+        });
+      }
+      const next = new URLSearchParams(searchParams);
+      next.delete("solution_name");
+      next.delete("panel");
+      setSearchParams(next, { replace: true });
+      return;
+    } else if (panelKey === "solution_detail") {
+      const applicationId = String(searchParams.get("application_id") || "").trim();
+      if (!applicationId) return;
+      const nextParams: Record<string, unknown> = { application_id: applicationId };
+      if (!activePanel || activePanel.key !== "solution_detail" || String(activePanel.params?.application_id || "") !== applicationId) {
+        openPanel({
+          key: "solution_detail",
+          params: nextParams,
+          open_in: "current_panel",
+        });
+      }
+      const next = new URLSearchParams(searchParams);
+      next.delete("application_id");
+      next.delete("panel");
+      setSearchParams(next, { replace: true });
+      return;
     } else if (panelKey === "composer_detail" || panelKey === "composer") {
       const nextParams: Record<string, unknown> = {};
       const applicationId = String(searchParams.get("application_id") || "").trim();

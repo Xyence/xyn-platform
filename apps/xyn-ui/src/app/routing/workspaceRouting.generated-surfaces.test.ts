@@ -18,9 +18,17 @@ describe("workspace routing for generated app surfaces", () => {
     expect(withWorkspaceInNavPath("/app/sources", "ws-1")).toBe("/w/ws-1/a/sources");
   });
 
-  it("keeps solution pages as shell-native workspace routes", () => {
-    expect(toWorkspaceScopedPath("/app/solutions", "ws-1")).toBe("/w/ws-1/solutions");
-    expect(toWorkspaceScopedPath("/app/solutions/app-1", "ws-1")).toBe("/w/ws-1/solutions/app-1");
-    expect(withWorkspaceInNavPath("/app/solutions", "ws-1")).toBe("/w/ws-1/solutions");
+  it("maps legacy solutions URLs into workbench panel deep links", () => {
+    expect(toWorkspaceScopedPath("/app/solutions", "ws-1")).toBe("/w/ws-1/workbench?panel=solution_list");
+    expect(toWorkspaceScopedPath("/app/solutions/app-1", "ws-1")).toBe("/w/ws-1/workbench?panel=solution_detail&application_id=app-1");
+    expect(withWorkspaceInNavPath("/app/solutions", "ws-1")).toBe("/w/ws-1/workbench?panel=solution_list");
+  });
+
+  it("preserves workbench query params for panel-native deep links", () => {
+    expect(toWorkspaceScopedPath("/app/workbench?panel=solution_list", "ws-1")).toBe("/w/ws-1/workbench?panel=solution_list");
+    expect(toWorkspaceScopedPath("/app/workbench?panel=solution_detail&application_id=app-1", "ws-1")).toBe(
+      "/w/ws-1/workbench?panel=solution_detail&application_id=app-1"
+    );
+    expect(withWorkspaceInNavPath("/app/workbench?panel=solution_list", "ws-1")).toBe("/w/ws-1/workbench?panel=solution_list");
   });
 });

@@ -68,7 +68,15 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Apps",
     icon: "Sparkles",
     items: [
-      { id: "solutions", label: "Solutions", path: "/app/solutions", icon: "PanelsTopLeft", keywords: ["applications", "multi-artifact", "composer"] },
+      {
+        id: "solutions",
+        label: "Solutions",
+        // Guardrail: panel-first entrypoint. Do not point this back at /app/solutions
+        // except as an intentional temporary compatibility shim.
+        path: "/app/workbench?panel=solution_list",
+        icon: "PanelsTopLeft",
+        keywords: ["applications", "multi-artifact", "composer"],
+      },
     ],
   },
   {

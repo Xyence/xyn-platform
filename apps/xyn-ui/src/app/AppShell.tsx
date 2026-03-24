@@ -1009,7 +1009,10 @@ export default function AppShell() {
             <Route path="console" element={<Navigate to={workspaceScopedTarget(DEFAULT_WORKSPACE_SUBPATH)} replace />} />
             <Route path="apps/articles/edit" element={<ArticleSurfaceEditorRedirectPage />} />
             <Route path="apps/articles/docs" element={<ArticleSurfaceDocsPage />} />
-            <Route path="solutions" element={<SolutionsPage workspaceId={activeWorkspace?.id || ""} workspaceName={activeWorkspace?.name || ""} />} />
+            {/* Compatibility-only routes.
+                New capability UX must be palette -> panel intent -> workbench panel.
+                These routes must remain thin redirects and must not own business logic. */}
+            <Route path="solutions" element={<SolutionsPage workspaceId={activeWorkspace?.id || ""} />} />
             <Route path="solutions/:applicationId" element={<SolutionDetailPage workspaceId={activeWorkspace?.id || ""} />} />
             <Route
               path="a/*"

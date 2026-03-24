@@ -23,8 +23,14 @@ describe("nav.utils", () => {
   });
 
   it("builds breadcrumbs from nav config", () => {
-    const crumbs = getBreadcrumbs("/app/platform/settings", NAV_GROUPS);
+    const crumbs = getBreadcrumbs("/app/platform/hub", NAV_GROUPS);
     expect(crumbs.map((entry) => entry.label)).toEqual(["Admin", "Platform Settings"]);
+  });
+
+  it("keeps Solutions navigation panel-first", () => {
+    const solutions = NAV_GROUPS.flatMap((group) => group.items || []).find((item) => item.id === "solutions");
+    expect(solutions).toBeDefined();
+    expect(solutions?.path).toBe("/app/workbench?panel=solution_list");
   });
 
   it("persists and hydrates nav state", () => {
