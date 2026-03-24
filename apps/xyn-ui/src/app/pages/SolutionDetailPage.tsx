@@ -598,7 +598,7 @@ export default function SolutionDetailPage({ workspaceId }: SolutionDetailPagePr
               <option value="">Select artifact…</option>
               {artifacts.map((artifact) => (
                 <option key={artifact.id} value={artifact.id}>
-                  {artifact.title} ({artifact.type})
+                  {artifact.title} ({artifact.artifact_type})
                 </option>
               ))}
             </select>

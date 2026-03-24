@@ -24,6 +24,22 @@ export default function ArtifactComposerPage({
   const [artifact, setArtifact] = useState<UnifiedArtifact | null>(null);
   const [objective, setObjective] = useState("");
 
+  const derivedSlug = (value: UnifiedArtifact | null): string => {
+    if (!value) return "";
+    const source = value.source && typeof value.source === "object" ? (value.source as Record<string, unknown>) : {};
+    return String(source.slug || value.artifact_id || value.id || "").trim();
+  };
+
+  const derivedType = (value: UnifiedArtifact | null): string => {
+    if (!value) return "artifact";
+    return String(value.artifact_type || "artifact");
+  };
+
+  const derivedVersion = (value: UnifiedArtifact | null): string => {
+    if (!value) return "n/a";
+    return String(value.package_version || value.schema_version || "n/a");
+  };
+
   useEffect(() => {
     const targetId = String(artifactId || "").trim();
     if (!targetId) {
@@ -39,7 +55,7 @@ export default function ArtifactComposerPage({
         const payload = await getArtifact(targetId);
         if (!mounted) return;
         setArtifact(payload);
-        setObjective(`Refine artifact ${payload.slug || targetId} with a structured implementation plan.`);
+        setObjective(`Refine artifact ${derivedSlug(payload) || targetId} with a structured implementation plan.`);
       } catch (err) {
         if (!mounted) return;
         setError(err instanceof Error ? err.message : "Failed to load artifact.");
@@ -52,8 +68,8 @@ export default function ArtifactComposerPage({
     };
   }, [artifactId]);
 
-  const artifactSlug = String(artifact?.slug || artifactId || "").trim();
-  const artifactTitle = String(artifact?.title || artifact?.name || artifactSlug || "Artifact").trim();
+  const artifactSlug = String(derivedSlug(artifact) || artifactId || "").trim();
+  const artifactTitle = String(artifact?.title || artifactSlug || "Artifact").trim();
   const legacyDetailPath = useMemo(
     () => `/w/${encodeURIComponent(workspaceId)}/build/artifacts/${encodeURIComponent(String(artifactId || ""))}/detail`,
     [artifactId, workspaceId]
@@ -66,7 +82,7 @@ export default function ArtifactComposerPage({
     params.set("prompt", prompt);
     params.set("artifact_slug", artifactSlug);
     params.set("artifact_title", artifactTitle);
-    params.set("artifact_type", String(artifact?.type || "Artifact"));
+    params.set("artifact_type", derivedType(artifact));
     navigate(`/w/${encodeURIComponent(workspaceId)}/workbench?${params.toString()}`);
   };
 
@@ -109,11 +125,11 @@ export default function ArtifactComposerPage({
           </div>
           <div>
             <div className="field-label">Type</div>
-            <div className="field-value">{String(artifact.type || "artifact")}</div>
+            <div className="field-value">{derivedType(artifact)}</div>
           </div>
           <div>
             <div className="field-label">Version</div>
-            <div className="field-value">{String(artifact.version || artifact.package_version || "n/a")}</div>
+            <div className="field-value">{derivedVersion(artifact)}</div>
           </div>
           <div>
             <div className="field-label">Updated</div>
@@ -176,4 +192,3 @@ export default function ArtifactComposerPage({
     </section>
   );
 }
-
