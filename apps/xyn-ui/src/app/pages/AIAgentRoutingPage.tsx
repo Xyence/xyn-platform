@@ -4,6 +4,8 @@ import { getAiRoutingStatus, listAiAgents, updateAiRouting } from "../../api/xyn
 import type { AiAgent, AiAgentResolution, AiRoutingStatusResponse } from "../../api/types";
 import { useNotifications } from "../state/notificationsStore";
 
+const AI_ROUTING_UPDATED_EVENT = "xyn:ai-routing-updated";
+
 type RoutingPurpose = "default" | "planning" | "coding";
 
 const PURPOSE_ROWS: Array<{ purpose: RoutingPurpose; label: string; helper: string }> = [
@@ -66,19 +68,24 @@ export default function AIAgentRoutingPage() {
   const [draftAgentId, setDraftAgentId] = useState<string>("");
   const [savingPurpose, setSavingPurpose] = useState<RoutingPurpose | null>(null);
 
+  const emitRoutingUpdated = useCallback((nextRouting: AiRoutingStatusResponse) => {
+    window.dispatchEvent(new CustomEvent(AI_ROUTING_UPDATED_EVENT, { detail: { routing: nextRouting } }));
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       const [routingRes, agentsRes] = await Promise.all([getAiRoutingStatus(), listAiAgents({ enabled: true })]);
       setRouting(routingRes);
+      emitRoutingUpdated(routingRes);
       setAgents((agentsRes.agents || []).filter((entry) => entry.enabled));
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [emitRoutingUpdated]);
 
   useEffect(() => {
     void refresh();
@@ -116,6 +123,7 @@ export default function AIAgentRoutingPage() {
       setError(null);
       const next = await updateAiRouting(payload);
       setRouting(next);
+      emitRoutingUpdated(next);
       push({ level: "success", title: "Routing updated", message: `${purpose[0].toUpperCase()}${purpose.slice(1)} assignment saved.` });
       setEditPurpose(null);
       setDraftAgentId("");

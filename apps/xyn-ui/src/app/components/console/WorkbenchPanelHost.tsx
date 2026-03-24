@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   applyApplicationPlan,
@@ -110,6 +110,8 @@ import PlatformBrandingPage from "../../pages/PlatformBrandingPage";
 import RulesBrowserPanel from "../rules/RulesBrowserPanel";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { SolutionDetailPanel, SolutionListPanel } from "../solutions/SolutionPanels";
+
+const AI_ROUTING_UPDATED_EVENT = "xyn:ai-routing-updated";
 
 export type ConsolePanelKey =
   | "platform_settings"
@@ -5396,6 +5398,17 @@ export default function WorkbenchPanelHost({
   const [resolvedTitle, setResolvedTitle] = useState("");
   const [systemReadiness, setSystemReadiness] = useState<SystemReadinessResponse | null>(null);
   const [aiRoutingStatus, setAiRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
+
+  const refreshAiRoutingStatus = useCallback(() => {
+    getAiRoutingStatus()
+      .then((next) => {
+        setAiRoutingStatus(next);
+      })
+      .catch(() => {
+        setAiRoutingStatus(null);
+      });
+  }, []);
+
   useEffect(() => {
     setResolvedTitle("");
   }, [panel?.panel_id, panel?.key]);
@@ -5415,18 +5428,23 @@ export default function WorkbenchPanelHost({
   }, [workspaceId]);
 
   useEffect(() => {
-    let active = true;
-    getAiRoutingStatus()
-      .then((next) => {
-        if (active) setAiRoutingStatus(next);
-      })
-      .catch(() => {
-        if (active) setAiRoutingStatus(null);
-      });
-    return () => {
-      active = false;
+    refreshAiRoutingStatus();
+  }, [refreshAiRoutingStatus, workspaceId]);
+
+  useEffect(() => {
+    const onRoutingUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ routing?: AiRoutingStatusResponse }>).detail;
+      if (detail?.routing) {
+        setAiRoutingStatus(detail.routing);
+        return;
+      }
+      refreshAiRoutingStatus();
     };
-  }, [workspaceId]);
+    window.addEventListener(AI_ROUTING_UPDATED_EVENT, onRoutingUpdated as EventListener);
+    return () => {
+      window.removeEventListener(AI_ROUTING_UPDATED_EVENT, onRoutingUpdated as EventListener);
+    };
+  }, [refreshAiRoutingStatus]);
 
   const content = useMemo(() => {
     if (!panel || panel.key === "platform_settings") return null;

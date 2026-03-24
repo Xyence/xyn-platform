@@ -87,6 +87,7 @@ describe("AIAgentRoutingPage", () => {
 
   it("assigns and clears planning routing", async () => {
     const user = userEvent.setup();
+    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
     apiMocks.updateAiRouting
       .mockResolvedValueOnce({
         routing: [
@@ -163,10 +164,18 @@ describe("AIAgentRoutingPage", () => {
     await user.click(within(planningRow).getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(apiMocks.updateAiRouting).toHaveBeenCalledWith({ planning_agent_id: "agent-plan" }));
+    await waitFor(() =>
+      expect(dispatchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "xyn:ai-routing-updated",
+        })
+      )
+    );
 
     await user.click(within(planningRow).getByRole("button", { name: "Change" }));
     await user.click(within(planningRow).getByRole("button", { name: "Clear" }));
 
     await waitFor(() => expect(apiMocks.updateAiRouting).toHaveBeenCalledWith({ planning_agent_id: null }));
+    dispatchSpy.mockRestore();
   });
 });
