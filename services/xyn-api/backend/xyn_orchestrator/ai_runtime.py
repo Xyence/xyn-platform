@@ -1080,15 +1080,32 @@ def ensure_default_ai_seeds() -> None:
         role_agents[role] = agent
     if "default" in role_agents:
         AgentDefinition.objects.exclude(id=role_agents["default"].id).filter(is_default=True).update(is_default=False)
+    bootstrap_managed_agent_slugs = {"default-assistant", "planning-assistant", "coding-assistant"}
     for purpose_slug, owner_role in {
         "planning": "planning" if "planning" in role_agents else "default",
         "coding": "coding" if "coding" in role_agents else "default",
     }.items():
-        AgentDefinitionPurpose.objects.filter(purpose__slug=purpose_slug, is_default_for_purpose=True).exclude(
-            agent_definition=role_agents.get(owner_role)
-        ).update(is_default_for_purpose=False)
+        current_default = (
+            AgentDefinitionPurpose.objects.select_related("agent_definition")
+            .filter(purpose__slug=purpose_slug, is_default_for_purpose=True)
+            .first()
+        )
+        if (
+            current_default
+            and current_default.agent_definition.enabled
+            and str(current_default.agent_definition.slug or "").strip() not in bootstrap_managed_agent_slugs
+        ):
+            # Preserve explicit user-selected defaults for a purpose. Bootstrap seed enforcement
+            # should only own the canonical bootstrap agent set.
+            AgentDefinitionPurpose.objects.filter(purpose__slug=purpose_slug, is_default_for_purpose=True).exclude(
+                id=current_default.id
+            ).update(is_default_for_purpose=False)
+            continue
         owner = role_agents.get(owner_role)
         if owner:
+            AgentDefinitionPurpose.objects.filter(purpose__slug=purpose_slug, is_default_for_purpose=True).exclude(
+                agent_definition=owner
+            ).update(is_default_for_purpose=False)
             link = AgentDefinitionPurpose.objects.filter(agent_definition=owner, purpose__slug=purpose_slug).first()
             if link and not link.is_default_for_purpose:
                 link.is_default_for_purpose = True

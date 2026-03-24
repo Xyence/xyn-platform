@@ -153,6 +153,49 @@ class AiRuntimeTests(TestCase):
         self.assertEqual(ContextPack.objects.filter(name="xyn-planner-canon", purpose="planner").count(), 1)
         self.assertEqual(ContextPack.objects.filter(name="xyn-coder-canon", purpose="coder").count(), 1)
 
+    def test_bootstrap_preserves_explicit_custom_purpose_default_assignments(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+                "XYN_AI_PLANNING_PROVIDER": "openai",
+                "XYN_AI_PLANNING_MODEL": "gpt-5-mini",
+                "XYN_AI_PLANNING_API_KEY": "sk-plan-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+            planning_purpose = AgentPurpose.objects.get(slug="planning")
+            custom_model = ModelConfig.objects.create(
+                provider=ModelProvider.objects.get(slug="openai"),
+                model_name="gpt-5-mini",
+                enabled=True,
+            )
+            custom_agent = AgentDefinition.objects.create(
+                slug="custom-planning-agent",
+                name="Custom Planning Agent",
+                model_config=custom_model,
+                enabled=True,
+            )
+            custom_link = AgentDefinitionPurpose.objects.create(
+                agent_definition=custom_agent,
+                purpose=planning_purpose,
+                is_default_for_purpose=True,
+            )
+            AgentDefinitionPurpose.objects.filter(
+                purpose=planning_purpose, is_default_for_purpose=True
+            ).exclude(id=custom_link.id).update(is_default_for_purpose=False)
+
+            ensure_default_ai_seeds()
+
+        refreshed = AgentDefinitionPurpose.objects.filter(
+            purpose__slug="planning", is_default_for_purpose=True
+        ).select_related("agent_definition")
+        self.assertEqual(refreshed.count(), 1)
+        self.assertEqual(refreshed.first().agent_definition.slug, "custom-planning-agent")
+
     def test_assemble_system_prompt_preamble_only(self):
         self.assertEqual(assemble_system_prompt("", "Purpose preamble"), "Purpose preamble")
 
