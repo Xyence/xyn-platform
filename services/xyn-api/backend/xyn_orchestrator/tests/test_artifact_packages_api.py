@@ -1,15 +1,18 @@
 import io
 import json
 import zipfile
+import uuid
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 
+from xyn_orchestrator import xyn_api
 from xyn_orchestrator.models import (
     Application,
     ApplicationArtifactMembership,
     Artifact,
+    ArtifactType,
     ArtifactBindingValue,
     ArtifactInstallReceipt,
     ArtifactPackage,
@@ -367,6 +370,118 @@ class ArtifactPackagesApiTests(TestCase):
         artifact = Artifact.objects.get(slug=app_slug)
         self.assertTrue(str(artifact.source_ref_id or "").startswith(f"{package_id}:"))
         self.assertLessEqual(len(artifact.source_ref_id or ""), 120)
+
+    def test_legacy_generated_solution_backfill_links_deterministic_groups_and_is_idempotent(self):
+        workspace = Workspace.objects.create(slug=f"legacy-{uuid.uuid4().hex[:8]}", name="Legacy Solution Workspace")
+        app_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        policy_type, _ = ArtifactType.objects.get_or_create(slug="policy_bundle", defaults={"name": "Policy Bundle"})
+
+        app_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=app_type,
+            title="Real Estate Deal Finder",
+            slug="app.real-estate-deal-finder",
+            summary="Generated app artifact",
+            status="active",
+            artifact_state="canonical",
+        )
+        policy_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=policy_type,
+            title="Real Estate Deal Finder Policy Bundle",
+            slug="policy.real-estate-deal-finder",
+            summary="Generated policy bundle",
+            status="active",
+            artifact_state="canonical",
+        )
+
+        first = xyn_api._backfill_legacy_generated_solution_memberships()
+        self.assertEqual(first["groups_backfilled"], 1)
+        self.assertEqual(first["applications_created"], 1)
+        self.assertEqual(first["memberships_created"], 2)
+
+        application = Application.objects.get(
+            workspace=workspace,
+            metadata_json__generated_artifact_key="real-estate-deal-finder",
+        )
+        self.assertEqual(application.source_factory_key, "legacy_solution_backfill")
+        self.assertEqual(application.metadata_json.get("origin"), "legacy_deterministic_backfill")
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=application).select_related("artifact").order_by("sort_order", "created_at")
+        )
+        self.assertEqual([member.artifact_id for member in memberships], [app_artifact.id, policy_artifact.id])
+        self.assertEqual([member.role for member in memberships], ["primary_ui", "supporting"])
+
+        second = xyn_api._backfill_legacy_generated_solution_memberships()
+        self.assertEqual(second["groups_backfilled"], 0)
+        self.assertEqual(Application.objects.filter(workspace=workspace, metadata_json__generated_artifact_key="real-estate-deal-finder").count(), 1)
+        self.assertEqual(ApplicationArtifactMembership.objects.filter(application=application).count(), 2)
+
+    def test_legacy_generated_solution_backfill_skips_conflicts_and_non_solution_scopes(self):
+        workspace = Workspace.objects.create(slug=f"legacy-skip-{uuid.uuid4().hex[:8]}", name="Legacy Skip Workspace")
+        app_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+
+        ignored_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=app_type,
+            title="Platform Scoped App Artifact",
+            slug="app.platform-seeded",
+            scope_json={"scope_classification": "platform"},
+            status="active",
+            artifact_state="canonical",
+        )
+
+        conflict_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=app_type,
+            title="Team Lunch Poll",
+            slug="app.team-lunch-poll",
+            status="active",
+            artifact_state="canonical",
+        )
+        conflicting_application = Application.objects.create(
+            workspace=workspace,
+            name="Existing Team Lunch Poll",
+            summary="existing",
+            source_factory_key="manual",
+            source_conversation_id="",
+            status="active",
+            request_objective="",
+            metadata_json={"generated_artifact_key": "team-lunch-poll", "origin": "manual"},
+        )
+        prelinked = Artifact.objects.create(
+            workspace=workspace,
+            type=app_type,
+            title="Prelinked",
+            slug=f"app.prelinked-{uuid.uuid4().hex[:8]}",
+            status="active",
+            artifact_state="canonical",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=workspace,
+            application=conflicting_application,
+            artifact=prelinked,
+            role="supporting",
+            responsibility_summary="existing membership makes this key ambiguous",
+        )
+
+        summary = xyn_api._backfill_legacy_generated_solution_memberships(workspace_id=str(workspace.id))
+        self.assertEqual(summary["groups_backfilled"], 0)
+        skipped = summary.get("skipped") or []
+        reasons = {str(item.get("reason") or "") for item in skipped}
+        self.assertIn("conflicting_existing_application_association", reasons)
+        self.assertFalse(
+            Application.objects.filter(
+                workspace=workspace,
+                metadata_json__generated_artifact_key="platform-seeded",
+            ).exists()
+        )
+        self.assertFalse(
+            ApplicationArtifactMembership.objects.filter(artifact=ignored_artifact).exists()
+        )
+        self.assertFalse(
+            ApplicationArtifactMembership.objects.filter(artifact=conflict_artifact).exists()
+        )
 
     def test_policy_bundle_artifact_type_is_importable_and_registered(self):
         blob = self._package_blob(

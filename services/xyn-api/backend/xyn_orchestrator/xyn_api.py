@@ -11555,6 +11555,212 @@ def _link_generated_artifacts_to_solution(*, artifacts: List[Artifact]) -> List[
     return linked_rows
 
 
+def _backfill_legacy_generated_solution_memberships(
+    *,
+    workspace_id: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    rows = (
+        Artifact.objects.select_related("type", "workspace")
+        .filter(type__slug__in=["application", "policy_bundle"])
+        .order_by("workspace_id", "slug", "created_at")
+    )
+    if workspace_id:
+        rows = rows.filter(workspace_id=workspace_id)
+    candidates = list(rows)
+
+    grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for artifact in candidates:
+        if _artifact_scope_classification(artifact) != "solution":
+            continue
+        solution_key = _generated_solution_key_for_artifact(artifact=artifact)
+        if not solution_key:
+            continue
+        group_key = (str(artifact.workspace_id), solution_key)
+        bucket = grouped.setdefault(
+            group_key,
+            {
+                "workspace_id": str(artifact.workspace_id),
+                "workspace_slug": str(getattr(artifact.workspace, "slug", "") or ""),
+                "solution_key": solution_key,
+                "application_artifact": None,
+                "policy_artifact": None,
+                "artifacts": [],
+            },
+        )
+        bucket["artifacts"].append(artifact)
+        type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+        if type_slug == "application":
+            bucket["application_artifact"] = artifact
+        elif type_slug == "policy_bundle":
+            bucket["policy_artifact"] = artifact
+
+    summary: Dict[str, Any] = {
+        "workspace_id": workspace_id or "",
+        "dry_run": bool(dry_run),
+        "groups_scanned": len(grouped),
+        "groups_backfilled": 0,
+        "applications_created": 0,
+        "memberships_created": 0,
+        "backfilled": [],
+        "skipped": [],
+    }
+
+    for bucket in grouped.values():
+        solution_key = str(bucket.get("solution_key") or "").strip()
+        candidate_artifacts = [item for item in (bucket.get("artifacts") or []) if isinstance(item, Artifact)]
+        app_artifact = bucket.get("application_artifact")
+        policy_artifact = bucket.get("policy_artifact")
+        if not isinstance(app_artifact, Artifact):
+            summary["skipped"].append(
+                {
+                    "workspace_id": str(bucket.get("workspace_id") or ""),
+                    "solution_key": solution_key,
+                    "reason": "missing_application_artifact",
+                }
+            )
+            continue
+
+        candidate_artifact_ids = {str(item.id) for item in candidate_artifacts}
+        existing_memberships = list(
+            ApplicationArtifactMembership.objects.filter(artifact_id__in=candidate_artifact_ids).select_related("application")
+        )
+        if existing_memberships:
+            summary["skipped"].append(
+                {
+                    "workspace_id": str(bucket.get("workspace_id") or ""),
+                    "solution_key": solution_key,
+                    "reason": "artifacts_already_linked",
+                    "application_ids": sorted({str(item.application_id) for item in existing_memberships}),
+                }
+            )
+            continue
+
+        applications_for_key = list(
+            Application.objects.filter(
+                workspace_id=bucket["workspace_id"],
+                metadata_json__generated_artifact_key=solution_key,
+            ).order_by("-updated_at", "-created_at")
+        )
+        workspace_obj = Workspace.objects.filter(id=bucket["workspace_id"]).first()
+        if workspace_obj is None:
+            summary["skipped"].append(
+                {
+                    "workspace_id": str(bucket.get("workspace_id") or ""),
+                    "solution_key": solution_key,
+                    "reason": "workspace_not_found",
+                }
+            )
+            continue
+        if len(applications_for_key) > 1:
+            summary["skipped"].append(
+                {
+                    "workspace_id": str(bucket.get("workspace_id") or ""),
+                    "solution_key": solution_key,
+                    "reason": "conflicting_applications_for_key",
+                    "application_ids": [str(item.id) for item in applications_for_key],
+                }
+            )
+            continue
+
+        application = applications_for_key[0] if applications_for_key else None
+        if application is not None:
+            conflicting_member_ids = set(
+                ApplicationArtifactMembership.objects.filter(application=application).values_list("artifact_id", flat=True)
+            )
+            if conflicting_member_ids:
+                summary["skipped"].append(
+                    {
+                        "workspace_id": str(bucket.get("workspace_id") or ""),
+                        "solution_key": solution_key,
+                        "reason": "conflicting_existing_application_association",
+                        "application_id": str(application.id),
+                    }
+                )
+                continue
+
+        title = _generated_solution_title_for_key(
+            solution_key=solution_key,
+            app_artifact=app_artifact,
+            policy_artifact=policy_artifact if isinstance(policy_artifact, Artifact) else None,
+        )
+        created_application = False
+        created_memberships = 0
+        if not dry_run:
+            if application is None:
+                application = Application.objects.create(
+                    workspace=workspace_obj,
+                    name=title,
+                    summary=str(getattr(app_artifact, "summary", "") or "").strip(),
+                    source_factory_key="legacy_solution_backfill",
+                    source_conversation_id="",
+                    status="active",
+                    request_objective="",
+                    metadata_json={
+                        "generated_artifact_key": solution_key,
+                        "origin": "legacy_deterministic_backfill",
+                        "backfill_version": 1,
+                    },
+                )
+                created_application = True
+
+            member_specs: List[Tuple[Artifact, str, str, int]] = [
+                (
+                    app_artifact,
+                    "primary_ui",
+                    "Primary generated application artifact linked by deterministic legacy backfill.",
+                    10,
+                )
+            ]
+            if isinstance(policy_artifact, Artifact):
+                member_specs.append(
+                    (
+                        policy_artifact,
+                        "supporting",
+                        "Generated policy bundle linked by deterministic legacy backfill.",
+                        20,
+                    )
+                )
+            for artifact, role, responsibility, sort_order in member_specs:
+                if str(artifact.workspace_id) != str(application.workspace_id):
+                    continue
+                _member = ApplicationArtifactMembership(
+                    workspace=application.workspace,
+                    application=application,
+                    artifact=artifact,
+                    role=role,
+                    responsibility_summary=responsibility,
+                    metadata_json={
+                        "origin": "legacy_deterministic_backfill",
+                        "backfill_version": 1,
+                    },
+                    sort_order=sort_order,
+                )
+                _member.save()
+                created_memberships += 1
+        else:
+            created_application = application is None
+            created_memberships = 1 + (1 if isinstance(policy_artifact, Artifact) else 0)
+
+        summary["groups_backfilled"] += 1
+        if created_application:
+            summary["applications_created"] += 1
+        summary["memberships_created"] += created_memberships
+        summary["backfilled"].append(
+            {
+                "workspace_id": str(bucket.get("workspace_id") or ""),
+                "workspace_slug": str(bucket.get("workspace_slug") or ""),
+                "solution_key": solution_key,
+                "application_id": str(application.id) if isinstance(application, Application) else None,
+                "application_created": created_application,
+                "membership_artifact_ids": sorted(candidate_artifact_ids),
+                "memberships_created": created_memberships,
+            }
+        )
+
+    return summary
+
+
 @csrf_exempt
 @login_required
 def artifact_bindings_collection(request: HttpRequest) -> JsonResponse:
