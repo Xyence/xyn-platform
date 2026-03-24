@@ -107,6 +107,7 @@ import AIAgentRoutingPage from "../../pages/AIAgentRoutingPage";
 import PlatformRenderingSettingsPage from "../../pages/PlatformRenderingSettingsPage";
 import PlatformDeploySettingsPage from "../../pages/PlatformDeploySettingsPage";
 import PlatformBrandingPage from "../../pages/PlatformBrandingPage";
+import WorkspacesPage from "../../pages/WorkspacesPage";
 import RulesBrowserPanel from "../rules/RulesBrowserPanel";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { SolutionDetailPanel, SolutionListPanel } from "../solutions/SolutionPanels";
@@ -3331,7 +3332,8 @@ type PlatformSettingsSurface =
   | "ai_agents"
   | "rendering_settings"
   | "deploy_settings"
-  | "branding";
+  | "branding"
+  | "workspaces";
 
 type PlatformSettingsTab = {
   id: string;
@@ -3365,6 +3367,8 @@ function platformSettingsSurfaceLabel(surface: PlatformSettingsSurface): string 
       return "Deploy Settings";
     case "branding":
       return "Branding";
+    case "workspaces":
+      return "Workspaces";
     default:
       return "Platform Settings";
   }
@@ -3381,15 +3385,20 @@ function mapPlatformSettingsRouteToSurface(route: string): PlatformSettingsSurfa
   if (path.endsWith("/platform/rendering-settings")) return "rendering_settings";
   if (path.endsWith("/platform/deploy")) return "deploy_settings";
   if (path.endsWith("/platform/branding")) return "branding";
+  if (path.endsWith("/platform/workspaces")) return "workspaces";
   return null;
 }
 
 const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
+  workspaceId,
+  workspaceName,
   initialSection,
   onSectionChange,
   initialSurface,
   onSurfaceChange,
 }: {
+  workspaceId: string;
+  workspaceName?: string;
   initialSection?: string;
   onSectionChange?: (section: HubSection) => void;
   initialSurface?: string;
@@ -3409,6 +3418,7 @@ const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
     "rendering_settings",
     "deploy_settings",
     "branding",
+    "workspaces",
   ] as string[]).includes(parsedSurface)
     ? (parsedSurface as PlatformSettingsSurface)
     : "hub";
@@ -3518,6 +3528,14 @@ const PlatformSettingsPanel = React.memo(function PlatformSettingsPanel({
       {activeSurface === "rendering_settings" ? <PlatformRenderingSettingsPage /> : null}
       {activeSurface === "deploy_settings" ? <PlatformDeploySettingsPage /> : null}
       {activeSurface === "branding" ? <PlatformBrandingPage /> : null}
+      {activeSurface === "workspaces" ? (
+        <WorkspacesPage
+          activeWorkspaceId={workspaceId}
+          activeWorkspaceName={workspaceName || workspaceId}
+          canWorkspaceAdmin
+          canManageWorkspaces
+        />
+      ) : null}
     </div>
   );
 });
@@ -5891,6 +5909,8 @@ export default function WorkbenchPanelHost({
       <div>
         <div className="card ems-panel-host">
           <PlatformSettingsPanel
+            workspaceId={workspaceId}
+            workspaceName={workspaceName}
             initialSection={String(panel.params?.section || "")}
             initialSurface={String(panel.params?.surface || "")}
             onSectionChange={(next) => {

@@ -10,6 +10,7 @@ const apiMocks = vi.hoisted(() => ({
   listGoals: vi.fn(),
   getGoal: vi.fn(),
   listCampaigns: vi.fn(),
+  listWorkspaces: vi.fn(),
   createCampaign: vi.fn(),
   getCampaign: vi.fn(),
   updateCampaign: vi.fn(),
@@ -68,6 +69,7 @@ vi.mock("../../../api/xyn", async () => {
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
     listCampaigns: apiMocks.listCampaigns,
+    listWorkspaces: apiMocks.listWorkspaces,
     createCampaign: apiMocks.createCampaign,
     getCampaign: apiMocks.getCampaign,
     updateCampaign: apiMocks.updateCampaign,
@@ -198,6 +200,18 @@ describe("WorkbenchPanelHost entity refresh", () => {
       components: ["application_service", "data_models", "api_endpoints"],
       generated_commands: [],
       artifacts: ["application"],
+    });
+    apiMocks.listWorkspaces.mockResolvedValue({
+      workspaces: [
+        {
+          id: "ws-1",
+          slug: "development",
+          name: "Development",
+          description: "",
+          role: "admin",
+          termination_authority: false,
+        },
+      ],
     });
   });
 
@@ -3694,6 +3708,31 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 2, name: "Platform Settings" })).toBeInTheDocument();
+  });
+
+  it("opens Workspace Management from Platform Settings hub in workbench context", async () => {
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          workspaceName="Development"
+          panel={{
+            panel_id: "platform-2",
+            panel_type: "detail",
+            instance_key: "platform_settings",
+            key: "platform_settings",
+            params: { section: "workspaces", surface: "hub" },
+          }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    const openButtons = await screen.findAllByRole("button", { name: "Open" });
+    fireEvent.click(openButtons[0]);
+
+    await waitFor(() => expect(screen.getByRole("heading", { level: 2, name: "Workspaces" })).toBeInTheDocument());
+    await waitFor(() => expect(apiMocks.listWorkspaces).toHaveBeenCalled());
   });
 
   it("loads composer discovery state with factory catalog", async () => {
