@@ -26,7 +26,7 @@ from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.validators import validate_email
 from django.core.paginator import Paginator
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import Count, Q
 from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -16469,12 +16469,17 @@ def _update_purpose_routing_assignment(purpose_slug: str, agent_id_raw: Any) -> 
         return f"agent '{desired_agent_id}' not found or disabled"
 
     link, _ = AgentDefinitionPurpose.objects.get_or_create(agent_definition=agent, purpose=purpose)
-    if not link.is_default_for_purpose:
-        link.is_default_for_purpose = True
-        link.save(update_fields=["is_default_for_purpose"])
+    # Clear any existing default first to satisfy the unique default-per-purpose
+    # constraint before promoting the selected link.
     AgentDefinitionPurpose.objects.filter(purpose=purpose, is_default_for_purpose=True).exclude(id=link.id).update(
         is_default_for_purpose=False
     )
+    if not link.is_default_for_purpose:
+        link.is_default_for_purpose = True
+        try:
+            link.save(update_fields=["is_default_for_purpose"])
+        except IntegrityError:
+            return f"unable to set default routing for purpose '{purpose_slug}' due to conflicting assignment"
     return None
 
 
