@@ -330,6 +330,47 @@ class AiRuntimeTests(TestCase):
         self.assertEqual(routing.get("resolved_agent_name"), "Xyn Coding Assistant")
         self.assertEqual(routing.get("resolution_source"), "explicit")
 
+    def test_resolve_ai_config_uses_resolved_agent_model_not_purpose_model(self):
+        provider, _ = ModelProvider.objects.get_or_create(slug="openai", defaults={"name": "OpenAI", "enabled": True})
+        purpose_model = ModelConfig.objects.create(provider=provider, model_name="gpt-5-mini", enabled=True)
+        purpose, _ = AgentPurpose.objects.get_or_create(
+            slug="planning",
+            defaults={"name": "Planning", "status": "active", "enabled": True},
+        )
+        purpose.model_config = purpose_model
+        purpose.save(update_fields=["model_config", "updated_at"])
+
+        os.environ["XYN_TEST_AGENT_MODEL_KEY"] = "sk-agent-model"
+        credential = ProviderCredential.objects.create(
+            provider=provider,
+            name="agent-openai",
+            auth_type="env_ref",
+            env_var_name="XYN_TEST_AGENT_MODEL_KEY",
+            enabled=True,
+            is_default=True,
+        )
+        selected_model = ModelConfig.objects.create(
+            provider=provider,
+            model_name="gpt-5.4",
+            credential=credential,
+            enabled=True,
+        )
+        selected_agent = AgentDefinition.objects.create(
+            slug="selected-planning-agent",
+            name="Selected Planning Agent",
+            model_config=selected_model,
+            enabled=True,
+        )
+        AgentDefinitionPurpose.objects.create(
+            agent_definition=selected_agent,
+            purpose=purpose,
+            is_default_for_purpose=True,
+        )
+
+        resolved = resolve_ai_config(purpose_slug="planning")
+        self.assertEqual(resolved.get("agent_slug"), "selected-planning-agent")
+        self.assertEqual(resolved.get("model_name"), "gpt-5.4")
+
     def test_resolve_agent_routing_uses_default_fallback_when_purpose_unassigned(self):
         with patch.dict(
             os.environ,

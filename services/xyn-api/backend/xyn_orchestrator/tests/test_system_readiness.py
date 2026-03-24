@@ -8,7 +8,16 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
 from xyn_orchestrator.ai_runtime import ensure_default_ai_seeds
-from xyn_orchestrator.models import AgentDefinition, ProviderCredential, RoleBinding, UserIdentity
+from xyn_orchestrator.models import (
+    AgentDefinition,
+    AgentDefinitionPurpose,
+    AgentPurpose,
+    ModelConfig,
+    ModelProvider,
+    ProviderCredential,
+    RoleBinding,
+    UserIdentity,
+)
 from xyn_orchestrator.system_readiness import system_readiness_report
 
 
@@ -186,3 +195,55 @@ class SystemReadinessTests(TestCase):
         payload = response.json()
         self.assertIn("ready", payload)
         self.assertIn("checks", payload)
+
+    def test_readiness_reports_model_from_resolved_purpose_agent(self):
+        provider, _ = ModelProvider.objects.get_or_create(slug="openai", defaults={"name": "OpenAI", "enabled": True})
+        os.environ["XYN_TEST_READINESS_AGENT_KEY"] = "sk-readiness-agent"
+        credential = ProviderCredential.objects.create(
+            provider=provider,
+            name="readiness-openai",
+            auth_type="env_ref",
+            env_var_name="XYN_TEST_READINESS_AGENT_KEY",
+            enabled=True,
+            is_default=True,
+        )
+        default_model = ModelConfig.objects.create(provider=provider, model_name="gpt-5-mini", credential=credential, enabled=True)
+        selected_model = ModelConfig.objects.create(provider=provider, model_name="gpt-5.4", credential=credential, enabled=True)
+        planning_purpose, _ = AgentPurpose.objects.get_or_create(
+            slug="planning",
+            defaults={"name": "Planning", "status": "active", "enabled": True},
+        )
+        coding_purpose, _ = AgentPurpose.objects.get_or_create(
+            slug="coding",
+            defaults={"name": "Coding", "status": "active", "enabled": True},
+        )
+        planning_purpose.model_config = default_model
+        planning_purpose.save(update_fields=["model_config", "updated_at"])
+        selected_planning_agent = AgentDefinition.objects.create(
+            slug="readiness-planning-agent",
+            name="Readiness Planning Agent",
+            model_config=selected_model,
+            enabled=True,
+        )
+        AgentDefinitionPurpose.objects.create(
+            agent_definition=selected_planning_agent,
+            purpose=planning_purpose,
+            is_default_for_purpose=True,
+        )
+        selected_coding_agent = AgentDefinition.objects.create(
+            slug="readiness-coding-agent",
+            name="Readiness Coding Agent",
+            model_config=selected_model,
+            enabled=True,
+        )
+        AgentDefinitionPurpose.objects.create(
+            agent_definition=selected_coding_agent,
+            purpose=coding_purpose,
+            is_default_for_purpose=True,
+        )
+
+        report = system_readiness_report()
+        planning = next(check for check in report["checks"] if check["component"] == "planning_agents")
+        coding = next(check for check in report["checks"] if check["component"] == "coding_agents")
+        self.assertIn("openai:gpt-5.4", planning["message"])
+        self.assertIn("openai:gpt-5.4", coding["message"])

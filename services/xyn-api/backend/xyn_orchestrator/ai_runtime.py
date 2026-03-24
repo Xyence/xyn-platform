@@ -714,7 +714,14 @@ def resolve_ai_config(*, purpose_slug: Optional[str] = None, agent_slug: Optiona
     purpose_obj = AgentPurpose.objects.filter(slug=purpose).first()
     purpose_preamble = str(getattr(purpose_obj, "preamble", "") or "")
     if agent:
-        model_config = purpose_obj.model_config if purpose_obj and purpose_obj.model_config_id else agent.model_config
+        # Runtime model selection must follow resolved agent routing. Purpose-level model
+        # config may inform defaults/authoring, but must not override explicit agent routing.
+        model_config = agent.model_config
+        if model_config is None and purpose_obj and purpose_obj.model_config_id:
+            # Legacy fallback for malformed agent rows.
+            model_config = purpose_obj.model_config
+        if model_config is None:
+            raise AiConfigError(f"Resolved agent '{agent.slug}' does not define a model configuration.")
         provider = model_config.provider
         credential = model_config.credential
         api_key = _resolve_model_api_key(provider.slug, credential)
