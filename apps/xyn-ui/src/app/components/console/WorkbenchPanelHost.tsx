@@ -343,9 +343,9 @@ function AiAgentRoutingCard({ routing }: { routing: AiAgentResolution[] | null }
   const planningRow = routingPurposeRow(routing, "planning");
   const codingRow = routingPurposeRow(routing, "coding");
   const rows = [
+    { purpose: "Default", row: defaultRow },
     { purpose: "Planning", row: planningRow },
     { purpose: "Coding", row: codingRow },
-    { purpose: "Default", row: defaultRow },
   ];
   return (
     <section className="card ai-routing-card">

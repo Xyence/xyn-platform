@@ -225,6 +225,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Claude Planning Agent")).toBeInTheDocument();
     expect(screen.getAllByText("Bootstrap Default Agent").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Fallback")).toBeInTheDocument();
+    const routingLabels = Array.from(
+      document.querySelectorAll(".ai-routing-card .ai-routing-row .field-label")
+    ).map((node) => node.textContent?.trim() || "");
+    expect(routingLabels).toEqual(["Default", "Planning", "Coding"]);
     expect(screen.getByText("System Readiness")).toBeInTheDocument();
     expect(screen.getByText("Configuration required")).toBeInTheDocument();
     expect(screen.getByText(/No enabled coding agents are configured\./)).toBeInTheDocument();
