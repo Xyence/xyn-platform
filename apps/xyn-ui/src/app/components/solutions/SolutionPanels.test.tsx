@@ -6,6 +6,8 @@ import { SolutionDetailPanel, SolutionListPanel } from "./SolutionPanels";
 
 const apiMocks = vi.hoisted(() => ({
   listApplications: vi.fn(),
+  generateApplicationPlan: vi.fn(),
+  applyApplicationPlan: vi.fn(),
   getApplication: vi.fn(),
   listApplicationArtifactMemberships: vi.fn(),
   listArtifacts: vi.fn(),
@@ -21,6 +23,8 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("../../../api/xyn", () => ({
   listApplications: apiMocks.listApplications,
+  generateApplicationPlan: apiMocks.generateApplicationPlan,
+  applyApplicationPlan: apiMocks.applyApplicationPlan,
   getApplication: apiMocks.getApplication,
   listApplicationArtifactMemberships: apiMocks.listApplicationArtifactMemberships,
   listArtifacts: apiMocks.listArtifacts,
@@ -61,6 +65,85 @@ describe("Solution panels", () => {
     expect(screen.getByText("Deal Finder")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Open" }));
     expect(onOpenPanel).toHaveBeenCalledWith("solution_detail", { application_id: "app-1" }, { open_in: "new_panel" });
+  });
+
+  it("creates a new solution via plan/apply and opens composer with an initialized planning session", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.listApplications
+      .mockResolvedValueOnce({ applications: [] })
+      .mockResolvedValueOnce({
+        applications: [
+          {
+            id: "app-1",
+            workspace_id: "ws-1",
+            name: "Deal Finder",
+            status: "active",
+            goal_count: 2,
+            artifact_member_count: 3,
+            updated_at: "2026-01-02T00:00:00Z",
+          },
+        ],
+      });
+    apiMocks.generateApplicationPlan.mockResolvedValue({ id: "plan-1" });
+    apiMocks.applyApplicationPlan.mockResolvedValue({
+      status: "applied",
+      application: { id: "app-1", name: "Deal Finder" },
+      application_plan: { id: "plan-1" },
+    });
+    apiMocks.createSolutionChangeSession.mockResolvedValue({
+      created: true,
+      session: { id: "session-1", application_id: "app-1" },
+    });
+
+    render(<SolutionListPanel workspaceId="ws-1" workspaceName="Workspace 1" onOpenPanel={onOpenPanel} />);
+
+    await waitFor(() => expect(apiMocks.listApplications).toHaveBeenCalledWith("ws-1"));
+    await userEvent.click(screen.getByRole("button", { name: "New Solution" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Solution name" }), "Deal Finder");
+    await userEvent.type(screen.getByRole("textbox", { name: "Objective / request" }), "Improve campaign creation UX");
+    await userEvent.click(screen.getByRole("button", { name: "Create Solution" }));
+
+    await waitFor(() =>
+      expect(apiMocks.generateApplicationPlan).toHaveBeenCalledWith({
+        workspace_id: "ws-1",
+        objective: "Improve campaign creation UX",
+        application_name: "Deal Finder",
+      })
+    );
+    await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
+    await waitFor(() =>
+      expect(apiMocks.createSolutionChangeSession).toHaveBeenCalledWith("app-1", {
+        request_text: "Improve campaign creation UX",
+      })
+    );
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      "composer_detail",
+      {
+        workspace_id: "ws-1",
+        application_id: "app-1",
+        solution_change_session_id: "session-1",
+      },
+      { open_in: "new_panel" }
+    );
+  });
+
+  it("prefills the new solution form when routed from create/build solution panel intent", async () => {
+    apiMocks.listApplications.mockResolvedValue({ applications: [] });
+    render(
+      <SolutionListPanel
+        workspaceId="ws-1"
+        workspaceName="Workspace 1"
+        createSolutionObjective="stabilize workspace selector placement"
+        createSolutionName="UI polish"
+        onOpenPanel={vi.fn()}
+      />
+    );
+    await waitFor(() => expect(apiMocks.listApplications).toHaveBeenCalledWith("ws-1"));
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Solution name" })).toHaveValue("UI polish");
+    expect(screen.getByRole("textbox", { name: "Objective / request" })).toHaveValue(
+      "stabilize workspace selector placement"
+    );
   });
 
   it("runs staged apply from solution detail panel and keeps composer handoff panel-native", async () => {

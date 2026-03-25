@@ -5062,6 +5062,8 @@ export default function WorkbenchPanelHost({
           workspaceId={workspaceId}
           workspaceName={String(panel.params?.workspace_name || "")}
           solutionNameQuery={String(panel.params?.solution_name || "") || undefined}
+          createSolutionObjective={String(panel.params?.create_solution_objective || "") || undefined}
+          createSolutionName={String(panel.params?.create_solution_name || "") || undefined}
           onOpenPanel={openPanel}
         />
       );

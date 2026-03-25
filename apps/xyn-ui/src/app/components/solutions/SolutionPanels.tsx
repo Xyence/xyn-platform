@@ -1,7 +1,9 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { ApplicationArtifactMembership, ApplicationDetail, ApplicationSummary, SolutionChangeSession, UnifiedArtifact } from "../../../api/types";
 import {
+  applyApplicationPlan,
   createSolutionChangeSession,
+  generateApplicationPlan,
   generateSolutionChangePlan,
   getApplication,
   listApplications,
@@ -37,35 +39,50 @@ export function SolutionListPanel({
   workspaceId,
   workspaceName,
   solutionNameQuery,
+  createSolutionObjective,
+  createSolutionName,
   onOpenPanel,
 }: {
   workspaceId: string;
   workspaceName: string;
   solutionNameQuery?: string;
+  createSolutionObjective?: string;
+  createSolutionName?: string;
   onOpenPanel: OpenPanel;
 }) {
   const [items, setItems] = useState<ApplicationSummary[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
   const [autoOpened, setAutoOpened] = useState<boolean>(false);
+  const [createOpen, setCreateOpen] = useState<boolean>(false);
+  const [createName, setCreateName] = useState<string>("");
+  const [createObjective, setCreateObjective] = useState<string>("");
+  const [creating, setCreating] = useState<boolean>(false);
+  const [createError, setCreateError] = useState<string>("");
+
+  async function loadSolutions() {
+    if (!workspaceId) {
+      setItems([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const payload = await listApplications(workspaceId);
+      setItems(payload.applications || []);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     let ignore = false;
     async function run() {
-      if (!workspaceId) {
-        setItems([]);
-        setLoading(false);
-        return;
-      }
-      setLoading(true);
-      setError("");
       try {
-        const payload = await listApplications(workspaceId);
-        if (!ignore) setItems(payload.applications || []);
+        await loadSolutions();
       } catch (err) {
         if (!ignore) setError(err instanceof Error ? err.message : "Failed to load solutions.");
-      } finally {
-        if (!ignore) setLoading(false);
       }
     }
     void run();
@@ -90,14 +107,99 @@ export function SolutionListPanel({
     onOpenPanel("solution_detail", { application_id: target.id }, { open_in: "new_panel" });
   }, [solutionNameQuery, loading, autoOpened, sorted, onOpenPanel]);
 
+  useEffect(() => {
+    const objective = String(createSolutionObjective || "").trim();
+    if (!objective) return;
+    setCreateOpen(true);
+    setCreateObjective(objective);
+    setCreateName(String(createSolutionName || "").trim());
+  }, [createSolutionName, createSolutionObjective]);
+
+  async function handleCreateSolution(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const objective = createObjective.trim();
+    if (!workspaceId || !objective) return;
+    setCreating(true);
+    setCreateError("");
+    try {
+      const plan = await generateApplicationPlan({
+        workspace_id: workspaceId,
+        objective,
+        ...(createName.trim() ? { application_name: createName.trim() } : {}),
+      });
+      const applied = await applyApplicationPlan(String(plan.id));
+      const session = await createSolutionChangeSession(String(applied.application.id), {
+        request_text: objective,
+      });
+      await loadSolutions();
+      setCreateOpen(false);
+      setCreateName("");
+      setCreateObjective("");
+      onOpenPanel(
+        "composer_detail",
+        {
+          workspace_id: workspaceId,
+          application_id: applied.application.id,
+          solution_change_session_id: session.session.id,
+        },
+        { open_in: "new_panel" }
+      );
+    } catch (err) {
+      setCreateError(err instanceof Error ? err.message : "Failed to create solution.");
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <section className="card solution-list-card" data-testid="solution-list-panel">
       <div className="solution-list-header">
-        <h3>Solutions</h3>
-        <p className="muted">
-          Multi-artifact development groups for <strong>{workspaceName || "this workspace"}</strong>.
-        </p>
+        <div>
+          <h3>Solutions</h3>
+          <p className="muted">
+            Multi-artifact development groups for <strong>{workspaceName || "this workspace"}</strong>.
+          </p>
+        </div>
+        <button className="button sm" type="button" onClick={() => {
+          setCreateError("");
+          setCreateOpen((current) => !current);
+        }}>
+          {createOpen ? "Close" : "New Solution"}
+        </button>
       </div>
+      {createOpen ? (
+        <section className="card solution-create-card">
+          <form className="stack" onSubmit={(event) => void handleCreateSolution(event)}>
+            <label className="field">
+              <span className="field-label">Solution name (optional)</span>
+              <input
+                aria-label="Solution name"
+                type="text"
+                value={createName}
+                onChange={(event) => setCreateName(event.target.value)}
+                placeholder="Deal Finder"
+              />
+            </label>
+            <label className="field">
+              <span className="field-label">Objective / request</span>
+              <textarea
+                aria-label="Objective / request"
+                rows={3}
+                value={createObjective}
+                onChange={(event) => setCreateObjective(event.target.value)}
+                placeholder="Describe the change you want planned."
+                required
+              />
+            </label>
+            {createError ? <p className="danger">{createError}</p> : null}
+            <div className="inline-action-row">
+              <button className="button sm" type="submit" disabled={creating || !createObjective.trim()}>
+                {creating ? "Creating…" : "Create Solution"}
+              </button>
+            </div>
+          </form>
+        </section>
+      ) : null}
       {loading ? <p className="muted">Loading solutions…</p> : null}
       {!loading && error ? <p className="danger">{error}</p> : null}
       {!loading && !error && sorted.length === 0 ? <p className="muted">No solutions have been registered yet.</p> : null}

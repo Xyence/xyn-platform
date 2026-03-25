@@ -3086,8 +3086,10 @@ button.sm {
 }
 
 .solution-list-header {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .solution-list-header h3 {
@@ -3096,6 +3098,10 @@ button.sm {
 
 .solution-list-header p {
   margin: 0;
+}
+
+.solution-create-card {
+  padding: 12px;
 }
 
 .solution-list-table-wrap,

@@ -42,7 +42,14 @@ type ArtifactStructuredQuery = {
 type ResolvedPanelCommand =
   | { panelKey: "composer_detail"; params: Record<string, never> }
   | { panelKey: "campaign_list"; params: { create?: boolean } }
-  | { panelKey: "solution_list"; params: { solution_name?: string } }
+  | {
+      panelKey: "solution_list";
+      params: {
+        solution_name?: string;
+        create_solution_objective?: string;
+        create_solution_name?: string;
+      };
+    }
   | { panelKey: "artifact_list"; params: { namespace?: string; query?: ArtifactStructuredQuery; query_error?: string } }
   | { panelKey: "workspaces"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "runs"; params: { query?: Record<string, unknown>; query_error?: string } }
@@ -207,6 +214,15 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
   }
   if (/^(show|list|open)\s+solutions?$/.test(normalized)) {
     return { panelKey: "solution_list", params: {} };
+  }
+  match = normalized.match(/^(create|build)\s+solution\s+(.+)$/);
+  if (match && match[2]) {
+    return {
+      panelKey: "solution_list",
+      params: {
+        create_solution_objective: String(match[2] || "").trim(),
+      },
+    };
   }
   match = normalized.match(/^(open|show|go to)\s+solution\s+(.+)$/);
   if (match && match[2]) {

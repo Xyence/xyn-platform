@@ -165,7 +165,14 @@ export default function WorkbenchPage({
       const nextParams: Record<string, unknown> = {};
       const solutionName = String(searchParams.get("solution_name") || "").trim();
       if (solutionName) nextParams.solution_name = solutionName;
-      if (!activePanel || activePanel.key !== "solution_list") {
+      const createObjective = String(searchParams.get("create_solution_objective") || "").trim();
+      const createName = String(searchParams.get("create_solution_name") || "").trim();
+      if (createObjective) nextParams.create_solution_objective = createObjective;
+      if (createName) nextParams.create_solution_name = createName;
+      const shouldOpenWithParams =
+        Boolean(solutionName || createObjective || createName)
+        && activePanel?.key === "solution_list";
+      if (!activePanel || activePanel.key !== "solution_list" || shouldOpenWithParams) {
         openPanel({
           key: "solution_list",
           params: nextParams,
@@ -174,6 +181,8 @@ export default function WorkbenchPage({
       }
       const next = new URLSearchParams(searchParams);
       next.delete("solution_name");
+      next.delete("create_solution_objective");
+      next.delete("create_solution_name");
       next.delete("panel");
       setSearchParams(next, { replace: true });
       return;

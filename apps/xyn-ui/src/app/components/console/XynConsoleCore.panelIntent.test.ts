@@ -153,6 +153,14 @@ describe("resolvePanelCommand", () => {
       panelKey: "solution_list",
       params: { solution_name: "deal finder" },
     });
+    expect(resolvePanelCommand("create solution add a new operator workflow")).toEqual({
+      panelKey: "solution_list",
+      params: { create_solution_objective: "add a new operator workflow" },
+    });
+    expect(resolvePanelCommand("build solution stabilize watcher evaluation")).toEqual({
+      panelKey: "solution_list",
+      params: { create_solution_objective: "stabilize watcher evaluation" },
+    });
     expect(resolvePanelCommand("campaigns")).toBeNull();
     expect(resolvePanelCommand("show campaigns")).toBeNull();
     expect(resolvePanelCommand("open campaigns")).toBeNull();
