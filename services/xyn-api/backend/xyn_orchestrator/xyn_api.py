@@ -28659,6 +28659,90 @@ def _ensure_solution_stage_checkpoint(
     return checkpoint
 
 
+def _solution_option_rows(
+    memberships: List[ApplicationArtifactMembership],
+    *,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    candidate_members = memberships[: min(max(limit, 1), len(memberships))]
+    options: List[Dict[str, Any]] = []
+    for member in candidate_members:
+        options.append(
+            {
+                "id": str(member.artifact_id),
+                "label": member.artifact.title,
+                "role": member.role,
+                "description": member.responsibility_summary or "",
+            }
+        )
+    return options
+
+
+def _maybe_emit_solution_checkpoint_turn(
+    *,
+    session: SolutionChangeSession,
+    checkpoint: SolutionPlanningCheckpoint,
+) -> None:
+    latest_checkpoint_turn = (
+        SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="checkpoint")
+        .order_by("-sequence", "-created_at")
+        .first()
+    )
+    latest_payload = latest_checkpoint_turn.payload_json if isinstance(getattr(latest_checkpoint_turn, "payload_json", None), dict) else {}
+    if (
+        latest_checkpoint_turn is not None
+        and str(latest_payload.get("checkpoint_id") or "") == str(checkpoint.id)
+        and str(latest_payload.get("status") or "") == str(checkpoint.status or "")
+    ):
+        return
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="checkpoint",
+        payload={
+            "checkpoint_id": str(checkpoint.id),
+            "checkpoint_key": checkpoint.checkpoint_key,
+            "label": checkpoint.label,
+            "required_before": checkpoint.required_before,
+            "status": checkpoint.status,
+        },
+    )
+
+
+def _advance_solution_planning_after_user_response(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> None:
+    planning_state = _solution_planning_state(session)
+    if planning_state.get("pending_question") or planning_state.get("pending_option_set"):
+        return
+    if not isinstance(session.plan_json, dict) or not session.plan_json:
+        plan = _generate_solution_change_plan(session=session, memberships=memberships)
+        session.plan_json = plan
+        session.status = "planned"
+        session.save(update_fields=["plan_json", "status", "updated_at"])
+        _append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="draft_plan",
+            payload={
+                "summary": "Generated structured cross-artifact draft plan.",
+                "objective": str(session.request_text or ""),
+                "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+                "shared_contracts": list(plan.get("shared_contracts") or []),
+                "validation_plan": list(plan.get("validation_plan") or []),
+            },
+        )
+    checkpoint = _ensure_solution_stage_checkpoint(session=session)
+    if str(checkpoint.status or "") != "pending":
+        checkpoint.status = "pending"
+        checkpoint.decided_by = None
+        checkpoint.decided_at = None
+        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+    _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+
+
 def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
     turns = list(
         SolutionPlanningTurn.objects.filter(session=session)
@@ -28684,27 +28768,23 @@ def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
         ),
         None,
     )
-    pending_question = next(
+    pending_prompt_turn = next(
         (
             serialized
             for serialized in reversed(serialized_turns)
             if str(serialized.get("actor") or "") == "planner"
-            and str(serialized.get("kind") or "") == "question"
+            and str(serialized.get("kind") or "") in {"question", "option_set"}
             and int(serialized.get("sequence") or 0) > last_user_sequence
         ),
         None,
     )
-    pending_option_set = next(
-        (
-            serialized
-            for serialized in reversed(serialized_turns)
-            if str(serialized.get("actor") or "") == "planner"
-            and str(serialized.get("kind") or "") == "option_set"
-            and int(serialized.get("sequence") or 0) > last_user_sequence
-        ),
-        None,
+    pending_question = pending_prompt_turn if str((pending_prompt_turn or {}).get("kind") or "") == "question" else None
+    pending_option_set = pending_prompt_turn if str((pending_prompt_turn or {}).get("kind") or "") == "option_set" else None
+    pending_checkpoints = (
+        [entry for entry in serialized_checkpoints if str(entry.get("status") or "") == "pending"]
+        if latest_draft_plan and not pending_prompt_turn
+        else []
     )
-    pending_checkpoints = [entry for entry in serialized_checkpoints if str(entry.get("status") or "") == "pending"]
     return {
         "turns": serialized_turns,
         "checkpoints": serialized_checkpoints,
@@ -28742,40 +28822,27 @@ def _seed_solution_planning_state_on_create(
             },
         )
     else:
-        candidate_members = memberships[: min(3, len(memberships))]
-        options: List[Dict[str, Any]] = []
-        for member in candidate_members:
-            options.append(
-                {
-                    "id": str(member.artifact_id),
-                    "label": member.artifact.title,
-                    "role": member.role,
-                    "description": member.responsibility_summary or "",
-                }
+        options = _solution_option_rows(memberships)
+        if options:
+            _append_solution_planning_turn(
+                session=session,
+                actor="planner",
+                kind="option_set",
+                payload={
+                    "prompt": "Select the first artifact focus for this planning session.",
+                    "options": options,
+                },
             )
-        _append_solution_planning_turn(
-            session=session,
-            actor="planner",
-            kind="option_set",
-            payload={
-                "prompt": "Select the first artifact focus for this planning session.",
-                "options": options,
-            },
-        )
-
-    checkpoint = _ensure_solution_stage_checkpoint(session=session)
-    _append_solution_planning_turn(
-        session=session,
-        actor="planner",
-        kind="checkpoint",
-        payload={
-            "checkpoint_id": str(checkpoint.id),
-            "checkpoint_key": checkpoint.checkpoint_key,
-            "label": checkpoint.label,
-            "required_before": checkpoint.required_before,
-            "status": checkpoint.status,
-        },
-    )
+        else:
+            _append_solution_planning_turn(
+                session=session,
+                actor="planner",
+                kind="question",
+                payload={
+                    "question": "No selectable artifacts are available yet. Add memberships or refine scope, then regenerate options.",
+                    "reason": "missing_artifact_options",
+                },
+            )
 
 
 def _analyze_solution_impacted_artifacts(
@@ -32407,6 +32474,7 @@ def application_solution_change_session_reply(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
+    _advance_solution_planning_after_user_response(session=session, memberships=memberships)
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {
@@ -32478,6 +32546,7 @@ def application_solution_change_session_select_option(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
+    _advance_solution_planning_after_user_response(session=session, memberships=memberships)
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {
@@ -32549,6 +32618,49 @@ def application_solution_change_session_checkpoint_decision(
 
 @csrf_exempt
 @login_required
+def application_solution_change_session_regenerate_options(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    options = _solution_option_rows(memberships)
+    if not options:
+        return JsonResponse({"error": "no selectable artifacts are available for this solution"}, status=409)
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="option_set",
+        payload={
+            "prompt": "Select the first artifact focus for this planning session.",
+            "options": options,
+            "source": "regenerated",
+        },
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "regenerated": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
 def application_solution_change_session_plan(
     request: HttpRequest, application_id: str, session_id: str
 ) -> JsonResponse:
@@ -32568,6 +32680,11 @@ def application_solution_change_session_plan(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
+    planning_state = _solution_planning_state(session)
+    if planning_state.get("pending_question"):
+        return JsonResponse({"error": "planner clarification is pending; submit a reply before generating a draft plan"}, status=409)
+    if planning_state.get("pending_option_set"):
+        return JsonResponse({"error": "planner option selection is pending; select an option before generating a draft plan"}, status=409)
     plan = _generate_solution_change_plan(session=session, memberships=memberships)
     session.plan_json = plan
     session.status = "planned"
@@ -32578,6 +32695,7 @@ def application_solution_change_session_plan(
         kind="draft_plan",
         payload={
             "summary": "Generated structured cross-artifact draft plan.",
+            "objective": str(session.request_text or ""),
             "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
             "shared_contracts": list(plan.get("shared_contracts") or []),
             "validation_plan": list(plan.get("validation_plan") or []),
@@ -32589,18 +32707,7 @@ def application_solution_change_session_plan(
         checkpoint.decided_by = None
         checkpoint.decided_at = None
         checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
-    _append_solution_planning_turn(
-        session=session,
-        actor="planner",
-        kind="checkpoint",
-        payload={
-            "checkpoint_id": str(checkpoint.id),
-            "checkpoint_key": checkpoint.checkpoint_key,
-            "label": checkpoint.label,
-            "required_before": checkpoint.required_before,
-            "status": checkpoint.status,
-        },
-    )
+    _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {
@@ -32631,6 +32738,17 @@ def application_solution_change_session_stage_apply(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
+    planning_state = _solution_planning_state(session)
+    if planning_state.get("pending_question") or planning_state.get("pending_option_set"):
+        return JsonResponse({"error": "planning interaction is still pending; resolve planner prompts before staging"}, status=409)
+    if not planning_state.get("latest_draft_plan"):
+        return JsonResponse({"error": "a draft plan is required before staging"}, status=409)
+    stage_checkpoint = SolutionPlanningCheckpoint.objects.filter(
+        session=session,
+        checkpoint_key="plan_scope_confirmed",
+    ).order_by("-created_at").first()
+    if stage_checkpoint is not None and str(stage_checkpoint.status or "") != "approved":
+        return JsonResponse({"error": "planning approval checkpoint must be approved before staging"}, status=409)
     if not isinstance(session.plan_json, dict) or not session.plan_json:
         return JsonResponse({"error": "solution change session must have a generated plan before staging"}, status=409)
     _stage_solution_change_session(session=session, memberships=memberships)

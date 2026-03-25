@@ -39,6 +39,7 @@ import {
   queryEmsDevicesCanvasTable,
   queryEmsRegistrationsCanvasTable,
   requeueDevTask,
+  regenerateSolutionPlanningOptions,
   replyToSolutionPlanningSession,
   reviewCoordinationThread,
   reviewGoal,
@@ -4341,17 +4342,29 @@ function ComposerDetailPanel({
   const pendingOptionSet = planning?.pending_option_set || null;
   const pendingCheckpoints = Array.isArray(planning?.pending_checkpoints) ? planning.pending_checkpoints : [];
   const latestDraftPlan = planning?.latest_draft_plan || null;
+  const allCheckpoints = Array.isArray(planning?.checkpoints) ? planning.checkpoints : [];
+  const hasPendingPrompt = Boolean(pendingQuestion || pendingOptionSet);
+  const hasDraftPlan = Boolean(latestDraftPlan || (selectedSession?.plan && Object.keys(selectedSession.plan).length > 0));
+  const hasPendingCheckpoint = pendingCheckpoints.length > 0;
+  const stageCheckpoint = allCheckpoints.find((entry: any) => String(entry.checkpoint_key || "") === "plan_scope_confirmed") || null;
+  const hasApprovedStageCheckpoint = !stageCheckpoint || String(stageCheckpoint.status || "") === "approved";
+  const canRunExecution = hasDraftPlan && !hasPendingPrompt && hasApprovedStageCheckpoint && !hasPendingCheckpoint;
+  const hasExecutionProgress = ["staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion", "completed", "applied"].includes(
+    String(selectedSession?.execution_status || "").toLowerCase()
+  );
+  const showInitialRequestInput = !hasDraftPlan && !hasPendingPrompt;
+  const showIterativeRequestInput = hasExecutionProgress && !hasPendingPrompt && !hasPendingCheckpoint;
   const latestActivityAt = planningTurns.length
     ? String(planningTurns[planningTurns.length - 1]?.created_at || selectedSession?.updated_at || "")
     : String(selectedSession?.updated_at || "");
 
   const planningStatusLabel = !selectedSession
     ? "Session required"
-    : pendingCheckpoints.length
+    : hasPendingCheckpoint
       ? "Awaiting approval"
-      : pendingQuestion || pendingOptionSet
+      : hasPendingPrompt
         ? "Awaiting response"
-        : latestDraftPlan
+        : hasDraftPlan
           ? "Draft plan ready"
           : titleCaseLabel(String(selectedSession.status || "draft"));
 
@@ -4482,10 +4495,12 @@ function ComposerDetailPanel({
           <div><div className="field-label">Planning status</div><div className="field-value">{planningStatusLabel}</div></div>
           <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(latestActivityAt)}</div></div>
         </div>
-        {!pendingQuestion ? (
+        {showInitialRequestInput || showIterativeRequestInput ? (
           <>
             <p className="muted small" style={{ marginTop: 10, marginBottom: 8 }}>
-              Request a change for the selected solution session.
+              {showIterativeRequestInput
+                ? "Describe the next change to continue this planning session."
+                : "Request a change for the selected solution session."}
             </p>
             <textarea
               className="input"
@@ -4511,17 +4526,19 @@ function ComposerDetailPanel({
                     );
                     mergeUpdatedSession(response.session);
                     setRequestDraft("");
-                    setMessage("Recorded change request.");
+                    setMessage(showIterativeRequestInput ? "Recorded iterative change request." : "Recorded change request.");
                   });
                 }}
               >
-                Submit Request
+                {showIterativeRequestInput ? "Describe Change" : "Submit Request"}
               </button>
             </div>
           </>
         ) : (
           <p className="muted small" style={{ marginTop: 10 }}>
-            A planner clarification is pending below. Respond there to continue.
+            {hasDraftPlan
+              ? "A draft plan is available. Complete approval to unlock execution controls."
+              : "A planner clarification or option selection is pending below. Respond there to continue."}
           </p>
         )}
         {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
@@ -4608,56 +4625,91 @@ function ComposerDetailPanel({
                   {isOptionTurn ? (
                     <div className="composer-planning-action-block">
                       <p className="composer-planning-turn__body">{String(payloadMap.question || payloadMap.prompt || "Select one planning option.")}</p>
-                      <div className="composer-option-list">
-                        {options.map((option: any, index: number) => {
-                          const optionId = String(option?.id || `option-${index}`);
-                          const optionLabel = String(option?.label || optionId);
-                          const optionDescription = String(option?.description || "");
-                          return (
-                            <label key={optionId} className="composer-option-item">
-                              <input
-                                type="radio"
-                                name={`planner-option-${turn.id}`}
-                                checked={selectedOptionId === optionId}
-                                onChange={() => setSelectedOptionByTurn((current) => ({ ...current, [String(turn.id)]: optionId }))}
-                              />
-                              <span>
-                                <strong>{optionLabel}</strong>
-                                {optionDescription ? <span className="muted small">{optionDescription}</span> : null}
-                              </span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                      <div className="inline-action-row" style={{ marginTop: 8 }}>
-                        <button
-                          type="button"
-                          className="ghost sm"
-                          disabled={!isPendingOptionTurn || busyAction === `option:${turn.id}` || !selectedOptionId}
-                          onClick={() => {
-                            if (!selectedSession || !selectedOptionId) return;
-                            setBusyAction(`option:${turn.id}`);
-                            void withSessionGuard(async () => {
-                              const response = await selectSolutionPlanningOption(
-                                String(selectedSession.application_id),
-                                String(selectedSession.id),
-                                {
-                                  option_id: selectedOptionId,
-                                  source_turn_id: String(turn.id),
-                                }
+                      {options.length ? (
+                        <>
+                          <div className="composer-option-list">
+                            {options.map((option: any, index: number) => {
+                              const optionId = String(option?.id || `option-${index}`);
+                              const optionLabel = String(option?.label || optionId);
+                              const optionDescription = String(option?.description || "");
+                              const effectiveSelectedOptionId = selectedOptionId || String(options[0]?.id || "");
+                              return (
+                                <label key={optionId} className="composer-option-item">
+                                  <input
+                                    type="radio"
+                                    name={`planner-option-${turn.id}`}
+                                    checked={effectiveSelectedOptionId === optionId}
+                                    onChange={() => setSelectedOptionByTurn((current) => ({ ...current, [String(turn.id)]: optionId }))}
+                                  />
+                                  <span>
+                                    <strong>{optionLabel}</strong>
+                                    {optionDescription ? <span className="muted small">{optionDescription}</span> : null}
+                                  </span>
+                                </label>
                               );
-                              mergeUpdatedSession(response.session);
-                              setMessage("Option selected.");
-                            });
-                          }}
-                        >
-                          Select Option
-                        </button>
-                      </div>
+                            })}
+                          </div>
+                          <div className="inline-action-row" style={{ marginTop: 8 }}>
+                            <button
+                              type="button"
+                              className="ghost sm"
+                              disabled={!isPendingOptionTurn || busyAction === `option:${turn.id}` || !(selectedOptionId || String(options[0]?.id || ""))}
+                              onClick={() => {
+                                const effectiveSelectedOptionId = selectedOptionId || String(options[0]?.id || "");
+                                if (!selectedSession || !effectiveSelectedOptionId) return;
+                                setBusyAction(`option:${turn.id}`);
+                                void withSessionGuard(async () => {
+                                  const response = await selectSolutionPlanningOption(
+                                    String(selectedSession.application_id),
+                                    String(selectedSession.id),
+                                    {
+                                      option_id: effectiveSelectedOptionId,
+                                      source_turn_id: String(turn.id),
+                                    }
+                                  );
+                                  mergeUpdatedSession(response.session);
+                                  setMessage("Option selected.");
+                                });
+                              }}
+                            >
+                              Select Option
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <InlineMessage
+                            tone="warn"
+                            title="Planner options unavailable"
+                            body="This option set has no selectable options. Regenerate options to continue."
+                          />
+                          <div className="inline-action-row" style={{ marginTop: 8 }}>
+                            <button
+                              type="button"
+                              className="ghost sm"
+                              disabled={!isPendingOptionTurn || busyAction === `regen-options:${turn.id}`}
+                              onClick={() => {
+                                if (!selectedSession) return;
+                                setBusyAction(`regen-options:${turn.id}`);
+                                void withSessionGuard(async () => {
+                                  const response = await regenerateSolutionPlanningOptions(
+                                    String(selectedSession.application_id),
+                                    String(selectedSession.id),
+                                  );
+                                  mergeUpdatedSession(response.session);
+                                  setMessage("Planner options regenerated.");
+                                });
+                              }}
+                            >
+                              Regenerate Options
+                            </button>
+                          </div>
+                        </>
+                      )}
                     </div>
                   ) : null}
                   {isDraftPlanTurn ? renderDraftPlanSummary(turn) : null}
-                  {isCheckpointTurn ? (
+                  {isCheckpointTurn && hasDraftPlan ? (
                     <div className="composer-planning-action-block">
                       <p className="composer-planning-turn__body">
                         {String(payloadMap.label || "Approval checkpoint")}
@@ -4758,91 +4810,103 @@ function ComposerDetailPanel({
           <p className="muted">Execution actions are available after selecting a solution change session.</p>
         ) : (
           <>
-            {pendingCheckpoints.length ? (
+            {hasPendingCheckpoint ? (
               <InlineMessage
                 tone="warn"
                 title="Awaiting planning approval"
                 body="A checkpoint is pending. Stage/apply actions remain blocked until approval is recorded."
               />
             ) : null}
-            <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
-              <button
-                type="button"
-                className="ghost sm"
-                disabled={busyAction === "generate-plan"}
-                onClick={() => {
-                  setBusyAction("generate-plan");
-                  void withSessionGuard(async () => {
-                    const response = await generateSolutionChangePlan(
-                      String(selectedSession.application_id),
-                      String(selectedSession.id)
-                    );
-                    mergeUpdatedSession(response.session);
-                    setMessage("Draft plan generated.");
-                  });
-                }}
-              >
-                Generate Draft Plan
-              </button>
-              <button
-                type="button"
-                className="ghost sm"
-                disabled={pendingCheckpoints.length > 0 || busyAction === "stage-apply"}
-                onClick={() => {
-                  setBusyAction("stage-apply");
-                  void withSessionGuard(async () => {
-                    const response = await stageSolutionChangeApply(
-                      String(selectedSession.application_id),
-                      String(selectedSession.id)
-                    );
-                    mergeUpdatedSession(response.session);
-                    setMessage("Stage apply completed.");
-                  });
-                }}
-              >
-                Stage Apply
-              </button>
-              <button
-                type="button"
-                className="ghost sm"
-                disabled={pendingCheckpoints.length > 0 || busyAction === "prepare-preview"}
-                onClick={() => {
-                  setBusyAction("prepare-preview");
-                  void withSessionGuard(async () => {
-                    const response = await prepareSolutionChangePreview(
-                      String(selectedSession.application_id),
-                      String(selectedSession.id)
-                    );
-                    mergeUpdatedSession(response.session);
-                    setMessage("Preview preparation completed.");
-                  });
-                }}
-              >
-                Prepare Preview
-              </button>
-              <button
-                type="button"
-                className="ghost sm"
-                disabled={busyAction === "validate"}
-                onClick={() => {
-                  setBusyAction("validate");
-                  void withSessionGuard(async () => {
-                    const response = await validateSolutionChangeSession(
-                      String(selectedSession.application_id),
-                      String(selectedSession.id)
-                    );
-                    mergeUpdatedSession(response.session);
-                    setMessage("Validation completed.");
-                  });
-                }}
-              >
-                Validate
-              </button>
-            </div>
+            {!hasDraftPlan && !hasPendingPrompt ? (
+              <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className="ghost sm"
+                  disabled={busyAction === "generate-plan"}
+                  onClick={() => {
+                    setBusyAction("generate-plan");
+                    void withSessionGuard(async () => {
+                      const response = await generateSolutionChangePlan(
+                        String(selectedSession.application_id),
+                        String(selectedSession.id)
+                      );
+                      mergeUpdatedSession(response.session);
+                      setMessage("Draft plan generated.");
+                    });
+                  }}
+                >
+                  Generate Draft Plan
+                </button>
+              </div>
+            ) : null}
+            {canRunExecution ? (
+              <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className="ghost sm"
+                  disabled={busyAction === "stage-apply"}
+                  onClick={() => {
+                    setBusyAction("stage-apply");
+                    void withSessionGuard(async () => {
+                      const response = await stageSolutionChangeApply(
+                        String(selectedSession.application_id),
+                        String(selectedSession.id)
+                      );
+                      mergeUpdatedSession(response.session);
+                      setMessage("Stage apply completed.");
+                    });
+                  }}
+                >
+                  Stage Apply
+                </button>
+                <button
+                  type="button"
+                  className="ghost sm"
+                  disabled={busyAction === "prepare-preview"}
+                  onClick={() => {
+                    setBusyAction("prepare-preview");
+                    void withSessionGuard(async () => {
+                      const response = await prepareSolutionChangePreview(
+                        String(selectedSession.application_id),
+                        String(selectedSession.id)
+                      );
+                      mergeUpdatedSession(response.session);
+                      setMessage("Preview preparation completed.");
+                    });
+                  }}
+                >
+                  Prepare Preview
+                </button>
+                <button
+                  type="button"
+                  className="ghost sm"
+                  disabled={busyAction === "validate"}
+                  onClick={() => {
+                    setBusyAction("validate");
+                    void withSessionGuard(async () => {
+                      const response = await validateSolutionChangeSession(
+                        String(selectedSession.application_id),
+                        String(selectedSession.id)
+                      );
+                      mergeUpdatedSession(response.session);
+                      setMessage("Validation completed.");
+                    });
+                  }}
+                >
+                  Validate
+                </button>
+              </div>
+            ) : null}
             <p className="muted small" style={{ marginTop: 8 }}>
-              {pendingCheckpoints.length
-                ? "Execution is blocked while approvals are pending."
-                : "Execution actions are available for this session."}
+              {hasPendingPrompt
+                ? "Execution is blocked while planner prompts are unresolved."
+                : !hasDraftPlan
+                  ? "Execution unlocks after a draft plan is available."
+                  : hasPendingCheckpoint
+                    ? "Execution is blocked while approvals are pending."
+                    : !hasApprovedStageCheckpoint
+                      ? "Execution remains blocked until the planning checkpoint is approved."
+                      : "Execution actions are available for this session."}
             </p>
           </>
         )}

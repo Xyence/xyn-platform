@@ -4727,6 +4727,19 @@ export async function selectSolutionPlanningOption(
   return handle<{ recorded: boolean; session: SolutionChangeSession }>(response);
 }
 
+export async function regenerateSolutionPlanningOptions(
+  applicationId: string,
+  sessionId: string
+): Promise<{ regenerated: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/regenerate-options`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ regenerated: boolean; session: SolutionChangeSession }>(response);
+}
+
 export async function decideSolutionPlanningCheckpoint(
   applicationId: string,
   sessionId: string,

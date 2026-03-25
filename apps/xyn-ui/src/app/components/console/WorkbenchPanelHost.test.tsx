@@ -47,6 +47,7 @@ const apiMocks = vi.hoisted(() => ({
   prepareSolutionChangePreview: vi.fn(),
   validateSolutionChangeSession: vi.fn(),
   replyToSolutionPlanningSession: vi.fn(),
+  regenerateSolutionPlanningOptions: vi.fn(),
   selectSolutionPlanningOption: vi.fn(),
   decideSolutionPlanningCheckpoint: vi.fn(),
 }));
@@ -114,6 +115,7 @@ vi.mock("../../../api/xyn", async () => {
     prepareSolutionChangePreview: apiMocks.prepareSolutionChangePreview,
     validateSolutionChangeSession: apiMocks.validateSolutionChangeSession,
     replyToSolutionPlanningSession: apiMocks.replyToSolutionPlanningSession,
+    regenerateSolutionPlanningOptions: apiMocks.regenerateSolutionPlanningOptions,
     selectSolutionPlanningOption: apiMocks.selectSolutionPlanningOption,
     decideSolutionPlanningCheckpoint: apiMocks.decideSolutionPlanningCheckpoint,
   };
@@ -861,7 +863,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.queryByText("Application efforts")).not.toBeInTheDocument();
   });
 
-  it("records planner replies, option selections, and checkpoint approvals from the planning timeline", async () => {
+  it("keeps composer phase-gated and allows selecting pending planner options", async () => {
     const onOpenPanel = vi.fn();
     const sessionPayload = {
       id: "session-1",
@@ -885,23 +887,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
             updated_at: "2026-03-20T10:00:00Z",
           },
           {
-            id: "turn-question",
-            workspace_id: "ws-1",
-            session_id: "session-1",
-            actor: "planner",
-            kind: "question",
-            sequence: 2,
-            payload: { question: "Which user role should be prioritized?" },
-            created_at: "2026-03-20T10:01:00Z",
-            updated_at: "2026-03-20T10:01:00Z",
-          },
-          {
             id: "turn-options",
             workspace_id: "ws-1",
             session_id: "session-1",
             actor: "planner",
             kind: "option_set",
-            sequence: 3,
+            sequence: 2,
             payload: {
               question: "Choose implementation path",
               options: [
@@ -912,55 +903,16 @@ describe("WorkbenchPanelHost entity refresh", () => {
             created_at: "2026-03-20T10:02:00Z",
             updated_at: "2026-03-20T10:02:00Z",
           },
-          {
-            id: "turn-checkpoint",
-            workspace_id: "ws-1",
-            session_id: "session-1",
-            actor: "planner",
-            kind: "checkpoint",
-            sequence: 4,
-            payload: {
-              checkpoint_id: "checkpoint-1",
-              label: "Approve planning scope before stage apply",
-              required_before: "stage",
-              status: "pending",
-            },
-            created_at: "2026-03-20T10:03:00Z",
-            updated_at: "2026-03-20T10:03:00Z",
-          },
         ],
-        checkpoints: [
-          {
-            id: "checkpoint-1",
-            workspace_id: "ws-1",
-            session_id: "session-1",
-            checkpoint_key: "plan_scope_confirmed",
-            label: "Approve planning scope before stage apply",
-            status: "pending",
-            required_before: "stage",
-            payload: {},
-            created_at: "2026-03-20T10:03:00Z",
-            updated_at: "2026-03-20T10:03:00Z",
-          },
-        ],
-        pending_question: {
-          id: "turn-question",
-          workspace_id: "ws-1",
-          session_id: "session-1",
-          actor: "planner",
-          kind: "question",
-          sequence: 2,
-          payload: { question: "Which user role should be prioritized?" },
-          created_at: "2026-03-20T10:01:00Z",
-          updated_at: "2026-03-20T10:01:00Z",
-        },
+        checkpoints: [],
+        pending_question: null,
         pending_option_set: {
           id: "turn-options",
           workspace_id: "ws-1",
           session_id: "session-1",
           actor: "planner",
           kind: "option_set",
-          sequence: 3,
+          sequence: 2,
           payload: {
             question: "Choose implementation path",
             options: [
@@ -971,20 +923,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
           created_at: "2026-03-20T10:02:00Z",
           updated_at: "2026-03-20T10:02:00Z",
         },
-        pending_checkpoints: [
-          {
-            id: "checkpoint-1",
-            workspace_id: "ws-1",
-            session_id: "session-1",
-            checkpoint_key: "plan_scope_confirmed",
-            label: "Approve planning scope before stage apply",
-            status: "pending",
-            required_before: "stage",
-            payload: {},
-            created_at: "2026-03-20T10:03:00Z",
-            updated_at: "2026-03-20T10:03:00Z",
-          },
-        ],
+        pending_checkpoints: [],
         latest_draft_plan: null,
       },
       created_at: "2026-03-20T10:00:00Z",
@@ -1018,7 +957,6 @@ describe("WorkbenchPanelHost entity refresh", () => {
     });
     apiMocks.replyToSolutionPlanningSession.mockResolvedValue({ recorded: true, session: sessionPayload });
     apiMocks.selectSolutionPlanningOption.mockResolvedValue({ recorded: true, session: sessionPayload });
-    apiMocks.decideSolutionPlanningCheckpoint.mockResolvedValue({ recorded: true, session: sessionPayload });
 
     render(
       <MemoryRouter>
@@ -1037,17 +975,9 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
-    fireEvent.change(screen.getByPlaceholderText("Reply to planner question."), {
-      target: { value: "Prioritize the operator role first." },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Submit Reply" }));
-    await waitFor(() =>
-      expect(apiMocks.replyToSolutionPlanningSession).toHaveBeenCalledWith("app-1", "session-1", {
-        reply_text: "Prioritize the operator role first.",
-        source_turn_id: "turn-question",
-      })
-    );
-
+    expect(screen.queryByPlaceholderText("Describe the change you want planned.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("radio", { name: /Conservative/i }));
     fireEvent.click(screen.getByRole("button", { name: "Select Option" }));
     await waitFor(() =>
@@ -1056,13 +986,111 @@ describe("WorkbenchPanelHost entity refresh", () => {
         source_turn_id: "turn-options",
       })
     );
+    expect(apiMocks.decideSolutionPlanningCheckpoint).not.toHaveBeenCalled();
+  });
 
-    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+  it("shows a regenerate-options fallback when planner option payload is empty", async () => {
+    const onOpenPanel = vi.fn();
+    const sessionPayload = {
+      id: "session-1",
+      workspace_id: "ws-1",
+      application_id: "app-1",
+      title: "Deal Finder Session",
+      request_text: "Improve campaign creation UX",
+      status: "draft",
+      selected_artifact_ids: ["artifact-1"],
+      planning: {
+        turns: [
+          {
+            id: "turn-request",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "user",
+            kind: "request",
+            sequence: 1,
+            payload: { request_text: "Improve campaign creation UX" },
+            created_at: "2026-03-20T10:00:00Z",
+            updated_at: "2026-03-20T10:00:00Z",
+          },
+          {
+            id: "turn-options-empty",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "planner",
+            kind: "option_set",
+            sequence: 2,
+            payload: { question: "Choose implementation path", options: [] },
+            created_at: "2026-03-20T10:01:00Z",
+            updated_at: "2026-03-20T10:01:00Z",
+          },
+        ],
+        checkpoints: [],
+        pending_question: null,
+        pending_option_set: {
+          id: "turn-options-empty",
+          workspace_id: "ws-1",
+          session_id: "session-1",
+          actor: "planner",
+          kind: "option_set",
+          sequence: 2,
+          payload: { question: "Choose implementation path", options: [] },
+          created_at: "2026-03-20T10:01:00Z",
+          updated_at: "2026-03-20T10:01:00Z",
+        },
+        pending_checkpoints: [],
+        latest_draft_plan: null,
+      },
+      created_at: "2026-03-20T10:00:00Z",
+      updated_at: "2026-03-20T10:01:00Z",
+    };
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: "app-1",
+        goal_id: null,
+        thread_id: null,
+        solution_change_session_id: "session-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      solution_change_sessions: [sessionPayload],
+      solution_change_session: sessionPayload,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+    apiMocks.regenerateSolutionPlanningOptions.mockResolvedValue({ regenerated: true, session: sessionPayload });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText("Planner options unavailable")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate Options" }));
     await waitFor(() =>
-      expect(apiMocks.decideSolutionPlanningCheckpoint).toHaveBeenCalledWith("app-1", "session-1", "checkpoint-1", {
-        decision: "approved",
-        notes: "",
-      })
+      expect(apiMocks.regenerateSolutionPlanningOptions).toHaveBeenCalledWith("app-1", "session-1")
     );
   });
 
