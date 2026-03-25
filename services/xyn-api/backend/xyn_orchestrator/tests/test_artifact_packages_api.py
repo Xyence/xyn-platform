@@ -47,6 +47,16 @@ class ArtifactPackagesApiTests(TestCase):
         session = self.client.session
         session["user_identity_id"] = str(self.identity.id)
         session.save()
+        self.workspace = Workspace.objects.create(
+            slug=f"pkg-workspace-{uuid.uuid4().hex[:8]}",
+            name="Package Workspace",
+        )
+        WorkspaceMembership.objects.create(
+            workspace=self.workspace,
+            user_identity=self.identity,
+            role="admin",
+            termination_authority=True,
+        )
 
     def _package_blob(self, *, artifacts, package_name="ems-hello", package_version="0.1.0", mutate_checksums=False):
         files = {}
@@ -114,6 +124,13 @@ class ArtifactPackagesApiTests(TestCase):
         upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
         return self.client.post("/xyn/api/artifacts/packages/import", data={"file": upload})
 
+    def _import_generated_artifacts(self, blob: bytes):
+        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
+        return self.client.post(
+            f"/xyn/api/artifacts/import?workspace_id={self.workspace.id}",
+            data={"file": upload},
+        )
+
     def _grant_debug_view(self):
         RoleBinding.objects.get_or_create(
             user_identity=self.identity,
@@ -165,15 +182,15 @@ class ArtifactPackagesApiTests(TestCase):
             package_name="app.net-inventory",
             package_version="0.0.1-dev",
         )
-        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
-        first = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        first = self._import_generated_artifacts(blob)
         self.assertEqual(first.status_code, 200, first.content.decode())
         self.assertTrue(
             Artifact.objects.filter(slug="app.net-inventory", package_version="0.0.1-dev").exists()
         )
+        artifact = Artifact.objects.get(slug="app.net-inventory", package_version="0.0.1-dev")
+        self.assertEqual(str(artifact.workspace_id), str(self.workspace.id))
 
-        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
-        second = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        second = self._import_generated_artifacts(blob)
         self.assertEqual(second.status_code, 200, second.content.decode())
         payload = second.json()
         self.assertFalse(payload["created"])
@@ -182,7 +199,7 @@ class ArtifactPackagesApiTests(TestCase):
             1,
         )
         application_rows = Application.objects.filter(
-            workspace=Artifact.objects.get(slug="app.net-inventory", package_version="0.0.1-dev").workspace,
+            workspace=self.workspace,
             metadata_json__generated_artifact_key="net-inventory",
         )
         self.assertEqual(application_rows.count(), 1)
@@ -229,8 +246,7 @@ class ArtifactPackagesApiTests(TestCase):
             package_name="app.net-inventory",
             package_version="0.0.1-dev",
         )
-        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
-        imported = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        imported = self._import_generated_artifacts(blob)
         self.assertEqual(imported.status_code, 200, imported.content.decode())
 
         artifact = Artifact.objects.get(slug="app.net-inventory", package_version="0.0.1-dev")
@@ -291,18 +307,19 @@ class ArtifactPackagesApiTests(TestCase):
             package_name="app.team-lunch-poll",
             package_version="0.0.1-dev",
         )
-        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
-        imported = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        imported = self._import_generated_artifacts(blob)
 
         self.assertEqual(imported.status_code, 200, imported.content.decode())
         self.assertTrue(Artifact.objects.filter(slug="app.team-lunch-poll").exists())
         self.assertTrue(Artifact.objects.filter(slug="policy.team-lunch-poll").exists())
         app_artifact = Artifact.objects.get(slug="app.team-lunch-poll")
         policy_artifact = Artifact.objects.get(slug="policy.team-lunch-poll")
+        self.assertEqual(str(app_artifact.workspace_id), str(self.workspace.id))
+        self.assertEqual(str(policy_artifact.workspace_id), str(self.workspace.id))
         self.assertEqual(str(app_artifact.type).lower(), "application")
         self.assertEqual(str(app_artifact.slug), "app.team-lunch-poll")
         application = Application.objects.get(
-            workspace=app_artifact.workspace,
+            workspace=self.workspace,
             metadata_json__generated_artifact_key="team-lunch-poll",
         )
         self.assertEqual(application.name, "Team Lunch Poll")
@@ -364,10 +381,26 @@ class ArtifactPackagesApiTests(TestCase):
             package_name=app_slug,
             package_version="0.0.1-dev",
         )
-        imported = self._import_package(blob)
+        imported = self._import_generated_artifacts(blob)
         self.assertEqual(imported.status_code, 200, imported.content.decode())
-        package_id = imported.json()["package"]["id"]
-        artifact = Artifact.objects.get(slug=app_slug)
+        payload = imported.json()
+        package_id = payload["package"]["id"]
+        imported_rows = payload.get("artifacts") or []
+        app_row = next(
+            (row for row in imported_rows if str(row.get("slug") or "").strip() == app_slug),
+            None,
+        )
+        self.assertIsNotNone(app_row, imported.content.decode())
+        artifact_qs = Artifact.objects.filter(
+            workspace=self.workspace,
+            slug=app_slug,
+            package_version="0.0.1-dev",
+        )
+        self.assertEqual(artifact_qs.count(), 1, imported.content.decode())
+        artifact = artifact_qs.first()
+        self.assertIsNotNone(artifact)
+        self.assertEqual(str(artifact.id), str(app_row["id"]))
+        self.assertEqual(str(artifact.workspace_id), str(self.workspace.id))
         self.assertTrue(str(artifact.source_ref_id or "").startswith(f"{package_id}:"))
         self.assertLessEqual(len(artifact.source_ref_id or ""), 120)
 

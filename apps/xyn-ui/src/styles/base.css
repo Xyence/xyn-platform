@@ -186,6 +186,12 @@ input {
   gap: 16px;
 }
 
+.app-header-branding {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .brand-link {
   color: inherit;
   text-decoration: none;
@@ -225,6 +231,22 @@ input {
   color: var(--muted);
   font-size: 0.84rem;
   font-weight: 600;
+}
+
+.workspace-selector {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--text);
+  padding: 4px 10px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  min-width: 170px;
+}
+
+.workspace-selector:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .header-meta {

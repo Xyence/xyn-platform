@@ -205,4 +205,22 @@ describe("Solution panels", () => {
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "Candidate scope" }), "all");
     await waitFor(() => expect(apiMocks.listArtifacts).toHaveBeenLastCalledWith({ limit: 200 }));
   });
+
+  it("shows an unavailable state when a preserved solution detail does not exist in the current workspace", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-other",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={onOpenPanel} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    expect(screen.getByRole("heading", { name: "Solution unavailable" })).toBeInTheDocument();
+    expect(screen.getByText("Solution was not found in workspace ws-1.")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Open Solutions" }));
+    expect(onOpenPanel).toHaveBeenCalledWith("solution_list", { workspace_id: "ws-1" }, { open_in: "current_panel" });
+  });
 });

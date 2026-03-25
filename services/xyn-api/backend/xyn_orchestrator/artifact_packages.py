@@ -639,6 +639,7 @@ def install_package(
     *,
     binding_overrides: Optional[Dict[str, Any]] = None,
     installed_by=None,
+    target_workspace: Optional[Workspace] = None,
 ) -> ArtifactInstallReceipt:
     manifest, files = _load_package(package)
     validation = validate_package_install(package, binding_overrides=binding_overrides)
@@ -663,7 +664,7 @@ def install_package(
 
     resolved_bindings = validation.get("resolved_bindings") or {}
     ordered = _topological_sort(manifest)
-    workspace = _workspace_for_artifacts()
+    workspace = target_workspace or _workspace_for_artifacts()
     artifact_changes: List[Dict[str, Any]] = []
     install_mode = "install"
 

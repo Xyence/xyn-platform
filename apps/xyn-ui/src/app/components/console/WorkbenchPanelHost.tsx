@@ -111,6 +111,7 @@ import WorkspacesPage from "../../pages/WorkspacesPage";
 import RulesBrowserPanel from "../rules/RulesBrowserPanel";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { SolutionDetailPanel, SolutionListPanel } from "../solutions/SolutionPanels";
+import WorkspaceUnavailableState, { classifyWorkspaceUnavailableReason } from "../common/WorkspaceUnavailableState";
 
 const AI_ROUTING_UPDATED_EVENT = "xyn:ai-routing-updated";
 
@@ -1376,6 +1377,7 @@ function GoalDetailPanel({
   const [payload, setPayload] = useState<GoalDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [unavailableReason, setUnavailableReason] = useState<"not_found" | "access_denied" | null>(null);
   const [actionState, setActionState] = useState<{ status: "idle" | "submitting"; message: string | null }>({
     status: "idle",
     message: null,
@@ -1386,12 +1388,25 @@ function GoalDetailPanel({
       try {
         setLoading(true);
         setError(null);
+        setUnavailableReason(null);
+        setPayload(null);
         const next = await getGoal(goalId);
         if (!active) return;
+        if (next.workspace_id && workspaceId && String(next.workspace_id) !== String(workspaceId)) {
+          setUnavailableReason("not_found");
+          return;
+        }
         setPayload(next);
       } catch (err) {
         if (!active) return;
-        setError(err instanceof Error ? err.message : "Failed to load goal");
+        const message = err instanceof Error ? err.message : "Failed to load goal";
+        const reason = classifyWorkspaceUnavailableReason(message);
+        if (reason === "not_found" || reason === "access_denied") {
+          setUnavailableReason(reason);
+          setError(null);
+          return;
+        }
+        setError(message);
       } finally {
         if (active) setLoading(false);
       }
@@ -1399,15 +1414,25 @@ function GoalDetailPanel({
     return () => {
       active = false;
     };
-  }, [goalId]);
+  }, [goalId, workspaceId]);
 
   useEffect(() => {
     onTitleChange?.(payload?.title || "Goal");
   }, [onTitleChange, payload?.title]);
 
   if (loading) return <p className="muted">Loading goal…</p>;
+  if (unavailableReason || !payload) {
+    return (
+      <WorkspaceUnavailableState
+        itemLabel="Goal"
+        workspaceLabel={workspaceId || "this workspace"}
+        reason={unavailableReason || "not_found"}
+        onOpenList={() => onOpenPanel("goal_list")}
+        openListLabel="Open Goals"
+      />
+    );
+  }
   if (error) return <p className="danger-text">{error}</p>;
-  if (!payload) return <p className="muted">Goal not found.</p>;
 
   const recommendationActions = Array.isArray(payload.recommendation?.actions) ? payload.recommendation?.actions : [];
   const queueableAction = recommendationActions.find((action) => action.type === "approve_and_queue");
@@ -1876,6 +1901,7 @@ function ThreadDetailPanel({
   const [payload, setPayload] = useState<CoordinationThreadDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [unavailableReason, setUnavailableReason] = useState<"not_found" | "access_denied" | null>(null);
   const [actionState, setActionState] = useState<{ status: "idle" | "submitting"; message: string | null }>({
     status: "idle",
     message: null,
@@ -1887,12 +1913,25 @@ function ThreadDetailPanel({
       try {
         setLoading(true);
         setError(null);
+        setUnavailableReason(null);
+        setPayload(null);
         const detail = await getCoordinationThread(threadId);
         if (!active) return;
+        if (detail.workspace_id && workspaceId && String(detail.workspace_id) !== String(workspaceId)) {
+          setUnavailableReason("not_found");
+          return;
+        }
         setPayload(detail);
       } catch (err) {
         if (!active) return;
-        setError(err instanceof Error ? err.message : "Failed to load thread");
+        const message = err instanceof Error ? err.message : "Failed to load thread";
+        const reason = classifyWorkspaceUnavailableReason(message);
+        if (reason === "not_found" || reason === "access_denied") {
+          setUnavailableReason(reason);
+          setError(null);
+          return;
+        }
+        setError(message);
       } finally {
         if (active) setLoading(false);
       }
@@ -1900,7 +1939,7 @@ function ThreadDetailPanel({
     return () => {
       active = false;
     };
-  }, [threadId]);
+  }, [threadId, workspaceId]);
 
   useEffect(() => {
     onTitleChange?.(payload?.title || "Thread");
@@ -1918,8 +1957,18 @@ function ThreadDetailPanel({
   }
 
   if (loading) return <p className="muted">Loading XCO thread…</p>;
+  if (unavailableReason || !payload) {
+    return (
+      <WorkspaceUnavailableState
+        itemLabel="Thread"
+        workspaceLabel={workspaceId || "this workspace"}
+        reason={unavailableReason || "not_found"}
+        onOpenList={() => onOpenPanel("thread_list")}
+        openListLabel="Open Threads"
+      />
+    );
+  }
   if (error) return <p className="danger-text">{error}</p>;
-  if (!payload) return <p className="muted">Thread not found.</p>;
 
   return (
     <div className="panel-section-stack">
@@ -3737,6 +3786,7 @@ function ArtifactDetailPanel({
   const [payload, setPayload] = useState<ArtifactConsoleDetailResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [unavailableReason, setUnavailableReason] = useState<"not_found" | "access_denied" | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -3744,12 +3794,21 @@ function ArtifactDetailPanel({
       try {
         setLoading(true);
         setError(null);
+        setUnavailableReason(null);
+        setPayload(null);
         const next = await getArtifactConsoleDetailBySlug(slug, { workspaceId: workspaceId || undefined });
         if (!active) return;
         setPayload(next);
       } catch (err) {
         if (!active) return;
-        setError(err instanceof Error ? err.message : "Failed to load artifact detail");
+        const message = err instanceof Error ? err.message : "Failed to load artifact detail";
+        const reason = classifyWorkspaceUnavailableReason(message);
+        if (reason === "not_found" || reason === "access_denied") {
+          setUnavailableReason(reason);
+          setError(null);
+          return;
+        }
+        setError(message);
       } finally {
         if (active) setLoading(false);
       }
@@ -3779,8 +3838,18 @@ function ArtifactDetailPanel({
   }, [onContextChange, panel, payload]);
 
   if (loading) return <p className="muted">Loading artifact detail…</p>;
+  if (unavailableReason || !payload) {
+    return (
+      <WorkspaceUnavailableState
+        itemLabel="Artifact"
+        workspaceLabel={workspaceId || "this workspace"}
+        reason={unavailableReason || "not_found"}
+        onOpenList={() => onOpenPanel("artifact_list")}
+        openListLabel="Open Artifacts"
+      />
+    );
+  }
   if (error) return <p className="danger-text">{error}</p>;
-  if (!payload) return <p className="muted">Artifact not found.</p>;
 
   const manage = payload.manifest_summary?.surfaces?.manage || [];
   const docs = payload.manifest_summary?.surfaces?.docs || [];

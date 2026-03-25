@@ -15,6 +15,7 @@ import {
   validateSolutionChangeSession,
 } from "../../../api/xyn";
 import type { ConsolePanelKey } from "../console/WorkbenchPanelHost";
+import WorkspaceUnavailableState, { classifyWorkspaceUnavailableReason } from "../common/WorkspaceUnavailableState";
 
 const ROLE_OPTIONS: ApplicationArtifactMembership["role"][] = [
   "primary_ui",
@@ -155,6 +156,7 @@ export function SolutionDetailPanel({
   const [selectedArtifactIds, setSelectedArtifactIds] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
+  const [unavailableReason, setUnavailableReason] = useState<"not_found" | "access_denied" | null>(null);
   const [artifactId, setArtifactId] = useState<string>("");
   const [artifactScopeMode, setArtifactScopeMode] = useState<"solution" | "all">("solution");
   const [role, setRole] = useState<ApplicationArtifactMembership["role"]>("supporting");
@@ -183,15 +185,29 @@ export function SolutionDetailPanel({
     let ignore = false;
     async function run() {
       if (!applicationId) {
+        setApplication(null);
+        setMemberships([]);
+        setArtifacts([]);
+        setSessions([]);
         setLoading(false);
         return;
       }
       setLoading(true);
       setError("");
+      setUnavailableReason(null);
       try {
         const artifactParams = artifactScopeMode === "solution" ? { limit: 200, scope: "solution" as const } : { limit: 200 };
-        const [app, memberPayload, artifactPayload, sessionPayload] = await Promise.all([
-          getApplication(applicationId),
+        const app = await getApplication(applicationId);
+        if (ignore) return;
+        if (app.workspace_id && workspaceId && String(app.workspace_id) !== String(workspaceId)) {
+          setApplication(null);
+          setMemberships([]);
+          setArtifacts([]);
+          setSessions([]);
+          setUnavailableReason("not_found");
+          return;
+        }
+        const [memberPayload, artifactPayload, sessionPayload] = await Promise.all([
           listApplicationArtifactMemberships(applicationId),
           listArtifacts(artifactParams),
           listSolutionChangeSessions(applicationId),
@@ -207,7 +223,16 @@ export function SolutionDetailPanel({
           setSelectedArtifactIds(loadedSessions[0].selected_artifact_ids || []);
         }
       } catch (err) {
-        if (!ignore) setError(err instanceof Error ? err.message : "Failed to load solution detail.");
+        if (!ignore) {
+          const message = err instanceof Error ? err.message : "Failed to load solution detail.";
+          const reason = classifyWorkspaceUnavailableReason(message);
+          if (reason === "not_found" || reason === "access_denied") {
+            setUnavailableReason(reason);
+            setError("");
+            return;
+          }
+          setError(message);
+        }
       } finally {
         if (!ignore) setLoading(false);
       }
@@ -222,6 +247,36 @@ export function SolutionDetailPanel({
     () => sessions.find((item) => item.id === activeSessionId) || null,
     [activeSessionId, sessions]
   );
+
+  if (loading) {
+    return (
+      <section className="card stack">
+        <h3>Solution</h3>
+        <p className="muted">Loading solution…</p>
+      </section>
+    );
+  }
+
+  if (unavailableReason || !application) {
+    return (
+      <WorkspaceUnavailableState
+        itemLabel="Solution"
+        workspaceLabel={workspaceId || "this workspace"}
+        reason={unavailableReason || "not_found"}
+        onOpenList={() => onOpenPanel("solution_list", { workspace_id: workspaceId }, { open_in: "current_panel" })}
+        openListLabel="Open Solutions"
+      />
+    );
+  }
+
+  if (error) {
+    return (
+      <section className="card stack">
+        <h3>Solution</h3>
+        <p className="danger">{error}</p>
+      </section>
+    );
+  }
 
   async function handleAddMembership(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -398,10 +453,6 @@ export function SolutionDetailPanel({
           </div>
         </div>
       </section>
-
-      {loading ? <p className="muted">Loading solution detail…</p> : null}
-      {!loading && error ? <p className="danger">{error}</p> : null}
-
       <section className="card">
         <h4>Artifact Membership</h4>
         <p className="muted">Assigned artifacts and their solution roles.</p>

@@ -8193,6 +8193,17 @@ DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
+def _default_dev_workspace_slug() -> str:
+    raw = str(os.getenv("XYN_WORKSPACE_SLUG", "development") or "").strip().lower()
+    slug = slugify(raw)
+    return slug or "development"
+
+
+def _workspace_title_from_slug(slug: str) -> str:
+    value = str(slug or "").strip().replace("-", " ")
+    return value.title() if value else "Development"
+
+
 def _runtime_artifact_host_workspace(fallback_workspace: Workspace) -> Workspace:
     host_workspace = Workspace.objects.filter(slug="platform-builder").first()
     if host_workspace is not None:
@@ -8235,12 +8246,13 @@ def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspac
         return None
     if not _is_platform_admin(identity):
         return None
+    workspace_slug = _default_dev_workspace_slug()
     workspace, _ = Workspace.objects.get_or_create(
-        slug="development",
+        slug=workspace_slug,
         defaults={
-            "name": "Development",
-            "org_name": "Development",
-            "description": "Default development workspace for local bootstrap.",
+            "name": _workspace_title_from_slug(workspace_slug),
+            "org_name": _workspace_title_from_slug(workspace_slug),
+            "description": f"Default {workspace_slug} workspace for local bootstrap.",
             "status": "active",
             "kind": "internal",
             "lifecycle_stage": "internal",
@@ -8372,7 +8384,8 @@ def api_me(request: HttpRequest) -> JsonResponse:
     if bootstrap_workspace is not None:
         preferred_workspace_id = str(bootstrap_workspace.id)
     elif workspace_payload:
-        dev_entry = next((entry for entry in workspace_payload if str(entry.get("slug") or "").strip().lower() == "development"), None)
+        default_slug = _default_dev_workspace_slug()
+        dev_entry = next((entry for entry in workspace_payload if str(entry.get("slug") or "").strip().lower() == default_slug), None)
         preferred_workspace_id = str((dev_entry or workspace_payload[0]).get("id") or "")
 
     return JsonResponse(
@@ -11555,6 +11568,37 @@ def _link_generated_artifacts_to_solution(*, artifacts: List[Artifact]) -> List[
     return linked_rows
 
 
+def _resolve_solution_import_workspace(identity: UserIdentity, request: HttpRequest) -> Optional[Workspace]:
+    candidates = [
+        str(request.POST.get("workspace_id") or "").strip(),
+        str(request.POST.get("workspace_slug") or "").strip(),
+        str(request.GET.get("workspace_id") or "").strip(),
+        str(request.GET.get("workspace_slug") or "").strip(),
+        str(request.headers.get("X-Workspace-Id") or "").strip(),
+        str(request.headers.get("X-Workspace-Slug") or "").strip(),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        workspace = _resolve_workspace_for_identity(identity, candidate)
+        if workspace and _workspace_is_visible(workspace, include_system=False):
+            return workspace
+
+    fallback = _resolve_workspace_for_identity(identity, "")
+    if fallback and _workspace_is_visible(fallback, include_system=False):
+        return fallback
+
+    if _is_platform_admin(identity):
+        default_slug = _default_dev_workspace_slug()
+        workspace = Workspace.objects.filter(slug=default_slug).first()
+        if workspace and _workspace_is_visible(workspace, include_system=False):
+            return workspace
+        workspace = _user_visible_workspace_qs().order_by("name", "created_at").first()
+        if workspace:
+            return workspace
+    return None
+
+
 def _backfill_legacy_generated_solution_memberships(
     *,
     workspace_id: Optional[str] = None,
@@ -11864,6 +11908,9 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "method not allowed"}, status=405)
     if staff_error := _require_staff(request):
         return staff_error
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
     if not request.FILES or "file" not in request.FILES:
         return JsonResponse({"error": "file upload required (multipart field: file)"}, status=400)
     upload = request.FILES["file"]
@@ -11900,10 +11947,18 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
             status=400,
         )
 
+    workspace = _resolve_solution_import_workspace(identity, request)
+    if workspace is None:
+        return JsonResponse(
+            {"error": "workspace context is required for generated artifact import"},
+            status=400,
+        )
+
     receipt = install_package(
         package,
         binding_overrides={},
         installed_by=request.user if request.user.is_authenticated else None,
+        target_workspace=workspace,
     )
     status = 200 if receipt.status == "success" else 400
     artifact_ids_from_receipt = [

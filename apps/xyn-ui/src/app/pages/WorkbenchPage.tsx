@@ -10,6 +10,17 @@ import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
 import type { ContextualCapability } from "../../api/types";
 import { buildWorkspaceLayout, derivePanelGroupAssignments, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
+export function shouldReuseExistingLayoutOnWorkspaceSwitch(input: {
+  previousWorkspaceId: string;
+  nextWorkspaceId: string;
+  panelCount: number;
+}): boolean {
+  const previous = String(input.previousWorkspaceId || "").trim();
+  const next = String(input.nextWorkspaceId || "").trim();
+  if (!previous || !next || previous === next) return false;
+  return input.panelCount > 0;
+}
+
 export default function WorkbenchPage({
   workspaceName = "",
   workspaceColor = "#6c7a89",
@@ -55,6 +66,7 @@ export default function WorkbenchPage({
     includeUnavailable: true,
   });
   const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
+  const previousWorkspaceIdRef = useRef<string>("");
 
   const panelById = useMemo(() => new Map(panels.map((entry) => [entry.panel_id, entry] as const)), [panels]);
 
@@ -100,13 +112,23 @@ export default function WorkbenchPage({
   }, [clearSessionResolution, setContext, setOpen]);
 
   useEffect(() => {
-    const stored = readWorkspaceLayout(workspaceId);
+    const previousWorkspaceId = String(previousWorkspaceIdRef.current || "").trim();
+    const nextWorkspaceId = String(workspaceId || "").trim();
+    const preserveLayout = shouldReuseExistingLayoutOnWorkspaceSwitch({
+      previousWorkspaceId,
+      nextWorkspaceId,
+      panelCount: panels.length,
+    });
+    previousWorkspaceIdRef.current = nextWorkspaceId;
+    if (!nextWorkspaceId) return;
+    if (preserveLayout) return;
+    const stored = readWorkspaceLayout(nextWorkspaceId);
     if (stored?.panel_ids?.length) {
       setLayoutJson(stored.flexlayout_model as IJsonModel);
     } else {
-      setLayoutJson(buildWorkspaceLayout(workspaceId, panels, activePanel?.panel_id || null).flexlayout_model as IJsonModel);
+      setLayoutJson(buildWorkspaceLayout(nextWorkspaceId, panels, activePanel?.panel_id || null).flexlayout_model as IJsonModel);
     }
-  }, [workspaceId]);
+  }, [workspaceId, panels.length, activePanel?.panel_id]);
 
   useEffect(() => {
     if (!activePanel) setCanvasContext(null);

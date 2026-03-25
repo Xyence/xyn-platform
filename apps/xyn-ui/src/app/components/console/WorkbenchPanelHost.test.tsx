@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import WorkbenchPanelHost from "./WorkbenchPanelHost";
@@ -9,6 +9,7 @@ const apiMocks = vi.hoisted(() => ({
   executeAppPalettePrompt: vi.fn(),
   listGoals: vi.fn(),
   getGoal: vi.fn(),
+  getArtifactConsoleDetailBySlug: vi.fn(),
   listCampaigns: vi.fn(),
   listWorkspaces: vi.fn(),
   createCampaign: vi.fn(),
@@ -68,6 +69,7 @@ vi.mock("../../../api/xyn", async () => {
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
+    getArtifactConsoleDetailBySlug: apiMocks.getArtifactConsoleDetailBySlug,
     listCampaigns: apiMocks.listCampaigns,
     listWorkspaces: apiMocks.listWorkspaces,
     createCampaign: apiMocks.createCampaign,
@@ -4191,5 +4193,109 @@ describe("WorkbenchPanelHost entity refresh", () => {
         },
       })
     );
+  });
+
+  it("shows a safe unavailable state for preserved goal detail panels after workspace switch", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getGoal
+      .mockResolvedValueOnce({
+        id: "goal-1",
+        workspace_id: "ws-1",
+        application_id: "app-1",
+        title: "Goal One",
+        description: "",
+        source_conversation_id: "conv-1",
+        requested_by: "user@example.com",
+        goal_type: "delivery",
+        planning_status: "in_progress",
+        priority: "high",
+        planning_summary: "",
+        resolution_notes: [],
+        thread_count: 0,
+        work_item_count: 0,
+        threads: [],
+        work_items: [],
+        created_at: "2026-03-20T00:00:00Z",
+        updated_at: "2026-03-20T00:00:00Z",
+      })
+      .mockRejectedValueOnce(new Error("Request failed (404)"));
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "goal-detail", panel_type: "detail", instance_key: "goal:goal-1", key: "goal_detail", params: { goal_id: "goal-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText("Goal One")).toBeInTheDocument());
+
+    rerender(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-2"
+          panel={{ panel_id: "goal-detail", panel_type: "detail", instance_key: "goal:goal-1", key: "goal_detail", params: { goal_id: "goal-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Goal unavailable" })).toBeInTheDocument());
+    expect(screen.queryByText("Goal One")).not.toBeInTheDocument();
+    await act(async () => {
+      screen.getByRole("button", { name: "Open Goals" }).click();
+    });
+    expect(onOpenPanel).toHaveBeenCalledWith(expect.objectContaining({ key: "goal_list" }));
+  });
+
+  it("shows a safe unavailable state for preserved thread detail panels after workspace switch", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getCoordinationThread.mockRejectedValue(new Error("Request failed (404)"));
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-2"
+          panel={{ panel_id: "thread-detail", panel_type: "detail", instance_key: "thread:thread-1", key: "thread_detail", params: { thread_id: "thread-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Thread unavailable" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Open Threads" }).click();
+    });
+    expect(onOpenPanel).toHaveBeenCalledWith(expect.objectContaining({ key: "thread_list" }));
+  });
+
+  it("shows a safe unavailable state for preserved artifact detail panels", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getArtifactConsoleDetailBySlug.mockRejectedValue(new Error("Request failed (404)"));
+
+    render(
+      <MemoryRouter initialEntries={["/w/ws-2/workbench"]}>
+        <Routes>
+          <Route
+            path="/w/:workspaceId/workbench"
+            element={
+              <WorkbenchPanelHost
+                workspaceId="ws-2"
+                panel={{ panel_id: "artifact-detail", panel_type: "detail", instance_key: "artifact:app.demo", key: "artifact_detail", params: { slug: "app.demo" } }}
+                onOpenPanel={onOpenPanel}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Artifact unavailable" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Open Artifacts" }).click();
+    });
+    expect(onOpenPanel).toHaveBeenCalledWith(expect.objectContaining({ key: "artifact_list" }));
   });
 });

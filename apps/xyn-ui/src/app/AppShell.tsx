@@ -758,6 +758,10 @@ export default function AppShell() {
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) || null,
     [workspaces, activeWorkspaceId]
   );
+  const workspaceSelectionOptions = useMemo(
+    () => workspaces.map((workspace) => ({ id: workspace.id, name: workspace.name, slug: workspace.slug })),
+    [workspaces]
+  );
   const workspaceScopedContextId = inWorkspaceScope ? activeWorkspace?.id || "" : "";
   const isWorkbenchRoute = useMemo(
     () => /\/w\/[^/]+\/workbench\/?$/.test(location.pathname) || /^\/app\/platform(?:\/|$)/.test(location.pathname),
@@ -918,18 +922,34 @@ export default function AppShell() {
   return (
     <div className={`app-shell ${isWorkbenchRoute ? "is-workbench" : ""}`}>
       <header className={`app-header ${isWorkbenchRoute ? "is-workbench" : ""}`} ref={headerRef}>
-        <Link className="brand brand-link" to="/">
-          <img className="brand-logo" src={brandLogo} alt="Xyence logo" />
-          <div>
-            <h1>Xyn</h1>
-            {isWorkbenchRoute && activeWorkspace?.name ? (
-              <div className="app-header-workspace">
-                <span className="workspace-dot" style={{ background: workspaceRoute.workspaceColor || "#6c7a89" }} aria-hidden="true" />
-                <span>{activeWorkspace.name}</span>
-              </div>
-            ) : null}
-          </div>
-        </Link>
+        <div className="app-header-branding">
+          <Link className="brand brand-link" to="/">
+            <img className="brand-logo" src={brandLogo} alt="Xyence logo" />
+            <div>
+              <h1>Xyn</h1>
+            </div>
+          </Link>
+          {isWorkbenchRoute && activeWorkspace?.name ? (
+            <div className="app-header-workspace">
+              <span className="workspace-dot" style={{ background: workspaceRoute.workspaceColor || "#6c7a89" }} aria-hidden="true" />
+              <label htmlFor="workspace-selector" className="sr-only">
+                Workspace
+              </label>
+              <select
+                id="workspace-selector"
+                className="workspace-selector"
+                value={activeWorkspace.id}
+                onChange={(event) => handleWorkspaceChange(String(event.target.value || ""))}
+              >
+                {workspaceSelectionOptions.map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>
+                    {workspace.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+        </div>
         <div className="header-meta">
           {authed ? (
             <>
