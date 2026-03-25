@@ -6,6 +6,8 @@ from typing import Any
 
 from xyn_orchestrator.jurisdiction import require_canonical_jurisdiction
 from xyn_orchestrator.models import WatchDefinition, WatchMatchEvent, WatchSubscriber
+from xyn_orchestrator.orchestration.definitions import STAGE_SIGNAL_MATCHING
+from xyn_orchestrator.orchestration.domain_events import DomainEventInput, DomainEventService
 from xyn_orchestrator.provenance import (
     AuditWithProvenanceInput,
     AuditEventInput,
@@ -338,6 +340,58 @@ class WatchService:
                         idempotency_scope=f"watch.eval:{resolved_idempotency_key}",
                     )
                 )
+                if result.matched:
+                    signal_token = hashlib.sha256(
+                        "|".join(
+                            [
+                                str(workspace_id),
+                                str(watch.id),
+                                str(payload.event_key or "").strip(),
+                                str(row.id),
+                                str(reconciled_state_version or ""),
+                            ]
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    event_row = DomainEventService().record(
+                        DomainEventInput(
+                            workspace_id=workspace_id,
+                            event_type="signal.watch_match_detected",
+                            idempotency_key=f"signal.watch:{resolved_idempotency_key}",
+                            stage_key=STAGE_SIGNAL_MATCHING,
+                            run_id=str(payload.run_id or ""),
+                            scope_jurisdiction=scope_jurisdiction,
+                            scope_source=str(event_ref.get("source") or ""),
+                            reconciled_state_version=str(reconciled_state_version or ""),
+                            signal_set_version=signal_token,
+                            correlation_id=str(payload.correlation_id or ""),
+                            chain_id=str(payload.chain_id or ""),
+                            subject_ref={
+                                "kind": "watch_match_event",
+                                "id": str(row.id),
+                                "watch_id": str(watch.id),
+                            },
+                            payload={
+                                "watch_id": str(watch.id),
+                                "watch_key": str(watch.key),
+                                "watch_match_event_id": str(row.id),
+                                "event_key": str(payload.event_key or ""),
+                                "matched": bool(result.matched),
+                                "score": float(result.score),
+                                "reason": str(result.reason),
+                                "event_ref": event_ref,
+                            },
+                            metadata={
+                                "materialized_from": "watch.evaluated",
+                            },
+                        )
+                    )
+                    try:
+                        from xyn_orchestrator.signal_read_model import SignalReadProjectionService
+
+                        SignalReadProjectionService().project_domain_event(event=event_row)
+                    except Exception:
+                        # Projection is a read-model concern; retain canonical match/domain-event durability.
+                        pass
             results.append(result)
         return results
 

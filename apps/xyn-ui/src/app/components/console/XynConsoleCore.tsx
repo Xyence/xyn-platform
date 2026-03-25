@@ -11,7 +11,7 @@ import type { AiAgentResolution, PromptInterpretationClarificationOption, Recent
 import { getEntityTypeForDataset } from "../../../components/canvas/datasetEntityRegistry";
 import { openViewDescriptor } from "../../navigation/openViewDescriptor";
 import { resolveCapabilityGraphContext } from "../../navigation/capabilityContext";
-import { toWorkspacePath } from "../../routing/workspaceRouting";
+import { toWorkspacePath, withWorkspaceInNavPath } from "../../routing/workspaceRouting";
 import { resolvePromptSurfaceTarget } from "../../routing/promptSurfaceResolver";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import { emitEntityChange, inferEntityChangeFromPrompt } from "../../utils/entityChangeEvents";
@@ -42,6 +42,14 @@ type ArtifactStructuredQuery = {
 type ResolvedPanelCommand =
   | { panelKey: "composer_detail"; params: Record<string, never> }
   | { panelKey: "campaign_list"; params: { create?: boolean } }
+  | {
+      panelKey: "solution_list";
+      params: {
+        solution_name?: string;
+        create_solution_objective?: string;
+        create_solution_name?: string;
+      };
+    }
   | { panelKey: "artifact_list"; params: { namespace?: string; query?: ArtifactStructuredQuery; query_error?: string } }
   | { panelKey: "workspaces"; params: { query?: Record<string, unknown>; query_error?: string } }
   | { panelKey: "runs"; params: { query?: Record<string, unknown>; query_error?: string } }
@@ -141,6 +149,8 @@ function explicitAppBuilderArtifactKind(input: string): string {
 }
 
 export function resolvePanelCommand(input: string): ResolvedPanelCommand | null {
+  // Guardrail: resolve user navigation requests into panel intents.
+  // New capability UX should not depend on route-owned page flows.
   const raw = String(input || "").trim();
   if (!raw) return null;
   const normalized = raw
@@ -202,22 +212,33 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
       },
     };
   }
+  if (/^(show|list|open)\s+solutions?$/.test(normalized)) {
+    return { panelKey: "solution_list", params: {} };
+  }
+  match = normalized.match(/^(create|build)\s+solution\s+(.+)$/);
+  if (match && match[2]) {
+    return {
+      panelKey: "solution_list",
+      params: {
+        create_solution_objective: String(match[2] || "").trim(),
+      },
+    };
+  }
+  match = normalized.match(/^(open|show|go to)\s+solution\s+(.+)$/);
+  if (match && match[2]) {
+    return {
+      panelKey: "solution_list",
+      params: {
+        solution_name: String(match[2] || "").trim(),
+      },
+    };
+  }
   if (
     /^(open|show|go to|list)\s+composer$/.test(normalized)
     || /^(open|show|go to)\s+application\s+workbench$/.test(normalized)
     || /^(open|show|go to)\s+workbench$/.test(normalized)
   ) {
     return { panelKey: "composer_detail", params: {} };
-  }
-  if (
-    /^(campaigns|show campaigns|open campaigns|list campaigns|go to campaigns)$/.test(normalized)
-  ) {
-    return { panelKey: "campaign_list", params: {} };
-  }
-  if (
-    /^(new campaign|create campaign|add campaign|start campaign)$/.test(normalized)
-  ) {
-    return { panelKey: "campaign_list", params: { create: true } };
   }
   if (/^(show|list|open)\s+drafts$/.test(normalized)) {
     return { panelKey: "drafts_list", params: {} };
@@ -431,6 +452,12 @@ export function resolveDirectPanelOpenParams(
     return {
       workspace_id: workspaceId || undefined,
       ...(directPanel.params.create ? { create: true } : {}),
+    };
+  }
+  if (directPanel.panelKey === "solution_list") {
+    return {
+      workspace_id: workspaceId || undefined,
+      ...directPanel.params,
     };
   }
   return directPanel.params;
@@ -1582,7 +1609,11 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
           if (isOverlay) setOpen(false);
           return;
         }
-        navigate(surfacedTarget.route);
+        const surfacedRoute =
+          surfacedTarget.scope === "workspace" && workspaceIdFromPath
+            ? withWorkspaceInNavPath(surfacedTarget.route, workspaceIdFromPath)
+            : surfacedTarget.route;
+        navigate(surfacedRoute);
         clearSessionResolution();
         if (isOverlay) setOpen(false);
         return;

@@ -35,6 +35,26 @@ describe("resolveDirectPanelOpenParams", () => {
     });
   });
 
+  it("injects workspace context for solution list open params", () => {
+    expect(
+      resolveDirectPanelOpenParams(
+        { panelKey: "solution_list", params: {} },
+        "ws-1",
+      )
+    ).toEqual({
+      workspace_id: "ws-1",
+    });
+    expect(
+      resolveDirectPanelOpenParams(
+        { panelKey: "solution_list", params: { solution_name: "deal finder" } },
+        "ws-1",
+      )
+    ).toEqual({
+      workspace_id: "ws-1",
+      solution_name: "deal finder",
+    });
+  });
+
   it("opens generic composer in neutral workspace context", () => {
     window.localStorage.setItem(
       "xyn:composer:selected-effort:ws-1",
@@ -121,26 +141,31 @@ describe("resolvePanelCommand", () => {
       panelKey: "jobs_list",
       params: {},
     });
-    expect(resolvePanelCommand("campaigns")).toEqual({
-      panelKey: "campaign_list",
+    expect(resolvePanelCommand("show solutions")).toEqual({
+      panelKey: "solution_list",
       params: {},
     });
-    expect(resolvePanelCommand("show campaigns")).toEqual({
-      panelKey: "campaign_list",
+    expect(resolvePanelCommand("list solutions")).toEqual({
+      panelKey: "solution_list",
       params: {},
     });
-    expect(resolvePanelCommand("open campaigns")).toEqual({
-      panelKey: "campaign_list",
-      params: {},
+    expect(resolvePanelCommand("open solution Deal Finder")).toEqual({
+      panelKey: "solution_list",
+      params: { solution_name: "deal finder" },
     });
-    expect(resolvePanelCommand("new campaign")).toEqual({
-      panelKey: "campaign_list",
-      params: { create: true },
+    expect(resolvePanelCommand("create solution add a new operator workflow")).toEqual({
+      panelKey: "solution_list",
+      params: { create_solution_objective: "add a new operator workflow" },
     });
-    expect(resolvePanelCommand("create campaign")).toEqual({
-      panelKey: "campaign_list",
-      params: { create: true },
+    expect(resolvePanelCommand("build solution stabilize watcher evaluation")).toEqual({
+      panelKey: "solution_list",
+      params: { create_solution_objective: "stabilize watcher evaluation" },
     });
+    expect(resolvePanelCommand("campaigns")).toBeNull();
+    expect(resolvePanelCommand("show campaigns")).toBeNull();
+    expect(resolvePanelCommand("open campaigns")).toBeNull();
+    expect(resolvePanelCommand("new campaign")).toBeNull();
+    expect(resolvePanelCommand("create campaign")).toBeNull();
 
     expect(resolvePanelCommand("list core artifacts")).toEqual({
       panelKey: "artifact_list",

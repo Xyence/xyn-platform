@@ -67,6 +67,17 @@ class PlatformBootstrapTests(TestCase):
         self.assertEqual(workspaces[0]["slug"], "development")
         self.assertEqual(payload.get("preferred_workspace_id"), workspaces[0]["id"])
 
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev", "XYN_WORKSPACE_SLUG": "local-dev"}, clear=False)
+    def test_dev_me_uses_configured_workspace_slug(self):
+        self.assertFalse(Workspace.objects.filter(slug="local-dev").exists())
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        workspaces = payload.get("workspaces") or []
+        self.assertEqual(len(workspaces), 1)
+        self.assertEqual(workspaces[0]["slug"], "local-dev")
+        self.assertEqual(payload.get("preferred_workspace_id"), workspaces[0]["id"])
+
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
     def test_non_dev_requires_setup_then_initializes(self):
         status_response = self.client.get("/xyn/api/platform/initialization/status")

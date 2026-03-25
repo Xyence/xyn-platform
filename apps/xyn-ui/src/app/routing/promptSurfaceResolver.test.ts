@@ -157,6 +157,52 @@ describe("resolvePromptSurfaceTarget", () => {
     });
   });
 
+  it("resolves route-derived alias for list workflows from surfaced metadata", () => {
+    const result = resolvePromptSurfaceTarget("campaigns", {
+      workspaceSurfaces: [
+        surface({
+          id: "campaign-list",
+          artifact_id: "a5",
+          key: "entity-campaigns-list",
+          title: "Campaigns List",
+          surface_kind: "dashboard",
+          route: "/app/campaigns",
+          nav_visibility: "always",
+          ui_mount_scope: "workspace",
+        }),
+      ],
+    });
+    expect(result).toEqual({
+      key: "entity-campaigns-list",
+      route: "/app/campaigns",
+      scope: "workspace",
+      source: "artifact_surface",
+    });
+  });
+
+  it("resolves create action prompt to metadata-declared create surface", () => {
+    const result = resolvePromptSurfaceTarget("create campaign", {
+      workspaceSurfaces: [
+        surface({
+          id: "campaign-create",
+          artifact_id: "a6",
+          key: "entity-campaigns-create",
+          title: "Create Campaign",
+          surface_kind: "editor",
+          route: "/app/campaigns/new",
+          nav_visibility: "always",
+          ui_mount_scope: "workspace",
+        }),
+      ],
+    });
+    expect(result).toEqual({
+      key: "entity-campaigns-create",
+      route: "/app/campaigns/new",
+      scope: "workspace",
+      source: "artifact_surface",
+    });
+  });
+
   it("resolves child global admin prompts to canonical child surfaces", () => {
     expect(
       resolvePromptSurfaceTarget("open oidc app clients", {

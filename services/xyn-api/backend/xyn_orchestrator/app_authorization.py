@@ -25,6 +25,7 @@ CAP_REFRESHES_RUN = "app.refreshes.run"
 CAP_INGEST_RUNS_READ = "app.ingest_runs.read"
 CAP_FAILURES_READ = "app.failures.read"
 CAP_ARTIFACTS_READ = "app.artifacts.read"
+CAP_ARTIFACTS_WRITE = "app.artifacts.write"
 CAP_PROVENANCE_READ = "app.provenance.read"
 CAP_DATASETS_PUBLISH = "app.datasets.publish"
 CAP_SOURCE_DIAGNOSTICS_READ = "app.sources.diagnostics.read"
@@ -48,6 +49,7 @@ ROLE_CAPABILITY_MAP: Mapping[str, Set[str]] = {
         CAP_INGEST_RUNS_READ,
         CAP_FAILURES_READ,
         CAP_ARTIFACTS_READ,
+        CAP_ARTIFACTS_WRITE,
         CAP_PROVENANCE_READ,
         CAP_DATASETS_PUBLISH,
         CAP_SOURCE_DIAGNOSTICS_READ,

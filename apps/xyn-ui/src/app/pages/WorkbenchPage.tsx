@@ -10,6 +10,17 @@ import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
 import type { ContextualCapability } from "../../api/types";
 import { buildWorkspaceLayout, derivePanelGroupAssignments, readWorkspaceLayout, syncFlexLayoutModel, writeWorkspaceLayout } from "../workspace/workspaceLayout";
 
+export function shouldReuseExistingLayoutOnWorkspaceSwitch(input: {
+  previousWorkspaceId: string;
+  nextWorkspaceId: string;
+  panelCount: number;
+}): boolean {
+  const previous = String(input.previousWorkspaceId || "").trim();
+  const next = String(input.nextWorkspaceId || "").trim();
+  if (!previous || !next || previous === next) return false;
+  return input.panelCount > 0;
+}
+
 export default function WorkbenchPage({
   workspaceName = "",
   workspaceColor = "#6c7a89",
@@ -55,6 +66,7 @@ export default function WorkbenchPage({
     includeUnavailable: true,
   });
   const [layoutJson, setLayoutJson] = useState<IJsonModel | null>(null);
+  const previousWorkspaceIdRef = useRef<string>("");
 
   const panelById = useMemo(() => new Map(panels.map((entry) => [entry.panel_id, entry] as const)), [panels]);
 
@@ -100,13 +112,23 @@ export default function WorkbenchPage({
   }, [clearSessionResolution, setContext, setOpen]);
 
   useEffect(() => {
-    const stored = readWorkspaceLayout(workspaceId);
+    const previousWorkspaceId = String(previousWorkspaceIdRef.current || "").trim();
+    const nextWorkspaceId = String(workspaceId || "").trim();
+    const preserveLayout = shouldReuseExistingLayoutOnWorkspaceSwitch({
+      previousWorkspaceId,
+      nextWorkspaceId,
+      panelCount: panels.length,
+    });
+    previousWorkspaceIdRef.current = nextWorkspaceId;
+    if (!nextWorkspaceId) return;
+    if (preserveLayout) return;
+    const stored = readWorkspaceLayout(nextWorkspaceId);
     if (stored?.panel_ids?.length) {
       setLayoutJson(stored.flexlayout_model as IJsonModel);
     } else {
-      setLayoutJson(buildWorkspaceLayout(workspaceId, panels, activePanel?.panel_id || null).flexlayout_model as IJsonModel);
+      setLayoutJson(buildWorkspaceLayout(nextWorkspaceId, panels, activePanel?.panel_id || null).flexlayout_model as IJsonModel);
     }
-  }, [workspaceId]);
+  }, [workspaceId, panels.length, activePanel?.panel_id]);
 
   useEffect(() => {
     if (!activePanel) setCanvasContext(null);
@@ -127,13 +149,92 @@ export default function WorkbenchPage({
 
   useEffect(() => {
     const panelKey = String(searchParams.get("panel") || "").trim().toLowerCase();
-    if (panelKey !== "platform_settings") return;
-    if (!activePanel || activePanel.key !== "platform_settings") {
-      openPanel({
-        key: "platform_settings",
-        params: {},
-        open_in: "current_panel",
-      });
+    if (!panelKey) return;
+    // Deep-link bridge into panel state only.
+    // New capability UX should be expressed as panel intents/palette commands,
+    // with route-level wrappers kept as compatibility redirects.
+    if (panelKey === "platform_settings") {
+      if (!activePanel || activePanel.key !== "platform_settings") {
+        openPanel({
+          key: "platform_settings",
+          params: {},
+          open_in: "current_panel",
+        });
+      }
+    } else if (panelKey === "solution_list") {
+      const nextParams: Record<string, unknown> = {};
+      const solutionName = String(searchParams.get("solution_name") || "").trim();
+      if (solutionName) nextParams.solution_name = solutionName;
+      const createObjective = String(searchParams.get("create_solution_objective") || "").trim();
+      const createName = String(searchParams.get("create_solution_name") || "").trim();
+      if (createObjective) nextParams.create_solution_objective = createObjective;
+      if (createName) nextParams.create_solution_name = createName;
+      const shouldOpenWithParams =
+        Boolean(solutionName || createObjective || createName)
+        && activePanel?.key === "solution_list";
+      if (!activePanel || activePanel.key !== "solution_list" || shouldOpenWithParams) {
+        openPanel({
+          key: "solution_list",
+          params: nextParams,
+          open_in: "current_panel",
+        });
+      }
+      const next = new URLSearchParams(searchParams);
+      next.delete("solution_name");
+      next.delete("create_solution_objective");
+      next.delete("create_solution_name");
+      next.delete("panel");
+      setSearchParams(next, { replace: true });
+      return;
+    } else if (panelKey === "solution_detail") {
+      const applicationId = String(searchParams.get("application_id") || "").trim();
+      if (!applicationId) return;
+      const nextParams: Record<string, unknown> = { application_id: applicationId };
+      if (!activePanel || activePanel.key !== "solution_detail" || String(activePanel.params?.application_id || "") !== applicationId) {
+        openPanel({
+          key: "solution_detail",
+          params: nextParams,
+          open_in: "current_panel",
+        });
+      }
+      const next = new URLSearchParams(searchParams);
+      next.delete("application_id");
+      next.delete("panel");
+      setSearchParams(next, { replace: true });
+      return;
+    } else if (panelKey === "composer_detail" || panelKey === "composer") {
+      const nextParams: Record<string, unknown> = {};
+      const applicationId = String(searchParams.get("application_id") || "").trim();
+      const applicationPlanId = String(searchParams.get("application_plan_id") || "").trim();
+      const goalId = String(searchParams.get("goal_id") || "").trim();
+      const threadId = String(searchParams.get("thread_id") || "").trim();
+      const factoryKey = String(searchParams.get("factory_key") || "").trim();
+      const solutionChangeSessionId = String(searchParams.get("solution_change_session_id") || "").trim();
+      if (applicationId) nextParams.application_id = applicationId;
+      if (applicationPlanId) nextParams.application_plan_id = applicationPlanId;
+      if (goalId) nextParams.goal_id = goalId;
+      if (threadId) nextParams.thread_id = threadId;
+      if (factoryKey) nextParams.factory_key = factoryKey;
+      if (solutionChangeSessionId) nextParams.solution_change_session_id = solutionChangeSessionId;
+      if (!activePanel || activePanel.key !== "composer_detail") {
+        openPanel({
+          key: "composer_detail",
+          params: nextParams,
+          open_in: "current_panel",
+        });
+      }
+      const next = new URLSearchParams(searchParams);
+      next.delete("application_id");
+      next.delete("application_plan_id");
+      next.delete("goal_id");
+      next.delete("thread_id");
+      next.delete("factory_key");
+      next.delete("solution_change_session_id");
+      next.delete("panel");
+      setSearchParams(next, { replace: true });
+      return;
+    } else {
+      return;
     }
     const next = new URLSearchParams(searchParams);
     next.delete("panel");
@@ -146,11 +247,12 @@ export default function WorkbenchPage({
     const prompt = String(searchParams.get("prompt") || "").trim();
     const artifactSlug = String(searchParams.get("artifact_slug") || "").trim();
     const artifactTitle = String(searchParams.get("artifact_title") || "").trim() || artifactSlug;
+    const artifactType = String(searchParams.get("artifact_type") || "").trim() || "Artifact";
     setContext({ artifact_id: null, artifact_type: null });
     if (artifactSlug) {
       setLastArtifactHint({
         artifact_id: artifactSlug,
-        artifact_type: "GeneratedApplication",
+        artifact_type: artifactType,
         artifact_state: "installed",
         title: artifactTitle,
         route: `/w/${encodeURIComponent(workspaceId)}/workbench`,
@@ -163,6 +265,7 @@ export default function WorkbenchPage({
     next.delete("prompt");
     next.delete("artifact_slug");
     next.delete("artifact_title");
+    next.delete("artifact_type");
     setSearchParams(next, { replace: true });
   }, [searchParams, setContext, setInputText, setLastArtifactHint, setOpen, setSearchParams, workspaceId]);
 

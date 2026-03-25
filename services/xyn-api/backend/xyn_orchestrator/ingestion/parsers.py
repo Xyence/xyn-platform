@@ -81,6 +81,11 @@ class CsvTsvParser:
     supported_kinds: tuple[str, ...] = (FILE_KIND_CSV, FILE_KIND_TSV)
 
     def parse(self, *, target: ParseTarget, stream: BinaryIO) -> ParseOutcome:
+        raw_limit = str(os.environ.get("XYN_INGEST_DELIMITED_MAX_RECORDS") or "50000").strip()
+        try:
+            max_records = max(1000, min(int(raw_limit), 2_000_000))
+        except ValueError:
+            max_records = 50000
         payload = stream.read()
         if not isinstance(payload, (bytes, bytearray)):
             payload = bytes(payload or b"")
@@ -89,6 +94,7 @@ class CsvTsvParser:
         delimiter = "\t" if kind == FILE_KIND_TSV else ","
         reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
         records: list[ParsedRecordEnvelope] = []
+        issues: list[ParseIssue] = []
         for index, row in enumerate(reader, start=1):
             src = {str(k): row.get(k) for k in row.keys()} if row else {}
             records.append(
@@ -100,11 +106,24 @@ class CsvTsvParser:
                     record_index=index,
                 )
             )
+            if index >= max_records:
+                issues.append(
+                    ParseIssue(
+                        category=ISSUE_CATEGORY_PARSE_ERROR,
+                        code="delimited.record_limit_reached",
+                        message=f"delimited parse truncated after {max_records} rows",
+                        severity="warning",
+                        details={"max_records": max_records},
+                    )
+                )
+                break
         return ParseOutcome(
             parser_name=self.name,
             parser_version=self.version,
             normalization_version="1",
             records=tuple(records),
+            issues=tuple(issues),
+            warnings=tuple(issue.message for issue in issues if issue.severity != "error"),
         )
 
 
@@ -320,6 +339,11 @@ class ShapefileParser:
     supported_kinds: tuple[str, ...] = (FILE_KIND_SHP,)
 
     def parse(self, *, target: ParseTarget, stream: BinaryIO) -> ParseOutcome:
+        raw_limit = str(os.environ.get("XYN_INGEST_SHAPEFILE_MAX_FEATURES") or "50000").strip()
+        try:
+            max_features = max(1000, min(int(raw_limit), 2_000_000))
+        except ValueError:
+            max_features = 50000
         members = set(target.grouped_member_paths or tuple())
         required = {".shp", ".dbf", ".shx"}
         have = {f".{path.rsplit('.', 1)[-1].lower()}" for path in members if "." in path}
@@ -462,6 +486,17 @@ class ShapefileParser:
                             record_index=feature_index,
                         )
                     )
+                    if feature_index >= max_features:
+                        issues.append(
+                            ParseIssue(
+                                category=ISSUE_CATEGORY_PARSE_ERROR,
+                                code="shapefile.feature_limit_reached",
+                                message=f"shapefile parse truncated after {max_features} features",
+                                severity="warning",
+                                details={"max_features": max_features},
+                            )
+                        )
+                        break
                 if feature_index == 0:
                     issues.append(
                         ParseIssue(
@@ -504,6 +539,11 @@ class AccessParser:
     supported_kinds: tuple[str, ...] = (FILE_KIND_MDB, FILE_KIND_ACCDB)
 
     def parse(self, *, target: ParseTarget, stream: BinaryIO) -> ParseOutcome:
+        raw_limit = str(os.environ.get("XYN_INGEST_ACCESS_MAX_RECORDS") or "25000").strip()
+        try:
+            max_records = max(1000, min(int(raw_limit), 1_000_000))
+        except ValueError:
+            max_records = 25000
         if not _mdb_tools_available():
             return ParseOutcome(
                 parser_name=self.name,
@@ -560,20 +600,26 @@ class AccessParser:
                         )
                     )
                 record_index = 0
+                truncated = False
                 for table in tables:
-                    export_cmd = _run_mdb_command(["mdb-export", db_path, table])
-                    if int(export_cmd.returncode or 0) != 0:
+                    export_proc = subprocess.Popen(
+                        ["mdb-export", db_path, table],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    if export_proc.stdout is None:
                         issues.append(
                             ParseIssue(
                                 category=ISSUE_CATEGORY_PARSE_ERROR,
                                 code="access.table_export_failed",
                                 message=f"failed to export table '{table}'",
                                 severity="warning",
-                                details={"table": table, "stderr": str(export_cmd.stderr or "").strip()},
+                                details={"table": table, "stderr": "mdb-export produced no stdout stream"},
                             )
                         )
                         continue
-                    reader = csv.DictReader(io.StringIO(str(export_cmd.stdout or "")))
+                    reader = csv.DictReader(export_proc.stdout)
                     for row_number, row in enumerate(reader, start=1):
                         record_index += 1
                         row_data = {str(k): row.get(k) for k in (row.keys() if row else [])}
@@ -586,6 +632,35 @@ class AccessParser:
                                 record_index=record_index,
                             )
                         )
+                        if record_index >= max_records:
+                            issues.append(
+                                ParseIssue(
+                                    category=ISSUE_CATEGORY_PARSE_ERROR,
+                                    code="access.record_limit_reached",
+                                    message=f"access parse truncated after {max_records} rows",
+                                    severity="warning",
+                                    details={"max_records": max_records},
+                                )
+                            )
+                            truncated = True
+                            break
+                    export_proc.stdout.close()
+                    stderr_text = str(export_proc.stderr.read() or "").strip() if export_proc.stderr else ""
+                    return_code = int(export_proc.wait() or 0)
+                    if return_code != 0:
+                        issues.append(
+                            ParseIssue(
+                                category=ISSUE_CATEGORY_PARSE_ERROR,
+                                code="access.table_export_failed",
+                                message=f"failed to export table '{table}'",
+                                severity="warning",
+                                details={"table": table, "stderr": stderr_text},
+                            )
+                        )
+                    if export_proc.stderr:
+                        export_proc.stderr.close()
+                    if truncated:
+                        break
         except Exception as exc:
             return ParseOutcome(
                 parser_name=self.name,

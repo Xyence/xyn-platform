@@ -4494,6 +4494,105 @@ class PlatformDomainEvent(models.Model):
         return f"{self.workspace_id}:{self.event_type}:{self.stage_key}"
 
 
+class SignalReadModel(models.Model):
+    """Durable signal projection for app/runtime query surfaces."""
+
+    STATUS_CHOICES = [
+        ("active", "Active"),
+        ("dismissed", "Dismissed"),
+        ("resolved", "Resolved"),
+    ]
+    SEVERITY_CHOICES = [
+        ("info", "Info"),
+        ("low", "Low"),
+        ("medium", "Medium"),
+        ("high", "High"),
+        ("critical", "Critical"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="signal_read_models")
+    domain_event = models.OneToOneField(
+        "PlatformDomainEvent",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_model",
+    )
+    watch_match_event = models.ForeignKey(
+        "WatchMatchEvent",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_models",
+    )
+    watch = models.ForeignKey(
+        "WatchDefinition",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_models",
+    )
+    campaign = models.ForeignKey(
+        "Campaign",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_models",
+    )
+    parcel_identity = models.ForeignKey(
+        "ParcelCanonicalIdentity",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="signal_read_models",
+    )
+    parcel_handle_normalized = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    signal_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    signal_type = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active", db_index=True)
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default="info", db_index=True)
+    title = models.CharField(max_length=240, blank=True, default="")
+    summary = models.TextField(blank=True, default="")
+    event_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    source_key = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    scope_jurisdiction = models.CharField(max_length=120, blank=True, default="", db_index=True)
+    reconciled_state_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    signal_set_version = models.CharField(max_length=160, blank=True, default="", db_index=True)
+    occurred_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    payload_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    idempotency_key = models.CharField(max_length=180, blank=True, default="", db_index=True)
+    first_observed_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    last_observed_at = models.DateTimeField(auto_now=True, db_index=True)
+
+    class Meta:
+        ordering = ["-occurred_at", "-last_observed_at", "-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "signal_key"],
+                condition=Q(signal_key__gt=""),
+                name="uniq_signal_read_signal_key",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "idempotency_key"],
+                condition=Q(idempotency_key__gt=""),
+                name="uniq_signal_read_idempotency",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "status", "last_observed_at"], name="ix_signal_read_status"),
+            models.Index(fields=["workspace", "signal_type", "last_observed_at"], name="ix_signal_read_type"),
+            models.Index(fields=["workspace", "parcel_handle_normalized", "last_observed_at"], name="ix_signal_read_handle"),
+            models.Index(fields=["workspace", "watch", "last_observed_at"], name="ix_signal_read_watch"),
+            models.Index(fields=["workspace", "campaign", "last_observed_at"], name="ix_signal_read_campaign"),
+            models.Index(fields=["workspace", "source_key", "last_observed_at"], name="ix_signal_read_source"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.signal_type}:{self.id}"
+
+
 class RecordMatchEvaluation(models.Model):
     """Durable, explainable record matching result for platform-level reuse."""
 
@@ -4661,6 +4760,215 @@ class Application(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class ApplicationArtifactMembership(models.Model):
+    ROLE_CHOICES = [
+        ("primary_ui", "Primary UI"),
+        ("primary_api", "Primary API"),
+        ("integration_adapter", "Integration Adapter"),
+        ("worker", "Worker"),
+        ("runtime_service", "Runtime Service"),
+        ("shared_library", "Shared Library"),
+        ("supporting", "Supporting"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="application_artifact_memberships")
+    application = models.ForeignKey("Application", on_delete=models.CASCADE, related_name="artifact_memberships")
+    artifact = models.ForeignKey("Artifact", on_delete=models.CASCADE, related_name="application_memberships")
+    role = models.CharField(max_length=40, choices=ROLE_CHOICES, default="supporting")
+    responsibility_summary = models.TextField(blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["application", "artifact"],
+                name="uniq_application_artifact_membership",
+            ),
+        ]
+
+    def clean(self):
+        if self.application_id and self.workspace_id and self.application.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match application workspace")
+        if self.artifact_id and self.workspace_id and self.artifact.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match artifact workspace")
+
+    def save(self, *args, **kwargs):
+        if self.application_id and not self.workspace_id:
+            self.workspace_id = self.application.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.application_id}:{self.artifact_id}:{self.role}"
+
+
+class SolutionChangeSession(models.Model):
+    STATUS_CHOICES = [
+        ("draft", "Draft"),
+        ("planned", "Planned"),
+        ("archived", "Archived"),
+    ]
+    EXECUTION_STATUS_CHOICES = [
+        ("not_started", "Not Started"),
+        ("staged", "Staged"),
+        ("preview_preparing", "Preview Preparing"),
+        ("preview_ready", "Preview Ready"),
+        ("validating", "Validating"),
+        ("ready_for_promotion", "Ready for Promotion"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_change_sessions")
+    application = models.ForeignKey("Application", on_delete=models.CASCADE, related_name="solution_change_sessions")
+    title = models.CharField(max_length=240)
+    request_text = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="solution_change_sessions"
+    )
+    analysis_json = models.JSONField(default=dict, blank=True)
+    selected_artifact_ids_json = models.JSONField(default=list, blank=True)
+    plan_json = models.JSONField(default=dict, blank=True)
+    execution_status = models.CharField(max_length=32, choices=EXECUTION_STATUS_CHOICES, default="not_started")
+    staged_changes_json = models.JSONField(default=dict, blank=True)
+    preview_json = models.JSONField(default=dict, blank=True)
+    validation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+
+    def clean(self):
+        if self.application_id and self.workspace_id and self.application.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match application workspace")
+
+    def save(self, *args, **kwargs):
+        if self.application_id and not self.workspace_id:
+            self.workspace_id = self.application.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.application_id}:{self.title}"
+
+
+class SolutionPlanningTurn(models.Model):
+    ACTOR_CHOICES = [
+        ("user", "User"),
+        ("planner", "Planner"),
+    ]
+    KIND_CHOICES = [
+        ("request", "Request"),
+        ("question", "Question"),
+        ("option_set", "Option Set"),
+        ("draft_plan", "Draft Plan"),
+        ("checkpoint", "Checkpoint"),
+        ("response", "Response"),
+        ("approval", "Approval"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_planning_turns")
+    session = models.ForeignKey("SolutionChangeSession", on_delete=models.CASCADE, related_name="planning_turns")
+    actor = models.CharField(max_length=16, choices=ACTOR_CHOICES)
+    kind = models.CharField(max_length=24, choices=KIND_CHOICES)
+    sequence = models.IntegerField(default=1)
+    payload_json = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="solution_planning_turns"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sequence", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "sequence"],
+                name="uniq_solution_planning_turn_sequence",
+            ),
+        ]
+
+    def clean(self):
+        if self.session_id and self.workspace_id and self.session.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match solution change session workspace")
+
+    def save(self, *args, **kwargs):
+        if self.session_id and not self.workspace_id:
+            self.workspace_id = self.session.workspace_id
+        if self.session_id and not self.sequence:
+            last_turn = (
+                SolutionPlanningTurn.objects.filter(session_id=self.session_id)
+                .exclude(id=self.id)
+                .order_by("-sequence")
+                .first()
+            )
+            self.sequence = int(last_turn.sequence or 0) + 1 if last_turn else 1
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.session_id}:{self.sequence}:{self.actor}:{self.kind}"
+
+
+class SolutionPlanningCheckpoint(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    ]
+    REQUIRED_BEFORE_CHOICES = [
+        ("stage", "Stage"),
+        ("apply", "Apply"),
+        ("dispatch", "Dispatch"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_planning_checkpoints")
+    session = models.ForeignKey("SolutionChangeSession", on_delete=models.CASCADE, related_name="planning_checkpoints")
+    checkpoint_key = models.CharField(max_length=120)
+    label = models.CharField(max_length=240)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="pending")
+    required_before = models.CharField(max_length=16, choices=REQUIRED_BEFORE_CHOICES, default="stage")
+    payload_json = models.JSONField(default=dict, blank=True)
+    decided_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="solution_planning_checkpoint_decisions"
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "checkpoint_key", "required_before"],
+                name="uniq_solution_planning_checkpoint_key_scope",
+            ),
+        ]
+
+    def clean(self):
+        if self.session_id and self.workspace_id and self.session.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match solution change session workspace")
+
+    def save(self, *args, **kwargs):
+        if self.session_id and not self.workspace_id:
+            self.workspace_id = self.session.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.session_id}:{self.checkpoint_key}:{self.required_before}:{self.status}"
 
 
 class ApplicationPlan(models.Model):

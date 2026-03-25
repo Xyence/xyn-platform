@@ -929,6 +929,260 @@ class NetInventoryCrudTests(unittest.TestCase):
         self.assertEqual(first.status_code, 201, first.text)
         self.assertEqual(second.status_code, 201, second.text)
 
+    def test_app_surface_scaffold_exposes_entity_and_admin_sections(self):
+        contracts = [
+            {
+                "key": "campaigns",
+                "singular_label": "campaign",
+                "plural_label": "campaigns",
+                "collection_path": "/campaigns",
+                "item_path_template": "/campaigns/{id}",
+                "operations": {
+                    "list": {"declared": True, "method": "GET", "path": "/campaigns"},
+                    "get": {"declared": True, "method": "GET", "path": "/campaigns/{id}"},
+                    "create": {"declared": True, "method": "POST", "path": "/campaigns"},
+                    "update": {"declared": True, "method": "PATCH", "path": "/campaigns/{id}"},
+                    "delete": {"declared": True, "method": "DELETE", "path": "/campaigns/{id}"},
+                },
+                "fields": [
+                    {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                    {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                    {"name": "name", "type": "string", "required": True, "readable": True, "writable": True, "identity": True},
+                ],
+                "presentation": {"default_list_fields": ["name"], "default_detail_fields": ["id", "name"], "title_field": "name"},
+                "validation": {"required_on_create": ["workspace_id", "name"], "allowed_on_update": ["name"]},
+                "relationships": [],
+            },
+            {
+                "key": "sources",
+                "singular_label": "source",
+                "plural_label": "sources",
+                "collection_path": "/sources",
+                "item_path_template": "/sources/{id}",
+                "operations": {
+                    "list": {"declared": True, "method": "GET", "path": "/sources"},
+                    "get": {"declared": True, "method": "GET", "path": "/sources/{id}"},
+                    "create": {"declared": True, "method": "POST", "path": "/sources"},
+                    "update": {"declared": True, "method": "PATCH", "path": "/sources/{id}"},
+                    "delete": {"declared": True, "method": "DELETE", "path": "/sources/{id}"},
+                },
+                "fields": [
+                    {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                    {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                    {"name": "name", "type": "string", "required": True, "readable": True, "writable": True, "identity": True},
+                ],
+                "presentation": {"default_list_fields": ["name"], "default_detail_fields": ["id", "name"], "title_field": "name"},
+                "validation": {"required_on_create": ["workspace_id", "name"], "allowed_on_update": ["name"]},
+                "relationships": [],
+            },
+        ]
+        service = GenericEntityOperationsService(entity_contracts=contracts, storage_adapter=InMemoryStorageAdapter())
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GENERATED_WORKFLOW_DEFINITIONS_JSON": json.dumps(
+                    [
+                        {"workflow_key": "end-user", "description": "campaign with map rectangle selection"},
+                        {"workflow_key": "admin-operator", "description": "source inspection and activation"},
+                    ]
+                ),
+                "GENERATED_UI_SURFACES_TEXT": "campaign list view; map selection view; admin/operator source-management area",
+                "GENERATED_REQUIRES_PRIMITIVES_JSON": json.dumps(["geospatial"]),
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app(entity_service=service, initialize_schema=False))
+            home = client.get("/app")
+            self.assertEqual(home.status_code, 200, home.text)
+            self.assertIn("/app/campaigns", home.text)
+            self.assertIn("/app/sources", home.text)
+            self.assertIn("/app/admin", home.text)
+
+            surfaces = client.get("/app/surfaces")
+            self.assertEqual(surfaces.status_code, 200, surfaces.text)
+            payload = surfaces.json()
+            self.assertTrue(payload.get("flags", {}).get("admin_grouping"))
+            self.assertTrue(payload.get("flags", {}).get("map_selection_scaffold"))
+
+            map_scaffold = client.get("/app/map-selection")
+            self.assertEqual(map_scaffold.status_code, 200, map_scaffold.text)
+            self.assertIn("rectangle/box selection", map_scaffold.text.lower())
+
+    def test_reports_routes_only_register_when_entities_exist(self):
+        service = GenericEntityOperationsService(entity_contracts=_lunch_poll_contracts(), storage_adapter=InMemoryStorageAdapter())
+        client = TestClient(create_app(entity_service=service, initialize_schema=False))
+        self.assertEqual(client.get("/reports/devices-by-status", params={"workspace_id": self.workspace_id}).status_code, 404)
+        self.assertEqual(client.get("/reports/interfaces-by-status", params={"workspace_id": self.workspace_id}).status_code, 404)
+
+    def test_root_redirects_to_shell_when_workspace_hint_and_referer_exist(self):
+        service = GenericEntityOperationsService(entity_contracts=_contracts(), storage_adapter=InMemoryStorageAdapter())
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GENERATED_POLICY_BUNDLE_JSON": json.dumps({"workspace_id": self.workspace_id}),
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app(entity_service=service, initialize_schema=False))
+            response = client.get("/", headers={"referer": "http://localhost:3000/w/seed/workbench"}, follow_redirects=False)
+            self.assertEqual(response.status_code, 307, response.text)
+            self.assertEqual(response.headers.get("location"), f"http://localhost:3000/w/{self.workspace_id}/workbench")
+
+            runtime_surface = client.get("/", params={"view": "runtime"})
+            self.assertEqual(runtime_surface.status_code, 200, runtime_surface.text)
+            self.assertIn("Runtime Dev Access", runtime_surface.text)
+
+    def test_root_redirects_to_shell_when_shell_base_env_is_set(self):
+        service = GenericEntityOperationsService(entity_contracts=_contracts(), storage_adapter=InMemoryStorageAdapter())
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GENERATED_POLICY_BUNDLE_JSON": json.dumps({"workspace_id": self.workspace_id}),
+                "SHELL_BASE_URL": "http://localhost:3000",
+            },
+            clear=False,
+        ):
+            client = TestClient(create_app(entity_service=service, initialize_schema=False))
+            response = client.get("/", follow_redirects=False)
+            self.assertEqual(response.status_code, 307, response.text)
+            self.assertEqual(response.headers.get("location"), f"http://localhost:3000/w/{self.workspace_id}/workbench")
+
+    def test_signal_surface_binds_to_canonical_signal_feed(self):
+        contracts = [
+            {
+                "key": "signals",
+                "singular_label": "signal",
+                "plural_label": "signals",
+                "collection_path": "/signals",
+                "item_path_template": "/signals/{id}",
+                "operations": {
+                    "list": {"declared": True, "method": "GET", "path": "/signals"},
+                    "get": {"declared": True, "method": "GET", "path": "/signals/{id}"},
+                },
+                "fields": [
+                    {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                    {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                    {"name": "name", "type": "string", "required": False, "readable": True, "writable": True, "identity": False},
+                ],
+                "presentation": {"default_list_fields": ["id"], "default_detail_fields": ["id"], "title_field": "id"},
+                "validation": {"required_on_create": ["workspace_id"], "allowed_on_update": ["name"]},
+                "relationships": [],
+            }
+        ]
+        service = GenericEntityOperationsService(entity_contracts=contracts, storage_adapter=InMemoryStorageAdapter())
+        with mock.patch(
+            "main._platform_call",
+            return_value={
+                "ok": True,
+                "status": 200,
+                "data": {
+                    "signals": [
+                        {
+                            "id": "sig-1",
+                            "title": "Vacancy escalation",
+                            "severity": "high",
+                            "status": "active",
+                            "campaign_id": "cmp-1",
+                            "watch_id": "watch-1",
+                            "parcel_handle_normalized": "10174000016",
+                        }
+                    ]
+                },
+                "error": "",
+                "url": "http://xyn-api/xyn/api/signals",
+            },
+        ) as mocked:
+            client = TestClient(create_app(entity_service=service, initialize_schema=False))
+            response = client.get("/app/signals", params={"workspace_id": self.workspace_id})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("Vacancy escalation", response.text)
+        self.assertIn("10174000016", response.text)
+        self.assertTrue(mocked.called)
+
+    def test_campaign_detail_surface_shows_watch_matches_and_signals(self):
+        contracts = [
+            {
+                "key": "campaigns",
+                "singular_label": "campaign",
+                "plural_label": "campaigns",
+                "collection_path": "/campaigns",
+                "item_path_template": "/campaigns/{id}",
+                "operations": {
+                    "list": {"declared": True, "method": "GET", "path": "/campaigns"},
+                    "get": {"declared": True, "method": "GET", "path": "/campaigns/{id}"},
+                },
+                "fields": [
+                    {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                    {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                    {"name": "name", "type": "string", "required": True, "readable": True, "writable": True, "identity": False},
+                ],
+                "presentation": {"default_list_fields": ["name"], "default_detail_fields": ["id", "name"], "title_field": "name"},
+                "validation": {"required_on_create": ["workspace_id", "name"], "allowed_on_update": ["name"]},
+                "relationships": [],
+            }
+        ]
+        service = GenericEntityOperationsService(entity_contracts=contracts, storage_adapter=InMemoryStorageAdapter())
+
+        def _platform_side_effect(_request, *, method, path, params=None, payload=None):
+            if path.startswith("/xyn/api/campaigns/"):
+                return {"ok": True, "status": 200, "data": {"id": "cmp-1", "name": "North STL", "slug": "north-stl", "status": "active", "campaign_type": "monitoring"}, "error": "", "url": path}
+            if path == "/xyn/api/watches/matches":
+                return {"ok": True, "status": 200, "data": {"matches": [{"watch_id": "watch-1", "matched": True, "score": 0.95, "event_key": "csb.event", "reason": "parcel-linked"}]}, "error": "", "url": path}
+            if path == "/xyn/api/signals":
+                return {"ok": True, "status": 200, "data": {"signals": [{"id": "sig-9", "title": "Code violation cluster", "severity": "medium", "status": "active", "watch_id": "watch-1"}]}, "error": "", "url": path}
+            return {"ok": False, "status": 404, "data": {"error": "missing"}, "error": "missing", "url": path}
+
+        with mock.patch("main._platform_call", side_effect=_platform_side_effect):
+            client = TestClient(create_app(entity_service=service, initialize_schema=False))
+            response = client.get("/app/campaigns/cmp-1", params={"workspace_id": self.workspace_id})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("Watch Matches", response.text)
+        self.assertIn("Code violation cluster", response.text)
+        self.assertIn("North STL", response.text)
+
+    def test_admin_surface_and_reresolve_action_use_canonical_endpoints(self):
+        contracts = [
+            {
+                "key": "sources",
+                "singular_label": "source",
+                "plural_label": "sources",
+                "collection_path": "/sources",
+                "item_path_template": "/sources/{id}",
+                "operations": {"list": {"declared": True, "method": "GET", "path": "/sources"}},
+                "fields": [
+                    {"name": "id", "type": "uuid", "required": True, "readable": True, "writable": False, "identity": True},
+                    {"name": "workspace_id", "type": "uuid", "required": True, "readable": True, "writable": True, "identity": False},
+                ],
+                "presentation": {"default_list_fields": ["id"], "default_detail_fields": ["id"], "title_field": "id"},
+                "validation": {"required_on_create": ["workspace_id"], "allowed_on_update": []},
+                "relationships": [],
+            }
+        ]
+        service = GenericEntityOperationsService(entity_contracts=contracts, storage_adapter=InMemoryStorageAdapter())
+
+        def _platform_side_effect(_request, *, method, path, params=None, payload=None):
+            if path == "/xyn/api/source-connectors":
+                return {"ok": True, "status": 200, "data": {"sources": [{"id": "src-1", "name": "CSB", "source_type": "events", "lifecycle_state": "active", "is_active": True, "health_status": "healthy"}]}, "error": "", "url": path}
+            if path == "/xyn/api/monitoring/funnel-summary":
+                return {"ok": True, "status": 200, "data": {"counts": {"adapted_rows": 100, "geocode_selected": 80, "crosswalk_resolved": 70, "crosswalk_unresolved": 30, "watch_matches_matched": 6, "signal_projection_rows": 4}, "unresolved_reasons": [{"reason": "missing_address", "count": 12}]}, "error": "", "url": path}
+            if path == "/xyn/api/parcel-crosswalks/reresolve-source":
+                return {"ok": True, "status": 200, "data": {"count": 9, "before": {"unresolved": 30}, "after": {"unresolved": 21}, "crosswalks": []}, "error": "", "url": path}
+            return {"ok": False, "status": 404, "data": {"error": "missing"}, "error": "missing", "url": path}
+
+        with mock.patch("main._platform_call", side_effect=_platform_side_effect):
+            client = TestClient(create_app(entity_service=service, initialize_schema=False))
+            admin = client.get("/app/admin", params={"workspace_id": self.workspace_id, "source_id": "src-1"})
+            reresolve = client.post(
+                "/app/operator/reresolve-source",
+                data={"workspace_id": self.workspace_id, "source_id": "src-1", "limit": "50", "require_selected_geocode": "1"},
+            )
+        self.assertEqual(admin.status_code, 200, admin.text)
+        self.assertIn("Monitoring Funnel", admin.text)
+        self.assertIn("missing_address", admin.text)
+        self.assertEqual(reresolve.status_code, 200, reresolve.text)
+        self.assertIn("Rows Processed", reresolve.text)
+        self.assertIn("Back to Admin", reresolve.text)
+
 
 if __name__ == "__main__":
     unittest.main()

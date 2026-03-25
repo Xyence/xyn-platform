@@ -714,7 +714,14 @@ def resolve_ai_config(*, purpose_slug: Optional[str] = None, agent_slug: Optiona
     purpose_obj = AgentPurpose.objects.filter(slug=purpose).first()
     purpose_preamble = str(getattr(purpose_obj, "preamble", "") or "")
     if agent:
-        model_config = purpose_obj.model_config if purpose_obj and purpose_obj.model_config_id else agent.model_config
+        # Runtime model selection must follow resolved agent routing. Purpose-level model
+        # config may inform defaults/authoring, but must not override explicit agent routing.
+        model_config = agent.model_config
+        if model_config is None and purpose_obj and purpose_obj.model_config_id:
+            # Legacy fallback for malformed agent rows.
+            model_config = purpose_obj.model_config
+        if model_config is None:
+            raise AiConfigError(f"Resolved agent '{agent.slug}' does not define a model configuration.")
         provider = model_config.provider
         credential = model_config.credential
         api_key = _resolve_model_api_key(provider.slug, credential)
@@ -1080,15 +1087,32 @@ def ensure_default_ai_seeds() -> None:
         role_agents[role] = agent
     if "default" in role_agents:
         AgentDefinition.objects.exclude(id=role_agents["default"].id).filter(is_default=True).update(is_default=False)
+    bootstrap_managed_agent_slugs = {"default-assistant", "planning-assistant", "coding-assistant"}
     for purpose_slug, owner_role in {
         "planning": "planning" if "planning" in role_agents else "default",
         "coding": "coding" if "coding" in role_agents else "default",
     }.items():
-        AgentDefinitionPurpose.objects.filter(purpose__slug=purpose_slug, is_default_for_purpose=True).exclude(
-            agent_definition=role_agents.get(owner_role)
-        ).update(is_default_for_purpose=False)
+        current_default = (
+            AgentDefinitionPurpose.objects.select_related("agent_definition")
+            .filter(purpose__slug=purpose_slug, is_default_for_purpose=True)
+            .first()
+        )
+        if (
+            current_default
+            and current_default.agent_definition.enabled
+            and str(current_default.agent_definition.slug or "").strip() not in bootstrap_managed_agent_slugs
+        ):
+            # Preserve explicit user-selected defaults for a purpose. Bootstrap seed enforcement
+            # should only own the canonical bootstrap agent set.
+            AgentDefinitionPurpose.objects.filter(purpose__slug=purpose_slug, is_default_for_purpose=True).exclude(
+                id=current_default.id
+            ).update(is_default_for_purpose=False)
+            continue
         owner = role_agents.get(owner_role)
         if owner:
+            AgentDefinitionPurpose.objects.filter(purpose__slug=purpose_slug, is_default_for_purpose=True).exclude(
+                agent_definition=owner
+            ).update(is_default_for_purpose=False)
             link = AgentDefinitionPurpose.objects.filter(agent_definition=owner, purpose__slug=purpose_slug).first()
             if link and not link.is_default_for_purpose:
                 link.is_default_for_purpose = True

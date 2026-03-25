@@ -40,10 +40,15 @@ class GeocodingService:
     DEFAULT_ADDRESS_FIELDS: tuple[str, ...] = (
         "record.address",
         "record.ADDRESS",
+        "record.Address",
         "record.site_address",
         "record.SITEADDR",
+        "record.PROBADDRESS",
+        "record.ProbAddress",
+        "record.probaddress",
         "attributes.address",
         "attributes.ADDRESS",
+        "attributes.Address",
         "attributes.site_address",
         "attributes.SITEADDR",
     )
@@ -59,7 +64,44 @@ class GeocodingService:
         geocode_cfg = _safe_dict(config.get("geocoding"))
         if not geocode_cfg:
             geocode_cfg = _safe_dict(config.get("geocoder"))
-        return geocode_cfg
+        provider_kind = str(geocode_cfg.get("provider_kind") or "").strip().lower()
+        provider_url = str(geocode_cfg.get("url") or "").strip()
+        if provider_kind and provider_url:
+            return geocode_cfg
+
+        geocoder_sources = list(
+            models.SourceConnector.objects.filter(
+                workspace_id=source.workspace_id,
+                is_active=True,
+                source_type="geocoder",
+            ).order_by("-updated_at", "-created_at")
+        )
+        if not geocoder_sources:
+            return geocode_cfg
+
+        # Prefer parcel-oriented geocoders when available; otherwise fallback to most recently updated geocoder.
+        geocoder_sources.sort(
+            key=lambda row: (
+                "parcel" not in str(row.key or "").lower() and "parcel" not in str(row.name or "").lower(),
+                -(int(row.updated_at.timestamp()) if row.updated_at else 0),
+            )
+        )
+        selected = geocoder_sources[0]
+        selected_cfg = _safe_dict(selected.configuration_json)
+        fallback_url = str(selected_cfg.get("url") or "").strip()
+        if not fallback_url:
+            return geocode_cfg
+        fallback_kind = str(selected_cfg.get("provider_kind") or "").strip().lower()
+        if not fallback_kind and "/geocodeserver" in fallback_url.lower():
+            fallback_kind = "arcgis_rest_geocoder"
+        merged = {
+            **geocode_cfg,
+            "provider_kind": fallback_kind or provider_kind,
+            "url": fallback_url,
+            "params": _safe_dict(selected_cfg.get("params")) or _safe_dict(geocode_cfg.get("params")),
+            "fallback_source_id": str(selected.id),
+        }
+        return merged
 
     def _extract_address(self, *, adapted: models.IngestAdaptedRecord, provider_config: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         payload = _safe_dict(adapted.adapted_payload_json)
@@ -133,9 +175,16 @@ class GeocodingService:
             normalized_address=normalized_address,
             provider_params=_safe_dict(provider_config.get("params")),
         )
+        request_fingerprint = idempotency_key
         existing = models.GeocodeEnrichmentResult.objects.filter(workspace=workspace, idempotency_key=idempotency_key).first()
         if existing is not None:
-            return existing
+            terminal_statuses = {"selected", "no_candidates", "invalid_input", "provider_not_configured"}
+            if str(existing.status or "") in terminal_statuses:
+                return existing
+            retry_count = (
+                models.GeocodeEnrichmentResult.objects.filter(workspace=workspace, request_fingerprint=request_fingerprint).count()
+            )
+            idempotency_key = _stable_hash({"fingerprint": request_fingerprint, "retry": retry_count + 1})
 
         if not provider_kind or not provider_url:
             return models.GeocodeEnrichmentResult.objects.create(
@@ -151,7 +200,7 @@ class GeocodingService:
                 input_address_raw=raw_address,
                 input_address_normalized=normalized_address,
                 input_address_fields_json=address_fields,
-                request_fingerprint=idempotency_key,
+                request_fingerprint=request_fingerprint,
                 idempotency_key=idempotency_key,
                 status="provider_not_configured",
                 failure_category="provider_not_configured",
@@ -172,7 +221,7 @@ class GeocodingService:
                 input_address_raw=raw_address,
                 input_address_normalized="",
                 input_address_fields_json=address_fields,
-                request_fingerprint=idempotency_key,
+                request_fingerprint=request_fingerprint,
                 idempotency_key=idempotency_key,
                 status="invalid_input",
                 failure_category="invalid_input",
@@ -194,7 +243,7 @@ class GeocodingService:
                 input_address_raw=raw_address,
                 input_address_normalized=normalized_address,
                 input_address_fields_json=address_fields,
-                request_fingerprint=idempotency_key,
+                request_fingerprint=request_fingerprint,
                 idempotency_key=idempotency_key,
                 status="provider_error",
                 failure_category="provider_not_installed",
@@ -247,7 +296,7 @@ class GeocodingService:
             input_address_raw=raw_address,
             input_address_normalized=normalized_address,
             input_address_fields_json=address_fields,
-            request_fingerprint=idempotency_key,
+            request_fingerprint=request_fingerprint,
             idempotency_key=idempotency_key,
             status=result_status,
             request_context_json=_safe_dict(response.request_context),
@@ -412,4 +461,3 @@ def serialize_geocode_result(row: models.GeocodeEnrichmentResult, *, include_can
     if include_candidates:
         payload["candidates"] = [serialize_geocode_candidate(item) for item in row.candidates.order_by("candidate_rank", "created_at")]
     return payload
-

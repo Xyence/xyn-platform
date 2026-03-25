@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import WorkbenchPanelHost from "./WorkbenchPanelHost";
@@ -9,7 +9,9 @@ const apiMocks = vi.hoisted(() => ({
   executeAppPalettePrompt: vi.fn(),
   listGoals: vi.fn(),
   getGoal: vi.fn(),
+  getArtifactConsoleDetailBySlug: vi.fn(),
   listCampaigns: vi.fn(),
+  listWorkspaces: vi.fn(),
   createCampaign: vi.fn(),
   getCampaign: vi.fn(),
   updateCampaign: vi.fn(),
@@ -40,6 +42,14 @@ const apiMocks = vi.hoisted(() => ({
   getAiRoutingStatus: vi.fn(),
   listAiAgents: vi.fn(),
   getExecutionPlan: vi.fn(),
+  generateSolutionChangePlan: vi.fn(),
+  stageSolutionChangeApply: vi.fn(),
+  prepareSolutionChangePreview: vi.fn(),
+  validateSolutionChangeSession: vi.fn(),
+  replyToSolutionPlanningSession: vi.fn(),
+  regenerateSolutionPlanningOptions: vi.fn(),
+  selectSolutionPlanningOption: vi.fn(),
+  decideSolutionPlanningCheckpoint: vi.fn(),
 }));
 
 const streamMocks = vi.hoisted(() => {
@@ -67,7 +77,9 @@ vi.mock("../../../api/xyn", async () => {
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
+    getArtifactConsoleDetailBySlug: apiMocks.getArtifactConsoleDetailBySlug,
     listCampaigns: apiMocks.listCampaigns,
+    listWorkspaces: apiMocks.listWorkspaces,
     createCampaign: apiMocks.createCampaign,
     getCampaign: apiMocks.getCampaign,
     updateCampaign: apiMocks.updateCampaign,
@@ -98,6 +110,14 @@ vi.mock("../../../api/xyn", async () => {
     getAiRoutingStatus: apiMocks.getAiRoutingStatus,
     listAiAgents: apiMocks.listAiAgents,
     getExecutionPlan: apiMocks.getExecutionPlan,
+    generateSolutionChangePlan: apiMocks.generateSolutionChangePlan,
+    stageSolutionChangeApply: apiMocks.stageSolutionChangeApply,
+    prepareSolutionChangePreview: apiMocks.prepareSolutionChangePreview,
+    validateSolutionChangeSession: apiMocks.validateSolutionChangeSession,
+    replyToSolutionPlanningSession: apiMocks.replyToSolutionPlanningSession,
+    regenerateSolutionPlanningOptions: apiMocks.regenerateSolutionPlanningOptions,
+    selectSolutionPlanningOption: apiMocks.selectSolutionPlanningOption,
+    decideSolutionPlanningCheckpoint: apiMocks.decideSolutionPlanningCheckpoint,
   };
 });
 
@@ -199,9 +219,21 @@ describe("WorkbenchPanelHost entity refresh", () => {
       generated_commands: [],
       artifacts: ["application"],
     });
+    apiMocks.listWorkspaces.mockResolvedValue({
+      workspaces: [
+        {
+          id: "ws-1",
+          slug: "development",
+          name: "Development",
+          description: "",
+          role: "admin",
+          termination_authority: false,
+        },
+      ],
+    });
   });
 
-  it("shows system readiness diagnostics in the workbench shell", async () => {
+  it("does not append global ai routing/readiness cards inside panel content", async () => {
     apiMocks.listWorkItems.mockResolvedValue({
       count: 0,
       next: null,
@@ -219,15 +251,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
       </MemoryRouter>
     );
 
-    await waitFor(() => expect(apiMocks.getSystemReadiness).toHaveBeenCalled());
-    await waitFor(() => expect(apiMocks.getAiRoutingStatus).toHaveBeenCalled());
-    expect(screen.getByText("AI Agent Routing")).toBeInTheDocument();
-    expect(screen.getByText("Claude Planning Agent")).toBeInTheDocument();
-    expect(screen.getAllByText("Bootstrap Default Agent").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("Fallback")).toBeInTheDocument();
-    expect(screen.getByText("System Readiness")).toBeInTheDocument();
-    expect(screen.getByText("Configuration required")).toBeInTheDocument();
-    expect(screen.getByText(/No enabled coding agents are configured\./)).toBeInTheDocument();
+    await waitFor(() => expect(apiMocks.listWorkItems).toHaveBeenCalled());
+    expect(screen.queryByText("AI Agent Routing")).not.toBeInTheDocument();
+    expect(screen.queryByText("System Readiness")).not.toBeInTheDocument();
+    expect(apiMocks.getSystemReadiness).not.toHaveBeenCalled();
+    expect(apiMocks.getAiRoutingStatus).not.toHaveBeenCalled();
   });
 
   it("loads work items from durable work item API and opens detail targets", async () => {
@@ -800,7 +828,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Approved and queued the recommended slice.")).toBeInTheDocument();
   });
 
-  it("loads composer discovery state with factory catalog", async () => {
+  it("loads composer with the session-first planning structure", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.getComposerState.mockResolvedValue({
       workspace_id: "ws-1",
@@ -828,64 +856,246 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalledWith({ workspace_id: "ws-1" }));
-    expect(screen.getByText("Application efforts")).toBeInTheDocument();
-    expect(screen.getByText("Current workflow step")).toBeInTheDocument();
-    expect(screen.getByText("No active build in progress")).toBeInTheDocument();
-    expect(screen.getByText("Start a new application plan.")).toBeInTheDocument();
-    expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Build plan" })).toBeInTheDocument();
+    expect(screen.getByText("Planning Session")).toBeInTheDocument();
+    expect(screen.getByText("Planning Conversation")).toBeInTheDocument();
+    expect(screen.getByText("Execution Handoff")).toBeInTheDocument();
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
+    expect(screen.queryByText("Application efforts")).not.toBeInTheDocument();
   });
 
-  it("surfaces already queued next-slice guidance and focuses the recommended thread in Composer", async () => {
+  it("keeps composer phase-gated and allows selecting pending planner options", async () => {
     const onOpenPanel = vi.fn();
-    apiMocks.reviewGoal.mockResolvedValue({
-      status: "already_queued",
-      goal: {
-        id: "goal-1",
-        application_id: "app-1",
-        title: "Workflow and Stabilization",
-        description: "Keep the app stable while extending the workflow.",
-        source_conversation_id: "conv-1",
-        requested_by: "admin@example.com",
-        goal_type: "delivery",
-        planning_status: "in_progress",
-        priority: "high",
-        planning_summary: "Queue the next smallest slice from Operator Workflow.",
-        resolution_notes: [],
-        thread_count: 4,
-        work_item_count: 4,
-        created_at: "2026-03-16T10:00:00Z",
-        updated_at: "2026-03-16T10:10:00Z",
-        recommendation: {
-          recommendation_id: "rec-1",
-          goal_id: "goal-1",
-          thread_id: "thread-operator",
-          thread_title: "Operator Workflow",
-          work_item_id: "task-operator-1",
-          work_item_title: "Define the first operator workflow state",
-          recommended_work_items: [
-            {
-              id: "task-operator-1",
-              title: "Define the first operator workflow state",
-              thread_id: "thread-operator",
-              thread_title: "Operator Workflow",
-            },
-          ],
-          queue_suggestion: {
-            action_type: "queue_next_slice",
-            thread_id: "thread-operator",
-            work_item_id: "task-operator-1",
-            reason: "It is first in deterministic order.",
-            summary: "Queue the next operator workflow slice.",
+    const sessionPayload = {
+      id: "session-1",
+      workspace_id: "ws-1",
+      application_id: "app-1",
+      title: "Deal Finder Session",
+      request_text: "Improve campaign creation UX",
+      status: "planned",
+      selected_artifact_ids: ["artifact-1"],
+      planning: {
+        turns: [
+          {
+            id: "turn-request",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "user",
+            kind: "request",
+            sequence: 1,
+            payload: { request_text: "Improve campaign creation UX" },
+            created_at: "2026-03-20T10:00:00Z",
+            updated_at: "2026-03-20T10:00:00Z",
           },
-          actions: [{ type: "approve_and_queue", label: "Approve and queue", queueable: true, target_thread: "thread-operator" }],
-          summary: "Queue the next operator workflow slice.",
-          reasoning_summary: "Operator Workflow is the next unblocked slice.",
+          {
+            id: "turn-options",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "planner",
+            kind: "option_set",
+            sequence: 2,
+            payload: {
+              question: "Choose implementation path",
+              options: [
+                { id: "option-1", label: "Conservative", description: "Minimal UI updates" },
+                { id: "option-2", label: "Comprehensive", description: "Full panel cleanup" },
+              ],
+            },
+            created_at: "2026-03-20T10:02:00Z",
+            updated_at: "2026-03-20T10:02:00Z",
+          },
+        ],
+        checkpoints: [],
+        pending_question: null,
+        pending_option_set: {
+          id: "turn-options",
+          workspace_id: "ws-1",
+          session_id: "session-1",
+          actor: "planner",
+          kind: "option_set",
+          sequence: 2,
+          payload: {
+            question: "Choose implementation path",
+            options: [
+              { id: "option-1", label: "Conservative", description: "Minimal UI updates" },
+              { id: "option-2", label: "Comprehensive", description: "Full panel cleanup" },
+            ],
+          },
+          created_at: "2026-03-20T10:02:00Z",
+          updated_at: "2026-03-20T10:02:00Z",
         },
-        threads: [],
-        work_items: [],
+        pending_checkpoints: [],
+        latest_draft_plan: null,
       },
+      created_at: "2026-03-20T10:00:00Z",
+      updated_at: "2026-03-20T10:03:00Z",
+    };
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: "app-1",
+        goal_id: null,
+        thread_id: null,
+        solution_change_session_id: "session-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      solution_change_sessions: [sessionPayload],
+      solution_change_session: sessionPayload,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
     });
+    apiMocks.replyToSolutionPlanningSession.mockResolvedValue({ recorded: true, session: sessionPayload });
+    apiMocks.selectSolutionPlanningOption.mockResolvedValue({ recorded: true, session: sessionPayload });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
+    expect(screen.queryByPlaceholderText("Describe the change you want planned.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: /Conservative/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Select Option" }));
+    await waitFor(() =>
+      expect(apiMocks.selectSolutionPlanningOption).toHaveBeenCalledWith("app-1", "session-1", {
+        option_id: "option-1",
+        source_turn_id: "turn-options",
+      })
+    );
+    expect(apiMocks.decideSolutionPlanningCheckpoint).not.toHaveBeenCalled();
+  });
+
+  it("shows a regenerate-options fallback when planner option payload is empty", async () => {
+    const onOpenPanel = vi.fn();
+    const sessionPayload = {
+      id: "session-1",
+      workspace_id: "ws-1",
+      application_id: "app-1",
+      title: "Deal Finder Session",
+      request_text: "Improve campaign creation UX",
+      status: "draft",
+      selected_artifact_ids: ["artifact-1"],
+      planning: {
+        turns: [
+          {
+            id: "turn-request",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "user",
+            kind: "request",
+            sequence: 1,
+            payload: { request_text: "Improve campaign creation UX" },
+            created_at: "2026-03-20T10:00:00Z",
+            updated_at: "2026-03-20T10:00:00Z",
+          },
+          {
+            id: "turn-options-empty",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "planner",
+            kind: "option_set",
+            sequence: 2,
+            payload: { question: "Choose implementation path", options: [] },
+            created_at: "2026-03-20T10:01:00Z",
+            updated_at: "2026-03-20T10:01:00Z",
+          },
+        ],
+        checkpoints: [],
+        pending_question: null,
+        pending_option_set: {
+          id: "turn-options-empty",
+          workspace_id: "ws-1",
+          session_id: "session-1",
+          actor: "planner",
+          kind: "option_set",
+          sequence: 2,
+          payload: { question: "Choose implementation path", options: [] },
+          created_at: "2026-03-20T10:01:00Z",
+          updated_at: "2026-03-20T10:01:00Z",
+        },
+        pending_checkpoints: [],
+        latest_draft_plan: null,
+      },
+      created_at: "2026-03-20T10:00:00Z",
+      updated_at: "2026-03-20T10:01:00Z",
+    };
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: "app-1",
+        goal_id: null,
+        thread_id: null,
+        solution_change_session_id: "session-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      solution_change_sessions: [sessionPayload],
+      solution_change_session: sessionPayload,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+    apiMocks.regenerateSolutionPlanningOptions.mockResolvedValue({ regenerated: true, session: sessionPayload });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText("Planner options unavailable")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate Options" }));
+    await waitFor(() =>
+      expect(apiMocks.regenerateSolutionPlanningOptions).toHaveBeenCalledWith("app-1", "session-1")
+    );
+  });
+
+  it("shows session-required guidance when Composer opens without a selected solution session", async () => {
+    const onOpenPanel = vi.fn();
     apiMocks.getComposerState.mockResolvedValue({
       workspace_id: "ws-1",
       stage: "goal_focus",
@@ -968,29 +1178,15 @@ describe("WorkbenchPanelHost entity refresh", () => {
       </MemoryRouter>
     );
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Approve Next Slice" })).toBeEnabled());
-
-    await act(async () => {
-      screen.getByRole("button", { name: "Approve Next Slice" }).click();
-    });
-
-    await waitFor(() => expect(apiMocks.reviewGoal).toHaveBeenCalledWith("goal-1", "approve_and_queue", "rec-1"));
-    expect(screen.getByText("That slice is already queued. Open the thread and dispatch the ready work item.")).toBeInTheDocument();
-    expect(onOpenPanel).toHaveBeenCalledWith(
-      expect.objectContaining({
-        key: "composer_detail",
-        params: expect.objectContaining({
-          workspace_id: "ws-1",
-          application_id: "app-1",
-          goal_id: "goal-1",
-          thread_id: "thread-operator",
-          work_item_id: "task-operator-1",
-        }),
-      })
+    await waitFor(() =>
+      expect(screen.getByText("Open a solution change session from Solution Detail.")).toBeInTheDocument()
     );
+    expect(screen.getByText("Session required")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit Request" })).toBeDisabled();
+    expect(onOpenPanel).not.toHaveBeenCalled();
   });
 
-  it("groups composer work under application efforts and isolates unlinked coordination items", async () => {
+  it("shows safe fallback copy when no solution planning session is selected", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.getComposerState.mockResolvedValue({
       workspace_id: "ws-1",
@@ -1172,38 +1368,14 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
-    expect(screen.getByText("Current application effort")).toBeInTheDocument();
-    expect(screen.getByText("Application efforts")).toBeInTheDocument();
-    expect(screen.getAllByText("Knowledgebase").length).toBeGreaterThan(0);
-    expect(screen.queryByText("Lunch Poll")).not.toBeInTheDocument();
-    const effortSection = screen.getByText("Application efforts").closest("section");
-    expect(effortSection).not.toBeNull();
-    const knowledgebaseCard = within(effortSection as HTMLElement).getByRole("heading", { name: "Knowledgebase" }).closest(".composer-effort-card");
-    expect(knowledgebaseCard).not.toBeNull();
-    const applicationGoalsSection = within(knowledgebaseCard as HTMLElement).getByText("Work goals for this application").closest(".composer-effort-children");
-    expect(applicationGoalsSection).not.toBeNull();
-    await act(async () => {
-      within(applicationGoalsSection as HTMLElement).getByRole("button", { name: "Open goal" }).click();
-    });
-    expect(onOpenPanel).toHaveBeenCalledWith(
-      expect.objectContaining({
-        key: "composer_detail",
-        params: expect.objectContaining({
-          workspace_id: "ws-1",
-          application_id: "app-2",
-          goal_id: "goal-kb-1",
-        }),
-      })
-    );
-    await act(async () => {
-      screen.getByRole("button", { name: "Failed (1)" }).click();
-    });
-    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
-    expect(screen.getByText("Unlinked work")).toBeInTheDocument();
-    expect(screen.getAllByText("Legacy cleanup").length).toBeGreaterThan(0);
+    expect(screen.getByText("Planning Session")).toBeInTheDocument();
+    expect(screen.getByText("Session required")).toBeInTheDocument();
+    expect(screen.getByText("Select a solution change session from Solution Detail to review and approve planning interactions.")).toBeInTheDocument();
+    expect(screen.queryByText("Application efforts")).not.toBeInTheDocument();
+    expect(onOpenPanel).not.toHaveBeenCalled();
   });
 
-  it("filters stale failed efforts out of the default active view and restores them in the failed filter", async () => {
+  it("demotes stale application effort browsing and keeps Composer focused on session planning", async () => {
     apiMocks.getComposerState.mockResolvedValue({
       workspace_id: "ws-1",
       stage: "application_overview",
@@ -1301,14 +1473,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
+    expect(
+      screen.getByText("Select a solution change session from Solution Detail to review and approve planning interactions.")
+    ).toBeInTheDocument();
     expect(screen.queryByText("Lunch Poll")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Failed (1)" })).toBeInTheDocument();
-
-    await act(async () => {
-      screen.getByRole("button", { name: "Failed (1)" }).click();
-    });
-
-    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Failed \(/i })).not.toBeInTheDocument();
   });
 
   it("archives and restarts application efforts through lifecycle controls", async () => {
@@ -1396,30 +1566,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
-
-    await act(async () => {
-      screen.getAllByRole("button", { name: "Start Over" })[0].click();
-    });
-
-    await waitFor(() =>
-      expect(apiMocks.generateApplicationPlan).toHaveBeenCalledWith({
-        workspace_id: "ws-1",
-        objective: "Build a lunch poll app",
-        factory_key: "generic_application_mvp",
-        application_name: "Lunch Poll",
-      }),
-    );
-    await waitFor(() => expect(apiMocks.updateApplication).toHaveBeenCalledWith("app-1", { status: "archived" }));
-    expect(onOpenPanel).toHaveBeenCalledWith(
-      expect.objectContaining({
-        key: "composer_detail",
-        params: expect.objectContaining({
-          workspace_id: "ws-1",
-          application_plan_id: "plan-2",
-          factory_key: "generic_application_mvp",
-        }),
-      }),
-    );
+    expect(screen.getByText("Planning Session")).toBeInTheDocument();
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start Over" })).not.toBeInTheDocument();
+    expect(apiMocks.generateApplicationPlan).not.toHaveBeenCalled();
+    expect(apiMocks.updateApplication).not.toHaveBeenCalled();
+    expect(onOpenPanel).not.toHaveBeenCalled();
   });
 
   it("keeps Composer focused on the new plan after restart instead of rendering stale application coordination state", async () => {
@@ -1564,17 +1716,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
-    expect(screen.getByText("Selected application plan")).toBeInTheDocument();
-    expect(screen.queryByText("Selected application overview")).not.toBeInTheDocument();
-    expect(screen.queryByText("Work goals for this application")).not.toBeInTheDocument();
-    expect(screen.queryByText("Selected work goal")).not.toBeInTheDocument();
-    expect(screen.queryByText("Selected execution thread")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Active (1)" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Archived (1)" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "All (2)" })).toBeInTheDocument();
+    expect(screen.getByText("Planning Session")).toBeInTheDocument();
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
+    expect(screen.getByText("Planning Conversation")).toBeInTheDocument();
+    expect(screen.queryByText("Selected application plan")).not.toBeInTheDocument();
   });
 
-  it("loads composer plan review state and applies plans through the existing plan seam", async () => {
+  it("shows session-first composer flow for plan review state without a selected change session", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.getComposerState.mockResolvedValue({
       workspace_id: "ws-1",
@@ -1598,12 +1746,6 @@ describe("WorkbenchPanelHost entity refresh", () => {
       breadcrumbs: [{ kind: "composer", label: "Composer" }, { kind: "application_plan", label: "Deal Finder", id: "plan-1" }],
       available_actions: [{ type: "apply_plan", label: "Apply Plan", enabled: true, target_kind: "application_plan", target_id: "plan-1" }],
     });
-    apiMocks.applyApplicationPlan.mockResolvedValue({
-      status: "applied",
-      application: { id: "app-1", name: "Deal Finder", status: "active", source_factory_key: "ai_real_estate_deal_finder", summary: "Deal Finder", goal_count: 1, goals: [] },
-      application_plan: { id: "plan-1", name: "Deal Finder", status: "applied", source_factory_key: "ai_real_estate_deal_finder", summary: "Reviewable plan", generated_goals: [] },
-    });
-
     render(
       <MemoryRouter>
         <WorkbenchPanelHost
@@ -1614,21 +1756,14 @@ describe("WorkbenchPanelHost entity refresh", () => {
       </MemoryRouter>
     );
 
-    await waitFor(() => expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0));
-    expect(screen.getByText("Selected application plan")).toBeInTheDocument();
-    expect(screen.getByText("Reviewing the implementation plan")).toBeInTheDocument();
-    expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getByText("Planning Session")).toBeInTheDocument();
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
+    expect(screen.getByText("Planning Conversation")).toBeInTheDocument();
+    expect(screen.getByText("Execution Handoff")).toBeInTheDocument();
     expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
-    await act(async () => {
-      screen.getAllByRole("button", { name: "Apply plan" })[0].click();
-    });
-    await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
-    await waitFor(() =>
-      expect(onOpenPanel).toHaveBeenCalledWith({
-        key: "composer_detail",
-        params: { workspace_id: "ws-1", application_id: "app-1" },
-      })
-    );
+    expect(screen.queryByRole("button", { name: /apply plan/i })).not.toBeInTheDocument();
+    expect(onOpenPanel).not.toHaveBeenCalled();
   });
 
   it("disables no-op composer focus actions and points blocked threads to work-item review", async () => {
@@ -1750,25 +1885,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
       </MemoryRouter>
     );
 
-    await waitFor(() => expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument());
-    expect(screen.getByText("Waiting on a fix or input")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Current goal" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Current thread" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Resume thread" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Queue next slice" })).toBeDisabled();
-    expect(screen.getByText("Review Required Before Resuming")).toBeInTheDocument();
-    expect(screen.getAllByText(/review the blocking execution brief/i).length).toBeGreaterThan(0);
-
-    await act(async () => {
-      screen.getAllByRole("button", { name: "Review work items" })[0].click();
-    });
-
-    expect(onOpenPanel).toHaveBeenCalledWith(
-      expect.objectContaining({
-        key: "thread_detail",
-        params: { thread_id: "thread-1" },
-      })
-    );
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
+    expect(screen.getByText("Planning Conversation")).toBeInTheDocument();
+    expect(screen.getByText("Execution Handoff")).toBeInTheDocument();
+    expect(screen.queryByText("Review Required Before Resuming")).not.toBeInTheDocument();
+    expect(onOpenPanel).not.toHaveBeenCalled();
   });
 
   it("loads XCO thread detail with work item, run, artifact, and timeline navigation", async () => {
@@ -3692,6 +3814,31 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByRole("heading", { level: 2, name: "Platform Settings" })).toBeInTheDocument();
   });
 
+  it("opens Workspace Management from Platform Settings hub in workbench context", async () => {
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          workspaceName="Development"
+          panel={{
+            panel_id: "platform-2",
+            panel_type: "detail",
+            instance_key: "platform_settings",
+            key: "platform_settings",
+            params: { section: "workspaces", surface: "hub" },
+          }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    const openButtons = await screen.findAllByRole("button", { name: "Open" });
+    fireEvent.click(openButtons[0]);
+
+    await waitFor(() => expect(screen.getByRole("heading", { level: 2, name: "Workspaces" })).toBeInTheDocument());
+    await waitFor(() => expect(apiMocks.listWorkspaces).toHaveBeenCalled());
+  });
+
   it("loads composer discovery state with factory catalog", async () => {
     apiMocks.getComposerState.mockResolvedValue({
       workspace_id: "ws-1",
@@ -3748,9 +3895,66 @@ describe("WorkbenchPanelHost entity refresh", () => {
       })
     );
     expect(apiMocks.getExecutionPlan).not.toHaveBeenCalled();
-    expect(screen.getByText("Application efforts")).toBeInTheDocument();
-    expect(screen.getByText("AI Real Estate Deal Finder")).toBeInTheDocument();
+    expect(screen.getByText("Planning Session")).toBeInTheDocument();
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Composer" })).not.toBeInTheDocument();
+  });
+
+  it("shows the session request input instead of the legacy plan-generation textarea", async () => {
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "factory_discovery",
+      context: {
+        factory_key: "generic_application_mvp",
+        application_plan_id: null,
+        application_id: null,
+        goal_id: null,
+        thread_id: null,
+      },
+      factory_catalog: [
+        {
+          key: "generic_application_mvp",
+          name: "Generic Application MVP",
+          description: "MVP-first planning template",
+          intended_use_case: "fallback",
+          generated_goal_families: [],
+          assumptions: [],
+        },
+      ],
+      selected_factory: {
+        key: "generic_application_mvp",
+        name: "Generic Application MVP",
+        description: "MVP-first planning template",
+        intended_use_case: "fallback",
+        generated_goal_families: [],
+        assumptions: [],
+      },
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "composer-generate", panel_type: "detail", instance_key: "composer:ws-1", key: "composer_detail", params: { workspace_id: "ws-1" } }}
+          onOpenPanel={() => {}}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getByPlaceholderText("Describe the change you want planned.")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Describe the application you want Xyn to plan.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Build plan" })).not.toBeInTheDocument();
   });
 
   it("auto-selects the only viable composer effort when no explicit focus is provided", async () => {
@@ -3872,11 +4076,9 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
-    expect(screen.getAllByText("Choose an application effort").length).toBeGreaterThan(0);
-    expect(screen.getByText("Awaiting Selection")).toBeInTheDocument();
-    expect(screen.getByText("Composer is not focused on a single effort yet. Choose one from the list below to see its work goals, execution threads, and next steps.")).toBeInTheDocument();
-    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
-    expect(screen.getByText("Knowledgebase Plan")).toBeInTheDocument();
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
+    expect(screen.getByText("Session required")).toBeInTheDocument();
+    expect(screen.queryByText("Choose an application effort")).not.toBeInTheDocument();
   });
 
   it("does not auto-select stale failed work when it is the only remaining history", async () => {
@@ -3965,13 +4167,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
-    expect(screen.getAllByText("Choose an application effort").length).toBeGreaterThan(0);
-    expect(screen.getByText("Lunch Poll")).toBeInTheDocument();
-    expect(screen.getByText("Needs attention")).toBeInTheDocument();
-    expect(screen.getByText("Most recent")).toBeInTheDocument();
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
+    expect(screen.getByText("Session required")).toBeInTheDocument();
+    expect(screen.queryByText("Choose an application effort")).not.toBeInTheDocument();
   });
 
-  it("loads composer plan review state and applies plans through the existing apply seam", async () => {
+  it("shows session-first composer flow for plan review contexts without a selected change session", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.getComposerState.mockResolvedValue({
       workspace_id: "ws-1",
@@ -4019,12 +4220,6 @@ describe("WorkbenchPanelHost entity refresh", () => {
       ],
       available_actions: [{ action_type: "apply_plan", label: "Apply Plan", enabled: true, target_kind: "application_plan", target_id: "plan-1" }],
     });
-    apiMocks.applyApplicationPlan.mockResolvedValue({
-      status: "applied",
-      application: { id: "app-1", name: "Deal Finder" },
-      application_plan: { id: "plan-1" },
-    });
-
     render(
       <MemoryRouter>
         <WorkbenchPanelHost
@@ -4041,21 +4236,114 @@ describe("WorkbenchPanelHost entity refresh", () => {
       </MemoryRouter>
     );
 
-    await waitFor(() => expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0));
-    expect(screen.getByText("Selected application plan")).toBeInTheDocument();
-    expect(screen.getAllByText("Deal Finder").length).toBeGreaterThan(0);
-    await act(async () => {
-      screen.getAllByRole("button", { name: /apply plan/i })[0].click();
-    });
-    await waitFor(() => expect(apiMocks.applyApplicationPlan).toHaveBeenCalledWith("plan-1"));
-    expect(onOpenPanel).toHaveBeenCalledWith(
-      expect.objectContaining({
-        key: "composer_detail",
-        params: {
-          workspace_id: "ws-1",
-          application_id: "app-1",
-        },
+    await waitFor(() => expect(apiMocks.getComposerState).toHaveBeenCalled());
+    expect(screen.getByText("No solution session selected")).toBeInTheDocument();
+    expect(screen.getByText("Execution actions are available after selecting a solution change session.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /apply plan/i })).not.toBeInTheDocument();
+    expect(onOpenPanel).not.toHaveBeenCalled();
+  });
+
+  it("shows a safe unavailable state for preserved goal detail panels after workspace switch", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getGoal
+      .mockResolvedValueOnce({
+        id: "goal-1",
+        workspace_id: "ws-1",
+        application_id: "app-1",
+        title: "Goal One",
+        description: "",
+        source_conversation_id: "conv-1",
+        requested_by: "user@example.com",
+        goal_type: "delivery",
+        planning_status: "in_progress",
+        priority: "high",
+        planning_summary: "",
+        resolution_notes: [],
+        thread_count: 0,
+        work_item_count: 0,
+        threads: [],
+        work_items: [],
+        created_at: "2026-03-20T00:00:00Z",
+        updated_at: "2026-03-20T00:00:00Z",
       })
+      .mockRejectedValueOnce(new Error("Request failed (404)"));
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{ panel_id: "goal-detail", panel_type: "detail", instance_key: "goal:goal-1", key: "goal_detail", params: { goal_id: "goal-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
     );
+
+    await waitFor(() => expect(screen.getByText("Goal One")).toBeInTheDocument());
+
+    rerender(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-2"
+          panel={{ panel_id: "goal-detail", panel_type: "detail", instance_key: "goal:goal-1", key: "goal_detail", params: { goal_id: "goal-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Goal unavailable" })).toBeInTheDocument());
+    expect(screen.queryByText("Goal One")).not.toBeInTheDocument();
+    await act(async () => {
+      screen.getByRole("button", { name: "Open Goals" }).click();
+    });
+    expect(onOpenPanel).toHaveBeenCalledWith(expect.objectContaining({ key: "goal_list" }));
+  });
+
+  it("shows a safe unavailable state for preserved thread detail panels after workspace switch", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getCoordinationThread.mockRejectedValue(new Error("Request failed (404)"));
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-2"
+          panel={{ panel_id: "thread-detail", panel_type: "detail", instance_key: "thread:thread-1", key: "thread_detail", params: { thread_id: "thread-1" } }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Thread unavailable" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Open Threads" }).click();
+    });
+    expect(onOpenPanel).toHaveBeenCalledWith(expect.objectContaining({ key: "thread_list" }));
+  });
+
+  it("shows a safe unavailable state for preserved artifact detail panels", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getArtifactConsoleDetailBySlug.mockRejectedValue(new Error("Request failed (404)"));
+
+    render(
+      <MemoryRouter initialEntries={["/w/ws-2/workbench"]}>
+        <Routes>
+          <Route
+            path="/w/:workspaceId/workbench"
+            element={
+              <WorkbenchPanelHost
+                workspaceId="ws-2"
+                panel={{ panel_id: "artifact-detail", panel_type: "detail", instance_key: "artifact:app.demo", key: "artifact_detail", params: { slug: "app.demo" } }}
+                onOpenPanel={onOpenPanel}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Artifact unavailable" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Open Artifacts" }).click();
+    });
+    expect(onOpenPanel).toHaveBeenCalledWith(expect.objectContaining({ key: "artifact_list" }));
   });
 });

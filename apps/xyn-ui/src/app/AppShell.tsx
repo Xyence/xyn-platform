@@ -1,11 +1,11 @@
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { Bot } from "lucide-react";
 import { getAuthMode, getMe, getMyProfile, getTenantBranding, listArtifactNavSurfaces, listWorkspaces } from "../api/xyn";
 import { setRuntimeAuthMode } from "../api/client";
 import type { ArtifactSurface } from "../api/types";
-import { CREATE_ACTIONS, NAV_GROUPS, NAV_MOVE_TOAST_STORAGE_KEY, NavGroup, NavItem, NavUserContext } from "./nav/nav.config";
+import { CREATE_ACTIONS, NAV_GROUPS, NAV_MOVE_TOAST_STORAGE_KEY, NavGroup, NavUserContext } from "./nav/nav.config";
 import { getBreadcrumbs, visibleNav } from "./nav/nav.utils";
+import { withArtifactSurfaceNav } from "./nav/artifactSurfaceNav";
 import Sidebar from "./components/nav/Sidebar";
 const BlueprintsPage = lazy(() => import("./pages/BlueprintsPage"));
 const InstancesPage = lazy(() => import("./pages/InstancesPage"));
@@ -38,6 +38,9 @@ const SeedPacksPage = lazy(() => import("./pages/SeedPacksPage"));
 const ArtifactsRegistryPage = lazy(() => import("./pages/ArtifactsRegistryPage"));
 const ArtifactsLibraryPage = lazy(() => import("./pages/ArtifactsLibraryPage"));
 const ArtifactDetailPage = lazy(() => import("./pages/ArtifactDetailPage"));
+const ArtifactComposerPage = lazy(() => import("./pages/ArtifactComposerPage"));
+const SolutionsPage = lazy(() => import("./pages/SolutionsPage"));
+const SolutionDetailPage = lazy(() => import("./pages/SolutionDetailPage"));
 const ArtifactSurfaceRoutePage = lazy(() => import("./pages/ArtifactSurfaceRoutePage"));
 const ArticleSurfaceEditorRedirectPage = lazy(() => import("./pages/ArticleSurfaceEditorRedirectPage"));
 const ArticleSurfaceDocsPage = lazy(() => import("./pages/ArticleSurfaceDocsPage"));
@@ -60,10 +63,9 @@ import { usePreview } from "./state/previewStore";
 import HelpDrawer from "./components/help/HelpDrawer";
 import TourOverlay from "./components/help/TourOverlay";
 import { resolveRouteId } from "./help/routeHelp";
-import HeaderPreviewControl from "./components/preview/HeaderPreviewControl";
 import PreviewBanner from "./components/preview/PreviewBanner";
 import XynConsoleNode from "./components/console/XynConsoleNode";
-import CapabilitiesIndicator from "./components/console/CapabilitiesIndicator";
+import HeaderUtilityMenu from "./components/common/HeaderUtilityMenu";
 import SuggestionSwitcher from "./components/console/SuggestionSwitcher";
 import { useXynConsole } from "./state/xynConsoleStore";
 import useWorkspaceFromRoute from "./hooks/useWorkspaceFromRoute";
@@ -740,61 +742,7 @@ export default function AppShell() {
 
   const navUser: NavUserContext = useMemo(() => ({ roles: effectiveRoles, permissions }), [effectiveRoles, permissions]);
   const navGroups: NavGroup[] = useMemo(() => {
-    const mapNavPath = (path: string, scope?: string): string => {
-      if (String(scope || "").trim().toLowerCase() === "global") return path;
-      if (!activeWorkspaceId) return path;
-      return withWorkspaceInNavPath(path, activeWorkspaceId);
-    };
-    const baseGroups = NAV_GROUPS.map((group) => ({
-      ...group,
-      items: group.items ? group.items.map((item) => ({ ...item, path: mapNavPath(item.path) })) : [],
-      subgroups: group.subgroups
-        ? group.subgroups.map((subgroup) => ({
-            ...subgroup,
-            items: subgroup.items.map((item) => ({ ...item, path: mapNavPath(item.path) })),
-          }))
-        : [],
-    }));
-    const appsGroup = baseGroups.find((group) => group.id === "apps");
-    if (!appsGroup) return baseGroups;
-
-    const pathSeen = new Set<string>();
-    baseGroups.forEach((group) => {
-      (group.items || []).forEach((item) => pathSeen.add(item.path));
-      (group.subgroups || []).forEach((subgroup) => subgroup.items.forEach((item) => pathSeen.add(item.path)));
-    });
-
-    const appItems: Array<{ sortOrder: number; item: NavItem }> = [];
-    (surfaceNavItems || [])
-      .filter((surface) => String(surface.nav_visibility || "").toLowerCase() === "always")
-      .forEach((surface) => {
-        const route = String(surface.route || "").trim();
-        if (!route || pathSeen.has(route)) return;
-        const permissionsSpec = (surface.permissions || {}) as Record<string, unknown>;
-        const requiredRoles = Array.isArray(permissionsSpec.required_roles)
-          ? permissionsSpec.required_roles.map((entry) => String(entry).trim()).filter(Boolean)
-          : [];
-        const requiredPermissions = Array.isArray(permissionsSpec.required_permissions)
-          ? permissionsSpec.required_permissions.map((entry) => String(entry).trim()).filter(Boolean)
-          : [];
-        const navItem: NavItem = {
-          id: `surface-${surface.id}`,
-          label: String(surface.nav_label || surface.title || "Surface"),
-          path: mapNavPath(route, String(surface.ui_mount_scope || "")),
-          icon: String(surface.nav_icon || "").trim() || "Sparkles",
-          requiredRoles: requiredRoles.length ? requiredRoles : undefined,
-          requiredPermissions: requiredPermissions.length ? requiredPermissions : undefined,
-        };
-        appItems.push({ sortOrder: Number(surface.sort_order || 0), item: navItem });
-        pathSeen.add(route);
-      });
-
-    appsGroup.items = appItems
-      .sort((a, b) => (a.sortOrder - b.sortOrder) || a.item.label.localeCompare(b.item.label))
-      .map((entry) => entry.item);
-    appsGroup.subgroups = [];
-
-    return baseGroups;
+    return withArtifactSurfaceNav(NAV_GROUPS, surfaceNavItems || [], activeWorkspaceId || "");
   }, [activeWorkspaceId, surfaceNavItems]);
   const createActions = useMemo(
     () =>
@@ -807,6 +755,10 @@ export default function AppShell() {
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeWorkspaceId) || null,
     [workspaces, activeWorkspaceId]
+  );
+  const workspaceSelectionOptions = useMemo(
+    () => workspaces.map((workspace) => ({ id: workspace.id, name: workspace.name, slug: workspace.slug })),
+    [workspaces]
   );
   const workspaceScopedContextId = inWorkspaceScope ? activeWorkspace?.id || "" : "";
   const isWorkbenchRoute = useMemo(
@@ -968,47 +920,52 @@ export default function AppShell() {
   return (
     <div className={`app-shell ${isWorkbenchRoute ? "is-workbench" : ""}`}>
       <header className={`app-header ${isWorkbenchRoute ? "is-workbench" : ""}`} ref={headerRef}>
-        <Link className="brand brand-link" to="/">
-          <img className="brand-logo" src={brandLogo} alt="Xyence logo" />
-          <div>
-            <h1>Xyn</h1>
-            {isWorkbenchRoute && activeWorkspace?.name ? (
-              <div className="app-header-workspace">
-                <span className="workspace-dot" style={{ background: workspaceRoute.workspaceColor || "#6c7a89" }} aria-hidden="true" />
-                <span>{activeWorkspace.name}</span>
-              </div>
-            ) : null}
-          </div>
-        </Link>
+        <div className="app-header-branding">
+          <Link className="brand brand-link" to="/">
+            <img className="brand-logo" src={brandLogo} alt="Xyence logo" />
+            <div>
+              <h1>Xyn</h1>
+            </div>
+          </Link>
+          {isWorkbenchRoute && activeWorkspace?.name ? (
+            <div className="app-header-workspace">
+              <label htmlFor="workspace-selector" className="sr-only">
+                Workspace
+              </label>
+              <select
+                id="workspace-selector"
+                className="workspace-selector"
+                value={activeWorkspace.id}
+                onChange={(event) => handleWorkspaceChange(String(event.target.value || ""))}
+              >
+                {workspaceSelectionOptions.map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>
+                    {workspace.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+        </div>
         <div className="header-meta">
           {authed ? (
             <>
-              {isWorkbenchRoute ? <CapabilitiesIndicator workspaceId={activeWorkspace?.id || ""} /> : null}
+              {isWorkbenchRoute && activeWorkspace?.id ? (
+                <HeaderUtilityMenu
+                  workspaceId={activeWorkspace.id}
+                  actorRoles={actorRoles}
+                  actorLabel={String(authUser?.email || authUser?.display_name || authUser?.subject || "current user")}
+                  onOpenAgentActivity={() => setAgentActivityOpen(true)}
+                  onMessage={({ level, title, message }) => push({ level, title, message })}
+                />
+              ) : null}
               <NotificationBell />
-              <button
-                type="button"
-                className={`ghost notification-bell agent-indicator ${runningAiCount > 0 ? "thinking" : ""}`}
-                aria-label={runningAiCount > 0 ? `Agent activity, ${runningAiCount} AI operation in progress` : "Agent activity"}
-                onClick={() => setAgentActivityOpen((prev) => !prev)}
-              >
-                <Bot size={16} />
-                {runningAiCount > 0 && <span className="agent-indicator-dot" aria-hidden="true" />}
-                <span className="sr-only" aria-live="polite">
-                  {runningAiCount > 0 ? "AI operation in progress" : "No AI operations in progress"}
-                </span>
-              </button>
-              <HeaderPreviewControl
-                actorRoles={actorRoles}
-                actorLabel={String(authUser?.email || authUser?.display_name || authUser?.subject || "current user")}
-                onMessage={({ level, title, message }) => push({ level, title, message })}
-              />
               <UserMenu
                 user={authUser || {}}
                 onReport={() => setReportOpen(true)}
-                onAgentActivity={() => setAgentActivityOpen(true)}
                 onSignOut={signOut}
               />
-              {runningAiCount > 0 && <span className="agent-thinking-label">Thinking…</span>}
+              {runningAiCount > 0 && <span className="agent-thinking-label">Agents active ({runningAiCount})</span>}
             </>
           ) : (
             <button className="ghost" onClick={startLogin}>
@@ -1059,6 +1016,11 @@ export default function AppShell() {
             <Route path="console" element={<Navigate to={workspaceScopedTarget(DEFAULT_WORKSPACE_SUBPATH)} replace />} />
             <Route path="apps/articles/edit" element={<ArticleSurfaceEditorRedirectPage />} />
             <Route path="apps/articles/docs" element={<ArticleSurfaceDocsPage />} />
+            {/* Compatibility-only routes.
+                New capability UX must be palette -> panel intent -> workbench panel.
+                These routes must remain thin redirects and must not own business logic. */}
+            <Route path="solutions" element={<SolutionsPage workspaceId={activeWorkspace?.id || ""} />} />
+            <Route path="solutions/:applicationId" element={<SolutionDetailPage workspaceId={activeWorkspace?.id || ""} />} />
             <Route
               path="a/*"
               element={
@@ -1075,6 +1037,10 @@ export default function AppShell() {
             <Route path="build/artifacts/library" element={<Navigate to={workspaceScopedTarget("build/catalog")} replace />} />
             <Route
               path="build/artifacts/:artifactId"
+              element={<ArtifactComposerPage workspaceId={activeWorkspace?.id || ""} />}
+            />
+            <Route
+              path="build/artifacts/:artifactId/detail"
               element={
                 <ArtifactDetailPage
                   workspaceId={activeWorkspace?.id || ""}

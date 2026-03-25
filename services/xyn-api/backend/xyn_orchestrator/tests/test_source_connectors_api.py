@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 
 from xyn_orchestrator.models import SourceConnector, UserIdentity, Workspace, WorkspaceMembership
+from xyn_orchestrator.ingestion import IngestionExecutionResult
 from xyn_orchestrator.xyn_api import (
     source_connector_activate,
     source_connector_detail,
@@ -13,6 +14,7 @@ from xyn_orchestrator.xyn_api import (
     source_connector_inspections_collection,
     source_connector_mappings_collection,
     source_connector_pause,
+    source_connector_refresh,
     source_connectors_collection,
 )
 
@@ -461,3 +463,85 @@ class SourceConnectorApiTests(TestCase):
         source_row = SourceConnector.objects.get(id=source["id"])
         self.assertEqual(source_row.inspections.count(), 1)
         self.assertEqual(source_row.mappings.count(), 1)
+
+    def test_refresh_requires_active_source(self):
+        source = self._create_source(mode="remote_url")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = source_connector_refresh(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/refresh",
+                    method="post",
+                    data=json.dumps({"workspace_id": str(self.workspace.id)}),
+                ),
+                source["id"],
+            )
+        self.assertEqual(response.status_code, 409)
+
+    @mock.patch("xyn_orchestrator.xyn_api.IngestionCoordinator")
+    def test_refresh_executes_ingestion_and_returns_run_payload(self, coordinator_cls):
+        source = self._create_source(mode="remote_url")
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            source_connector_inspections_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/inspections",
+                    method="post",
+                    data=json.dumps(
+                        {
+                            "workspace_id": str(self.workspace.id),
+                            "status": "ok",
+                            "detected_format": "csv",
+                            "discovered_fields": [{"name": "parcel_id", "type": "string"}],
+                        }
+                    ),
+                ),
+                source["id"],
+            )
+            source_connector_mappings_collection(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/mappings",
+                    method="post",
+                    data=json.dumps(
+                        {
+                            "workspace_id": str(self.workspace.id),
+                            "status": "validated",
+                            "field_mapping": {"parcel_id": "source.parcel_id"},
+                            "transformation_hints": {},
+                            "validation_state": {"ok": True},
+                        }
+                    ),
+                ),
+                source["id"],
+            )
+            source_connector_activate(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/activate",
+                    method="post",
+                    data=json.dumps({"workspace_id": str(self.workspace.id)}),
+                ),
+                source["id"],
+            )
+
+        fake_run_id = str(uuid.uuid4())
+        fake_artifact_id = str(uuid.uuid4())
+        coordinator_cls.return_value.ingest_from_url.return_value = IngestionExecutionResult(
+            run_id=fake_run_id,
+            artifact_record_id=fake_artifact_id,
+            parsed_record_count=12,
+            warnings=("warning: sample",),
+        )
+
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = source_connector_refresh(
+                self._request(
+                    f"/xyn/api/source-connectors/{source['id']}/refresh",
+                    method="post",
+                    data=json.dumps({"workspace_id": str(self.workspace.id)}),
+                ),
+                source["id"],
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["run"]["id"], fake_run_id)
+        self.assertEqual(payload["artifact_record_id"], fake_artifact_id)
+        self.assertEqual(payload["parsed_record_count"], 12)
+        coordinator_cls.return_value.ingest_from_url.assert_called_once()

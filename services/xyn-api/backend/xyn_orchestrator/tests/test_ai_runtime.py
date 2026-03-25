@@ -153,6 +153,49 @@ class AiRuntimeTests(TestCase):
         self.assertEqual(ContextPack.objects.filter(name="xyn-planner-canon", purpose="planner").count(), 1)
         self.assertEqual(ContextPack.objects.filter(name="xyn-coder-canon", purpose="coder").count(), 1)
 
+    def test_bootstrap_preserves_explicit_custom_purpose_default_assignments(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+                "XYN_AI_PLANNING_PROVIDER": "openai",
+                "XYN_AI_PLANNING_MODEL": "gpt-5-mini",
+                "XYN_AI_PLANNING_API_KEY": "sk-plan-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+            planning_purpose = AgentPurpose.objects.get(slug="planning")
+            custom_model = ModelConfig.objects.create(
+                provider=ModelProvider.objects.get(slug="openai"),
+                model_name="gpt-5-mini",
+                enabled=True,
+            )
+            custom_agent = AgentDefinition.objects.create(
+                slug="custom-planning-agent",
+                name="Custom Planning Agent",
+                model_config=custom_model,
+                enabled=True,
+            )
+            custom_link = AgentDefinitionPurpose.objects.create(
+                agent_definition=custom_agent,
+                purpose=planning_purpose,
+                is_default_for_purpose=True,
+            )
+            AgentDefinitionPurpose.objects.filter(
+                purpose=planning_purpose, is_default_for_purpose=True
+            ).exclude(id=custom_link.id).update(is_default_for_purpose=False)
+
+            ensure_default_ai_seeds()
+
+        refreshed = AgentDefinitionPurpose.objects.filter(
+            purpose__slug="planning", is_default_for_purpose=True
+        ).select_related("agent_definition")
+        self.assertEqual(refreshed.count(), 1)
+        self.assertEqual(refreshed.first().agent_definition.slug, "custom-planning-agent")
+
     def test_assemble_system_prompt_preamble_only(self):
         self.assertEqual(assemble_system_prompt("", "Purpose preamble"), "Purpose preamble")
 
@@ -286,6 +329,47 @@ class AiRuntimeTests(TestCase):
         self.assertEqual(routing.get("purpose"), "coding")
         self.assertEqual(routing.get("resolved_agent_name"), "Xyn Coding Assistant")
         self.assertEqual(routing.get("resolution_source"), "explicit")
+
+    def test_resolve_ai_config_uses_resolved_agent_model_not_purpose_model(self):
+        provider, _ = ModelProvider.objects.get_or_create(slug="openai", defaults={"name": "OpenAI", "enabled": True})
+        purpose_model = ModelConfig.objects.create(provider=provider, model_name="gpt-5-mini", enabled=True)
+        purpose, _ = AgentPurpose.objects.get_or_create(
+            slug="planning",
+            defaults={"name": "Planning", "status": "active", "enabled": True},
+        )
+        purpose.model_config = purpose_model
+        purpose.save(update_fields=["model_config", "updated_at"])
+
+        os.environ["XYN_TEST_AGENT_MODEL_KEY"] = "sk-agent-model"
+        credential = ProviderCredential.objects.create(
+            provider=provider,
+            name="agent-openai",
+            auth_type="env_ref",
+            env_var_name="XYN_TEST_AGENT_MODEL_KEY",
+            enabled=True,
+            is_default=True,
+        )
+        selected_model = ModelConfig.objects.create(
+            provider=provider,
+            model_name="gpt-5.4",
+            credential=credential,
+            enabled=True,
+        )
+        selected_agent = AgentDefinition.objects.create(
+            slug="selected-planning-agent",
+            name="Selected Planning Agent",
+            model_config=selected_model,
+            enabled=True,
+        )
+        AgentDefinitionPurpose.objects.create(
+            agent_definition=selected_agent,
+            purpose=purpose,
+            is_default_for_purpose=True,
+        )
+
+        resolved = resolve_ai_config(purpose_slug="planning")
+        self.assertEqual(resolved.get("agent_slug"), "selected-planning-agent")
+        self.assertEqual(resolved.get("model_name"), "gpt-5.4")
 
     def test_resolve_agent_routing_uses_default_fallback_when_purpose_unassigned(self):
         with patch.dict(

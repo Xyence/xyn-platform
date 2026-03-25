@@ -8,6 +8,7 @@ import os
 import re
 import html
 import secrets
+import subprocess
 import time
 import uuid
 import hashlib
@@ -25,8 +26,8 @@ from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.validators import validate_email
 from django.core.paginator import Paginator
-from django.db import models, transaction
-from django.db.models import Q
+from django.db import IntegrityError, models, transaction
+from django.db.models import Count, Q
 from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -91,6 +92,10 @@ from .models import (
     PlatformDomainEvent,
     Goal,
     Application,
+    ApplicationArtifactMembership,
+    SolutionChangeSession,
+    SolutionPlanningTurn,
+    SolutionPlanningCheckpoint,
     ApplicationPlan,
     Environment,
     EnvironmentAppState,
@@ -159,6 +164,7 @@ from .models import (
     Report,
     ReportAttachment,
     IngestArtifactRecord,
+    SignalReadModel,
 )
 from .matching import (
     DjangoMatchResultRepository,
@@ -179,6 +185,7 @@ from .sources import (
     serialize_source_mapping,
 )
 from .source_governance import SourceGovernanceService, normalize_governance_policy
+from .ingestion import IngestionCoordinator
 from .watching import (
     WATCH_LIFECYCLE_STATES,
     WATCH_SUBSCRIBER_TYPES,
@@ -203,6 +210,7 @@ from .parcel_identity import (
     serialize_parcel_identity,
 )
 from .geocoding import GeocodingService, serialize_geocode_result
+from .signal_read_model import SignalReadProjectionService, serialize_signal_read
 from .orchestration import AppNotificationFailureNotifier
 from .orchestration.domain_events import DomainEventQuery, DomainEventService
 from .orchestration.publication import StagePublicationService
@@ -386,10 +394,12 @@ from .app_authorization import (
     CAP_CAMPAIGNS_MANAGE,
     CAP_INGEST_RUNS_READ,
     CAP_MATCH_REVIEW,
+    CAP_ARTIFACTS_WRITE,
     CAP_NOTIFICATION_TARGETS_MANAGE,
     CAP_NOTIFICATIONS_READ,
     CAP_PROVENANCE_READ,
     CAP_REFRESHES_RUN,
+    CAP_SIGNALS_REVIEW,
     CAP_SOURCES_MANAGE,
     CAP_SUBSCRIBERS_MANAGE,
     CAP_WATCHES_MANAGE,
@@ -8186,6 +8196,17 @@ DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
+def _default_dev_workspace_slug() -> str:
+    raw = str(os.getenv("XYN_WORKSPACE_SLUG", "development") or "").strip().lower()
+    slug = slugify(raw)
+    return slug or "development"
+
+
+def _workspace_title_from_slug(slug: str) -> str:
+    value = str(slug or "").strip().replace("-", " ")
+    return value.title() if value else "Development"
+
+
 def _runtime_artifact_host_workspace(fallback_workspace: Workspace) -> Workspace:
     host_workspace = Workspace.objects.filter(slug="platform-builder").first()
     if host_workspace is not None:
@@ -8228,12 +8249,13 @@ def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspac
         return None
     if not _is_platform_admin(identity):
         return None
+    workspace_slug = _default_dev_workspace_slug()
     workspace, _ = Workspace.objects.get_or_create(
-        slug="development",
+        slug=workspace_slug,
         defaults={
-            "name": "Development",
-            "org_name": "Development",
-            "description": "Default development workspace for local bootstrap.",
+            "name": _workspace_title_from_slug(workspace_slug),
+            "org_name": _workspace_title_from_slug(workspace_slug),
+            "description": f"Default {workspace_slug} workspace for local bootstrap.",
             "status": "active",
             "kind": "internal",
             "lifecycle_stage": "internal",
@@ -8365,7 +8387,8 @@ def api_me(request: HttpRequest) -> JsonResponse:
     if bootstrap_workspace is not None:
         preferred_workspace_id = str(bootstrap_workspace.id)
     elif workspace_payload:
-        dev_entry = next((entry for entry in workspace_payload if str(entry.get("slug") or "").strip().lower() == "development"), None)
+        default_slug = _default_dev_workspace_slug()
+        dev_entry = next((entry for entry in workspace_payload if str(entry.get("slug") or "").strip().lower() == default_slug), None)
         preferred_workspace_id = str((dev_entry or workspace_payload[0]).get("id") or "")
 
     return JsonResponse(
@@ -9267,6 +9290,7 @@ def _serialize_unified_artifact(artifact: Artifact, source_record: Any = None) -
         "id": str(artifact.id),
         "artifact_id": str(artifact.id),
         "artifact_type": artifact.type.slug,
+        "scope_classification": _artifact_scope_classification(artifact),
         "artifact_state": artifact.artifact_state,
         "title": artifact.title,
         "summary": artifact.summary or "",
@@ -9306,6 +9330,7 @@ ARTIFACTS_DATASET_COLUMNS: List[Dict[str, Any]] = [
     {"key": "namespace", "label": "Namespace", "type": "string", "filterable": True, "sortable": True, "searchable": True},
     {"key": "name", "label": "Name", "type": "string", "filterable": True, "sortable": True, "searchable": True},
     {"key": "kind", "label": "Kind", "type": "string", "filterable": True, "sortable": True, "enum": ["module", "article", "workflow", "app"]},
+    {"key": "scope", "label": "Scope", "type": "string", "filterable": True, "sortable": True, "enum": ["solution", "shared", "platform"]},
     {"key": "version", "label": "Version", "type": "integer", "filterable": True, "sortable": True},
     {"key": "roles", "label": "Roles", "type": "string[]", "filterable": True},
     {"key": "surfaces_count", "label": "Surfaces", "type": "integer", "filterable": False, "sortable": True},
@@ -9316,6 +9341,7 @@ ARTIFACTS_DATASET_COLUMNS: List[Dict[str, Any]] = [
 
 ARTIFACTS_DATASET_SCHEMA_BY_KEY: Dict[str, Dict[str, Any]] = {str(col.get("key")): col for col in ARTIFACTS_DATASET_COLUMNS}
 ARTIFACTS_FILTER_OPS = {"eq", "neq", "contains", "in", "gte", "lte", "gt", "lt"}
+ARTIFACT_SCOPE_CLASSIFICATIONS: Set[str] = {"solution", "shared", "platform"}
 
 
 def _iso_utc(dt_value: Any) -> Optional[str]:
@@ -9336,6 +9362,37 @@ def _artifact_namespace_from_slug(slug: str) -> str:
     if not token or "." not in token:
         return ""
     return token.split(".", 1)[0].strip().lower()
+
+
+def _normalize_artifact_scope_classification(value: Any) -> Optional[str]:
+    token = str(value or "").strip().lower()
+    if token in ARTIFACT_SCOPE_CLASSIFICATIONS:
+        return token
+    if token in {"global", "core"}:
+        return "platform"
+    return None
+
+
+def _artifact_scope_classification(artifact: Artifact) -> str:
+    scope = artifact.scope_json if isinstance(artifact.scope_json, dict) else {}
+    explicit = _normalize_artifact_scope_classification(scope.get("scope_classification"))
+    if explicit:
+        return explicit
+    explicit = _normalize_artifact_scope_classification(scope.get("artifact_scope"))
+    if explicit:
+        return explicit
+
+    type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+    slug = str(_artifact_slug(artifact) or "").strip().lower()
+    namespace = _artifact_namespace_from_slug(slug)
+
+    if type_slug in {"application", "policy_bundle"} or slug.startswith("app.") or slug.startswith("policy."):
+        return "solution"
+    if type_slug in {"app_shell", "auth_login"}:
+        return "platform"
+    if slug in {"xyn-ui", "xyn-api"} or slug.startswith("core.") or namespace == "core":
+        return "platform"
+    return "shared"
 
 
 def _resolve_relative_time_value(raw_value: Any) -> Optional[timezone.datetime]:
@@ -9459,6 +9516,7 @@ def _artifact_table_row(artifact: Artifact, *, workspace_id: Optional[str], inst
         "namespace": _artifact_namespace_from_slug(slug),
         "name": artifact.title,
         "kind": artifact.type.slug if artifact.type_id else "",
+        "scope": _artifact_scope_classification(artifact),
         "version": int(artifact.version or 0),
         "roles": [str(entry) for entry in roles if str(entry or "").strip()],
         "surfaces_count": len(nav) + len(manage) + len(docs),
@@ -10255,6 +10313,10 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
         return staff_error
     if request.method == "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
+    scope_filter = _normalize_artifact_scope_classification(request.GET.get("scope"))
+    if str(request.GET.get("scope") or "").strip() and not scope_filter:
+        return JsonResponse({"error": "invalid scope"}, status=400)
+
     if request.method == "GET" and (
         str(request.GET.get("entity") or "").strip().lower() == "artifacts"
         or bool(str(request.GET.get("filters") or "").strip())
@@ -10276,6 +10338,8 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
                 ).only("artifact_id")
             }
         artifacts = _dedupe_artifacts_for_dataset(artifacts, installed_ids=installed_ids)
+        if scope_filter:
+            artifacts = [artifact for artifact in artifacts if _artifact_scope_classification(artifact) == scope_filter]
         rows = [_artifact_table_row(artifact, workspace_id=workspace_id, installed_ids=installed_ids) for artifact in artifacts]
         for filter_row in structured_query.get("filters") or []:
             field = str(filter_row.get("field") or "").strip()
@@ -10342,6 +10406,8 @@ def artifacts_collection(request: HttpRequest) -> JsonResponse:
     qs = qs.order_by("-updated_at", "-created_at")
     total = qs.count()
     items = list(qs)
+    if scope_filter:
+        items = [artifact for artifact in items if _artifact_scope_classification(artifact) == scope_filter]
     total = len(items)
     items = items[offset : offset + limit]
     blueprint_ids = [item.source_ref_id for item in items if item.source_ref_type == "Blueprint" and item.source_ref_id]
@@ -11371,6 +11437,377 @@ def _serialize_artifact_install_receipt(receipt: ArtifactInstallReceipt) -> Dict
     }
 
 
+def _generated_solution_key_for_artifact(*, artifact: Artifact) -> Optional[str]:
+    slug = str(artifact.slug or "").strip().lower()
+    type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+    if type_slug == "application" and slug.startswith("app."):
+        return slug[4:] or None
+    if type_slug == "policy_bundle" and slug.startswith("policy."):
+        return slug[7:] or None
+    return None
+
+
+def _generated_solution_title_for_key(*, solution_key: str, app_artifact: Optional[Artifact], policy_artifact: Optional[Artifact]) -> str:
+    if app_artifact and str(app_artifact.title or "").strip():
+        app_title = str(app_artifact.title or "").strip()
+        app_slug = str(app_artifact.slug or "").strip().lower()
+        normalized_title = app_title.lower()
+        if normalized_title not in {app_slug, f"app.{solution_key}".lower()}:
+            return app_title[:240]
+    if policy_artifact and str(policy_artifact.title or "").strip():
+        policy_title = str(policy_artifact.title or "").strip()
+        policy_slug = str(policy_artifact.slug or "").strip().lower()
+        if policy_title.lower() in {policy_slug, f"policy.{solution_key}".lower()}:
+            policy_title = ""
+        title = re.sub(r"\s+policy\s+bundle$", "", policy_title, flags=re.IGNORECASE).strip()
+        if title:
+            return title[:240]
+    fallback = str(solution_key or "").replace("-", " ").replace("_", " ").strip()
+    if not fallback:
+        return "Generated Application"
+    words = [word for word in fallback.split(" ") if word]
+    return " ".join(word[:1].upper() + word[1:] for word in words)[:240]
+
+
+def _link_generated_artifacts_to_solution(*, artifacts: List[Artifact]) -> List[Dict[str, Any]]:
+    grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for artifact in artifacts:
+        if artifact is None or artifact.workspace_id is None or artifact.type_id is None:
+            continue
+        solution_key = _generated_solution_key_for_artifact(artifact=artifact)
+        if not solution_key:
+            continue
+        group_key = (str(artifact.workspace_id), solution_key)
+        bucket = grouped.setdefault(
+            group_key,
+            {
+                "workspace_id": str(artifact.workspace_id),
+                "solution_key": solution_key,
+                "application_artifact": None,
+                "policy_artifact": None,
+                "artifacts": [],
+            },
+        )
+        bucket["artifacts"].append(artifact)
+        type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+        if type_slug == "application":
+            bucket["application_artifact"] = artifact
+        elif type_slug == "policy_bundle":
+            bucket["policy_artifact"] = artifact
+
+    linked_rows: List[Dict[str, Any]] = []
+    for bucket in grouped.values():
+        workspace_id = str(bucket.get("workspace_id") or "").strip()
+        solution_key = str(bucket.get("solution_key") or "").strip()
+        if not workspace_id or not solution_key:
+            continue
+        workspace = Workspace.objects.filter(id=workspace_id).first()
+        if workspace is None:
+            continue
+        app_artifact = bucket.get("application_artifact")
+        policy_artifact = bucket.get("policy_artifact")
+        title = _generated_solution_title_for_key(
+            solution_key=solution_key,
+            app_artifact=app_artifact,
+            policy_artifact=policy_artifact,
+        )
+        application = (
+            Application.objects.filter(
+                workspace=workspace,
+                metadata_json__generated_artifact_key=solution_key,
+            )
+            .order_by("-updated_at", "-created_at")
+            .first()
+        )
+        if application is None:
+            application = Application.objects.create(
+                workspace=workspace,
+                name=title,
+                summary=str(getattr(app_artifact, "summary", "") or "").strip(),
+                source_factory_key="generated_artifact_import",
+                source_conversation_id="",
+                status="active",
+                request_objective="",
+                metadata_json={
+                    "generated_artifact_key": solution_key,
+                    "origin": "artifact_import",
+                },
+            )
+        elif title and application.name != title:
+            application.name = title
+            application.save(update_fields=["name", "updated_at"])
+
+        for artifact in bucket.get("artifacts") or []:
+            if artifact.workspace_id != application.workspace_id:
+                continue
+            type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+            role = "primary_ui" if type_slug == "application" else "supporting"
+            responsibility_summary = (
+                "Primary generated application artifact imported from package."
+                if type_slug == "application"
+                else "Generated policy bundle imported from package."
+            )
+            sort_order = 10 if type_slug == "application" else 20
+            ApplicationArtifactMembership.objects.update_or_create(
+                application=application,
+                artifact=artifact,
+                defaults={
+                    "workspace": application.workspace,
+                    "role": role,
+                    "responsibility_summary": responsibility_summary,
+                    "metadata_json": {"origin": "artifact_import"},
+                    "sort_order": sort_order,
+                },
+            )
+        linked_rows.append(
+            {
+                "application_id": str(application.id),
+                "workspace_id": str(application.workspace_id),
+                "name": application.name,
+                "solution_key": solution_key,
+                "artifact_ids": [str(item.id) for item in bucket.get("artifacts") or [] if item is not None],
+            }
+        )
+    return linked_rows
+
+
+def _resolve_solution_import_workspace(identity: UserIdentity, request: HttpRequest) -> Optional[Workspace]:
+    candidates = [
+        str(request.POST.get("workspace_id") or "").strip(),
+        str(request.POST.get("workspace_slug") or "").strip(),
+        str(request.GET.get("workspace_id") or "").strip(),
+        str(request.GET.get("workspace_slug") or "").strip(),
+        str(request.headers.get("X-Workspace-Id") or "").strip(),
+        str(request.headers.get("X-Workspace-Slug") or "").strip(),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        workspace = _resolve_workspace_for_identity(identity, candidate)
+        if workspace and _workspace_is_visible(workspace, include_system=False):
+            return workspace
+
+    fallback = _resolve_workspace_for_identity(identity, "")
+    if fallback and _workspace_is_visible(fallback, include_system=False):
+        return fallback
+
+    if _is_platform_admin(identity):
+        default_slug = _default_dev_workspace_slug()
+        workspace = Workspace.objects.filter(slug=default_slug).first()
+        if workspace and _workspace_is_visible(workspace, include_system=False):
+            return workspace
+        workspace = _user_visible_workspace_qs().order_by("name", "created_at").first()
+        if workspace:
+            return workspace
+    return None
+
+
+def _backfill_legacy_generated_solution_memberships(
+    *,
+    workspace_id: Optional[str] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    rows = (
+        Artifact.objects.select_related("type", "workspace")
+        .filter(type__slug__in=["application", "policy_bundle"])
+        .order_by("workspace_id", "slug", "created_at")
+    )
+    if workspace_id:
+        rows = rows.filter(workspace_id=workspace_id)
+    candidates = list(rows)
+
+    grouped: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for artifact in candidates:
+        if _artifact_scope_classification(artifact) != "solution":
+            continue
+        solution_key = _generated_solution_key_for_artifact(artifact=artifact)
+        if not solution_key:
+            continue
+        group_key = (str(artifact.workspace_id), solution_key)
+        bucket = grouped.setdefault(
+            group_key,
+            {
+                "workspace_id": str(artifact.workspace_id),
+                "workspace_slug": str(getattr(artifact.workspace, "slug", "") or ""),
+                "solution_key": solution_key,
+                "application_artifact": None,
+                "policy_artifact": None,
+                "artifacts": [],
+            },
+        )
+        bucket["artifacts"].append(artifact)
+        type_slug = str(getattr(artifact.type, "slug", "") or "").strip().lower()
+        if type_slug == "application":
+            bucket["application_artifact"] = artifact
+        elif type_slug == "policy_bundle":
+            bucket["policy_artifact"] = artifact
+
+    summary: Dict[str, Any] = {
+        "workspace_id": workspace_id or "",
+        "dry_run": bool(dry_run),
+        "groups_scanned": len(grouped),
+        "groups_backfilled": 0,
+        "applications_created": 0,
+        "memberships_created": 0,
+        "backfilled": [],
+        "skipped": [],
+    }
+
+    for bucket in grouped.values():
+        solution_key = str(bucket.get("solution_key") or "").strip()
+        candidate_artifacts = [item for item in (bucket.get("artifacts") or []) if isinstance(item, Artifact)]
+        app_artifact = bucket.get("application_artifact")
+        policy_artifact = bucket.get("policy_artifact")
+        if not isinstance(app_artifact, Artifact):
+            summary["skipped"].append(
+                {
+                    "workspace_id": str(bucket.get("workspace_id") or ""),
+                    "solution_key": solution_key,
+                    "reason": "missing_application_artifact",
+                }
+            )
+            continue
+
+        candidate_artifact_ids = {str(item.id) for item in candidate_artifacts}
+        existing_memberships = list(
+            ApplicationArtifactMembership.objects.filter(artifact_id__in=candidate_artifact_ids).select_related("application")
+        )
+        if existing_memberships:
+            summary["skipped"].append(
+                {
+                    "workspace_id": str(bucket.get("workspace_id") or ""),
+                    "solution_key": solution_key,
+                    "reason": "artifacts_already_linked",
+                    "application_ids": sorted({str(item.application_id) for item in existing_memberships}),
+                }
+            )
+            continue
+
+        applications_for_key = list(
+            Application.objects.filter(
+                workspace_id=bucket["workspace_id"],
+                metadata_json__generated_artifact_key=solution_key,
+            ).order_by("-updated_at", "-created_at")
+        )
+        workspace_obj = Workspace.objects.filter(id=bucket["workspace_id"]).first()
+        if workspace_obj is None:
+            summary["skipped"].append(
+                {
+                    "workspace_id": str(bucket.get("workspace_id") or ""),
+                    "solution_key": solution_key,
+                    "reason": "workspace_not_found",
+                }
+            )
+            continue
+        if len(applications_for_key) > 1:
+            summary["skipped"].append(
+                {
+                    "workspace_id": str(bucket.get("workspace_id") or ""),
+                    "solution_key": solution_key,
+                    "reason": "conflicting_applications_for_key",
+                    "application_ids": [str(item.id) for item in applications_for_key],
+                }
+            )
+            continue
+
+        application = applications_for_key[0] if applications_for_key else None
+        if application is not None:
+            conflicting_member_ids = set(
+                ApplicationArtifactMembership.objects.filter(application=application).values_list("artifact_id", flat=True)
+            )
+            if conflicting_member_ids:
+                summary["skipped"].append(
+                    {
+                        "workspace_id": str(bucket.get("workspace_id") or ""),
+                        "solution_key": solution_key,
+                        "reason": "conflicting_existing_application_association",
+                        "application_id": str(application.id),
+                    }
+                )
+                continue
+
+        title = _generated_solution_title_for_key(
+            solution_key=solution_key,
+            app_artifact=app_artifact,
+            policy_artifact=policy_artifact if isinstance(policy_artifact, Artifact) else None,
+        )
+        created_application = False
+        created_memberships = 0
+        if not dry_run:
+            if application is None:
+                application = Application.objects.create(
+                    workspace=workspace_obj,
+                    name=title,
+                    summary=str(getattr(app_artifact, "summary", "") or "").strip(),
+                    source_factory_key="legacy_solution_backfill",
+                    source_conversation_id="",
+                    status="active",
+                    request_objective="",
+                    metadata_json={
+                        "generated_artifact_key": solution_key,
+                        "origin": "legacy_deterministic_backfill",
+                        "backfill_version": 1,
+                    },
+                )
+                created_application = True
+
+            member_specs: List[Tuple[Artifact, str, str, int]] = [
+                (
+                    app_artifact,
+                    "primary_ui",
+                    "Primary generated application artifact linked by deterministic legacy backfill.",
+                    10,
+                )
+            ]
+            if isinstance(policy_artifact, Artifact):
+                member_specs.append(
+                    (
+                        policy_artifact,
+                        "supporting",
+                        "Generated policy bundle linked by deterministic legacy backfill.",
+                        20,
+                    )
+                )
+            for artifact, role, responsibility, sort_order in member_specs:
+                if str(artifact.workspace_id) != str(application.workspace_id):
+                    continue
+                _member = ApplicationArtifactMembership(
+                    workspace=application.workspace,
+                    application=application,
+                    artifact=artifact,
+                    role=role,
+                    responsibility_summary=responsibility,
+                    metadata_json={
+                        "origin": "legacy_deterministic_backfill",
+                        "backfill_version": 1,
+                    },
+                    sort_order=sort_order,
+                )
+                _member.save()
+                created_memberships += 1
+        else:
+            created_application = application is None
+            created_memberships = 1 + (1 if isinstance(policy_artifact, Artifact) else 0)
+
+        summary["groups_backfilled"] += 1
+        if created_application:
+            summary["applications_created"] += 1
+        summary["memberships_created"] += created_memberships
+        summary["backfilled"].append(
+            {
+                "workspace_id": str(bucket.get("workspace_id") or ""),
+                "workspace_slug": str(bucket.get("workspace_slug") or ""),
+                "solution_key": solution_key,
+                "application_id": str(application.id) if isinstance(application, Application) else None,
+                "application_created": created_application,
+                "membership_artifact_ids": sorted(candidate_artifact_ids),
+                "memberships_created": created_memberships,
+            }
+        )
+
+    return summary
+
+
 @csrf_exempt
 @login_required
 def artifact_bindings_collection(request: HttpRequest) -> JsonResponse:
@@ -11474,6 +11911,9 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "method not allowed"}, status=405)
     if staff_error := _require_staff(request):
         return staff_error
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
     if not request.FILES or "file" not in request.FILES:
         return JsonResponse({"error": "file upload required (multipart field: file)"}, status=400)
     upload = request.FILES["file"]
@@ -11510,21 +11950,33 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
             status=400,
         )
 
+    workspace = _resolve_solution_import_workspace(identity, request)
+    if workspace is None:
+        return JsonResponse(
+            {"error": "workspace context is required for generated artifact import"},
+            status=400,
+        )
+
     receipt = install_package(
         package,
         binding_overrides={},
         installed_by=request.user if request.user.is_authenticated else None,
+        target_workspace=workspace,
     )
     status = 200 if receipt.status == "success" else 400
+    artifact_ids_from_receipt = [
+        str(change.get("artifact_id") or "").strip()
+        for change in (receipt.artifact_changes if isinstance(receipt.artifact_changes, list) else [])
+        if isinstance(change, dict) and str(change.get("artifact_id") or "").strip()
+    ]
+    receipt_artifacts = list(
+        Artifact.objects.filter(id__in=artifact_ids_from_receipt).select_related("type")
+    ) if artifact_ids_from_receipt else []
+    artifact_by_id = {str(item.id): item for item in receipt_artifacts}
     imported_rows: List[Dict[str, Any]] = []
-    for item in artifacts:
-        if not isinstance(item, dict):
-            continue
-        artifact = Artifact.objects.filter(
-            type__slug=str(item.get("type") or "").strip(),
-            slug=str(item.get("slug") or "").strip(),
-        ).order_by("-updated_at", "-created_at").first()
-        if not artifact:
+    for artifact_id in artifact_ids_from_receipt:
+        artifact = artifact_by_id.get(artifact_id)
+        if artifact is None:
             continue
         imported_rows.append(
             {
@@ -11535,12 +11987,37 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
                 "title": artifact.title,
             }
         )
+    if not imported_rows:
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            artifact = Artifact.objects.filter(
+                type__slug=str(item.get("type") or "").strip(),
+                slug=str(item.get("slug") or "").strip(),
+            ).order_by("-updated_at", "-created_at").first()
+            if not artifact:
+                continue
+            imported_rows.append(
+                {
+                    "id": str(artifact.id),
+                    "slug": _artifact_slug(artifact),
+                    "type": artifact.type.slug if artifact.type_id else "",
+                    "package_version": str(artifact.package_version or ""),
+                    "title": artifact.title,
+                }
+            )
+    solution_links = _link_generated_artifacts_to_solution(artifacts=receipt_artifacts or [
+        Artifact.objects.filter(id=row.get("id")).select_related("type").first()
+        for row in imported_rows
+        if isinstance(row, dict)
+    ])
     return JsonResponse(
         {
             "package": _serialize_artifact_package(package),
             "created": created,
             "receipt": _serialize_artifact_install_receipt(receipt),
             "artifacts": imported_rows,
+            "solution_links": solution_links,
         },
         status=status,
     )
@@ -16462,12 +16939,17 @@ def _update_purpose_routing_assignment(purpose_slug: str, agent_id_raw: Any) -> 
         return f"agent '{desired_agent_id}' not found or disabled"
 
     link, _ = AgentDefinitionPurpose.objects.get_or_create(agent_definition=agent, purpose=purpose)
-    if not link.is_default_for_purpose:
-        link.is_default_for_purpose = True
-        link.save(update_fields=["is_default_for_purpose"])
+    # Clear any existing default first to satisfy the unique default-per-purpose
+    # constraint before promoting the selected link.
     AgentDefinitionPurpose.objects.filter(purpose=purpose, is_default_for_purpose=True).exclude(id=link.id).update(
         is_default_for_purpose=False
     )
+    if not link.is_default_for_purpose:
+        link.is_default_for_purpose = True
+        try:
+            link.save(update_fields=["is_default_for_purpose"])
+        except IntegrityError:
+            return f"unable to set default routing for purpose '{purpose_slug}' due to conflicting assignment"
     return None
 
 
@@ -18260,25 +18742,36 @@ def _direct_panel_prompt_interpretation(
 def _extract_app_intent_fields(message: str) -> Dict[str, Any]:
     text = str(message or "")
     lower = text.lower()
+    def _contains_token(*tokens: str) -> bool:
+        return any(re.search(rf"(?<!\w){re.escape(token)}(?!\w)", lower) for token in tokens if token)
+
     requested_entities: List[str] = []
-    if "devices" in lower:
-        requested_entities.append("devices")
-    if "interfaces" in lower:
-        requested_entities.append("interfaces")
-    if "vlans" in lower or "vlan" in lower:
-        requested_entities.append("vlans")
-    if "ip addresses" in lower or "ip_address" in lower or "ip address" in lower:
-        requested_entities.append("ip_addresses")
-    if "locations" in lower or "location" in lower:
-        requested_entities.append("locations")
-    if "racks" in lower or "rack" in lower:
-        requested_entities.append("racks")
+    entity_token_map: List[Tuple[str, Tuple[str, ...]]] = [
+        ("devices", ("device", "devices")),
+        ("interfaces", ("interface", "interfaces")),
+        ("vlans", ("vlan", "vlans")),
+        ("ip_addresses", ("ip address", "ip addresses", "ip_address", "ip_addresses")),
+        ("locations", ("location", "locations", "site", "sites")),
+        ("racks", ("rack", "racks")),
+        ("campaigns", ("campaign", "campaigns")),
+        ("properties", ("property", "properties", "parcel", "parcels")),
+        ("signals", ("signal", "signals")),
+        ("sources", ("source", "sources")),
+        ("watches", ("watch", "watches", "subscription", "subscriptions")),
+        ("subscribers", ("subscriber", "subscribers", "notification target", "notification targets")),
+    ]
+    for slug, tokens in entity_token_map:
+        if _contains_token(*tokens):
+            requested_entities.append(slug)
+    requested_entities = _normalize_unique_strings(requested_entities)
 
     phase_1_scope: List[str] = []
     if re.search(r"start\s+with\s+devices?\s+and\s+locations?", lower):
         phase_1_scope = ["devices", "locations"]
-    elif "devices" in lower and ("locations" in lower or "location" in lower):
+    elif _contains_token("devices", "device") and _contains_token("locations", "location"):
         phase_1_scope = ["devices", "locations"]
+    elif "campaigns" in requested_entities and "properties" in requested_entities:
+        phase_1_scope = ["campaigns", "properties", "signals"]
 
     requested_visuals: List[str] = []
     if re.search(r"devices?\s+by\s+status", lower):
@@ -18286,9 +18779,29 @@ def _extract_app_intent_fields(message: str) -> Dict[str, Any]:
     if re.search(r"interfaces?\s+by\s+status", lower):
         requested_visuals.append("interfaces_by_status_chart")
 
-    app_kind = "network_inventory" if ("network inventory" in lower or "devices" in lower) else "custom_app"
-    workspace_scoped = "workspace" in lower
-    title = "Network Inventory App" if app_kind == "network_inventory" else "New App"
+    app_kind = (
+        "network_inventory"
+        if ("network inventory" in lower or ("devices" in requested_entities and ("network" in lower or "inventory" in lower)))
+        else "custom_app"
+    )
+    workspace_scoped = _contains_token("workspace", "workspace-scoped")
+    title_patterns = [
+        re.compile(r'named\s+[“"]([^”"]+)[”"]', re.IGNORECASE),
+        re.compile(r'called\s+[“"]([^”"]+)[”"]', re.IGNORECASE),
+        re.compile(r'named\s+([^.;\\n]+)', re.IGNORECASE),
+        re.compile(r'called\s+([^.;\\n]+)', re.IGNORECASE),
+    ]
+    title = ""
+    for pattern in title_patterns:
+        match = pattern.search(text)
+        if not match:
+            continue
+        candidate = str(match.group(1) or "").strip().strip(".")
+        if candidate:
+            title = candidate
+            break
+    if not title:
+        title = "Network Inventory App" if app_kind == "network_inventory" else "Generated App"
     return {
         "title": title,
         "app_kind": app_kind,
@@ -28005,6 +28518,7 @@ def _serialize_application_plan_detail(plan: ApplicationPlan) -> Dict[str, Any]:
 def _serialize_application_summary(application: Application) -> Dict[str, Any]:
     goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
     portfolio = _build_goal_portfolio_payload(goals)
+    member_count = application.artifact_memberships.count() if hasattr(application, "artifact_memberships") else 0
     return {
         "id": str(application.id),
         "workspace_id": str(application.workspace_id),
@@ -28018,19 +28532,920 @@ def _serialize_application_summary(application: Application) -> Dict[str, Any]:
         "status": application.status,
         "request_objective": application.request_objective or "",
         "goal_count": len(goals),
+        "artifact_member_count": member_count,
         "portfolio_state": portfolio,
         "created_at": application.created_at,
         "updated_at": application.updated_at,
     }
 
 
+def _serialize_application_artifact_membership(member: ApplicationArtifactMembership) -> Dict[str, Any]:
+    artifact = member.artifact
+    return {
+        "id": str(member.id),
+        "workspace_id": str(member.workspace_id),
+        "application_id": str(member.application_id),
+        "artifact_id": str(member.artifact_id),
+        "role": member.role,
+        "responsibility_summary": member.responsibility_summary or "",
+        "metadata": member.metadata_json if isinstance(member.metadata_json, dict) else {},
+        "sort_order": int(member.sort_order or 0),
+        "created_at": member.created_at,
+        "updated_at": member.updated_at,
+        "artifact": {
+            "id": str(artifact.id),
+            "workspace_id": str(artifact.workspace_id),
+            "type": artifact.type.slug if artifact.type_id else "",
+            "scope_classification": _artifact_scope_classification(artifact),
+            "title": artifact.title,
+            "slug": _artifact_slug(artifact),
+            "status": artifact.status,
+            "version": artifact.version,
+            "updated_at": artifact.updated_at,
+        },
+    }
+
+
+def _solution_change_session_selected_artifact_ids(session: SolutionChangeSession) -> List[str]:
+    raw = session.selected_artifact_ids_json if isinstance(session.selected_artifact_ids_json, list) else []
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
+
+
+def _next_solution_planning_turn_sequence(session: SolutionChangeSession) -> int:
+    current = (
+        SolutionPlanningTurn.objects.filter(session=session)
+        .order_by("-sequence")
+        .values_list("sequence", flat=True)
+        .first()
+    )
+    return int(current or 0) + 1
+
+
+def _serialize_solution_planning_turn(turn: SolutionPlanningTurn) -> Dict[str, Any]:
+    return {
+        "id": str(turn.id),
+        "workspace_id": str(turn.workspace_id),
+        "session_id": str(turn.session_id),
+        "actor": turn.actor,
+        "kind": turn.kind,
+        "sequence": int(turn.sequence or 0),
+        "payload": turn.payload_json if isinstance(turn.payload_json, dict) else {},
+        "created_by": str(turn.created_by_id) if turn.created_by_id else None,
+        "created_at": turn.created_at,
+        "updated_at": turn.updated_at,
+    }
+
+
+def _serialize_solution_planning_checkpoint(checkpoint: SolutionPlanningCheckpoint) -> Dict[str, Any]:
+    return {
+        "id": str(checkpoint.id),
+        "workspace_id": str(checkpoint.workspace_id),
+        "session_id": str(checkpoint.session_id),
+        "checkpoint_key": checkpoint.checkpoint_key,
+        "label": checkpoint.label,
+        "status": checkpoint.status,
+        "required_before": checkpoint.required_before,
+        "payload": checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {},
+        "decided_by": str(checkpoint.decided_by_id) if checkpoint.decided_by_id else None,
+        "decided_at": checkpoint.decided_at,
+        "created_at": checkpoint.created_at,
+        "updated_at": checkpoint.updated_at,
+    }
+
+
+def _append_solution_planning_turn(
+    *,
+    session: SolutionChangeSession,
+    actor: str,
+    kind: str,
+    payload: Optional[Dict[str, Any]] = None,
+    created_by: Optional[UserIdentity] = None,
+) -> SolutionPlanningTurn:
+    turn = SolutionPlanningTurn.objects.create(
+        workspace_id=session.workspace_id,
+        session=session,
+        actor=actor,
+        kind=kind,
+        sequence=_next_solution_planning_turn_sequence(session),
+        payload_json=payload if isinstance(payload, dict) else {},
+        created_by=created_by,
+    )
+    return turn
+
+
+def _ensure_solution_stage_checkpoint(
+    *,
+    session: SolutionChangeSession,
+) -> SolutionPlanningCheckpoint:
+    checkpoint, _created = SolutionPlanningCheckpoint.objects.get_or_create(
+        session=session,
+        workspace_id=session.workspace_id,
+        checkpoint_key="plan_scope_confirmed",
+        required_before="stage",
+        defaults={
+            "label": "Approve planning scope before stage apply",
+            "status": "pending",
+            "payload_json": {"description": "Confirm the selected artifacts and draft plan before staging."},
+        },
+    )
+    return checkpoint
+
+
+def _solution_option_rows(
+    memberships: List[ApplicationArtifactMembership],
+    *,
+    limit: int = 3,
+) -> List[Dict[str, Any]]:
+    candidate_members = memberships[: min(max(limit, 1), len(memberships))]
+    options: List[Dict[str, Any]] = []
+    for member in candidate_members:
+        options.append(
+            {
+                "id": str(member.artifact_id),
+                "label": member.artifact.title,
+                "role": member.role,
+                "description": member.responsibility_summary or "",
+            }
+        )
+    return options
+
+
+def _maybe_emit_solution_checkpoint_turn(
+    *,
+    session: SolutionChangeSession,
+    checkpoint: SolutionPlanningCheckpoint,
+) -> None:
+    latest_checkpoint_turn = (
+        SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="checkpoint")
+        .order_by("-sequence", "-created_at")
+        .first()
+    )
+    latest_payload = latest_checkpoint_turn.payload_json if isinstance(getattr(latest_checkpoint_turn, "payload_json", None), dict) else {}
+    if (
+        latest_checkpoint_turn is not None
+        and str(latest_payload.get("checkpoint_id") or "") == str(checkpoint.id)
+        and str(latest_payload.get("status") or "") == str(checkpoint.status or "")
+    ):
+        return
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="checkpoint",
+        payload={
+            "checkpoint_id": str(checkpoint.id),
+            "checkpoint_key": checkpoint.checkpoint_key,
+            "label": checkpoint.label,
+            "required_before": checkpoint.required_before,
+            "status": checkpoint.status,
+        },
+    )
+
+
+def _advance_solution_planning_after_user_response(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> None:
+    planning_state = _solution_planning_state(session)
+    if planning_state.get("pending_question") or planning_state.get("pending_option_set"):
+        return
+    if not isinstance(session.plan_json, dict) or not session.plan_json:
+        plan = _generate_solution_change_plan(session=session, memberships=memberships)
+        session.plan_json = plan
+        session.status = "planned"
+        session.save(update_fields=["plan_json", "status", "updated_at"])
+        _append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="draft_plan",
+            payload={
+                "summary": "Generated structured cross-artifact draft plan.",
+                "objective": str(session.request_text or ""),
+                "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+                "shared_contracts": list(plan.get("shared_contracts") or []),
+                "validation_plan": list(plan.get("validation_plan") or []),
+            },
+        )
+    checkpoint = _ensure_solution_stage_checkpoint(session=session)
+    if str(checkpoint.status or "") != "pending":
+        checkpoint.status = "pending"
+        checkpoint.decided_by = None
+        checkpoint.decided_at = None
+        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+    _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+
+
+def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
+    turns = list(
+        SolutionPlanningTurn.objects.filter(session=session)
+        .select_related("created_by")
+        .order_by("sequence", "created_at")
+    )
+    checkpoints = list(
+        SolutionPlanningCheckpoint.objects.filter(session=session)
+        .select_related("decided_by")
+        .order_by("created_at")
+    )
+    serialized_turns = [_serialize_solution_planning_turn(turn) for turn in turns]
+    serialized_checkpoints = [_serialize_solution_planning_checkpoint(checkpoint) for checkpoint in checkpoints]
+    last_user_sequence = max(
+        (int(turn.sequence or 0) for turn in turns if str(turn.actor or "") == "user"),
+        default=0,
+    )
+    latest_draft_plan = next(
+        (
+            serialized
+            for serialized in reversed(serialized_turns)
+            if str(serialized.get("actor") or "") == "planner" and str(serialized.get("kind") or "") == "draft_plan"
+        ),
+        None,
+    )
+    pending_prompt_turn = next(
+        (
+            serialized
+            for serialized in reversed(serialized_turns)
+            if str(serialized.get("actor") or "") == "planner"
+            and str(serialized.get("kind") or "") in {"question", "option_set"}
+            and int(serialized.get("sequence") or 0) > last_user_sequence
+        ),
+        None,
+    )
+    pending_question = pending_prompt_turn if str((pending_prompt_turn or {}).get("kind") or "") == "question" else None
+    pending_option_set = pending_prompt_turn if str((pending_prompt_turn or {}).get("kind") or "") == "option_set" else None
+    pending_checkpoints = (
+        [entry for entry in serialized_checkpoints if str(entry.get("status") or "") == "pending"]
+        if latest_draft_plan and not pending_prompt_turn
+        else []
+    )
+    return {
+        "turns": serialized_turns,
+        "checkpoints": serialized_checkpoints,
+        "pending_question": pending_question,
+        "pending_option_set": pending_option_set,
+        "pending_checkpoints": pending_checkpoints,
+        "latest_draft_plan": latest_draft_plan,
+    }
+
+
+def _seed_solution_planning_state_on_create(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> None:
+    request_text = str(session.request_text or "").strip()
+    if request_text:
+        _append_solution_planning_turn(
+            session=session,
+            actor="user",
+            kind="request",
+            payload={"request_text": request_text},
+            created_by=session.created_by,
+        )
+
+    token_count = len([token for token in re.findall(r"[a-z0-9_]+", request_text.lower()) if len(token) >= 2])
+    if token_count <= 6:
+        _append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="question",
+            payload={
+                "question": "Which artifacts should this change target first, and what outcome should be validated?",
+                "reason": "request_scope_needs_clarification",
+            },
+        )
+    else:
+        options = _solution_option_rows(memberships)
+        if options:
+            _append_solution_planning_turn(
+                session=session,
+                actor="planner",
+                kind="option_set",
+                payload={
+                    "prompt": "Select the first artifact focus for this planning session.",
+                    "options": options,
+                },
+            )
+        else:
+            _append_solution_planning_turn(
+                session=session,
+                actor="planner",
+                kind="question",
+                payload={
+                    "question": "No selectable artifacts are available yet. Add memberships or refine scope, then regenerate options.",
+                    "reason": "missing_artifact_options",
+                },
+            )
+
+
+def _analyze_solution_impacted_artifacts(
+    *, application: Application, request_text: str, memberships: List[ApplicationArtifactMembership]
+) -> Dict[str, Any]:
+    text = str(request_text or "").strip().lower()
+    tokens = [token for token in re.findall(r"[a-z0-9_]+", text) if len(token) >= 3]
+    role_signals: Dict[str, List[str]] = {
+        "primary_ui": ["ui", "ux", "frontend", "view", "screen", "page", "shell", "workbench"],
+        "primary_api": ["api", "endpoint", "contract", "schema", "backend", "service", "orchestrator"],
+        "integration_adapter": ["adapter", "integration", "connector", "bridge", "import"],
+        "worker": ["worker", "job", "queue", "async", "batch"],
+        "runtime_service": ["runtime", "deploy", "container", "service", "ops"],
+        "shared_library": ["shared", "library", "sdk", "types", "common"],
+    }
+    matched_roles: set[str] = set()
+    for role, words in role_signals.items():
+        if any(word in text for word in words):
+            matched_roles.add(role)
+    impacted_rows: List[Dict[str, Any]] = []
+    for member in memberships:
+        artifact = member.artifact
+        score = 0
+        reasons: List[str] = []
+        if member.role in matched_roles:
+            score += 4
+            reasons.append(f"request mentions {member.role.replace('_', ' ')} concerns")
+        haystack = " ".join(
+            [
+                str(member.role or ""),
+                str(member.responsibility_summary or ""),
+                str(artifact.title or ""),
+                str(getattr(artifact.type, "slug", "") or ""),
+                str(getattr(artifact, "summary", "") or ""),
+            ]
+        ).lower()
+        token_hits = [token for token in tokens if token in haystack]
+        if token_hits:
+            score += min(3, len(token_hits))
+            reasons.append(f"matched request terms: {', '.join(sorted(set(token_hits))[:3])}")
+        if member.role in {"primary_ui", "primary_api"}:
+            score += 1
+            reasons.append("primary role default weighting")
+        if score <= 0:
+            continue
+        impacted_rows.append(
+            {
+                "membership_id": str(member.id),
+                "artifact_id": str(artifact.id),
+                "artifact_title": artifact.title,
+                "artifact_type": artifact.type.slug if artifact.type_id else "",
+                "role": member.role,
+                "score": score,
+                "reasons": reasons,
+            }
+        )
+    impacted_rows.sort(key=lambda row: (-int(row.get("score") or 0), str(row.get("artifact_title") or "")))
+    if not impacted_rows:
+        fallback_members = [m for m in memberships if m.role in {"primary_ui", "primary_api"}] or memberships[:2]
+        for member in fallback_members:
+            impacted_rows.append(
+                {
+                    "membership_id": str(member.id),
+                    "artifact_id": str(member.artifact_id),
+                    "artifact_title": member.artifact.title,
+                    "artifact_type": member.artifact.type.slug if member.artifact.type_id else "",
+                    "role": member.role,
+                    "score": 1,
+                    "reasons": ["defaulted to primary solution artifacts"],
+                }
+            )
+    suggested_artifact_ids = [str(row.get("artifact_id") or "") for row in impacted_rows if str(row.get("artifact_id") or "").strip()]
+    return {
+        "request_text": request_text,
+        "token_count": len(tokens),
+        "impacted_artifacts": impacted_rows,
+        "suggested_artifact_ids": suggested_artifact_ids,
+    }
+
+
+def _generate_solution_change_plan(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> Dict[str, Any]:
+    selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
+    if not selected_members:
+        selected_members = memberships
+    per_artifact: List[Dict[str, Any]] = []
+    for member in selected_members:
+        artifact = member.artifact
+        role = member.role
+        focus = "maintain compatibility with adjacent artifacts"
+        if role == "primary_ui":
+            focus = "update shell views and interaction flows for the requested change"
+        elif role == "primary_api":
+            focus = "extend API contracts and validation paths required by the change"
+        elif role == "worker":
+            focus = "update worker orchestration and async execution paths"
+        elif role == "integration_adapter":
+            focus = "adjust integration adapter contracts and transformation seams"
+        per_artifact.append(
+            {
+                "artifact_id": str(artifact.id),
+                "artifact_title": artifact.title,
+                "artifact_type": artifact.type.slug if artifact.type_id else "",
+                "role": role,
+                "planned_work": [
+                    focus,
+                    "add/adjust tests for changed behavior",
+                    "document any contract changes for consuming artifacts",
+                ],
+            }
+        )
+    return {
+        "session_id": str(session.id),
+        "application_id": str(session.application_id),
+        "title": session.title,
+        "request_text": session.request_text or "",
+        "generated_at": timezone.now().isoformat(),
+        "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
+        "per_artifact_work": per_artifact,
+        "shared_contracts": [
+            "Cross-artifact API/schema compatibility",
+            "Event/payload shape compatibility where artifacts exchange runtime data",
+            "Generated surface/action metadata consistency for shell navigation",
+        ],
+        "validation_plan": [
+            "Run artifact-local unit tests for each changed artifact",
+            "Run integration tests covering cross-artifact contract seams",
+            "Run shell/workbench smoke route checks for affected user paths",
+        ],
+        "preview_implications": [
+            "Preview instance should include all changed artifacts in one sibling deploy set",
+            "Cross-artifact regression checks are required before promotion",
+        ],
+    }
+
+
+def _serialize_solution_change_session(
+    session: SolutionChangeSession,
+    *,
+    memberships_by_artifact_id: Optional[Dict[str, ApplicationArtifactMembership]] = None,
+) -> Dict[str, Any]:
+    memberships_by_artifact_id = memberships_by_artifact_id or {}
+    selected_ids = _solution_change_session_selected_artifact_ids(session)
+    selected_artifacts: List[Dict[str, Any]] = []
+    for artifact_id in selected_ids:
+        member = memberships_by_artifact_id.get(artifact_id)
+        if not member:
+            continue
+        selected_artifacts.append(
+            {
+                "artifact_id": artifact_id,
+                "artifact_title": member.artifact.title,
+                "artifact_type": member.artifact.type.slug if member.artifact.type_id else "",
+                "role": member.role,
+            }
+        )
+    planning_state = _solution_planning_state(session)
+    return {
+        "id": str(session.id),
+        "workspace_id": str(session.workspace_id),
+        "application_id": str(session.application_id),
+        "title": session.title,
+        "request_text": session.request_text or "",
+        "status": session.status,
+        "created_by": str(session.created_by_id) if session.created_by_id else None,
+        "analysis": session.analysis_json if isinstance(session.analysis_json, dict) else {},
+        "selected_artifact_ids": selected_ids,
+        "selected_artifacts": selected_artifacts,
+        "plan": session.plan_json if isinstance(session.plan_json, dict) else {},
+        "execution_status": session.execution_status or "not_started",
+        "staged_changes": session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {},
+        "preview": session.preview_json if isinstance(session.preview_json, dict) else {},
+        "validation": session.validation_json if isinstance(session.validation_json, dict) else {},
+        "metadata": session.metadata_json if isinstance(session.metadata_json, dict) else {},
+        "planning": planning_state,
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    }
+
+
+def _stage_solution_change_session(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> Dict[str, Any]:
+    selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
+    if not selected_members:
+        selected_members = memberships
+    plan = session.plan_json if isinstance(session.plan_json, dict) else {}
+    planned_work_by_artifact: Dict[str, List[str]] = {}
+    for row in (plan.get("per_artifact_work") if isinstance(plan.get("per_artifact_work"), list) else []):
+        if not isinstance(row, dict):
+            continue
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        if not artifact_id:
+            continue
+        planned_work_by_artifact[artifact_id] = [
+            str(item).strip()
+            for item in (row.get("planned_work") if isinstance(row.get("planned_work"), list) else [])
+            if str(item).strip()
+        ]
+    staged_artifacts: List[Dict[str, Any]] = []
+    for member in selected_members:
+        artifact = member.artifact
+        artifact_id = str(artifact.id)
+        staged_artifacts.append(
+            {
+                "artifact_id": artifact_id,
+                "artifact_title": artifact.title,
+                "artifact_type": artifact.type.slug if artifact.type_id else "",
+                "role": member.role,
+                "state": "staged",
+                "apply_state": "proposed",
+                "validation_state": "pending",
+                "planned_work": planned_work_by_artifact.get(artifact_id) or [],
+                "updated_at": timezone.now().isoformat(),
+            }
+        )
+    staged_payload: Dict[str, Any] = {
+        "operation_id": str(uuid.uuid4()),
+        "staged_at": timezone.now().isoformat(),
+        "overall_state": "staged",
+        "artifact_count": len(staged_artifacts),
+        "artifact_states": staged_artifacts,
+        "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
+        "shared_contracts": plan.get("shared_contracts") if isinstance(plan.get("shared_contracts"), list) else [],
+        "validation_plan": plan.get("validation_plan") if isinstance(plan.get("validation_plan"), list) else [],
+        "preview_implications": plan.get("preview_implications") if isinstance(plan.get("preview_implications"), list) else [],
+        "planning_checkpoint_state": {
+            "pending_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="pending").count(),
+            "approved_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="approved").count(),
+            "rejected_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="rejected").count(),
+        },
+    }
+    session.staged_changes_json = staged_payload
+    session.preview_json = {}
+    session.validation_json = {}
+    session.execution_status = "staged"
+    if session.status == "draft":
+        session.status = "planned"
+    session.save(update_fields=["staged_changes_json", "preview_json", "validation_json", "execution_status", "status", "updated_at"])
+    return staged_payload
+
+
+def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[str, Any]:
+    staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+    artifact_states = staged.get("artifact_states") if isinstance(staged.get("artifact_states"), list) else []
+    workspace_id = str(session.workspace_id)
+    application_id = str(session.application_id)
+    now_iso = timezone.now().isoformat()
+
+    def _artifact_preview_app_slug(artifact: Artifact) -> str:
+        slug = str(getattr(artifact, "slug", "") or "").strip()
+        if slug.startswith("app."):
+            return slug[4:]
+        metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
+        runtime = metadata.get("runtime_target") if isinstance(metadata.get("runtime_target"), dict) else {}
+        runtime_app_slug = str(runtime.get("app_slug") or metadata.get("app_slug") or "").strip()
+        return runtime_app_slug
+
+    def _probe_runtime(base_url: str) -> Dict[str, Any]:
+        probe_paths = ["/healthz", "/health", "/xyn/api/health"]
+        last_error = ""
+        for probe_path in probe_paths:
+            try:
+                response = _runtime_target_request(
+                    base_url=base_url,
+                    method="GET",
+                    path=probe_path,
+                    timeout=8,
+                )
+                return {
+                    "ok": response.status_code < 400,
+                    "status_code": int(response.status_code),
+                    "path": probe_path,
+                }
+            except Exception as exc:
+                last_error = str(exc)
+        return {
+            "ok": False,
+            "status_code": 0,
+            "path": probe_paths[-1],
+            "error": last_error,
+        }
+
+    def _run_command(cmd: List[str], *, timeout_seconds: int = 90) -> Tuple[int, str, str]:
+        try:
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = str(exc.stdout or "").strip()
+            stderr = str(exc.stderr or "").strip()
+            return 124, stdout, stderr or f"command timed out after {timeout_seconds}s"
+        except Exception as exc:  # pragma: no cover - defensive
+            return 1, "", str(exc)
+        return int(proc.returncode or 0), str(proc.stdout or "").strip(), str(proc.stderr or "").strip()
+
+    def _launch_preview_for_session(
+        *,
+        artifact_rows: List[Dict[str, Any]],
+        compose_projects: set[str],
+    ) -> Dict[str, Any]:
+        launched_at = timezone.now().isoformat()
+        if len(compose_projects) != 1:
+            return {
+                "attempted": False,
+                "supported": False,
+                "status": "reused",
+                "reason": "multiple_compose_projects",
+                "started_at": launched_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        containers: List[str] = []
+        runtime_target_ids: List[str] = []
+        for item in artifact_rows:
+            if not isinstance(item, dict):
+                continue
+            container_name = str(item.get("app_container_name") or "").strip()
+            if container_name and container_name not in containers:
+                containers.append(container_name)
+            runtime_target_id = str(item.get("runtime_target_id") or "").strip()
+            if runtime_target_id and runtime_target_id not in runtime_target_ids:
+                runtime_target_ids.append(runtime_target_id)
+        if not containers:
+            return {
+                "attempted": False,
+                "supported": False,
+                "status": "reused",
+                "reason": "missing_app_container_bindings",
+                "runtime_target_ids": runtime_target_ids,
+                "started_at": launched_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        docker_probe_code, _docker_probe_out, docker_probe_err = _run_command(["docker", "version", "--format", "{{.Server.Version}}"])
+        if docker_probe_code != 0:
+            return {
+                "attempted": False,
+                "supported": False,
+                "status": "reused",
+                "reason": "docker_unavailable",
+                "details": docker_probe_err or "docker CLI unavailable",
+                "runtime_target_ids": runtime_target_ids,
+                "started_at": launched_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        commands: List[Dict[str, Any]] = []
+        for container_name in containers:
+            code, out, err = _run_command(["docker", "restart", container_name], timeout_seconds=120)
+            commands.append(
+                {
+                    "container": container_name,
+                    "command": ["docker", "restart", container_name],
+                    "status_code": code,
+                    "stdout": out,
+                    "stderr": err,
+                }
+            )
+            if code != 0:
+                return {
+                    "attempted": True,
+                    "supported": True,
+                    "status": "failed",
+                    "reason": "docker_restart_failed",
+                    "details": err or out or f"failed to restart {container_name}",
+                    "launched_containers": containers,
+                    "runtime_target_ids": runtime_target_ids,
+                    "command_results": commands,
+                    "started_at": launched_at,
+                    "completed_at": timezone.now().isoformat(),
+                }
+        return {
+            "attempted": True,
+            "supported": True,
+            "status": "succeeded",
+            "launched_containers": containers,
+            "runtime_target_ids": runtime_target_ids,
+            "command_results": commands,
+            "started_at": launched_at,
+            "completed_at": timezone.now().isoformat(),
+        }
+
+    artifact_rows: List[Dict[str, Any]] = []
+    selected_artifact_ids: List[str] = []
+    compose_projects: set[str] = set()
+    all_bound = True
+    for row in artifact_states:
+        if not isinstance(row, dict):
+            continue
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        if not artifact_id:
+            continue
+        selected_artifact_ids.append(artifact_id)
+        artifact = Artifact.objects.filter(id=artifact_id).first()
+        if artifact is None:
+            all_bound = False
+            artifact_rows.append(
+                {
+                    "artifact_id": artifact_id,
+                    "status": "failed",
+                    "reason": "artifact_not_found",
+                }
+            )
+            continue
+        app_slug = _artifact_preview_app_slug(artifact)
+        if not app_slug:
+            all_bound = False
+            artifact_rows.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_title": artifact.title,
+                    "artifact_slug": artifact.slug,
+                    "status": "failed",
+                    "reason": "preview_app_slug_unresolved",
+                }
+            )
+            continue
+        runtime_record = _workspace_runtime_target(session.workspace, app_slug)
+        runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record, dict) else {}
+        runtime_instance = runtime_record.get("instance") if isinstance(runtime_record, dict) else None
+        runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip()
+        public_app_url = str(runtime_target.get("public_app_url") or "").strip()
+        compose_project = str(runtime_target.get("compose_project") or "").strip()
+        if not runtime_base_url or not compose_project:
+            all_bound = False
+            artifact_rows.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_title": artifact.title,
+                    "artifact_slug": artifact.slug,
+                    "app_slug": app_slug,
+                    "status": "failed",
+                    "reason": "runtime_target_missing",
+                }
+            )
+            continue
+        probe = _probe_runtime(runtime_base_url)
+        if not probe.get("ok"):
+            all_bound = False
+        compose_projects.add(compose_project)
+        artifact_rows.append(
+            {
+                "artifact_id": artifact_id,
+                "artifact_title": artifact.title,
+                "artifact_slug": artifact.slug,
+                "app_slug": app_slug,
+                "status": "ready" if probe.get("ok") else "failed",
+                "runtime_owner": str(runtime_target.get("runtime_owner") or "sibling"),
+                "runtime_base_url": runtime_base_url,
+                "public_app_url": public_app_url,
+                "compose_project": compose_project,
+                "runtime_target_id": str(getattr(runtime_instance, "id", "") or "").strip(),
+                "app_container_name": str(runtime_target.get("app_container_name") or "").strip(),
+                "source_build_job_id": str(runtime_target.get("source_build_job_id") or "").strip(),
+                "probe": probe,
+            }
+        )
+
+    single_preview_environment = len(compose_projects) == 1
+    if not single_preview_environment:
+        all_bound = False
+
+    preview_urls: List[str] = []
+    for artifact_row in artifact_rows:
+        if not isinstance(artifact_row, dict):
+            continue
+        url = str(artifact_row.get("public_app_url") or "").strip()
+        if url and url not in preview_urls:
+            preview_urls.append(url)
+
+    session_build = _launch_preview_for_session(artifact_rows=artifact_rows, compose_projects=compose_projects)
+    build_status = str(session_build.get("status") or "").strip().lower()
+    built_for_session = bool(session_build.get("attempted")) and build_status == "succeeded"
+    reused_existing_runtime = not built_for_session
+    if build_status == "failed":
+        for artifact_row in artifact_rows:
+            if not isinstance(artifact_row, dict):
+                continue
+            runtime_base_url = str(artifact_row.get("runtime_base_url") or "").strip()
+            artifact_row["probe"] = _probe_runtime(runtime_base_url) if runtime_base_url else {"ok": False, "status_code": 0, "path": "/health"}
+            artifact_row["status"] = "ready" if bool((artifact_row.get("probe") or {}).get("ok")) else "failed"
+    status = "ready" if all_bound and bool(preview_urls) and build_status != "failed" else "failed"
+    preview_payload: Dict[str, Any] = {
+        "preview_id": str(uuid.uuid4()),
+        "status": status,
+        "mode": "coordinated_multi_artifact_preview",
+        "prepared_at": now_iso,
+        "newly_built_for_session": built_for_session,
+        "reused_existing_runtime": reused_existing_runtime,
+        "selected_artifact_ids": selected_artifact_ids,
+        "artifact_count": len(selected_artifact_ids),
+        "artifacts": artifact_rows,
+        "preview_urls": preview_urls,
+        "primary_url": preview_urls[0] if preview_urls else "",
+        "compose_projects": sorted(compose_projects),
+        "single_preview_environment": single_preview_environment,
+        "session_build": session_build,
+        "build_deploy_evidence": {
+            "runtime_owner": "sibling",
+            "source_build_job_ids": sorted(
+                {
+                    str(item.get("source_build_job_id") or "").strip()
+                    for item in artifact_rows
+                    if isinstance(item, dict) and str(item.get("source_build_job_id") or "").strip()
+                }
+            ),
+            "verified_at": now_iso,
+            "session_build": session_build,
+        },
+        "handoff": {
+            "workbench_path": (
+                f"/w/{workspace_id}/workbench?panel=composer_detail&application_id={application_id}"
+                f"&solution_change_session_id={session.id}"
+            ),
+            "solution_path": f"/w/{workspace_id}/solutions/{application_id}",
+        },
+    }
+    if status != "ready":
+        if build_status == "failed":
+            reason = str(session_build.get("reason") or "session_preview_launch_failed").strip() or "session_preview_launch_failed"
+            details = str(session_build.get("details") or "Failed to launch session preview for selected artifacts.").strip()
+        else:
+            reason = "preview_environment_unavailable"
+            details = "Selected artifacts must resolve to healthy sibling runtime targets in one compose project."
+        preview_payload["error"] = {
+            "reason": reason,
+            "details": details,
+        }
+
+    staged["overall_state"] = "preview_ready" if status == "ready" else "preview_failed"
+    staged["preview_prepared_at"] = now_iso
+    for row in artifact_states:
+        if isinstance(row, dict):
+            row["state"] = "preview_ready" if status == "ready" else "preview_failed"
+            row["updated_at"] = now_iso
+    session.staged_changes_json = staged
+    session.preview_json = preview_payload
+    session.execution_status = "preview_ready" if status == "ready" else "failed"
+    session.save(update_fields=["staged_changes_json", "preview_json", "execution_status", "updated_at"])
+    return preview_payload
+
+
+def _validate_solution_change_session(*, session: SolutionChangeSession) -> Dict[str, Any]:
+    plan = session.plan_json if isinstance(session.plan_json, dict) else {}
+    staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+    preview = session.preview_json if isinstance(session.preview_json, dict) else {}
+    artifact_states = staged.get("artifact_states") if isinstance(staged.get("artifact_states"), list) else []
+    checks = [
+        {
+            "key": "plan_generated",
+            "label": "Structured cross-artifact plan generated",
+            "status": "passed" if bool(plan.get("per_artifact_work")) else "failed",
+        },
+        {
+            "key": "staged_artifacts_present",
+            "label": "Selected artifacts are staged",
+            "status": "passed" if bool(artifact_states) else "failed",
+        },
+        {
+            "key": "preview_prepared",
+            "label": "Preview orchestration handoff prepared",
+            "status": "passed" if str(preview.get("status") or "").strip().lower() == "ready" else "failed",
+        },
+    ]
+    all_passed = all(str(item.get("status") or "") == "passed" for item in checks)
+    for row in artifact_states:
+        if isinstance(row, dict):
+            row["validation_state"] = "passed" if all_passed else "failed"
+            row["updated_at"] = timezone.now().isoformat()
+    staged["artifact_states"] = artifact_states
+    staged["overall_state"] = "validated" if all_passed else "validation_failed"
+    validation_payload: Dict[str, Any] = {
+        "validation_id": str(uuid.uuid4()),
+        "validated_at": timezone.now().isoformat(),
+        "status": "passed" if all_passed else "failed",
+        "checks": checks,
+        "artifact_count": len(artifact_states),
+    }
+    session.staged_changes_json = staged
+    session.validation_json = validation_payload
+    session.execution_status = "ready_for_promotion" if all_passed else "failed"
+    session.save(update_fields=["staged_changes_json", "validation_json", "execution_status", "updated_at"])
+    return validation_payload
+
+
 def _serialize_application_detail(application: Application) -> Dict[str, Any]:
     goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
     factory_definition = get_application_factory(application.source_factory_key)
+    members = list(application.artifact_memberships.select_related("artifact", "artifact__type").order_by("sort_order", "created_at"))
     return {
         **_serialize_application_summary(application),
         "factory": _serialize_application_factory_summary(factory_definition) if factory_definition else None,
         "goals": [_serialize_goal_summary(goal) for goal in goals],
+        "artifact_memberships": [_serialize_application_artifact_membership(member) for member in members],
         "metadata": application.metadata_json if isinstance(application.metadata_json, dict) else {},
     }
 
@@ -28108,6 +29523,7 @@ def _serialize_composer_state(
     application: Optional[Application] = None,
     goal: Optional[Goal] = None,
     thread: Optional[CoordinationThread] = None,
+    solution_change_session: Optional[SolutionChangeSession] = None,
 ) -> Dict[str, Any]:
     if thread is not None and goal is None and thread.goal_id:
         goal = thread.goal
@@ -28197,6 +29613,43 @@ def _serialize_composer_state(
                 target_id=str(application.id),
             )
         )
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="open_solution_change_sessions",
+                label="Open Solution Change Sessions",
+                target_kind="application",
+                target_id=str(application.id),
+            )
+        )
+    if solution_change_session is not None:
+        session_execution_status = str(solution_change_session.execution_status or "not_started")
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="stage_solution_change",
+                label="Stage Coordinated Change",
+                enabled=bool(solution_change_session.plan_json),
+                target_kind="solution_change_session",
+                target_id=str(solution_change_session.id),
+            )
+        )
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="prepare_solution_preview",
+                label="Prepare Preview Handoff",
+                enabled=session_execution_status in {"staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion"},
+                target_kind="solution_change_session",
+                target_id=str(solution_change_session.id),
+            )
+        )
+        available_actions.append(
+            _serialize_composer_action(
+                action_type="validate_solution_change",
+                label="Validate Staged Change",
+                enabled=session_execution_status in {"preview_ready", "validating", "ready_for_promotion"},
+                target_kind="solution_change_session",
+                target_id=str(solution_change_session.id),
+            )
+        )
     if goal is not None and isinstance((_serialize_goal_detail(goal).get("recommendation") or {}), dict):
         goal_detail = _serialize_goal_detail(goal)
         recommendation = goal_detail.get("recommendation") if isinstance(goal_detail.get("recommendation"), dict) else {}
@@ -28229,6 +29682,7 @@ def _serialize_composer_state(
             "application_id": str(application.id) if application else None,
             "goal_id": str(goal.id) if goal else None,
             "thread_id": str(thread.id) if thread else None,
+            "solution_change_session_id": str(solution_change_session.id) if solution_change_session else None,
         },
         "factory_catalog": factory_catalog,
         "selected_factory": _serialize_application_factory_summary(selected_factory) if selected_factory else None,
@@ -28236,6 +29690,33 @@ def _serialize_composer_state(
         "applications": [_serialize_application_summary(app) for app in recent_applications],
         "application_plan": _serialize_application_plan_detail(application_plan) if application_plan else None,
         "application": _serialize_application_detail(application) if application else None,
+        "solution_change_sessions": [
+            _serialize_solution_change_session(
+                item,
+                memberships_by_artifact_id={
+                    str(member.artifact_id): member
+                    for member in ApplicationArtifactMembership.objects.filter(application=item.application)
+                    .select_related("artifact", "artifact__type")
+                    .all()
+                },
+            )
+            for item in (
+                SolutionChangeSession.objects.filter(application=application).order_by("-updated_at", "-created_at")[:10]
+                if application is not None
+                else []
+            )
+        ],
+        "solution_change_session": _serialize_solution_change_session(
+            solution_change_session,
+            memberships_by_artifact_id={
+                str(member.artifact_id): member
+                for member in ApplicationArtifactMembership.objects.filter(application=solution_change_session.application)
+                .select_related("artifact", "artifact__type")
+                .all()
+            },
+        )
+        if solution_change_session is not None
+        else None,
         "goal": _serialize_goal_detail(goal) if goal else None,
         "thread": _coordination_thread_detail(thread) if thread else None,
         "related_goals": related_goals,
@@ -30713,6 +32194,648 @@ def application_detail(request: HttpRequest, application_id: str) -> JsonRespons
     return JsonResponse(_serialize_application_detail(application))
 
 
+@csrf_exempt
+@login_required
+def application_artifact_memberships_collection(request: HttpRequest, application_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method == "GET":
+        rows = list(
+            ApplicationArtifactMembership.objects.filter(application=application)
+            .select_related("artifact", "artifact__type")
+            .order_by("sort_order", "created_at")
+        )
+        return JsonResponse(
+            {
+                "application_id": str(application.id),
+                "workspace_id": str(application.workspace_id),
+                "memberships": [_serialize_application_artifact_membership(row) for row in rows],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    artifact_id = str(payload.get("artifact_id") or "").strip()
+    if not artifact_id:
+        return JsonResponse({"error": "artifact_id is required"}, status=400)
+    artifact = Artifact.objects.filter(id=artifact_id, workspace_id=application.workspace_id).select_related("type").first()
+    if not artifact:
+        return JsonResponse({"error": "artifact must exist in application workspace"}, status=400)
+    allowed_roles = {choice for choice, _label in ApplicationArtifactMembership.ROLE_CHOICES}
+    role = str(payload.get("role") or "supporting").strip().lower() or "supporting"
+    if role not in allowed_roles:
+        return JsonResponse({"error": f"role must be one of {', '.join(sorted(allowed_roles))}"}, status=400)
+    responsibility_summary = str(payload.get("responsibility_summary") or "").strip()
+    metadata = payload.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        return JsonResponse({"error": "metadata must be an object"}, status=400)
+    sort_order_value = payload.get("sort_order")
+    sort_order = 0
+    if sort_order_value is not None:
+        try:
+            sort_order = int(sort_order_value)
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "sort_order must be an integer"}, status=400)
+
+    member, created = ApplicationArtifactMembership.objects.update_or_create(
+        application=application,
+        artifact=artifact,
+        defaults={
+            "workspace_id": application.workspace_id,
+            "role": role,
+            "responsibility_summary": responsibility_summary,
+            "metadata_json": metadata if isinstance(metadata, dict) else {},
+            "sort_order": sort_order,
+        },
+    )
+    member.refresh_from_db()
+    return JsonResponse(
+        {
+            "created": created,
+            "membership": _serialize_application_artifact_membership(member),
+        },
+        status=201 if created else 200,
+    )
+
+
+@csrf_exempt
+@login_required
+def application_artifact_membership_detail(
+    request: HttpRequest, application_id: str, membership_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    membership = get_object_or_404(
+        ApplicationArtifactMembership.objects.select_related("artifact", "artifact__type"),
+        id=membership_id,
+        application=application,
+    )
+    if request.method == "DELETE":
+        if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        payload = _serialize_application_artifact_membership(membership)
+        membership.delete()
+        return JsonResponse({"deleted": True, "membership": payload})
+    if request.method != "PATCH":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    updates: Dict[str, Any] = {}
+    if "role" in payload:
+        allowed_roles = {choice for choice, _label in ApplicationArtifactMembership.ROLE_CHOICES}
+        role = str(payload.get("role") or "").strip().lower()
+        if role not in allowed_roles:
+            return JsonResponse({"error": f"role must be one of {', '.join(sorted(allowed_roles))}"}, status=400)
+        updates["role"] = role
+    if "responsibility_summary" in payload:
+        updates["responsibility_summary"] = str(payload.get("responsibility_summary") or "").strip()
+    if "metadata" in payload:
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return JsonResponse({"error": "metadata must be an object"}, status=400)
+        updates["metadata_json"] = metadata if isinstance(metadata, dict) else {}
+    if "sort_order" in payload:
+        try:
+            updates["sort_order"] = int(payload.get("sort_order"))
+        except (TypeError, ValueError):
+            return JsonResponse({"error": "sort_order must be an integer"}, status=400)
+    if updates:
+        for key, value in updates.items():
+            setattr(membership, key, value)
+        membership.save()
+        membership.refresh_from_db()
+    return JsonResponse(_serialize_application_artifact_membership(membership))
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_sessions_collection(
+    request: HttpRequest, application_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    if request.method == "GET":
+        sessions = list(
+            SolutionChangeSession.objects.filter(application=application)
+            .select_related("created_by")
+            .order_by("-updated_at", "-created_at")
+        )
+        return JsonResponse(
+            {
+                "application_id": str(application.id),
+                "workspace_id": str(application.workspace_id),
+                "sessions": [
+                    _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id)
+                    for session in sessions
+                ],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    request_text = str(payload.get("request_text") or "").strip()
+    if not request_text:
+        return JsonResponse({"error": "request_text is required"}, status=400)
+    title = str(payload.get("title") or "").strip() or f"Change Session {timezone.now().strftime('%Y-%m-%d %H:%M')}"
+    analysis = _analyze_solution_impacted_artifacts(
+        application=application,
+        request_text=request_text,
+        memberships=memberships,
+    )
+    session = SolutionChangeSession.objects.create(
+        workspace_id=application.workspace_id,
+        application=application,
+        title=title,
+        request_text=request_text,
+        created_by=identity,
+        analysis_json=analysis,
+        selected_artifact_ids_json=analysis.get("suggested_artifact_ids") if isinstance(analysis.get("suggested_artifact_ids"), list) else [],
+    )
+    _seed_solution_planning_state_on_create(session=session, memberships=memberships)
+    session.refresh_from_db()
+    return JsonResponse(
+        {
+            "created": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        },
+        status=201,
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_detail(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(
+        SolutionChangeSession.objects.select_related("created_by"),
+        id=session_id,
+        application=application,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    if request.method == "GET":
+        return JsonResponse(_serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id))
+    if request.method != "PATCH":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if "title" in payload:
+        session.title = str(payload.get("title") or "").strip() or session.title
+    if "status" in payload:
+        status_value = str(payload.get("status") or "").strip().lower()
+        allowed_statuses = {choice for choice, _label in SolutionChangeSession.STATUS_CHOICES}
+        if status_value not in allowed_statuses:
+            return JsonResponse({"error": "invalid status"}, status=400)
+        session.status = status_value
+    if "selected_artifact_ids" in payload:
+        raw = payload.get("selected_artifact_ids")
+        if not isinstance(raw, list):
+            return JsonResponse({"error": "selected_artifact_ids must be a list"}, status=400)
+        allowed_ids = set(memberships_by_artifact_id.keys())
+        selected_ids: List[str] = []
+        for item in raw:
+            token = str(item or "").strip()
+            if token and token in allowed_ids and token not in selected_ids:
+                selected_ids.append(token)
+        session.selected_artifact_ids_json = selected_ids
+    session.save()
+    session.refresh_from_db()
+    return JsonResponse(_serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id))
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_reply(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    payload = _parse_json(request)
+    reply_text = str(payload.get("reply_text") or payload.get("text") or "").strip()
+    if not reply_text:
+        return JsonResponse({"error": "reply_text is required"}, status=400)
+    _append_solution_planning_turn(
+        session=session,
+        actor="user",
+        kind="response",
+        payload={
+            "reply_text": reply_text,
+            "response_kind": "response",
+            "source_turn_id": str(payload.get("source_turn_id") or "").strip() or None,
+        },
+        created_by=identity,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "recorded": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_select_option(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    payload = _parse_json(request)
+    option_id = str(payload.get("option_id") or "").strip()
+    if not option_id:
+        return JsonResponse({"error": "option_id is required"}, status=400)
+
+    source_turn_id = str(payload.get("source_turn_id") or "").strip()
+    option_turn_qs = SolutionPlanningTurn.objects.filter(
+        session=session,
+        actor="planner",
+        kind="option_set",
+    ).order_by("-sequence", "-created_at")
+    if source_turn_id:
+        option_turn_qs = option_turn_qs.filter(id=source_turn_id)
+    source_turn = option_turn_qs.first()
+    if source_turn is None:
+        return JsonResponse({"error": "planner option set was not found for this session"}, status=404)
+    source_payload = source_turn.payload_json if isinstance(source_turn.payload_json, dict) else {}
+    options = source_payload.get("options") if isinstance(source_payload.get("options"), list) else []
+    selected_option = None
+    for item in options:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id") or "").strip() == option_id:
+            selected_option = item
+            break
+    if selected_option is None:
+        return JsonResponse({"error": "option_id is not part of the planner option set"}, status=400)
+
+    _append_solution_planning_turn(
+        session=session,
+        actor="user",
+        kind="response",
+        payload={
+            "response_kind": "option_selection",
+            "source_turn_id": str(source_turn.id),
+            "option_id": option_id,
+            "option_label": str(selected_option.get("label") or option_id),
+            "option_payload": selected_option,
+        },
+        created_by=identity,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "recorded": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_checkpoint_decision(
+    request: HttpRequest, application_id: str, session_id: str, checkpoint_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    checkpoint = get_object_or_404(
+        SolutionPlanningCheckpoint,
+        id=checkpoint_id,
+        session=session,
+    )
+    payload = _parse_json(request)
+    decision = str(payload.get("decision") or "").strip().lower()
+    if decision not in {"approved", "rejected"}:
+        return JsonResponse({"error": "decision must be approved or rejected"}, status=400)
+    checkpoint.status = decision
+    checkpoint.decided_by = identity
+    checkpoint.decided_at = timezone.now()
+    checkpoint.payload_json = {
+        **(checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {}),
+        "decision_notes": str(payload.get("notes") or "").strip(),
+    }
+    checkpoint.save(update_fields=["status", "decided_by", "decided_at", "payload_json", "updated_at"])
+    _append_solution_planning_turn(
+        session=session,
+        actor="user",
+        kind="approval",
+        payload={
+            "checkpoint_id": str(checkpoint.id),
+            "checkpoint_key": checkpoint.checkpoint_key,
+            "decision": decision,
+            "required_before": checkpoint.required_before,
+            "notes": str(payload.get("notes") or "").strip(),
+        },
+        created_by=identity,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "recorded": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_regenerate_options(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    options = _solution_option_rows(memberships)
+    if not options:
+        return JsonResponse({"error": "no selectable artifacts are available for this solution"}, status=409)
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="option_set",
+        payload={
+            "prompt": "Select the first artifact focus for this planning session.",
+            "options": options,
+            "source": "regenerated",
+        },
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "regenerated": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_plan(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    planning_state = _solution_planning_state(session)
+    if planning_state.get("pending_question"):
+        return JsonResponse({"error": "planner clarification is pending; submit a reply before generating a draft plan"}, status=409)
+    if planning_state.get("pending_option_set"):
+        return JsonResponse({"error": "planner option selection is pending; select an option before generating a draft plan"}, status=409)
+    plan = _generate_solution_change_plan(session=session, memberships=memberships)
+    session.plan_json = plan
+    session.status = "planned"
+    session.save(update_fields=["plan_json", "status", "updated_at"])
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="draft_plan",
+        payload={
+            "summary": "Generated structured cross-artifact draft plan.",
+            "objective": str(session.request_text or ""),
+            "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+            "shared_contracts": list(plan.get("shared_contracts") or []),
+            "validation_plan": list(plan.get("validation_plan") or []),
+        },
+    )
+    checkpoint = _ensure_solution_stage_checkpoint(session=session)
+    if str(checkpoint.status or "") != "pending":
+        checkpoint.status = "pending"
+        checkpoint.decided_by = None
+        checkpoint.decided_at = None
+        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+    _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "planned": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_stage_apply(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    planning_state = _solution_planning_state(session)
+    if planning_state.get("pending_question") or planning_state.get("pending_option_set"):
+        return JsonResponse({"error": "planning interaction is still pending; resolve planner prompts before staging"}, status=409)
+    if not planning_state.get("latest_draft_plan"):
+        return JsonResponse({"error": "a draft plan is required before staging"}, status=409)
+    stage_checkpoint = SolutionPlanningCheckpoint.objects.filter(
+        session=session,
+        checkpoint_key="plan_scope_confirmed",
+    ).order_by("-created_at").first()
+    if stage_checkpoint is not None and str(stage_checkpoint.status or "") != "approved":
+        return JsonResponse({"error": "planning approval checkpoint must be approved before staging"}, status=409)
+    if not isinstance(session.plan_json, dict) or not session.plan_json:
+        return JsonResponse({"error": "solution change session must have a generated plan before staging"}, status=409)
+    _stage_solution_change_session(session=session, memberships=memberships)
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "staged": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_prepare_preview(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+    artifact_states = staged.get("artifact_states") if isinstance(staged.get("artifact_states"), list) else []
+    if not artifact_states:
+        return JsonResponse({"error": "stage apply must run before preview preparation"}, status=409)
+    preview_payload = _prepare_solution_change_preview(session=session)
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    response_payload = {
+        "prepared": str(preview_payload.get("status") or "").strip().lower() == "ready",
+        "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+    }
+    if not response_payload["prepared"]:
+        return JsonResponse(response_payload, status=409)
+    return JsonResponse(
+        {
+            "prepared": True,
+            "session": response_payload["session"],
+        },
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_validate(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    preview = session.preview_json if isinstance(session.preview_json, dict) else {}
+    if str(preview.get("status") or "").strip().lower() != "ready":
+        return JsonResponse({"error": "preview must be prepared before validation"}, status=409)
+    _validate_solution_change_session(session=session)
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    return JsonResponse(
+        {
+            "validated": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
 @login_required
 def campaign_types_collection(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
@@ -31235,10 +33358,15 @@ def watch_matches_collection(request: HttpRequest) -> JsonResponse:
         workspace, _ = _watch_queryset(identity, workspace_id)
     except PermissionDenied:
         return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ]):
+        return JsonResponse({"error": "forbidden"}, status=403)
     qs = WatchMatchEvent.objects.filter(workspace=workspace).select_related("watch", "run").order_by("-created_at", "-id")
     watch_id = str(request.GET.get("watch_id") or "").strip()
     if watch_id:
         qs = qs.filter(watch_id=watch_id)
+    campaign_id = str(request.GET.get("campaign_id") or "").strip()
+    if campaign_id:
+        qs = qs.filter(watch__linked_campaign_id=campaign_id)
     event_key = str(request.GET.get("event_key") or "").strip()
     if event_key:
         qs = qs.filter(event_key=event_key)
@@ -31259,6 +33387,138 @@ def watch_matches_collection(request: HttpRequest) -> JsonResponse:
     limit = max(1, min(200, int(str(request.GET.get("limit") or "50"))))
     rows = [serialize_watch_match(item) for item in qs[:limit]]
     return JsonResponse({"workspace_id": str(workspace.id), "matches": rows})
+
+
+def _signal_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[SignalReadModel]]:
+    workspace = Workspace.objects.filter(id=workspace_id).first()
+    if workspace is None:
+        raise PermissionDenied
+    if not _workspace_membership(identity, str(workspace.id)):
+        raise PermissionDenied
+    qs = (
+        SignalReadModel.objects.filter(workspace=workspace)
+        .select_related("watch", "campaign", "parcel_identity", "watch_match_event", "domain_event")
+        .order_by("-occurred_at", "-last_observed_at", "-id")
+    )
+    return workspace, qs
+
+
+@csrf_exempt
+@login_required
+def signals_project_domain_events(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _signal_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity,
+        str(workspace.id),
+        [CAP_SIGNALS_REVIEW, CAP_WATCHES_MANAGE],
+        require_all=False,
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    try:
+        limit = int(payload.get("limit") or 500)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "limit must be an integer"}, status=400)
+    since_event_id = str(payload.get("since_event_id") or "").strip()
+    rows = SignalReadProjectionService().project_workspace_events(
+        workspace_id=str(workspace.id),
+        limit=limit,
+        since_event_id=since_event_id,
+    )
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "count": len(rows),
+            "signals": [serialize_signal_read(item) for item in rows],
+        },
+        status=200,
+    )
+
+
+@login_required
+def signals_collection(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, qs = _signal_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ, CAP_SIGNALS_REVIEW], require_all=False):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    status = str(request.GET.get("status") or "").strip().lower()
+    if status:
+        qs = qs.filter(status=status)
+    severity = str(request.GET.get("severity") or "").strip().lower()
+    if severity:
+        qs = qs.filter(severity=severity)
+    signal_type = str(request.GET.get("signal_type") or "").strip().lower()
+    if signal_type:
+        qs = qs.filter(signal_type=signal_type)
+    watch_id = str(request.GET.get("watch_id") or "").strip()
+    if watch_id:
+        qs = qs.filter(watch_id=watch_id)
+    campaign_id = str(request.GET.get("campaign_id") or "").strip()
+    if campaign_id:
+        qs = qs.filter(campaign_id=campaign_id)
+    parcel_id = str(request.GET.get("parcel_id") or "").strip()
+    if parcel_id:
+        qs = qs.filter(parcel_identity_id=parcel_id)
+    handle = str(request.GET.get("handle") or "").strip()
+    if handle:
+        normalized = "".join(ch for ch in handle.lower() if ch.isalnum())
+        qs = qs.filter(parcel_handle_normalized=normalized)
+    source_key = str(request.GET.get("source_key") or "").strip()
+    if source_key:
+        qs = qs.filter(source_key=source_key)
+    event_key = str(request.GET.get("event_key") or "").strip()
+    if event_key:
+        qs = qs.filter(event_key=event_key)
+    reconciled_state_version = str(request.GET.get("reconciled_state_version") or "").strip()
+    if reconciled_state_version:
+        qs = qs.filter(reconciled_state_version=reconciled_state_version)
+    limit = max(1, min(500, int(str(request.GET.get("limit") or "50"))))
+    rows = [serialize_signal_read(item) for item in qs[:limit]]
+    return JsonResponse({"workspace_id": str(workspace.id), "signals": rows}, status=200)
+
+
+@login_required
+def signal_detail(request: HttpRequest, signal_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    row = get_object_or_404(
+        SignalReadModel.objects.select_related("workspace", "watch", "campaign", "parcel_identity", "watch_match_event", "domain_event"),
+        id=signal_id,
+    )
+    if workspace_id != str(row.workspace_id):
+        return JsonResponse({"error": "signal not found in workspace context"}, status=404)
+    if not _workspace_membership(identity, str(row.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(row.workspace_id), [CAP_APP_READ, CAP_SIGNALS_REVIEW], require_all=False):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse(serialize_signal_read(row), status=200)
 
 
 def _provenance_workspace(identity: UserIdentity, workspace_id: str) -> Workspace:
@@ -31722,6 +33982,119 @@ def source_connector_health_update(request: HttpRequest, source_id: str) -> Json
     return JsonResponse(serialize_source_connector(source, readiness=readiness))
 
 
+@csrf_exempt
+@login_required
+def source_connector_refresh(request: HttpRequest, source_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    source = get_object_or_404(SourceConnector.objects.select_related("workspace"), id=source_id)
+    if not _workspace_membership(identity, str(source.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity,
+        str(source.workspace_id),
+        [CAP_SOURCES_MANAGE, CAP_REFRESHES_RUN],
+        require_all=False,
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    if str(payload.get("workspace_id") or "").strip() != str(source.workspace_id):
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    if not bool(source.is_active):
+        return JsonResponse({"error": "source must be active before refresh/import runs"}, status=409)
+
+    governance_decision = SourceGovernanceService().evaluate(source=source, action="run_source")
+    if governance_decision.decision != "allow":
+        SourceGovernanceService().emit_audit_event(
+            source=source,
+            decision=governance_decision,
+            actor_id=str(identity.id),
+            metadata={"route": "source_connector_refresh"},
+        )
+        return JsonResponse(
+            {
+                "error": governance_decision.message,
+                "governance_decision": governance_decision.as_dict(),
+            },
+            status=409 if governance_decision.decision == "defer" else 403,
+        )
+
+    source_url = str(payload.get("source_url") or "").strip()
+    if not source_url:
+        cfg = source.configuration_json if isinstance(source.configuration_json, dict) else {}
+        source_url = str(cfg.get("url") or "").strip()
+    if not source_url:
+        return JsonResponse({"error": "source configuration must include a url for refresh/import"}, status=400)
+
+    raw_jurisdiction = str(payload.get("jurisdiction") or "").strip()
+    if not raw_jurisdiction:
+        cfg = source.configuration_json if isinstance(source.configuration_json, dict) else {}
+        raw_jurisdiction = str(cfg.get("jurisdiction") or "").strip()
+    jurisdiction = ""
+    if raw_jurisdiction:
+        try:
+            jurisdiction = require_canonical_jurisdiction(raw_jurisdiction, context="jurisdiction")
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+
+    source_scope = str(payload.get("source") or "").strip() or str(source.key)
+    try:
+        timeout_seconds = int(payload.get("timeout_seconds") or 60)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "timeout_seconds must be an integer"}, status=400)
+    timeout_seconds = max(5, min(timeout_seconds, 600))
+    reprocess_unchanged = bool(payload.get("reprocess_unchanged"))
+
+    coordinator = IngestionCoordinator()
+    service = SourceConnectorService()
+    try:
+        result = coordinator.ingest_from_url(
+            source_connector=source,
+            source_url=source_url,
+            jurisdiction=jurisdiction,
+            source_scope=source_scope,
+            timeout_seconds=timeout_seconds,
+            reprocess_unchanged=reprocess_unchanged,
+        )
+        run = OrchestrationRun.objects.select_related("pipeline").filter(id=result.run_id).first()
+        if run is not None:
+            service.update_health(
+                SourceHealthUpdate(
+                    source_id=str(source.id),
+                    health_status="healthy",
+                    lifecycle_state="active",
+                    success=True,
+                    run_id=str(run.id),
+                )
+            )
+        source.refresh_from_db()
+        readiness = service.validate_readiness(source_id=str(source.id))
+        return JsonResponse(
+            {
+                "source": serialize_source_connector(source, readiness=readiness),
+                "run": _serialize_orchestration_run_summary(run) if run is not None else {"id": result.run_id},
+                "artifact_record_id": result.artifact_record_id,
+                "parsed_record_count": int(result.parsed_record_count),
+                "warnings": list(result.warnings),
+            },
+            status=200,
+        )
+    except Exception as exc:
+        service.update_health(
+            SourceHealthUpdate(
+                source_id=str(source.id),
+                health_status="failing",
+                lifecycle_state="failing",
+                success=False,
+                failure_reason=str(exc),
+            )
+        )
+        return JsonResponse({"error": "source refresh/import failed", "details": str(exc)}, status=502)
+
+
 def _record_matching_queryset(identity: UserIdentity, workspace_id: str) -> tuple[Workspace, models.QuerySet[RecordMatchEvaluation]]:
     workspace = Workspace.objects.filter(id=workspace_id).first()
     if workspace is None:
@@ -32153,6 +34526,70 @@ def parcel_crosswalks_resolve_source(request: HttpRequest) -> JsonResponse:
     )
 
 
+@csrf_exempt
+@login_required
+def parcel_crosswalks_reresolve_source(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    source_id = str(payload.get("source_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    if not source_id:
+        return JsonResponse({"error": "source_id is required"}, status=400)
+    try:
+        workspace, _ = _parcel_crosswalk_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(
+        identity, str(workspace.id), [CAP_SOURCES_MANAGE, CAP_CAMPAIGNS_MANAGE], require_all=False
+    ):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    source = SourceConnector.objects.filter(workspace_id=workspace.id, id=source_id).first()
+    if source is None:
+        return JsonResponse({"error": "source not found in workspace context"}, status=404)
+    try:
+        limit = int(payload.get("limit") or 500)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "limit must be an integer"}, status=400)
+    require_selected_geocode = bool(payload.get("require_selected_geocode", False))
+
+    before_qs = ParcelCrosswalkMapping.objects.filter(workspace_id=workspace.id, source_connector_id=source_id)
+    before_unresolved = before_qs.filter(status="unresolved").count()
+    before_resolved = before_qs.filter(status="resolved").count()
+    service = ParcelIdentityResolverService()
+    rows = service.reresolve_unresolved_for_source(
+        workspace_id=str(workspace.id),
+        source_id=source_id,
+        limit=limit,
+        require_selected_geocode=require_selected_geocode,
+    )
+    after_qs = ParcelCrosswalkMapping.objects.filter(workspace_id=workspace.id, source_connector_id=source_id)
+    after_unresolved = after_qs.filter(status="unresolved").count()
+    after_resolved = after_qs.filter(status="resolved").count()
+    method_counts = list(
+        after_qs.values("resolution_method", "status")
+        .annotate(count=Count("id"))
+        .order_by("resolution_method", "status")
+    )
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source_id": str(source.id),
+            "count": len(rows),
+            "before": {"resolved": int(before_resolved), "unresolved": int(before_unresolved)},
+            "after": {"resolved": int(after_resolved), "unresolved": int(after_unresolved)},
+            "method_counts": method_counts,
+            "crosswalks": [serialize_parcel_crosswalk(row) for row in rows],
+        },
+        status=200,
+    )
+
+
 @login_required
 def geocode_results_collection(request: HttpRequest) -> JsonResponse:
     identity = _require_authenticated(request)
@@ -32315,6 +34752,80 @@ def geocode_results_resolve_source(request: HttpRequest) -> JsonResponse:
             "source_id": source_id,
             "count": len(rows),
             "results": [serialize_geocode_result(row, include_candidates=True) for row in rows],
+        },
+        status=200,
+    )
+
+
+@login_required
+def monitoring_funnel_summary(request: HttpRequest) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    workspace_id = str(request.GET.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return JsonResponse({"error": "workspace_id is required"}, status=400)
+    try:
+        workspace, _ = _parcel_crosswalk_queryset(identity, workspace_id)
+    except PermissionDenied:
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _require_workspace_capabilities(identity, str(workspace.id), [CAP_APP_READ, CAP_MATCH_REVIEW], require_all=False):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    source_id = str(request.GET.get("source_id") or "").strip()
+    adapted_qs = IngestAdaptedRecord.objects.filter(workspace_id=workspace.id)
+    geocode_qs = GeocodeEnrichmentResult.objects.filter(workspace_id=workspace.id)
+    crosswalk_qs = ParcelCrosswalkMapping.objects.filter(workspace_id=workspace.id)
+    if source_id:
+        adapted_qs = adapted_qs.filter(source_connector_id=source_id)
+        geocode_qs = geocode_qs.filter(source_connector_id=source_id)
+        crosswalk_qs = crosswalk_qs.filter(source_connector_id=source_id)
+
+    unresolved_reason_counts = list(
+        crosswalk_qs.filter(status="unresolved")
+        .exclude(reason="")
+        .values("reason")
+        .annotate(count=Count("id"))
+        .order_by("-count", "reason")[:10]
+    )
+    crosswalk_method_counts = list(
+        crosswalk_qs.values("resolution_method", "status")
+        .annotate(count=Count("id"))
+        .order_by("resolution_method", "status")
+    )
+    watch_match_qs = WatchMatchEvent.objects.filter(workspace_id=workspace.id)
+    signal_event_qs = PlatformDomainEvent.objects.filter(workspace_id=workspace.id, event_type="signal.watch_match_detected")
+    signal_projection_qs = SignalReadModel.objects.filter(workspace_id=workspace.id)
+    if source_id:
+        signal_event_qs = signal_event_qs.filter(scope_source=source_id)
+        signal_projection_qs = signal_projection_qs.filter(source_key=source_id)
+
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source_id": source_id or None,
+            "counts": {
+                "adapted_rows": int(adapted_qs.count()),
+                "geocode_results": int(geocode_qs.count()),
+                "geocode_selected": int(geocode_qs.filter(status="selected").count()),
+                "crosswalk_rows": int(crosswalk_qs.count()),
+                "crosswalk_resolved": int(crosswalk_qs.filter(status="resolved").count()),
+                "crosswalk_unresolved": int(crosswalk_qs.filter(status="unresolved").count()),
+                "watch_matches": int(watch_match_qs.count()),
+                "watch_matches_matched": int(watch_match_qs.filter(matched=True).count()),
+                "signal_domain_events": int(signal_event_qs.count()),
+                "signal_projection_rows": int(signal_projection_qs.count()),
+            },
+            "crosswalk_method_counts": crosswalk_method_counts,
+            "unresolved_reasons": unresolved_reason_counts,
+            "signal_projection_by_status": list(
+                signal_projection_qs.values("status").annotate(count=Count("id")).order_by("status")
+            ),
+            "signal_projection_by_type": list(
+                signal_projection_qs.values("signal_type").annotate(count=Count("id")).order_by("signal_type")
+            ),
         },
         status=200,
     )
@@ -33461,10 +35972,12 @@ def composer_state(request: HttpRequest) -> JsonResponse:
     application_id = str(request.GET.get("application_id") or "").strip()
     goal_id = str(request.GET.get("goal_id") or "").strip()
     thread_id = str(request.GET.get("thread_id") or "").strip()
+    solution_change_session_id = str(request.GET.get("solution_change_session_id") or "").strip()
     application_plan: Optional[ApplicationPlan] = None
     application: Optional[Application] = None
     goal: Optional[Goal] = None
     thread: Optional[CoordinationThread] = None
+    solution_change_session: Optional[SolutionChangeSession] = None
     if application_plan_id:
         application_plan = (
             ApplicationPlan.objects.filter(id=application_plan_id, workspace=workspace)
@@ -33492,6 +36005,17 @@ def composer_state(request: HttpRequest) -> JsonResponse:
             .prefetch_related("work_items")
             .first()
         )
+    if solution_change_session_id:
+        solution_change_session = (
+            SolutionChangeSession.objects.filter(
+                id=solution_change_session_id,
+                workspace=workspace,
+            )
+            .select_related("application", "created_by")
+            .first()
+        )
+        if solution_change_session and application is None:
+            application = solution_change_session.application
     return JsonResponse(
         _serialize_composer_state(
             workspace=workspace,
@@ -33500,6 +36024,7 @@ def composer_state(request: HttpRequest) -> JsonResponse:
             application=application,
             goal=goal,
             thread=thread,
+            solution_change_session=solution_change_session,
         )
     )
 
@@ -35151,6 +37676,8 @@ def _resolved_manifest_surfaces(resolved: Dict[str, Any], workspace_id: Optional
         if not isinstance(view, dict):
             continue
         surface = str(view.get("surface") or "").strip().lower()
+        if surface == "admin":
+            surface = "nav"
         if surface not in surfaces:
             continue
         path = _resolve_manifest_surface_path(
@@ -35566,12 +38093,12 @@ def artifact_surfaces_nav(request: HttpRequest) -> JsonResponse:
 def artifact_surface_resolve(request: HttpRequest) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    if staff_error := _require_staff(request):
-        return staff_error
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
     path = _normalize_surface_path(request.GET.get("path") or "")
     if not path:
         return JsonResponse({"error": "path is required"}, status=400)
-    identity = _identity_from_user(request.user)
     matches: List[Dict[str, Any]] = []
     surfaces = ArtifactSurface.objects.select_related("artifact", "artifact__type").all()
     for surface in surfaces:

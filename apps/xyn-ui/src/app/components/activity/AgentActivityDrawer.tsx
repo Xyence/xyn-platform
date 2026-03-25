@@ -115,6 +115,7 @@ function activityResolutionSummary(item: AiActivityEntry): { actor: string; sour
 }
 
 export default function AgentActivityDrawer({ open, onClose, workspaceId, artifactId, threadId }: Props) {
+  const normalizedWorkspaceId = String(workspaceId || "").trim();
   const [items, setItems] = useState<AiActivityEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -127,7 +128,7 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
   }, [artifactId]);
 
   const load = async () => {
-    if (!workspaceId) {
+    if (!normalizedWorkspaceId) {
       setItems([]);
       return;
     }
@@ -136,11 +137,11 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
       setLoading(true);
       const [activityResult, appJobs] = await Promise.all([
         listAiActivity({
-          workspaceId,
+          workspaceId: normalizedWorkspaceId,
           threadId,
           artifactId: artifactOnly ? artifactId : undefined,
         }),
-        listAppJobs(workspaceId),
+        listAppJobs(normalizedWorkspaceId),
       ]);
       const merged = [...(activityResult.items || []), ...appJobs.map(mapAppJobToActivity)];
       merged.sort((left, right) => {
@@ -159,12 +160,12 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
   useEffect(() => {
     if (!open) return;
     void load();
-  }, [open, workspaceId, threadId, artifactId, artifactOnly]);
+  }, [open, normalizedWorkspaceId, threadId, artifactId, artifactOnly]);
 
   useEffect(() => {
-    if (!open || !workspaceId || artifactOnly) return;
+    if (!open || !normalizedWorkspaceId || artifactOnly) return;
     const subscription = subscribeRuntimeEventStream({
-      workspaceId,
+      workspaceId: normalizedWorkspaceId,
       threadId,
       onOpen: () => setDegradedMode(false),
       onError: () => setDegradedMode(true),
@@ -174,13 +175,13 @@ export default function AgentActivityDrawer({ open, onClose, workspaceId, artifa
       },
     });
     return () => subscription.close();
-  }, [open, workspaceId, threadId, artifactOnly]);
+  }, [open, normalizedWorkspaceId, threadId, artifactOnly]);
 
   useEffect(() => {
     if (!open || !degradedMode) return;
     const interval = window.setInterval(() => void load(), 30000);
     return () => window.clearInterval(interval);
-  }, [open, degradedMode, workspaceId, threadId, artifactId, artifactOnly]);
+  }, [open, degradedMode, normalizedWorkspaceId, threadId, artifactId, artifactOnly]);
 
   const badgeCount = useMemo(() => items.filter((item) => item.status === "running").length, [items]);
   const runningOps = useMemo(() => operations.filter((entry) => entry.status === "running"), [operations]);

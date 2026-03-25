@@ -639,6 +639,7 @@ def install_package(
     *,
     binding_overrides: Optional[Dict[str, Any]] = None,
     installed_by=None,
+    target_workspace: Optional[Workspace] = None,
 ) -> ArtifactInstallReceipt:
     manifest, files = _load_package(package)
     validation = validate_package_install(package, binding_overrides=binding_overrides)
@@ -663,7 +664,7 @@ def install_package(
 
     resolved_bindings = validation.get("resolved_bindings") or {}
     ordered = _topological_sort(manifest)
-    workspace = _workspace_for_artifacts()
+    workspace = target_workspace or _workspace_for_artifacts()
     artifact_changes: List[Dict[str, Any]] = []
     install_mode = "install"
 
@@ -783,7 +784,10 @@ def install_package(
                     )
                     artifact = existing
                 else:
-                    package_source_ref = f"{package.id}:{artifact_json_path}"
+                    # Keep source_ref_id stable, unique-per-artifact, and bounded
+                    # for DB constraints; the full artifact path remains in
+                    # content_ref for provenance/debugging.
+                    package_source_ref = f"{package.id}:{hashlib.sha1(artifact_json_path.encode('utf-8')).hexdigest()[:16]}"
                     artifact = Artifact.objects.create(
                         workspace=workspace,
                         type=type_row,

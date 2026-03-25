@@ -128,8 +128,8 @@ export function resolveDraftActions({
       title: "Open generated app environment",
       description:
         overallState === "build_blocked"
-          ? "Open the deployed runtime to compare the live environment against the failing smoke test result."
-          : "Open the deployed runtime environment that was provisioned for this generated application.",
+          ? "Open the deployed app in the Xyn shell/workbench (fallback to direct runtime URL if workspace routing is unavailable)."
+          : "Open the deployed app in the Xyn shell/workbench (fallback to direct runtime URL if workspace routing is unavailable).",
       badge: "Available",
       enabled: true,
       emphasis: "secondary",

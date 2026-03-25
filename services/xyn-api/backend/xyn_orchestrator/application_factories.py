@@ -501,6 +501,23 @@ def infer_application_name(objective: str, explicit_name: str = "") -> str:
     if str(explicit_name or "").strip():
         return _normalize_name(explicit_name)
     text = _normalize_name(objective)
+    if not text:
+        return "Application"
+
+    # Prefer explicit naming cues when the objective includes one.
+    # Example: "Build an app named 'Real Estate Deal Finder'..."
+    quoted_match = re.search(r"\b(?:named|called)\s+[\"'“”‘’]([^\"'“”‘’]{2,160})[\"'“”‘’]", text, flags=re.IGNORECASE)
+    if quoted_match:
+        return _title_case_label(quoted_match.group(1))
+
+    unquoted_match = re.search(
+        r"\b(?:named|called)\s+([a-z0-9][a-z0-9 &/_\-]{1,160}?)(?=(?:[.,:;]|$|\s+(?:for|to|that|with|where|which|who)\b))",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if unquoted_match:
+        return _title_case_label(unquoted_match.group(1))
+
     for prefix in (
         "build ",
         "create ",
@@ -514,8 +531,13 @@ def infer_application_name(objective: str, explicit_name: str = "") -> str:
         if text.lower().startswith(prefix):
             text = text[len(prefix):]
             break
+    text = re.split(r"[.?!]", text, maxsplit=1)[0].strip()
+    text = re.sub(r"\s+(purpose|requirements|core entities|views|behavior|validation)\b.*$", "", text, flags=re.IGNORECASE).strip()
     text = re.sub(r"^(an?\s+)", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+(application|system|project|portal|console)$", "", text, flags=re.IGNORECASE)
+    words = [word for word in text.split(" ") if word]
+    if len(words) > 12:
+        text = " ".join(words[:12])
     return _title_case_label(text)
 
 

@@ -219,15 +219,93 @@ function isWorkspaceSurface(surface: ArtifactSurface): boolean {
 function candidatePhrasesForSurfaceLabel(label: string): string[] {
   const normalized = normalizePrompt(label);
   if (!normalized) return [];
-  return [normalized, `open ${normalized}`, `show ${normalized}`, `go to ${normalized}`];
+  const values = new Set<string>();
+  const push = (entry: string) => {
+    const next = normalizePrompt(entry);
+    if (next) values.add(next);
+  };
+  push(normalized);
+  push(`open ${normalized}`);
+  push(`show ${normalized}`);
+  push(`go to ${normalized}`);
+  const withoutList = normalized.replace(/\s+list$/, "").trim();
+  if (withoutList && withoutList !== normalized) {
+    push(withoutList);
+    push(`open ${withoutList}`);
+    push(`show ${withoutList}`);
+    push(`go to ${withoutList}`);
+  }
+  const createMatch = normalized.match(/^create\s+(.+)$/);
+  if (createMatch?.[1]) {
+    const noun = normalizePrompt(createMatch[1]);
+    if (noun) {
+      push(`new ${noun}`);
+      push(`add ${noun}`);
+      push(`start ${noun}`);
+    }
+  }
+  return Array.from(values);
+}
+
+function singularizeSurfaceToken(value: string): string {
+  const token = normalizePrompt(value);
+  if (!token) return "";
+  if (token.endsWith("ies") && token.length > 3) return `${token.slice(0, -3)}y`;
+  if (token.endsWith("ses") && token.length > 3) return token.slice(0, -2);
+  if (token.endsWith("s") && token.length > 1 && !token.endsWith("ss")) return token.slice(0, -1);
+  return token;
+}
+
+function routeAliasesForSurface(surface: ArtifactSurface): string[] {
+  const route = normalizeRoutePath(String(surface.route || ""));
+  if (!route.startsWith("/app/")) return [];
+  const segments = route
+    .replace(/^\/+/, "")
+    .split("/")
+    .filter(Boolean);
+  const appIndex = segments.indexOf("app");
+  if (appIndex < 0) return [];
+  const local = segments.slice(appIndex + 1);
+  if (!local.length) return [];
+  const values = new Set<string>();
+  const push = (entry: string) => {
+    const next = normalizePrompt(entry);
+    if (next) values.add(next);
+  };
+  const [entity, action] = local;
+  const entityToken = normalizePrompt(entity || "");
+  if (!entityToken) return [];
+  push(entityToken);
+  push(`open ${entityToken}`);
+  push(`show ${entityToken}`);
+  push(`go to ${entityToken}`);
+  if (action === "new") {
+    const singular = singularizeSurfaceToken(entityToken);
+    const noun = singular || entityToken;
+    push(`create ${noun}`);
+    push(`new ${noun}`);
+    push(`add ${noun}`);
+    push(`start ${noun}`);
+  }
+  return Array.from(values);
+}
+
+function candidatePhrasesForSurface(surface: ArtifactSurface): string[] {
+  const values = new Set<string>();
+  for (const phrase of candidatePhrasesForSurfaceLabel(String(surface.nav_label || surface.title || ""))) {
+    values.add(phrase);
+  }
+  for (const phrase of routeAliasesForSurface(surface)) {
+    values.add(phrase);
+  }
+  return Array.from(values);
 }
 
 function matchSurfaceByPrompt(prompt: string, surfaces: ArtifactSurface[]): ArtifactSurface | null {
   const normalizedPrompt = normalizeSurfacePrompt(prompt);
   if (!normalizedPrompt) return null;
   const exactLabelMatch = surfaces.find((surface) => {
-    const label = String(surface.nav_label || surface.title || "").trim();
-    return candidatePhrasesForSurfaceLabel(label).includes(normalizedPrompt);
+    return candidatePhrasesForSurface(surface).includes(normalizedPrompt);
   });
   if (exactLabelMatch) return exactLabelMatch;
   return null;

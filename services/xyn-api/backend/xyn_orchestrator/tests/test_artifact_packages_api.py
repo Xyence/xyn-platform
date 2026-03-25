@@ -1,13 +1,18 @@
 import io
 import json
 import zipfile
+import uuid
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 
+from xyn_orchestrator import xyn_api
 from xyn_orchestrator.models import (
+    Application,
+    ApplicationArtifactMembership,
     Artifact,
+    ArtifactType,
     ArtifactBindingValue,
     ArtifactInstallReceipt,
     ArtifactPackage,
@@ -42,6 +47,16 @@ class ArtifactPackagesApiTests(TestCase):
         session = self.client.session
         session["user_identity_id"] = str(self.identity.id)
         session.save()
+        self.workspace = Workspace.objects.create(
+            slug=f"pkg-workspace-{uuid.uuid4().hex[:8]}",
+            name="Package Workspace",
+        )
+        WorkspaceMembership.objects.create(
+            workspace=self.workspace,
+            user_identity=self.identity,
+            role="admin",
+            termination_authority=True,
+        )
 
     def _package_blob(self, *, artifacts, package_name="ems-hello", package_version="0.1.0", mutate_checksums=False):
         files = {}
@@ -109,6 +124,13 @@ class ArtifactPackagesApiTests(TestCase):
         upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
         return self.client.post("/xyn/api/artifacts/packages/import", data={"file": upload})
 
+    def _import_generated_artifacts(self, blob: bytes):
+        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
+        return self.client.post(
+            f"/xyn/api/artifacts/import?workspace_id={self.workspace.id}",
+            data={"file": upload},
+        )
+
     def _grant_debug_view(self):
         RoleBinding.objects.get_or_create(
             user_identity=self.identity,
@@ -160,15 +182,15 @@ class ArtifactPackagesApiTests(TestCase):
             package_name="app.net-inventory",
             package_version="0.0.1-dev",
         )
-        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
-        first = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        first = self._import_generated_artifacts(blob)
         self.assertEqual(first.status_code, 200, first.content.decode())
         self.assertTrue(
             Artifact.objects.filter(slug="app.net-inventory", package_version="0.0.1-dev").exists()
         )
+        artifact = Artifact.objects.get(slug="app.net-inventory", package_version="0.0.1-dev")
+        self.assertEqual(str(artifact.workspace_id), str(self.workspace.id))
 
-        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
-        second = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        second = self._import_generated_artifacts(blob)
         self.assertEqual(second.status_code, 200, second.content.decode())
         payload = second.json()
         self.assertFalse(payload["created"])
@@ -176,6 +198,14 @@ class ArtifactPackagesApiTests(TestCase):
             Artifact.objects.filter(slug="app.net-inventory", package_version="0.0.1-dev").count(),
             1,
         )
+        application_rows = Application.objects.filter(
+            workspace=self.workspace,
+            metadata_json__generated_artifact_key="net-inventory",
+        )
+        self.assertEqual(application_rows.count(), 1)
+        app = application_rows.first()
+        self.assertIsNotNone(app)
+        self.assertEqual(ApplicationArtifactMembership.objects.filter(application=app).count(), 1)
 
     def test_generated_artifact_import_preserves_manifest_summary_in_workspace_registry(self):
         blob = self._package_blob(
@@ -216,8 +246,7 @@ class ArtifactPackagesApiTests(TestCase):
             package_name="app.net-inventory",
             package_version="0.0.1-dev",
         )
-        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
-        imported = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        imported = self._import_generated_artifacts(blob)
         self.assertEqual(imported.status_code, 200, imported.content.decode())
 
         artifact = Artifact.objects.get(slug="app.net-inventory", package_version="0.0.1-dev")
@@ -278,15 +307,214 @@ class ArtifactPackagesApiTests(TestCase):
             package_name="app.team-lunch-poll",
             package_version="0.0.1-dev",
         )
-        upload = SimpleUploadedFile("bundle.zip", blob, content_type="application/zip")
-        imported = self.client.post("/xyn/api/artifacts/import", data={"file": upload})
+        imported = self._import_generated_artifacts(blob)
 
         self.assertEqual(imported.status_code, 200, imported.content.decode())
         self.assertTrue(Artifact.objects.filter(slug="app.team-lunch-poll").exists())
         self.assertTrue(Artifact.objects.filter(slug="policy.team-lunch-poll").exists())
         app_artifact = Artifact.objects.get(slug="app.team-lunch-poll")
+        policy_artifact = Artifact.objects.get(slug="policy.team-lunch-poll")
+        self.assertEqual(str(app_artifact.workspace_id), str(self.workspace.id))
+        self.assertEqual(str(policy_artifact.workspace_id), str(self.workspace.id))
         self.assertEqual(str(app_artifact.type).lower(), "application")
         self.assertEqual(str(app_artifact.slug), "app.team-lunch-poll")
+        application = Application.objects.get(
+            workspace=self.workspace,
+            metadata_json__generated_artifact_key="team-lunch-poll",
+        )
+        self.assertEqual(application.name, "Team Lunch Poll")
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=application).select_related("artifact").order_by("sort_order", "created_at")
+        )
+        self.assertEqual(len(memberships), 2)
+        self.assertEqual({member.artifact.slug for member in memberships}, {"app.team-lunch-poll", "policy.team-lunch-poll"})
+        app_membership = next(member for member in memberships if member.artifact.slug == "app.team-lunch-poll")
+        policy_membership = next(member for member in memberships if member.artifact.slug == "policy.team-lunch-poll")
+        self.assertEqual(app_membership.role, "primary_ui")
+        self.assertEqual(policy_membership.role, "supporting")
+        self.assertEqual(str(policy_artifact.workspace_id), str(application.workspace_id))
+
+    def test_generated_artifact_import_handles_long_application_slug_without_source_ref_overflow(self):
+        app_slug = "app.real-estate-deal-finder-fidelity-validation-4"
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "application",
+                    "slug": app_slug,
+                    "version": "0.0.1-dev",
+                    "title": "Real Estate Deal Finder",
+                    "content": {
+                        "artifact": {
+                            "id": app_slug,
+                            "type": "application",
+                            "slug": app_slug,
+                            "version": "0.0.1-dev",
+                        }
+                    },
+                },
+                {
+                    "type": "policy_bundle",
+                    "slug": "policy.real-estate-deal-finder-fidelity-validation-4",
+                    "version": "0.0.1-dev",
+                    "title": "Real Estate Deal Finder Policy Bundle",
+                    "content": {
+                        "schema_version": "xyn.policy_bundle.v0",
+                        "bundle_id": "policy.real-estate-deal-finder-fidelity-validation-4",
+                        "app_slug": "real-estate-deal-finder-fidelity-validation-4",
+                        "workspace_id": "workspace-1",
+                        "title": "Real Estate Deal Finder Policy Bundle",
+                        "scope": {"artifact_slug": app_slug, "applies_to": ["generated_runtime"]},
+                        "ownership": {"owner_kind": "generated_application", "editable": True, "source": "generated_from_prompt"},
+                        "policy_families": ["validation_policies"],
+                        "policies": {
+                            "validation_policies": [],
+                            "relation_constraints": [],
+                            "transition_policies": [],
+                            "derived_policies": [],
+                            "trigger_policies": [],
+                        },
+                        "configurable_parameters": [],
+                        "explanation": {"summary": "Generated policy scaffold.", "coverage": {"documented_policy_count": 0}, "future_capabilities": ["render_policy_bundle"]},
+                    },
+                },
+            ],
+            package_name=app_slug,
+            package_version="0.0.1-dev",
+        )
+        imported = self._import_generated_artifacts(blob)
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+        payload = imported.json()
+        package_id = payload["package"]["id"]
+        imported_rows = payload.get("artifacts") or []
+        app_row = next(
+            (row for row in imported_rows if str(row.get("slug") or "").strip() == app_slug),
+            None,
+        )
+        self.assertIsNotNone(app_row, imported.content.decode())
+        artifact_qs = Artifact.objects.filter(
+            workspace=self.workspace,
+            slug=app_slug,
+            package_version="0.0.1-dev",
+        )
+        self.assertEqual(artifact_qs.count(), 1, imported.content.decode())
+        artifact = artifact_qs.first()
+        self.assertIsNotNone(artifact)
+        self.assertEqual(str(artifact.id), str(app_row["id"]))
+        self.assertEqual(str(artifact.workspace_id), str(self.workspace.id))
+        self.assertTrue(str(artifact.source_ref_id or "").startswith(f"{package_id}:"))
+        self.assertLessEqual(len(artifact.source_ref_id or ""), 120)
+
+    def test_legacy_generated_solution_backfill_links_deterministic_groups_and_is_idempotent(self):
+        workspace = Workspace.objects.create(slug=f"legacy-{uuid.uuid4().hex[:8]}", name="Legacy Solution Workspace")
+        app_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        policy_type, _ = ArtifactType.objects.get_or_create(slug="policy_bundle", defaults={"name": "Policy Bundle"})
+
+        app_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=app_type,
+            title="Real Estate Deal Finder",
+            slug="app.real-estate-deal-finder",
+            summary="Generated app artifact",
+            status="active",
+            artifact_state="canonical",
+        )
+        policy_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=policy_type,
+            title="Real Estate Deal Finder Policy Bundle",
+            slug="policy.real-estate-deal-finder",
+            summary="Generated policy bundle",
+            status="active",
+            artifact_state="canonical",
+        )
+
+        first = xyn_api._backfill_legacy_generated_solution_memberships()
+        self.assertEqual(first["groups_backfilled"], 1)
+        self.assertEqual(first["applications_created"], 1)
+        self.assertEqual(first["memberships_created"], 2)
+
+        application = Application.objects.get(
+            workspace=workspace,
+            metadata_json__generated_artifact_key="real-estate-deal-finder",
+        )
+        self.assertEqual(application.source_factory_key, "legacy_solution_backfill")
+        self.assertEqual(application.metadata_json.get("origin"), "legacy_deterministic_backfill")
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=application).select_related("artifact").order_by("sort_order", "created_at")
+        )
+        self.assertEqual([member.artifact_id for member in memberships], [app_artifact.id, policy_artifact.id])
+        self.assertEqual([member.role for member in memberships], ["primary_ui", "supporting"])
+
+        second = xyn_api._backfill_legacy_generated_solution_memberships()
+        self.assertEqual(second["groups_backfilled"], 0)
+        self.assertEqual(Application.objects.filter(workspace=workspace, metadata_json__generated_artifact_key="real-estate-deal-finder").count(), 1)
+        self.assertEqual(ApplicationArtifactMembership.objects.filter(application=application).count(), 2)
+
+    def test_legacy_generated_solution_backfill_skips_conflicts_and_non_solution_scopes(self):
+        workspace = Workspace.objects.create(slug=f"legacy-skip-{uuid.uuid4().hex[:8]}", name="Legacy Skip Workspace")
+        app_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+
+        ignored_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=app_type,
+            title="Platform Scoped App Artifact",
+            slug="app.platform-seeded",
+            scope_json={"scope_classification": "platform"},
+            status="active",
+            artifact_state="canonical",
+        )
+
+        conflict_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=app_type,
+            title="Team Lunch Poll",
+            slug="app.team-lunch-poll",
+            status="active",
+            artifact_state="canonical",
+        )
+        conflicting_application = Application.objects.create(
+            workspace=workspace,
+            name="Existing Team Lunch Poll",
+            summary="existing",
+            source_factory_key="manual",
+            source_conversation_id="",
+            status="active",
+            request_objective="",
+            metadata_json={"generated_artifact_key": "team-lunch-poll", "origin": "manual"},
+        )
+        prelinked = Artifact.objects.create(
+            workspace=workspace,
+            type=app_type,
+            title="Prelinked",
+            slug=f"app.prelinked-{uuid.uuid4().hex[:8]}",
+            status="active",
+            artifact_state="canonical",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=workspace,
+            application=conflicting_application,
+            artifact=prelinked,
+            role="supporting",
+            responsibility_summary="existing membership makes this key ambiguous",
+        )
+
+        summary = xyn_api._backfill_legacy_generated_solution_memberships(workspace_id=str(workspace.id))
+        self.assertEqual(summary["groups_backfilled"], 0)
+        skipped = summary.get("skipped") or []
+        reasons = {str(item.get("reason") or "") for item in skipped}
+        self.assertIn("conflicting_existing_application_association", reasons)
+        self.assertFalse(
+            Application.objects.filter(
+                workspace=workspace,
+                metadata_json__generated_artifact_key="platform-seeded",
+            ).exists()
+        )
+        self.assertFalse(
+            ApplicationArtifactMembership.objects.filter(artifact=ignored_artifact).exists()
+        )
+        self.assertFalse(
+            ApplicationArtifactMembership.objects.filter(artifact=conflict_artifact).exists()
+        )
 
     def test_policy_bundle_artifact_type_is_importable_and_registered(self):
         blob = self._package_blob(
@@ -546,6 +774,73 @@ class ArtifactPackagesApiTests(TestCase):
         runtime_role = ArtifactRuntimeRole.objects.get(artifact=artifact, role_kind="route_provider")
         self.assertEqual(surface.route, "/app/a/ems/dashboard")
         self.assertTrue(runtime_role.enabled)
+
+    def test_install_registers_generated_dashboard_and_editor_surfaces(self):
+        self._grant_debug_view()
+        workspace = Workspace.objects.create(slug="deal-finder-shell", name="Deal Finder Shell")
+        WorkspaceMembership.objects.create(workspace=workspace, user_identity=self.identity, role="admin", termination_authority=True)
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "application",
+                    "slug": "app.generated-deal-finder",
+                    "version": "0.0.1-dev",
+                    "content": {"artifact": {"id": "app.generated-deal-finder"}, "surfaces": {"manage": [], "docs": [], "nav": []}},
+                    "surfaces": [
+                        {
+                            "key": "campaigns-list",
+                            "title": "Campaigns",
+                            "surface_kind": "dashboard",
+                            "route": "/app/campaigns",
+                            "nav_visibility": "always",
+                            "nav_label": "Campaigns",
+                            "nav_group": "apps",
+                            "renderer": {"type": "generic_dashboard"},
+                            "sort_order": 100,
+                        },
+                        {
+                            "key": "campaigns-create",
+                            "title": "Create Campaign",
+                            "surface_kind": "editor",
+                            "route": "/app/campaigns/new",
+                            "nav_visibility": "always",
+                            "nav_label": "Create Campaign",
+                            "nav_group": "apps",
+                            "renderer": {"type": "generic_editor", "payload": {"shell_renderer_key": "campaign_map_workflow", "mode": "create"}},
+                            "sort_order": 101,
+                        },
+                    ],
+                }
+            ]
+        )
+        imported = self._import_package(blob)
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+        package_id = imported.json()["package"]["id"]
+        install = self.client.post(f"/xyn/api/artifacts/packages/{package_id}/install", data=json.dumps({}), content_type="application/json")
+        self.assertEqual(install.status_code, 200, install.content.decode())
+
+        artifact = Artifact.objects.get(type__slug="application", slug="app.generated-deal-finder")
+        WorkspaceArtifactBinding.objects.create(
+            workspace=workspace,
+            artifact=artifact,
+            installed_state="installed",
+            enabled=True,
+        )
+        rows = list(ArtifactSurface.objects.filter(artifact=artifact).order_by("sort_order"))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0].surface_kind, "dashboard")
+        self.assertEqual(rows[0].route, "/app/campaigns")
+        self.assertEqual((rows[0].renderer or {}).get("type"), "generic_dashboard")
+        self.assertEqual(rows[1].surface_kind, "editor")
+        self.assertEqual((rows[1].renderer or {}).get("type"), "generic_editor")
+        self.assertEqual(((rows[1].renderer or {}).get("payload") or {}).get("shell_renderer_key"), "campaign_map_workflow")
+
+        nav = self.client.get(f"/xyn/api/artifact-surfaces/nav?workspace_id={workspace.id}")
+        self.assertEqual(nav.status_code, 200, nav.content.decode())
+        nav_rows = nav.json().get("surfaces") or []
+        nav_labels = [str(item.get("nav_label") or "") for item in nav_rows if isinstance(item, dict)]
+        self.assertIn("Campaigns", nav_labels)
+        self.assertIn("Create Campaign", nav_labels)
 
     def test_surface_resolve_endpoint_matches_declared_route(self):
         self._grant_debug_view()

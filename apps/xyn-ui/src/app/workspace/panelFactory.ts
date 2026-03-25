@@ -28,6 +28,8 @@ function panelToConsoleSpec(panel: Panel, params?: Record<string, unknown>, titl
   if (panel.panel_type === "campaign_detail") nextParams.campaign_id = panel.object_id;
   if (panel.panel_type === "application_plan_detail") nextParams.application_plan_id = panel.object_id;
   if (panel.panel_type === "application_detail") nextParams.application_id = panel.object_id;
+  if (panel.panel_type === "solution_list") nextParams.workspace_id = panel.workspace_id;
+  if (panel.panel_type === "solution_detail") nextParams.application_id = panel.object_id;
   if (panel.panel_type === "goal_list") nextParams.workspace_id = panel.workspace_id;
   if (panel.panel_type === "campaign_list") nextParams.workspace_id = panel.workspace_id;
   if (panel.panel_type === "thread_detail") nextParams.thread_id = panel.object_id;
@@ -69,6 +71,8 @@ export function createWorkspacePanel(input: CreatePanelInput): Panel {
   else if (input.panel_type === "campaign_detail") object_type = "campaign";
   else if (input.panel_type === "application_plan_detail") object_type = "application_plan";
   else if (input.panel_type === "application_detail") object_type = "application";
+  else if (input.panel_type === "solution_list") object_type = "workspace";
+  else if (input.panel_type === "solution_detail") object_type = "application";
   else if (input.panel_type === "thread_list") object_type = "workspace";
   else if (input.panel_type === "thread_detail") object_type = "thread";
   else if (input.panel_type === "run_detail") object_type = "run";

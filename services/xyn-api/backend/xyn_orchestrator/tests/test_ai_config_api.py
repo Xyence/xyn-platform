@@ -224,6 +224,66 @@ class AiConfigApiTests(TestCase):
             AgentDefinitionPurpose.objects.filter(purpose__slug="planning", is_default_for_purpose=True).exists()
         )
 
+    def test_ai_routing_patch_can_switch_coding_default_without_server_error(self):
+        self._set_identity(self.admin_identity)
+        provider = self._ensure_provider()
+        model_config = ModelConfig.objects.create(provider=provider, model_name="gpt-4o-mini", enabled=True)
+
+        first_agent_response = self.client.post(
+            "/xyn/api/ai/agents",
+            data=json.dumps(
+                {
+                    "slug": "coding-explicit-first",
+                    "name": "Coding Explicit First",
+                    "model_config_id": str(model_config.id),
+                    "purposes": ["coding"],
+                    "enabled": True,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(first_agent_response.status_code, 200)
+        first_agent_id = first_agent_response.json()["agent"]["id"]
+
+        second_agent_response = self.client.post(
+            "/xyn/api/ai/agents",
+            data=json.dumps(
+                {
+                    "slug": "coding-explicit-second",
+                    "name": "Coding Explicit Second",
+                    "model_config_id": str(model_config.id),
+                    "purposes": ["coding"],
+                    "enabled": True,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(second_agent_response.status_code, 200)
+        second_agent_id = second_agent_response.json()["agent"]["id"]
+
+        # Establish an existing explicit coding default first.
+        seed_response = self.client.patch(
+            "/xyn/api/ai/routing",
+            data=json.dumps({"coding_agent_id": first_agent_id}),
+            content_type="application/json",
+        )
+        self.assertEqual(seed_response.status_code, 200)
+
+        # Switching to a different coding agent should succeed (no 500).
+        switch_response = self.client.patch(
+            "/xyn/api/ai/routing",
+            data=json.dumps({"coding_agent_id": second_agent_id}),
+            content_type="application/json",
+        )
+        self.assertEqual(switch_response.status_code, 200)
+        coding_route = next(item for item in switch_response.json().get("routing") or [] if item.get("purpose") == "coding")
+        self.assertEqual(coding_route.get("explicit_agent_id"), second_agent_id)
+        self.assertEqual(coding_route.get("resolution_type"), "explicit")
+
+        defaults = AgentDefinitionPurpose.objects.filter(purpose__slug="coding", is_default_for_purpose=True)
+        self.assertEqual(defaults.count(), 1)
+        self.assertEqual(str(defaults.first().agent_definition_id), second_agent_id)
+
     def test_non_admin_cannot_patch_ai_routing(self):
         self._set_identity(self.user_identity)
         response = self.client.patch(

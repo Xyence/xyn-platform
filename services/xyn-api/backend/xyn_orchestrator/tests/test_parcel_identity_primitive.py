@@ -221,6 +221,115 @@ class ParcelIdentityPrimitiveTests(TestCase):
             ).exists()
         )
 
+    def test_geocode_point_containment_calibrated_resolves_to_handle(self):
+        parcel_source = models.SourceConnector.objects.create(
+            workspace=self.workspace,
+            key=f"parcel-geometry-{uuid.uuid4().hex[:8]}",
+            name="Parcel Geometry Source",
+            source_type="parcel_geometry",
+            source_mode="remote_url",
+        )
+        parcel_artifact = models.IngestArtifactRecord.objects.create(
+            workspace=self.workspace,
+            source_connector=parcel_source,
+            orchestration_run=self.run,
+            artifact_id=uuid.uuid4(),
+            original_filename="prcl_shape.zip",
+            sha256="b" * 64,
+        )
+        models.IngestAdaptedRecord.objects.create(
+            workspace=self.workspace,
+            source_connector=parcel_source,
+            orchestration_run=self.run,
+            artifact=parcel_artifact,
+            adapter_kind="shapefile",
+            source_format="shp",
+            adapted_payload_json={"attributes": {"HANDLE": "H-900"}},
+            geometry_payload_json={
+                "type": "Polygon",
+                "coordinates": [[[560, 1000], [570, 1000], [570, 1010], [560, 1010], [560, 1000]]],
+            },
+            status="ok",
+        )
+        models.IngestAdaptedRecord.objects.create(
+            workspace=self.workspace,
+            source_connector=parcel_source,
+            orchestration_run=self.run,
+            artifact=parcel_artifact,
+            adapter_kind="shapefile",
+            source_format="shp",
+            adapted_payload_json={"attributes": {"HANDLE": "H-901"}},
+            geometry_payload_json={
+                "type": "Polygon",
+                "coordinates": [[[590, 1000], [600, 1000], [600, 1010], [590, 1010], [590, 1000]]],
+            },
+            status="ok",
+        )
+
+        adapted = self._adapted_row({"record": {"PROBADDRESS": "2205 S JEFFERSON AVE"}})
+
+        # Anchor selected geocode points establish the geocoder extent for calibration.
+        for idx, point in enumerate(((800, 1000), (850, 1010)), start=1):
+            anchor = models.GeocodeEnrichmentResult.objects.create(
+                workspace=self.workspace,
+                source_connector=self.source,
+                orchestration_run=self.run,
+                adapted_record=adapted,
+                provider_kind="arcgis_rest_geocoder",
+                provider_name="arcgis_rest_geocoder",
+                provider_version="1",
+                provider_endpoint_url="https://example.local/geocode",
+                input_address_raw=f"anchor-{idx}",
+                input_address_normalized=f"anchor-{idx}",
+                idempotency_key=f"geo-anchor-{idx}-{uuid.uuid4().hex}",
+                request_fingerprint=uuid.uuid4().hex,
+                status="selected",
+            )
+            models.GeocodeEnrichmentCandidate.objects.create(
+                result_set=anchor,
+                candidate_rank=1,
+                provider_score=90.0,
+                matched_address=f"anchor-{idx}",
+                geometry_json={"x": point[0], "y": point[1]},
+                spatial_reference_json={"wkid": 102696},
+                is_selected=True,
+            )
+
+        geocode = models.GeocodeEnrichmentResult.objects.create(
+            workspace=self.workspace,
+            source_connector=self.source,
+            orchestration_run=self.run,
+            adapted_record=adapted,
+            provider_kind="arcgis_rest_geocoder",
+            provider_name="arcgis_rest_geocoder",
+            provider_version="1",
+            provider_endpoint_url="https://example.local/geocode",
+            input_address_raw="2205 S JEFFERSON AVE",
+            input_address_normalized="2205 s jefferson ave",
+            idempotency_key=f"geo-calibrated-{uuid.uuid4().hex}",
+            request_fingerprint=uuid.uuid4().hex,
+            status="selected",
+        )
+        candidate = models.GeocodeEnrichmentCandidate.objects.create(
+            result_set=geocode,
+            candidate_rank=1,
+            provider_score=97.0,
+            matched_address="2205 S JEFFERSON AVE",
+            geometry_json={"x": 810, "y": 1005},
+            spatial_reference_json={"wkid": 102696},
+            is_selected=True,
+        )
+        geocode.selected_candidate = candidate
+        geocode.selection_reason = "highest_score_then_rank"
+        geocode.save(update_fields=["selected_candidate", "selection_reason", "updated_at"])
+
+        mapping = self.service.resolve_adapted_record(adapted_record_id=str(adapted.id))
+        self.assertEqual(mapping.status, "resolved")
+        self.assertEqual(mapping.resolution_method, "geocode_point_containment_calibrated")
+        self.assertEqual(mapping.namespace, "handle")
+        self.assertEqual(mapping.identifier_value_normalized, "h900")
+        self.assertTrue(mapping.explanation_json.get("geocoding_evidence", {}).get("calibrated_point"))
+
     def test_api_lookup_and_crosswalk_resolution(self):
         adapted = self._adapted_row({"attributes": {"HANDLE": "H-500"}})
         payload = {"workspace_id": str(self.workspace.id), "adapted_record_id": str(adapted.id)}

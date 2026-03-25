@@ -1,11 +1,12 @@
 import importlib
+import uuid
 
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
 from xyn_orchestrator.artifact_links import ensure_blueprint_artifact, ensure_draft_session_artifact
-from xyn_orchestrator.models import Artifact, Blueprint, BlueprintDraftSession, UserIdentity
+from xyn_orchestrator.models import Artifact, ArtifactType, Blueprint, BlueprintDraftSession, UserIdentity
 
 
 class UnifiedArtifactsApiTests(TestCase):
@@ -118,3 +119,65 @@ class UnifiedArtifactsApiTests(TestCase):
         artifact = Artifact.objects.get(id=payload["artifact_id"])
         self.assertEqual(artifact.artifact_state, "provisional")
         self.assertEqual(artifact.family_id, str(blueprint.blueprint_family_id))
+
+    def test_artifacts_list_supports_scope_classification_and_filter(self):
+        blueprint = Blueprint.objects.create(
+            name="shared-logic",
+            namespace="catalog",
+            description="Shared runtime behavior",
+            created_by=self.staff,
+            updated_by=self.staff,
+        )
+        shared_artifact = ensure_blueprint_artifact(blueprint, owner_user=self.staff)
+        workspace = shared_artifact.workspace
+
+        app_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        explicit_scope_type, _ = ArtifactType.objects.get_or_create(slug="workflow", defaults={"name": "Workflow"})
+
+        solution_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=app_type,
+            title="Deal Finder",
+            summary="Generated app artifact",
+            slug="app.deal-finder",
+            artifact_state="canonical",
+            status="active",
+        )
+        platform_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=module_type,
+            title="Auth Runtime",
+            summary="Platform auth surface",
+            slug=f"core.scope-test-{uuid.uuid4().hex[:8]}",
+            artifact_state="canonical",
+            status="active",
+        )
+        explicit_platform_artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=explicit_scope_type,
+            title="Explicit Platform Scope",
+            summary="Explicit scope test",
+            slug="workflow.scope-test",
+            scope_json={"scope_classification": "platform"},
+            artifact_state="canonical",
+            status="active",
+        )
+
+        listing = self.client.get("/xyn/api/artifacts")
+        self.assertEqual(listing.status_code, 200, listing.content.decode())
+        rows = {row["id"]: row for row in listing.json().get("artifacts") or []}
+        self.assertEqual(rows[str(shared_artifact.id)]["scope_classification"], "shared")
+        self.assertEqual(rows[str(solution_artifact.id)]["scope_classification"], "solution")
+        self.assertEqual(rows[str(platform_artifact.id)]["scope_classification"], "platform")
+        self.assertEqual(rows[str(explicit_platform_artifact.id)]["scope_classification"], "platform")
+
+        solution_listing = self.client.get("/xyn/api/artifacts", {"scope": "solution"})
+        self.assertEqual(solution_listing.status_code, 200, solution_listing.content.decode())
+        solution_ids = {row["id"] for row in solution_listing.json().get("artifacts") or []}
+        self.assertIn(str(solution_artifact.id), solution_ids)
+        self.assertNotIn(str(shared_artifact.id), solution_ids)
+        self.assertNotIn(str(platform_artifact.id), solution_ids)
+
+        invalid = self.client.get("/xyn/api/artifacts", {"scope": "invalid"})
+        self.assertEqual(invalid.status_code, 400, invalid.content.decode())
