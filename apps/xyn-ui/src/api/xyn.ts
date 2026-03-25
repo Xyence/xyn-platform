@@ -4691,6 +4691,61 @@ export async function validateSolutionChangeSession(
   return handle<{ validated: boolean; session: SolutionChangeSession }>(response);
 }
 
+export async function replyToSolutionPlanningSession(
+  applicationId: string,
+  sessionId: string,
+  payload: {
+    reply_text: string;
+    source_turn_id?: string;
+  }
+): Promise<{ recorded: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/reply`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<{ recorded: boolean; session: SolutionChangeSession }>(response);
+}
+
+export async function selectSolutionPlanningOption(
+  applicationId: string,
+  sessionId: string,
+  payload: {
+    option_id: string;
+    source_turn_id?: string;
+  }
+): Promise<{ recorded: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/select-option`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<{ recorded: boolean; session: SolutionChangeSession }>(response);
+}
+
+export async function decideSolutionPlanningCheckpoint(
+  applicationId: string,
+  sessionId: string,
+  checkpointId: string,
+  payload: {
+    decision: "approved" | "rejected";
+    notes?: string;
+  }
+): Promise<{ recorded: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/checkpoints/${checkpointId}/decision`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<{ recorded: boolean; session: SolutionChangeSession }>(response);
+}
+
 export async function listCampaignTypes(workspaceId: string): Promise<{ campaign_types: CampaignTypeDefinition[] }> {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/campaign-types`);

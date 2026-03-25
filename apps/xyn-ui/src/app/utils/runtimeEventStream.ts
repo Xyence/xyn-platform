@@ -27,10 +27,17 @@ type RuntimeSubscription = {
   close: () => void;
 };
 
+function normalizeWorkspaceId(value: string): string {
+  return String(value || "").trim();
+}
+
 function runtimeStreamUrl(workspaceId: string, threadId?: string, lastEventId?: string, since?: string): string {
   const apiBaseUrl = resolveApiBaseUrl();
   const url = new URL(`${apiBaseUrl}/xyn/api/ai/activity/stream`);
-  url.searchParams.set("workspace_id", workspaceId);
+  const normalizedWorkspaceId = normalizeWorkspaceId(workspaceId);
+  if (normalizedWorkspaceId) {
+    url.searchParams.set("workspace_id", normalizedWorkspaceId);
+  }
   if (threadId) url.searchParams.set("thread_id", threadId);
   if (lastEventId) url.searchParams.set("last_event_id", lastEventId);
   if (since) url.searchParams.set("since", since);
@@ -64,6 +71,11 @@ function emitCapabilityRefreshForRuntimeEvent(event: RuntimeStreamEvent) {
 }
 
 export function subscribeRuntimeEventStream(options: RuntimeStreamOptions): RuntimeSubscription {
+  const normalizedWorkspaceId = normalizeWorkspaceId(options.workspaceId);
+  if (!normalizedWorkspaceId) {
+    options.onError?.();
+    return { close: () => undefined };
+  }
   let closed = false;
   let eventSource: EventSource | null = null;
   let reconnectTimer: number | null = null;
@@ -71,7 +83,7 @@ export function subscribeRuntimeEventStream(options: RuntimeStreamOptions): Runt
 
   const connect = () => {
     if (closed) return;
-    eventSource = new EventSource(runtimeStreamUrl(options.workspaceId, options.threadId, latestEventId, options.since), { withCredentials: true });
+    eventSource = new EventSource(runtimeStreamUrl(normalizedWorkspaceId, options.threadId, latestEventId, options.since), { withCredentials: true });
     eventSource.onopen = () => {
       options.onOpen?.();
     };

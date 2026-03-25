@@ -4862,6 +4862,115 @@ class SolutionChangeSession(models.Model):
         return f"{self.application_id}:{self.title}"
 
 
+class SolutionPlanningTurn(models.Model):
+    ACTOR_CHOICES = [
+        ("user", "User"),
+        ("planner", "Planner"),
+    ]
+    KIND_CHOICES = [
+        ("request", "Request"),
+        ("question", "Question"),
+        ("option_set", "Option Set"),
+        ("draft_plan", "Draft Plan"),
+        ("checkpoint", "Checkpoint"),
+        ("response", "Response"),
+        ("approval", "Approval"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_planning_turns")
+    session = models.ForeignKey("SolutionChangeSession", on_delete=models.CASCADE, related_name="planning_turns")
+    actor = models.CharField(max_length=16, choices=ACTOR_CHOICES)
+    kind = models.CharField(max_length=24, choices=KIND_CHOICES)
+    sequence = models.IntegerField(default=1)
+    payload_json = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="solution_planning_turns"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sequence", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "sequence"],
+                name="uniq_solution_planning_turn_sequence",
+            ),
+        ]
+
+    def clean(self):
+        if self.session_id and self.workspace_id and self.session.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match solution change session workspace")
+
+    def save(self, *args, **kwargs):
+        if self.session_id and not self.workspace_id:
+            self.workspace_id = self.session.workspace_id
+        if self.session_id and not self.sequence:
+            last_turn = (
+                SolutionPlanningTurn.objects.filter(session_id=self.session_id)
+                .exclude(id=self.id)
+                .order_by("-sequence")
+                .first()
+            )
+            self.sequence = int(last_turn.sequence or 0) + 1 if last_turn else 1
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.session_id}:{self.sequence}:{self.actor}:{self.kind}"
+
+
+class SolutionPlanningCheckpoint(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    ]
+    REQUIRED_BEFORE_CHOICES = [
+        ("stage", "Stage"),
+        ("apply", "Apply"),
+        ("dispatch", "Dispatch"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_planning_checkpoints")
+    session = models.ForeignKey("SolutionChangeSession", on_delete=models.CASCADE, related_name="planning_checkpoints")
+    checkpoint_key = models.CharField(max_length=120)
+    label = models.CharField(max_length=240)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="pending")
+    required_before = models.CharField(max_length=16, choices=REQUIRED_BEFORE_CHOICES, default="stage")
+    payload_json = models.JSONField(default=dict, blank=True)
+    decided_by = models.ForeignKey(
+        "UserIdentity", null=True, blank=True, on_delete=models.SET_NULL, related_name="solution_planning_checkpoint_decisions"
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "checkpoint_key", "required_before"],
+                name="uniq_solution_planning_checkpoint_key_scope",
+            ),
+        ]
+
+    def clean(self):
+        if self.session_id and self.workspace_id and self.session.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match solution change session workspace")
+
+    def save(self, *args, **kwargs):
+        if self.session_id and not self.workspace_id:
+            self.workspace_id = self.session.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.session_id}:{self.checkpoint_key}:{self.required_before}:{self.status}"
+
+
 class ApplicationPlan(models.Model):
     STATUS_CHOICES = [
         ("review", "Review"),

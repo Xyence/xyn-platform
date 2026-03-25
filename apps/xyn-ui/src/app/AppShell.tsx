@@ -1,6 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { Bot } from "lucide-react";
 import { getAuthMode, getMe, getMyProfile, getTenantBranding, listArtifactNavSurfaces, listWorkspaces } from "../api/xyn";
 import { setRuntimeAuthMode } from "../api/client";
 import type { ArtifactSurface } from "../api/types";
@@ -64,10 +63,9 @@ import { usePreview } from "./state/previewStore";
 import HelpDrawer from "./components/help/HelpDrawer";
 import TourOverlay from "./components/help/TourOverlay";
 import { resolveRouteId } from "./help/routeHelp";
-import HeaderPreviewControl from "./components/preview/HeaderPreviewControl";
 import PreviewBanner from "./components/preview/PreviewBanner";
 import XynConsoleNode from "./components/console/XynConsoleNode";
-import CapabilitiesIndicator from "./components/console/CapabilitiesIndicator";
+import HeaderUtilityMenu from "./components/common/HeaderUtilityMenu";
 import SuggestionSwitcher from "./components/console/SuggestionSwitcher";
 import { useXynConsole } from "./state/xynConsoleStore";
 import useWorkspaceFromRoute from "./hooks/useWorkspaceFromRoute";
@@ -931,7 +929,6 @@ export default function AppShell() {
           </Link>
           {isWorkbenchRoute && activeWorkspace?.name ? (
             <div className="app-header-workspace">
-              <span className="workspace-dot" style={{ background: workspaceRoute.workspaceColor || "#6c7a89" }} aria-hidden="true" />
               <label htmlFor="workspace-selector" className="sr-only">
                 Workspace
               </label>
@@ -953,32 +950,22 @@ export default function AppShell() {
         <div className="header-meta">
           {authed ? (
             <>
-              {isWorkbenchRoute ? <CapabilitiesIndicator workspaceId={activeWorkspace?.id || ""} /> : null}
+              {isWorkbenchRoute && activeWorkspace?.id ? (
+                <HeaderUtilityMenu
+                  workspaceId={activeWorkspace.id}
+                  actorRoles={actorRoles}
+                  actorLabel={String(authUser?.email || authUser?.display_name || authUser?.subject || "current user")}
+                  onOpenAgentActivity={() => setAgentActivityOpen(true)}
+                  onMessage={({ level, title, message }) => push({ level, title, message })}
+                />
+              ) : null}
               <NotificationBell />
-              <button
-                type="button"
-                className={`ghost notification-bell agent-indicator ${runningAiCount > 0 ? "thinking" : ""}`}
-                aria-label={runningAiCount > 0 ? `Agent activity, ${runningAiCount} AI operation in progress` : "Agent activity"}
-                onClick={() => setAgentActivityOpen((prev) => !prev)}
-              >
-                <Bot size={16} />
-                {runningAiCount > 0 && <span className="agent-indicator-dot" aria-hidden="true" />}
-                <span className="sr-only" aria-live="polite">
-                  {runningAiCount > 0 ? "AI operation in progress" : "No AI operations in progress"}
-                </span>
-              </button>
-              <HeaderPreviewControl
-                actorRoles={actorRoles}
-                actorLabel={String(authUser?.email || authUser?.display_name || authUser?.subject || "current user")}
-                onMessage={({ level, title, message }) => push({ level, title, message })}
-              />
               <UserMenu
                 user={authUser || {}}
                 onReport={() => setReportOpen(true)}
-                onAgentActivity={() => setAgentActivityOpen(true)}
                 onSignOut={signOut}
               />
-              {runningAiCount > 0 && <span className="agent-thinking-label">Thinking…</span>}
+              {runningAiCount > 0 && <span className="agent-thinking-label">Agents active ({runningAiCount})</span>}
             </>
           ) : (
             <button className="ghost" onClick={startLogin}>

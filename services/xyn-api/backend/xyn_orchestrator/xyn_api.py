@@ -94,6 +94,8 @@ from .models import (
     Application,
     ApplicationArtifactMembership,
     SolutionChangeSession,
+    SolutionPlanningTurn,
+    SolutionPlanningCheckpoint,
     ApplicationPlan,
     Environment,
     EnvironmentAppState,
@@ -28576,6 +28578,205 @@ def _solution_change_session_selected_artifact_ids(session: SolutionChangeSessio
     return normalized
 
 
+def _next_solution_planning_turn_sequence(session: SolutionChangeSession) -> int:
+    current = (
+        SolutionPlanningTurn.objects.filter(session=session)
+        .order_by("-sequence")
+        .values_list("sequence", flat=True)
+        .first()
+    )
+    return int(current or 0) + 1
+
+
+def _serialize_solution_planning_turn(turn: SolutionPlanningTurn) -> Dict[str, Any]:
+    return {
+        "id": str(turn.id),
+        "workspace_id": str(turn.workspace_id),
+        "session_id": str(turn.session_id),
+        "actor": turn.actor,
+        "kind": turn.kind,
+        "sequence": int(turn.sequence or 0),
+        "payload": turn.payload_json if isinstance(turn.payload_json, dict) else {},
+        "created_by": str(turn.created_by_id) if turn.created_by_id else None,
+        "created_at": turn.created_at,
+        "updated_at": turn.updated_at,
+    }
+
+
+def _serialize_solution_planning_checkpoint(checkpoint: SolutionPlanningCheckpoint) -> Dict[str, Any]:
+    return {
+        "id": str(checkpoint.id),
+        "workspace_id": str(checkpoint.workspace_id),
+        "session_id": str(checkpoint.session_id),
+        "checkpoint_key": checkpoint.checkpoint_key,
+        "label": checkpoint.label,
+        "status": checkpoint.status,
+        "required_before": checkpoint.required_before,
+        "payload": checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {},
+        "decided_by": str(checkpoint.decided_by_id) if checkpoint.decided_by_id else None,
+        "decided_at": checkpoint.decided_at,
+        "created_at": checkpoint.created_at,
+        "updated_at": checkpoint.updated_at,
+    }
+
+
+def _append_solution_planning_turn(
+    *,
+    session: SolutionChangeSession,
+    actor: str,
+    kind: str,
+    payload: Optional[Dict[str, Any]] = None,
+    created_by: Optional[UserIdentity] = None,
+) -> SolutionPlanningTurn:
+    turn = SolutionPlanningTurn.objects.create(
+        workspace_id=session.workspace_id,
+        session=session,
+        actor=actor,
+        kind=kind,
+        sequence=_next_solution_planning_turn_sequence(session),
+        payload_json=payload if isinstance(payload, dict) else {},
+        created_by=created_by,
+    )
+    return turn
+
+
+def _ensure_solution_stage_checkpoint(
+    *,
+    session: SolutionChangeSession,
+) -> SolutionPlanningCheckpoint:
+    checkpoint, _created = SolutionPlanningCheckpoint.objects.get_or_create(
+        session=session,
+        workspace_id=session.workspace_id,
+        checkpoint_key="plan_scope_confirmed",
+        required_before="stage",
+        defaults={
+            "label": "Approve planning scope before stage apply",
+            "status": "pending",
+            "payload_json": {"description": "Confirm the selected artifacts and draft plan before staging."},
+        },
+    )
+    return checkpoint
+
+
+def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
+    turns = list(
+        SolutionPlanningTurn.objects.filter(session=session)
+        .select_related("created_by")
+        .order_by("sequence", "created_at")
+    )
+    checkpoints = list(
+        SolutionPlanningCheckpoint.objects.filter(session=session)
+        .select_related("decided_by")
+        .order_by("created_at")
+    )
+    serialized_turns = [_serialize_solution_planning_turn(turn) for turn in turns]
+    serialized_checkpoints = [_serialize_solution_planning_checkpoint(checkpoint) for checkpoint in checkpoints]
+    last_user_sequence = max(
+        (int(turn.sequence or 0) for turn in turns if str(turn.actor or "") == "user"),
+        default=0,
+    )
+    latest_draft_plan = next(
+        (
+            serialized
+            for serialized in reversed(serialized_turns)
+            if str(serialized.get("actor") or "") == "planner" and str(serialized.get("kind") or "") == "draft_plan"
+        ),
+        None,
+    )
+    pending_question = next(
+        (
+            serialized
+            for serialized in reversed(serialized_turns)
+            if str(serialized.get("actor") or "") == "planner"
+            and str(serialized.get("kind") or "") == "question"
+            and int(serialized.get("sequence") or 0) > last_user_sequence
+        ),
+        None,
+    )
+    pending_option_set = next(
+        (
+            serialized
+            for serialized in reversed(serialized_turns)
+            if str(serialized.get("actor") or "") == "planner"
+            and str(serialized.get("kind") or "") == "option_set"
+            and int(serialized.get("sequence") or 0) > last_user_sequence
+        ),
+        None,
+    )
+    pending_checkpoints = [entry for entry in serialized_checkpoints if str(entry.get("status") or "") == "pending"]
+    return {
+        "turns": serialized_turns,
+        "checkpoints": serialized_checkpoints,
+        "pending_question": pending_question,
+        "pending_option_set": pending_option_set,
+        "pending_checkpoints": pending_checkpoints,
+        "latest_draft_plan": latest_draft_plan,
+    }
+
+
+def _seed_solution_planning_state_on_create(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> None:
+    request_text = str(session.request_text or "").strip()
+    if request_text:
+        _append_solution_planning_turn(
+            session=session,
+            actor="user",
+            kind="request",
+            payload={"request_text": request_text},
+            created_by=session.created_by,
+        )
+
+    token_count = len([token for token in re.findall(r"[a-z0-9_]+", request_text.lower()) if len(token) >= 2])
+    if token_count <= 6:
+        _append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="question",
+            payload={
+                "question": "Which artifacts should this change target first, and what outcome should be validated?",
+                "reason": "request_scope_needs_clarification",
+            },
+        )
+    else:
+        candidate_members = memberships[: min(3, len(memberships))]
+        options: List[Dict[str, Any]] = []
+        for member in candidate_members:
+            options.append(
+                {
+                    "id": str(member.artifact_id),
+                    "label": member.artifact.title,
+                    "role": member.role,
+                    "description": member.responsibility_summary or "",
+                }
+            )
+        _append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="option_set",
+            payload={
+                "prompt": "Select the first artifact focus for this planning session.",
+                "options": options,
+            },
+        )
+
+    checkpoint = _ensure_solution_stage_checkpoint(session=session)
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="checkpoint",
+        payload={
+            "checkpoint_id": str(checkpoint.id),
+            "checkpoint_key": checkpoint.checkpoint_key,
+            "label": checkpoint.label,
+            "required_before": checkpoint.required_before,
+            "status": checkpoint.status,
+        },
+    )
+
+
 def _analyze_solution_impacted_artifacts(
     *, application: Application, request_text: str, memberships: List[ApplicationArtifactMembership]
 ) -> Dict[str, Any]:
@@ -28734,6 +28935,7 @@ def _serialize_solution_change_session(
                 "role": member.role,
             }
         )
+    planning_state = _solution_planning_state(session)
     return {
         "id": str(session.id),
         "workspace_id": str(session.workspace_id),
@@ -28751,6 +28953,7 @@ def _serialize_solution_change_session(
         "preview": session.preview_json if isinstance(session.preview_json, dict) else {},
         "validation": session.validation_json if isinstance(session.validation_json, dict) else {},
         "metadata": session.metadata_json if isinstance(session.metadata_json, dict) else {},
+        "planning": planning_state,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     }
@@ -28805,6 +29008,11 @@ def _stage_solution_change_session(
         "shared_contracts": plan.get("shared_contracts") if isinstance(plan.get("shared_contracts"), list) else [],
         "validation_plan": plan.get("validation_plan") if isinstance(plan.get("validation_plan"), list) else [],
         "preview_implications": plan.get("preview_implications") if isinstance(plan.get("preview_implications"), list) else [],
+        "planning_checkpoint_state": {
+            "pending_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="pending").count(),
+            "approved_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="approved").count(),
+            "rejected_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="rejected").count(),
+        },
     }
     session.staged_changes_json = staged_payload
     session.preview_json = {}
@@ -32098,6 +32306,7 @@ def application_solution_change_sessions_collection(
         analysis_json=analysis,
         selected_artifact_ids_json=analysis.get("suggested_artifact_ids") if isinstance(analysis.get("suggested_artifact_ids"), list) else [],
     )
+    _seed_solution_planning_state_on_create(session=session, memberships=memberships)
     session.refresh_from_db()
     return JsonResponse(
         {
@@ -32163,6 +32372,182 @@ def application_solution_change_session_detail(
 
 @csrf_exempt
 @login_required
+def application_solution_change_session_reply(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    payload = _parse_json(request)
+    reply_text = str(payload.get("reply_text") or payload.get("text") or "").strip()
+    if not reply_text:
+        return JsonResponse({"error": "reply_text is required"}, status=400)
+    _append_solution_planning_turn(
+        session=session,
+        actor="user",
+        kind="response",
+        payload={
+            "reply_text": reply_text,
+            "response_kind": "response",
+            "source_turn_id": str(payload.get("source_turn_id") or "").strip() or None,
+        },
+        created_by=identity,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "recorded": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_select_option(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    payload = _parse_json(request)
+    option_id = str(payload.get("option_id") or "").strip()
+    if not option_id:
+        return JsonResponse({"error": "option_id is required"}, status=400)
+
+    source_turn_id = str(payload.get("source_turn_id") or "").strip()
+    option_turn_qs = SolutionPlanningTurn.objects.filter(
+        session=session,
+        actor="planner",
+        kind="option_set",
+    ).order_by("-sequence", "-created_at")
+    if source_turn_id:
+        option_turn_qs = option_turn_qs.filter(id=source_turn_id)
+    source_turn = option_turn_qs.first()
+    if source_turn is None:
+        return JsonResponse({"error": "planner option set was not found for this session"}, status=404)
+    source_payload = source_turn.payload_json if isinstance(source_turn.payload_json, dict) else {}
+    options = source_payload.get("options") if isinstance(source_payload.get("options"), list) else []
+    selected_option = None
+    for item in options:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("id") or "").strip() == option_id:
+            selected_option = item
+            break
+    if selected_option is None:
+        return JsonResponse({"error": "option_id is not part of the planner option set"}, status=400)
+
+    _append_solution_planning_turn(
+        session=session,
+        actor="user",
+        kind="response",
+        payload={
+            "response_kind": "option_selection",
+            "source_turn_id": str(source_turn.id),
+            "option_id": option_id,
+            "option_label": str(selected_option.get("label") or option_id),
+            "option_payload": selected_option,
+        },
+        created_by=identity,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "recorded": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_checkpoint_decision(
+    request: HttpRequest, application_id: str, session_id: str, checkpoint_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    checkpoint = get_object_or_404(
+        SolutionPlanningCheckpoint,
+        id=checkpoint_id,
+        session=session,
+    )
+    payload = _parse_json(request)
+    decision = str(payload.get("decision") or "").strip().lower()
+    if decision not in {"approved", "rejected"}:
+        return JsonResponse({"error": "decision must be approved or rejected"}, status=400)
+    checkpoint.status = decision
+    checkpoint.decided_by = identity
+    checkpoint.decided_at = timezone.now()
+    checkpoint.payload_json = {
+        **(checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {}),
+        "decision_notes": str(payload.get("notes") or "").strip(),
+    }
+    checkpoint.save(update_fields=["status", "decided_by", "decided_at", "payload_json", "updated_at"])
+    _append_solution_planning_turn(
+        session=session,
+        actor="user",
+        kind="approval",
+        payload={
+            "checkpoint_id": str(checkpoint.id),
+            "checkpoint_key": checkpoint.checkpoint_key,
+            "decision": decision,
+            "required_before": checkpoint.required_before,
+            "notes": str(payload.get("notes") or "").strip(),
+        },
+        created_by=identity,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return JsonResponse(
+        {
+            "recorded": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
 def application_solution_change_session_plan(
     request: HttpRequest, application_id: str, session_id: str
 ) -> JsonResponse:
@@ -32186,6 +32571,35 @@ def application_solution_change_session_plan(
     session.plan_json = plan
     session.status = "planned"
     session.save(update_fields=["plan_json", "status", "updated_at"])
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="draft_plan",
+        payload={
+            "summary": "Generated structured cross-artifact draft plan.",
+            "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+            "shared_contracts": list(plan.get("shared_contracts") or []),
+            "validation_plan": list(plan.get("validation_plan") or []),
+        },
+    )
+    checkpoint = _ensure_solution_stage_checkpoint(session=session)
+    if str(checkpoint.status or "") != "pending":
+        checkpoint.status = "pending"
+        checkpoint.decided_by = None
+        checkpoint.decided_at = None
+        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="checkpoint",
+        payload={
+            "checkpoint_id": str(checkpoint.id),
+            "checkpoint_key": checkpoint.checkpoint_key,
+            "label": checkpoint.label,
+            "required_before": checkpoint.required_before,
+            "status": checkpoint.status,
+        },
+    )
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {

@@ -91,17 +91,19 @@ export function SolutionListPanel({
   }, [solutionNameQuery, loading, autoOpened, sorted, onOpenPanel]);
 
   return (
-    <section className="card stack" data-testid="solution-list-panel">
-      <h3>Solutions</h3>
-      <p className="muted">
-        Multi-artifact development groups for <strong>{workspaceName || "this workspace"}</strong>.
-      </p>
+    <section className="card solution-list-card" data-testid="solution-list-panel">
+      <div className="solution-list-header">
+        <h3>Solutions</h3>
+        <p className="muted">
+          Multi-artifact development groups for <strong>{workspaceName || "this workspace"}</strong>.
+        </p>
+      </div>
       {loading ? <p className="muted">Loading solutions…</p> : null}
       {!loading && error ? <p className="danger">{error}</p> : null}
       {!loading && !error && sorted.length === 0 ? <p className="muted">No solutions have been registered yet.</p> : null}
       {!loading && !error && sorted.length > 0 ? (
-        <div className="table-wrap">
-          <table>
+        <div className="table-wrap solution-list-table-wrap">
+          <table className="solution-list-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -109,17 +111,17 @@ export function SolutionListPanel({
                 <th>Goals</th>
                 <th>Artifacts</th>
                 <th>Updated</th>
-                <th />
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
               {sorted.map((item) => (
                 <tr key={item.id}>
-                  <td>{item.name}</td>
+                  <td className="solution-list-name-cell" title={item.name || ""}>{item.name}</td>
                   <td>{item.status}</td>
-                  <td>{item.goal_count || 0}</td>
-                  <td>{item.artifact_member_count || 0}</td>
-                  <td>{item.updated_at ? new Date(item.updated_at).toLocaleString() : "—"}</td>
+                  <td className="solution-list-quiet-count">{item.goal_count || 0}</td>
+                  <td className="solution-list-quiet-count">{item.artifact_member_count || 0}</td>
+                  <td className="solution-list-updated-cell">{item.updated_at ? new Date(item.updated_at).toLocaleString() : "—"}</td>
                   <td>
                     <button
                       className="ghost sm"
@@ -423,13 +425,10 @@ export function SolutionDetailPanel({
   const validationChecks = (validationState?.checks as Array<Record<string, unknown>> | undefined) || [];
 
   return (
-    <div className="stack" data-testid="solution-detail-panel">
-      <section className="card">
-        <div className="row" style={{ justifyContent: "space-between", gap: 12 }}>
-          <div>
-            <h3>{application?.name || "Solution"}</h3>
-            <p className="muted">{application?.summary || "Application-level development context across member artifacts."}</p>
-          </div>
+    <div className="solution-detail-layout" data-testid="solution-detail-panel">
+      <section className="card solution-summary-card">
+        <div className="solution-summary-header-row">
+          <h3>{application?.name || "Solution"}</h3>
           <div className="inline-action-row">
             <button
               className="ghost sm"
@@ -452,107 +451,100 @@ export function SolutionDetailPanel({
             </button>
           </div>
         </div>
-      </section>
-      <section className="card">
-        <h4>Artifact Membership</h4>
-        <p className="muted">Assigned artifacts and their solution roles.</p>
-        {memberships.length ? (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Artifact</th>
-                  <th>Role</th>
-                  <th>Responsibility</th>
-                </tr>
-              </thead>
-              <tbody>
-                {memberships.map((item) => (
-                  <tr key={item.id}>
-                    <td>{item.artifact?.title || item.artifact_id}</td>
-                    <td>{item.role}</td>
-                    <td>{item.responsibility_summary || "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {application?.summary ? <p className="muted">{application.summary}</p> : null}
+        <div className="solution-summary-metrics">
+          <div>
+            <span className="field-label">Status</span>
+            <span className="field-value">{application?.status || "—"}</span>
           </div>
-        ) : (
-          <p className="muted">No artifacts assigned yet.</p>
-        )}
+          <div>
+            <span className="field-label">Updated</span>
+            <span className="field-value">{application?.updated_at ? new Date(application.updated_at).toLocaleString() : "—"}</span>
+          </div>
+          <div>
+            <span className="field-label">Goals</span>
+            <span className="field-value">{application?.goal_count || 0}</span>
+          </div>
+          <div>
+            <span className="field-label">Artifacts</span>
+            <span className="field-value">{application?.artifact_member_count || memberships.length || 0}</span>
+          </div>
+        </div>
       </section>
 
-      <section className="card">
-        <h4>New Change Session</h4>
-        <p className="muted">Describe the solution-level change request. Xyn will analyze likely impacted artifacts and create a coordinated planning session.</p>
-        <form className="stack" onSubmit={(event) => void handleCreateSession(event)}>
-          <label className="field">
-            <span className="field-label">Title (optional)</span>
-            <input aria-label="Title" type="text" value={changeTitle} onChange={(event) => setChangeTitle(event.target.value)} placeholder="Campaign monitoring enhancement" />
-          </label>
-          <label className="field">
-            <span className="field-label">Requested change</span>
-            <textarea
-              aria-label="Requested change"
-              rows={4}
-              value={changeRequest}
-              onChange={(event) => setChangeRequest(event.target.value)}
-              placeholder="Describe the cross-artifact change request."
-              required
-            />
-          </label>
-          <div className="row">
-            <button className="button sm" type="submit" disabled={creatingSession || !changeRequest.trim()}>
-              {creatingSession ? "Creating…" : "Create Change Session"}
-            </button>
-          </div>
-        </form>
-      </section>
+      <div className="solution-detail-grid">
+        <div className="solution-detail-main">
+          <section className="card solution-card-compact">
+            <h4>New Change Session</h4>
+            <p className="muted">Describe the solution-level change request.</p>
+            <form className="stack" onSubmit={(event) => void handleCreateSession(event)}>
+              <label className="field">
+                <span className="field-label">Title (optional)</span>
+                <input aria-label="Title" type="text" value={changeTitle} onChange={(event) => setChangeTitle(event.target.value)} placeholder="Campaign monitoring enhancement" />
+              </label>
+              <label className="field">
+                <span className="field-label">Requested change</span>
+                <textarea
+                  aria-label="Requested change"
+                  rows={3}
+                  value={changeRequest}
+                  onChange={(event) => setChangeRequest(event.target.value)}
+                  placeholder="Describe the cross-artifact change request."
+                  required
+                />
+              </label>
+              <div className="row">
+                <button className="button sm" type="submit" disabled={creatingSession || !changeRequest.trim()}>
+                  {creatingSession ? "Creating…" : "Create Change Session"}
+                </button>
+              </div>
+            </form>
+          </section>
 
-      <section className="card">
-        <h4>Change Sessions</h4>
-        {sessions.length ? (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Session</th>
-                  <th>Status</th>
-                  <th>Updated</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {sessions.map((session) => (
-                  <tr key={session.id}>
-                    <td>{session.title}</td>
-                    <td>{session.status}</td>
-                    <td>{session.updated_at ? new Date(session.updated_at).toLocaleString() : "—"}</td>
-                    <td>
-                      <button
-                        className={`ghost sm ${activeSessionId === session.id ? "active" : ""}`}
-                        type="button"
-                        onClick={() => {
-                          setActiveSessionId(session.id);
-                          setSelectedArtifactIds(session.selected_artifact_ids || []);
-                        }}
-                      >
-                        {activeSessionId === session.id ? "Selected" : "Select"}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="muted">No change sessions yet.</p>
-        )}
-      </section>
+          <section className="card solution-card-compact">
+            <h4>Change Sessions</h4>
+            {sessions.length ? (
+              <div className="table-wrap solution-compact-table-wrap">
+                <table className="solution-compact-table">
+                  <thead>
+                    <tr>
+                      <th>Session</th>
+                      <th>Status</th>
+                      <th>Updated</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sessions.map((session) => (
+                      <tr key={session.id}>
+                        <td className="solution-list-name-cell" title={session.title || ""}>{session.title}</td>
+                        <td>{session.status}</td>
+                        <td className="solution-list-updated-cell">{session.updated_at ? new Date(session.updated_at).toLocaleString() : "—"}</td>
+                        <td>
+                          <button
+                            className={`ghost sm ${activeSessionId === session.id ? "active" : ""}`}
+                            type="button"
+                            onClick={() => {
+                              setActiveSessionId(session.id);
+                              setSelectedArtifactIds(session.selected_artifact_ids || []);
+                            }}
+                          >
+                            {activeSessionId === session.id ? "Selected" : "Select"}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="muted solution-empty-state">No change sessions yet.</p>
+            )}
+          </section>
 
-      {activeSession ? (
-        <section className="card stack">
-          <h4>Selected Session</h4>
+          {activeSession ? (
+            <section className="card stack solution-card-compact">
+              <h4>Selected Session</h4>
           <p className="muted">
             <strong>{activeSession.title}</strong> · {activeSession.status}
           </p>
@@ -576,7 +568,7 @@ export function SolutionDetailPanel({
               })}
             </div>
           ) : (
-            <p className="muted">No impacted artifact analysis available yet.</p>
+            <p className="muted solution-empty-state">No impacted artifact analysis available yet.</p>
           )}
           <div className="inline-action-row">
             <button className="ghost sm" type="button" onClick={() => void handleSaveImpactedArtifacts()} disabled={saving}>
@@ -622,8 +614,8 @@ export function SolutionDetailPanel({
           {stagedArtifacts.length ? (
             <>
               <h5>Staged Multi-Artifact Apply State</h5>
-              <div className="table-wrap">
-                <table>
+              <div className="table-wrap solution-compact-table-wrap">
+                <table className="solution-compact-table">
                   <thead>
                     <tr>
                       <th>Artifact</th>
@@ -646,7 +638,7 @@ export function SolutionDetailPanel({
               </div>
             </>
           ) : (
-            <p className="muted">No staged artifacts yet.</p>
+            <p className="muted solution-empty-state">No staged artifacts yet.</p>
           )}
 
           {Object.keys(previewState).length > 0 ? (
@@ -695,8 +687,8 @@ export function SolutionDetailPanel({
               {previewArtifacts.length ? (
                 <div className="stack">
                   <div className="field-label">Per-artifact preview evidence</div>
-                  <div className="table-wrap">
-                    <table>
+                  <div className="table-wrap solution-compact-table-wrap">
+                    <table className="solution-compact-table">
                       <thead>
                         <tr>
                           <th>Artifact</th>
@@ -731,8 +723,8 @@ export function SolutionDetailPanel({
           {validationChecks.length ? (
             <>
               <h5>Validation/Test Status</h5>
-              <div className="table-wrap">
-                <table>
+              <div className="table-wrap solution-compact-table-wrap">
+                <table className="solution-compact-table">
                   <thead>
                     <tr>
                       <th>Check</th>
@@ -751,13 +743,46 @@ export function SolutionDetailPanel({
               </div>
             </>
           ) : null}
-        </section>
-      ) : null}
+            </section>
+          ) : null}
+        </div>
 
-      <section className="card">
-        <h4>Add Artifact Membership</h4>
-        <p className="muted">Assign coordinated artifacts under this solution.</p>
-        <form className="stack" onSubmit={(event) => void handleAddMembership(event)}>
+        <aside className="solution-detail-secondary">
+          <section className="card solution-card-compact">
+            <h4>Artifact Membership</h4>
+            <p className="muted">Assigned artifacts and their solution roles.</p>
+            {memberships.length ? (
+              <div className="table-wrap solution-compact-table-wrap">
+                <table className="solution-compact-table">
+                  <thead>
+                    <tr>
+                      <th>Artifact</th>
+                      <th>Role</th>
+                      <th>Responsibility</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {memberships.map((item) => (
+                      <tr key={item.id}>
+                        <td className="solution-list-name-cell" title={item.artifact?.title || item.artifact_id}>
+                          {item.artifact?.title || item.artifact_id}
+                        </td>
+                        <td>{item.role}</td>
+                        <td className="solution-list-name-cell" title={item.responsibility_summary || "—"}>{item.responsibility_summary || "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="muted solution-empty-state">No artifacts assigned yet.</p>
+            )}
+          </section>
+
+          <section className="card solution-card-compact">
+            <h4>Add Artifact Membership</h4>
+            <p className="muted">Assign coordinated artifacts under this solution.</p>
+            <form className="stack solution-membership-form" onSubmit={(event) => void handleAddMembership(event)}>
           <label className="field">
             <span className="field-label">Candidate scope</span>
             <select
@@ -803,13 +828,15 @@ export function SolutionDetailPanel({
               placeholder="Optional scope summary"
             />
           </label>
-          <div className="row">
-            <button className="button sm" type="submit" disabled={saving || !artifactId || !applicationId}>
-              {saving ? "Saving…" : "Add Membership"}
-            </button>
-          </div>
-        </form>
-      </section>
+              <div className="row">
+                <button className="button sm" type="submit" disabled={saving || !artifactId || !applicationId}>
+                  {saving ? "Saving…" : "Add Membership"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </aside>
+      </div>
     </div>
   );
 }

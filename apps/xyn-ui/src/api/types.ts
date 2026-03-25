@@ -2882,8 +2882,46 @@ export type SolutionChangeSession = {
   preview?: Record<string, unknown>;
   validation?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  planning?: SolutionPlanningState;
   created_at: string;
   updated_at: string;
+};
+
+export type SolutionPlanningTurn = {
+  id: string;
+  workspace_id: string;
+  session_id: string;
+  actor: "user" | "planner" | string;
+  kind: "request" | "question" | "option_set" | "draft_plan" | "checkpoint" | "response" | "approval" | string;
+  sequence: number;
+  payload: Record<string, unknown>;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SolutionPlanningCheckpoint = {
+  id: string;
+  workspace_id: string;
+  session_id: string;
+  checkpoint_key: string;
+  label: string;
+  status: "pending" | "approved" | "rejected" | string;
+  required_before: "stage" | "apply" | "dispatch" | string;
+  payload: Record<string, unknown>;
+  decided_by?: string | null;
+  decided_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SolutionPlanningState = {
+  turns: SolutionPlanningTurn[];
+  checkpoints: SolutionPlanningCheckpoint[];
+  pending_question?: SolutionPlanningTurn | null;
+  pending_option_set?: SolutionPlanningTurn | null;
+  pending_checkpoints: SolutionPlanningCheckpoint[];
+  latest_draft_plan?: SolutionPlanningTurn | null;
 };
 
 export type CampaignTypeDefinition = {

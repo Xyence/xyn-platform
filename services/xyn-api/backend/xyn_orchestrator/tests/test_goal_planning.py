@@ -21,6 +21,8 @@ from xyn_orchestrator.models import (
     ApplicationArtifactMembership,
     ApplicationPlan,
     SolutionChangeSession,
+    SolutionPlanningTurn,
+    SolutionPlanningCheckpoint,
     Artifact,
     ArtifactType,
     Campaign,
@@ -39,6 +41,9 @@ from xyn_orchestrator.xyn_api import (
     application_artifact_membership_detail,
     application_artifact_memberships_collection,
     application_solution_change_session_detail,
+    application_solution_change_session_reply,
+    application_solution_change_session_select_option,
+    application_solution_change_session_checkpoint_decision,
     application_solution_change_session_plan,
     application_solution_change_session_prepare_preview,
     application_solution_change_session_stage_apply,
@@ -1213,6 +1218,107 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(payload["session"]["selected_artifact_ids"])
         impacted = ((payload["session"].get("analysis") or {}).get("impacted_artifacts") or [])
         self.assertGreaterEqual(len(impacted), 1)
+        planning = payload["session"].get("planning") or {}
+        turns = planning.get("turns") or []
+        checkpoints = planning.get("checkpoints") or []
+        self.assertGreaterEqual(len(turns), 2)
+        self.assertTrue(any(str(turn.get("actor") or "") == "user" and str(turn.get("kind") or "") == "request" for turn in turns))
+        self.assertTrue(any(str(turn.get("actor") or "") == "planner" for turn in turns))
+        self.assertEqual(len(checkpoints), 1)
+        self.assertEqual(str(checkpoints[0].get("status") or ""), "pending")
+
+    def test_solution_change_session_reply_option_and_checkpoint_decision_are_persisted(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"df-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Campaign UX update",
+                    "request_text": "Update campaign UX and signal review flow end to end.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            create_payload = json.loads(create_response.content)
+            session_id = str((create_payload.get("session") or {}).get("id") or "")
+            session = SolutionChangeSession.objects.get(id=session_id)
+            option_turn = (
+                SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="option_set")
+                .order_by("-sequence")
+                .first()
+            )
+            self.assertIsNotNone(option_turn)
+            option_payload = option_turn.payload_json if isinstance(option_turn.payload_json, dict) else {}
+            option_rows = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+            self.assertTrue(option_rows)
+            option_id = str((option_rows[0] if isinstance(option_rows[0], dict) else {}).get("id") or "")
+
+            reply_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/reply",
+                method="post",
+                data=json.dumps({"reply_text": "Target the UI and API first."}),
+            )
+            reply_response = application_solution_change_session_reply(reply_request, str(application.id), str(session.id))
+            self.assertEqual(reply_response.status_code, 200)
+
+            select_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/select-option",
+                method="post",
+                data=json.dumps({"source_turn_id": str(option_turn.id), "option_id": option_id}),
+            )
+            select_response = application_solution_change_session_select_option(select_request, str(application.id), str(session.id))
+            self.assertEqual(select_response.status_code, 200)
+
+            checkpoint = SolutionPlanningCheckpoint.objects.filter(session=session).first()
+            self.assertIsNotNone(checkpoint)
+            checkpoint_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/checkpoints/{checkpoint.id}/decision",
+                method="post",
+                data=json.dumps({"decision": "approved", "notes": "Scope looks correct."}),
+            )
+            checkpoint_response = application_solution_change_session_checkpoint_decision(
+                checkpoint_request,
+                str(application.id),
+                str(session.id),
+                str(checkpoint.id),
+            )
+            self.assertEqual(checkpoint_response.status_code, 200)
+
+        session.refresh_from_db()
+        checkpoint = SolutionPlanningCheckpoint.objects.get(id=checkpoint.id)
+        self.assertEqual(checkpoint.status, "approved")
+        turns = list(SolutionPlanningTurn.objects.filter(session=session).order_by("sequence"))
+        kinds = [turn.kind for turn in turns]
+        self.assertIn("response", kinds)
+        self.assertIn("approval", kinds)
 
     def test_solution_change_session_update_and_plan_generation(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
@@ -1272,6 +1378,9 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(plan_response.status_code, 200)
         self.assertTrue(plan_payload["planned"])
         self.assertIn("per_artifact_work", plan_payload["session"]["plan"])
+        planning = plan_payload["session"].get("planning") or {}
+        latest_draft = planning.get("latest_draft_plan") or {}
+        self.assertEqual(str(latest_draft.get("kind") or ""), "draft_plan")
 
     def test_solution_change_session_stage_preview_and_validate_flow(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
@@ -1881,6 +1990,11 @@ class GoalPlanningTests(TestCase):
         self.assertIn("stage_solution_change", action_types)
         self.assertIn("prepare_solution_preview", action_types)
         self.assertIn("validate_solution_change", action_types)
+        session_payload = payload.get("solution_change_session") or {}
+        planning_payload = session_payload.get("planning") if isinstance(session_payload, dict) else {}
+        self.assertIsInstance(planning_payload, dict)
+        self.assertIn("turns", planning_payload)
+        self.assertIn("checkpoints", planning_payload)
 
     def test_composer_state_default_workspace_view_excludes_archived_application_work(self):
         archived_application = Application.objects.create(

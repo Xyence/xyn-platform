@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   applyApplicationPlan,
@@ -19,7 +19,6 @@ import {
   getRuntimeRunCanvasApi,
   getAiRoutingStatus,
   listAiAgents,
-  getSystemReadiness,
   getWorkItem,
   getWorkQueue,
   dispatchNextWorkQueueItem,
@@ -32,17 +31,24 @@ import {
   listCampaigns,
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
+  decideSolutionPlanningCheckpoint,
+  generateSolutionChangePlan,
+  prepareSolutionChangePreview,
   publishDevTask,
   queryArtifactCanvasTable,
   queryEmsDevicesCanvasTable,
   queryEmsRegistrationsCanvasTable,
   requeueDevTask,
+  replyToSolutionPlanningSession,
   reviewCoordinationThread,
   reviewGoal,
   retryDevTask,
+  selectSolutionPlanningOption,
+  stageSolutionChangeApply,
   updateApplication,
   updateApplicationPlan,
   updateCampaign,
+  validateSolutionChangeSession,
   updateWorkItem,
 } from "../../../api/xyn";
 import type {
@@ -71,7 +77,6 @@ import type {
   RuntimeRunDetail,
   RuntimeRunArtifactContent,
   RuntimeRunSummary,
-  SystemReadinessResponse,
   WorkQueueResponse,
   WorkItemDetail,
   WorkItemSummary,
@@ -83,16 +88,9 @@ import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityR
 import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail } from "../../utils/entityChangeEvents";
 import { applyRuntimeEventToRunDetail, applyRuntimeEventToRuns, refreshRuntimeRunDetail, refreshRuntimeRunSummary, subscribeRuntimeEventStream } from "../../utils/runtimeEventStream";
 import {
-  deriveComposerStageSummary,
   deriveComposerViewModel,
-  formatComposerCountLabel,
-  formatComposerGoalProgressStatus,
-  formatComposerPlanningStatus,
-  formatComposerThreadStatus,
-  latestTimestamp,
 } from "./composerViewModel";
-import type { ComposerContainerFilter, ComposerWorkContainer } from "./composerViewModel";
-import { clearComposerStoredSelection, readComposerStoredSelection, resolveComposerInitialSelection, writeComposerStoredSelection } from "./composerSelection";
+import { readComposerStoredSelection, resolveComposerInitialSelection, writeComposerStoredSelection } from "./composerSelection";
 import DraftDetailPage from "../../pages/DraftDetailPage";
 import DraftsListPage from "../../pages/DraftsListPage";
 import JobDetailPage from "../../pages/JobDetailPage";
@@ -112,8 +110,6 @@ import RulesBrowserPanel from "../rules/RulesBrowserPanel";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { SolutionDetailPanel, SolutionListPanel } from "../solutions/SolutionPanels";
 import WorkspaceUnavailableState, { classifyWorkspaceUnavailableReason } from "../common/WorkspaceUnavailableState";
-
-const AI_ROUTING_UPDATED_EVENT = "xyn:ai-routing-updated";
 
 export type ConsolePanelKey =
   | "platform_settings"
@@ -273,46 +269,6 @@ function PublishSummary({ item }: { item: Pick<WorkItemSummary, "publish_state">
   );
 }
 
-function readinessTone(readiness: SystemReadinessResponse | null): "ok" | "warning" | "error" {
-  if (!readiness) return "warning";
-  if (readiness.ready) return "ok";
-  return readiness.checks.some((check) => check.status === "error") ? "error" : "warning";
-}
-
-function SystemReadinessBanner({ readiness }: { readiness: SystemReadinessResponse | null }) {
-  if (!readiness) return null;
-  const tone = readinessTone(readiness);
-  const title = readiness.summary || (readiness.ready ? "System ready" : "Configuration required");
-  return (
-    <section className="card system-readiness-banner" style={{ borderColor: tone === "error" ? "#d14343" : tone === "warning" ? "#c18401" : "#2d7a46" }}>
-      <div className="card-header">
-        <h3>System Readiness</h3>
-      </div>
-      <p style={{ marginTop: 0 }}>{title}</p>
-      <details>
-        <summary>Diagnostic checks</summary>
-        <div className="detail-grid" style={{ marginTop: 12 }}>
-          {readiness.checks.map((check) => (
-            <div key={check.component}>
-              <div className="field-label">{titleCaseToken(check.component)}</div>
-              <div className="field-value">
-                {titleCaseToken(check.status)}: {check.message}
-              </div>
-            </div>
-          ))}
-        </div>
-      </details>
-    </section>
-  );
-}
-
-function routingRowLabel(row: AiAgentResolution | null): "Explicit" | "Fallback" | "Missing" {
-  if (!row || !row.resolved_agent_name) return "Missing";
-  if (row.resolution_source === "explicit") return "Explicit";
-  if (row.resolution_source === "default_fallback") return "Fallback";
-  return "Missing";
-}
-
 function routingPurposeRow(routing: AiAgentResolution[], purpose: string): AiAgentResolution | null {
   return routing.find((row) => String(row.purpose || "").trim().toLowerCase() === purpose) || null;
 }
@@ -337,39 +293,6 @@ function routingResolutionLabel(row: AiAgentResolution | null, purpose: "plannin
   if (row.resolution_source === "explicit") return `Explicit ${purpose} assignment`;
   if (row.resolution_source === "default_fallback") return "Default fallback";
   return titleCaseLabel(row.resolution_source || "unresolved");
-}
-
-function AiAgentRoutingCard({ routing }: { routing: AiAgentResolution[] | null }) {
-  if (!routing || !routing.length) return null;
-  const defaultRow = routingPurposeRow(routing, "default");
-  const planningRow = routingPurposeRow(routing, "planning");
-  const codingRow = routingPurposeRow(routing, "coding");
-  const rows = [
-    { purpose: "Default", row: defaultRow },
-    { purpose: "Planning", row: planningRow },
-    { purpose: "Coding", row: codingRow },
-  ];
-  return (
-    <section className="card ai-routing-card">
-      <div className="card-header">
-        <h3>AI Agent Routing</h3>
-      </div>
-      <div className="ai-routing-rows">
-        {rows.map((entry) => {
-          const status = routingRowLabel(entry.row);
-          return (
-            <div key={entry.purpose} className="ai-routing-row">
-              <span className="field-label">{entry.purpose}</span>
-              <span className="field-value ai-routing-value">
-                <span>{entry.row?.resolved_agent_name || "Not configured"}</span>
-                <span className={`ai-routing-status ${status.toLowerCase()}`}>{status}</span>
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
 }
 
 type CanvasQuery = {
@@ -4319,29 +4242,19 @@ function ComposerDetailPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [objective, setObjective] = useState("");
-  const [effortFilter, setEffortFilter] = useState<ComposerContainerFilter>("active");
-  const [hiddenEffortIds, setHiddenEffortIds] = useState<Record<string, true>>(() => {
-    if (typeof window === "undefined") return {};
-    try {
-      const raw = window.localStorage.getItem(`xyn:composer:hidden-efforts:${workspaceId}`);
-      return raw ? JSON.parse(raw) as Record<string, true> : {};
-    } catch {
-      return {};
-    }
-  });
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(`xyn:composer:hidden-efforts:${workspaceId}`, JSON.stringify(hiddenEffortIds));
-  }, [hiddenEffortIds, workspaceId]);
+  const [requestDraft, setRequestDraft] = useState("");
+  const [questionReplyDraft, setQuestionReplyDraft] = useState("");
+  const [checkpointNotes, setCheckpointNotes] = useState<Record<string, string>>({});
+  const [selectedOptionByTurn, setSelectedOptionByTurn] = useState<Record<string, string>>({});
+  const [busyAction, setBusyAction] = useState<string | null>(null);
 
   useEffect(() => {
     writeComposerStoredSelection(workspaceId, {
       application_id: applicationId,
       application_plan_id: applicationPlanId,
+      solution_change_session_id: solutionChangeSessionId,
     });
-  }, [applicationId, applicationPlanId, workspaceId]);
+  }, [applicationId, applicationPlanId, solutionChangeSessionId, workspaceId]);
 
   async function reloadComposerState() {
     const next = await getComposerState({
@@ -4353,8 +4266,8 @@ function ComposerDetailPanel({
       thread_id: threadId,
       ...(solutionChangeSessionId ? { solution_change_session_id: solutionChangeSessionId } : {}),
     });
-    setPayload(next);
-    return next;
+      setPayload(next);
+      return next;
   }
 
   useEffect(() => {
@@ -4399,168 +4312,59 @@ function ComposerDetailPanel({
     onOpenPanel("composer_detail", nextParams);
   };
 
-  async function handleGeneratePlan(targetFactoryKey?: string) {
-    const objectiveText = objective.trim();
-    if (!objectiveText) {
-      setMessage("Enter an application objective before generating a plan.");
-      return;
-    }
-    try {
-      const response = await generateApplicationPlan({
-        workspace_id: workspaceId,
-        objective: objectiveText,
-        factory_key: targetFactoryKey || factoryKey || undefined,
-      });
-      setMessage(`Generated reviewable plan for ${response.name}.`);
-      openComposer({
-        application_plan_id: response.id,
-        factory_key: response.source_factory_key || targetFactoryKey || factoryKey || undefined,
-      });
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to generate application plan");
-    }
-  }
-
-  async function handleApplyPlan(id: string) {
-    try {
-      const response = await applyApplicationPlan(id);
-      setMessage(
-        response.status === "applied"
-          ? `Applied ${response.application.name} into durable goals, threads, and work items.`
-          : `${response.application.name} was already applied.`
-      );
-      // After plan apply, Composer should move into the live application effort.
-      // Keeping both plan and application ids in focus leaves the user in a mixed
-      // review/execution state and obscures the next actionable step.
-      openComposer({
-        application_id: response.application.id,
-      });
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to apply application plan");
-    }
-  }
-
-  async function handleArchiveApplication(application: ComposerWorkContainer | ApplicationDetail) {
-    try {
-      const result = await updateApplication(application.id, { status: "archived" });
-      setMessage(`Archived ${result.name}. It is now hidden from the default active view.`);
-      await reloadComposerState();
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to archive the application effort");
-    }
-  }
-
-  async function handleCancelPlan(plan: ComposerWorkContainer | ApplicationPlanDetail) {
-    try {
-      const result = await updateApplicationPlan(plan.id, { status: "canceled" });
-      setMessage(`Canceled ${result.name}. It is now treated as historical plan work.`);
-      await reloadComposerState();
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to archive the application plan");
-    }
-  }
-
-  async function handleRestartEffort(container: ComposerWorkContainer) {
-    const objectiveText = String(container.requestObjective || "").trim();
-    if (!objectiveText) {
-      setMessage("This effort does not have a reusable objective, so Xyn cannot restart it automatically.");
-      return;
-    }
-    try {
-      const response = await generateApplicationPlan({
-        workspace_id: workspaceId,
-        objective: objectiveText,
-        factory_key: container.sourceFactoryKey || undefined,
-        application_name: container.title,
-      });
-      if (container.kind === "application") {
-        await updateApplication(container.id, { status: "archived" });
-      } else {
-        await updateApplicationPlan(container.id, { status: "canceled" });
+  const mergeUpdatedSession = (updatedSession: any) => {
+    setPayload((current) => {
+      if (!current) return current;
+      const sessions = Array.isArray(current.solution_change_sessions)
+        ? current.solution_change_sessions.map((session) =>
+            String(session.id) === String(updatedSession?.id) ? updatedSession : session
+          )
+        : [];
+      if (!sessions.find((session) => String(session.id) === String(updatedSession?.id))) {
+        sessions.unshift(updatedSession);
       }
-      setMessage(`Started a new plan for ${container.title} and retired the older effort from the default active view.`);
-      setEffortFilter("active");
-      openComposer({
-        application_plan_id: response.id,
-        factory_key: response.source_factory_key || container.sourceFactoryKey || undefined,
-      });
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to start over from this application effort");
-    }
-  }
+      return {
+        ...current,
+        solution_change_sessions: sessions,
+        solution_change_session: updatedSession,
+      };
+    });
+  };
 
-  async function handleApproveNextSlice(goal: GoalDetail, recommendationId?: string | null) {
-    try {
-      const response = await reviewGoal(goal.id, "approve_and_queue", recommendationId);
-      const nextRecommendation =
-        response.goal?.recommendation && typeof response.goal.recommendation === "object"
-          ? response.goal.recommendation
-          : null;
-      const nextThreadId =
-        nextRecommendation?.thread_id
-        || nextRecommendation?.queue_suggestion?.thread_id
-        || nextRecommendation?.recommended_work_items?.[0]?.thread_id
-        || null;
-      const nextWorkItemId =
-        nextRecommendation?.work_item_id
-        || nextRecommendation?.queue_suggestion?.work_item_id
-        || nextRecommendation?.recommended_work_items?.[0]?.id
-        || null;
-      const nextMessage =
-        response.status === "approved"
-          ? "Approved and queued the next slice."
-          : response.status === "already_queued"
-            ? "That slice is already queued. Open the thread and dispatch the ready work item."
-            : response.status === "no_recommendation"
-              ? "No queueable next slice is available right now."
-              : response.status === "stale_recommendation"
-                ? "That recommendation is no longer current. Refresh the goal and review the latest next slice."
-                : response.status.replace(/_/g, " ");
-      setMessage(nextMessage);
-      openComposer({
-        goal_id: goal.id,
-        application_id: goal.application_id || undefined,
-        thread_id: nextThreadId || undefined,
-        work_item_id: nextWorkItemId || undefined,
-      });
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to approve the next slice");
-    }
-  }
+  const selectedSession = payload?.solution_change_session
+    || payload?.solution_change_sessions?.find((session) => String(session.id) === String(solutionChangeSessionId || ""))
+    || null;
+  const selectedSessionId = selectedSession ? String(selectedSession.id) : "";
+  const planning = selectedSession?.planning || null;
+  const planningTurns = Array.isArray(planning?.turns) ? planning.turns : [];
+  const pendingQuestion = planning?.pending_question || null;
+  const pendingOptionSet = planning?.pending_option_set || null;
+  const pendingCheckpoints = Array.isArray(planning?.pending_checkpoints) ? planning.pending_checkpoints : [];
+  const latestDraftPlan = planning?.latest_draft_plan || null;
+  const latestActivityAt = planningTurns.length
+    ? String(planningTurns[planningTurns.length - 1]?.created_at || selectedSession?.updated_at || "")
+    : String(selectedSession?.updated_at || "");
 
-  async function handleThreadReview(thread: CoordinationThreadDetail, reviewAction: "resume_thread" | "queue_next_slice" | "mark_thread_completed") {
-    try {
-      const response = await reviewCoordinationThread(thread.id, reviewAction);
-      setMessage(response.summary || response.status.replace(/_/g, " "));
-      openComposer({
-        thread_id: thread.id,
-        goal_id: thread.goal_id || goalId,
-        application_id: applicationId || payload?.goal?.application_id || undefined,
-      });
-    } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to review thread");
-    }
-  }
+  const planningStatusLabel = !selectedSession
+    ? "Session required"
+    : pendingCheckpoints.length
+      ? "Awaiting approval"
+      : pendingQuestion || pendingOptionSet
+        ? "Awaiting response"
+        : latestDraftPlan
+          ? "Draft plan ready"
+          : titleCaseLabel(String(selectedSession.status || "draft"));
 
-  const selectedFactory = payload?.selected_factory ?? null;
-  const selectedGoal = payload?.goal ?? null;
-  const selectedThread = payload?.thread ?? null;
-  const selectedApplication = payload?.application ?? null;
-  const selectedPlan = payload?.application_plan ?? null;
-  const portfolioInsights = payload?.portfolio_context?.insights || [];
-  const breadcrumbRows = payload?.breadcrumbs || [];
-  const actionableBreadcrumbs = breadcrumbRows.filter(
-    (crumb) => !(crumb.kind === "composer" && breadcrumbRows.length === 1)
-  );
-  const composerView = payload ? deriveComposerViewModel(payload) : null;
-  const storedSelection = composerView ? readComposerStoredSelection(workspaceId) : null;
   const hasExplicitComposerFocus = Boolean(
     factoryKey
     || applicationPlanId
     || applicationId
     || goalId
     || threadId
+    || solutionChangeSessionId
   );
+  const composerView = payload ? deriveComposerViewModel(payload) : null;
+  const storedSelection = composerView ? readComposerStoredSelection(workspaceId) : null;
   const initialSelection = composerView && !hasExplicitComposerFocus
     ? resolveComposerInitialSelection(composerView.containers, storedSelection)
     : null;
@@ -4568,828 +4372,481 @@ function ComposerDetailPanel({
     if (loading || !payload || !composerView || hasExplicitComposerFocus || !initialSelection) return;
     openComposer(initialSelection);
   }, [composerView, hasExplicitComposerFocus, initialSelection, loading, payload]);
-  const currentContainer = composerView?.containers.find((container) =>
-    (applicationId && container.kind === "application" && container.id === applicationId)
-    || (applicationPlanId && container.kind === "application_plan" && container.id === applicationPlanId)
-  ) || null;
-  const currentApplication =
-    currentContainer?.kind === "application" && selectedApplication?.id === currentContainer.id
-      ? selectedApplication
-      : null;
-  const currentPlan =
-    currentContainer?.kind === "application_plan" && selectedPlan?.id === currentContainer.id
-      ? selectedPlan
-      : null;
-  const currentPlanGoals = currentPlan?.generated_goals || currentPlan?.generated_plan?.generated_goals || [];
-  const currentGoal =
-    currentContainer?.kind === "application" && selectedGoal?.application_id === currentContainer.id
-      ? selectedGoal
-      : null;
-  const currentGoalId = currentGoal?.id || "";
-  const selectedContainerGoals = currentContainer?.kind === "application" ? currentContainer.goals : [];
-  const selectedContainerGoalIds = new Set(selectedContainerGoals.map((goal) => goal.id));
-  const selectedContainerThreads = currentContainer?.kind === "application"
-    ? currentContainer.threads
-    : [];
-  const currentThread =
-    currentContainer?.kind === "application" && selectedThread && selectedContainerThreads.some((thread) => thread.id === selectedThread.id)
-      ? selectedThread
-      : null;
-  const currentThreadId = currentThread?.id || "";
-  const currentGoalThreads = currentGoal
-    ? selectedContainerThreads.filter((thread) => thread.goal_id === currentGoal.id)
-    : [];
-  const threadDiagnosticSummary = currentThread?.thread_diagnostic
-    ? currentThread.thread_diagnostic.observations[0]
-      || currentThread.thread_diagnostic.likely_causes[0]
-      || currentThread.thread_diagnostic.provenance?.summary
-      || null
-    : null;
-  const threadNeedsBriefReview = Boolean(
-    currentThread?.thread_diagnostic && [
-      currentThread.thread_diagnostic.suggested_human_review_action,
-      ...currentThread.thread_diagnostic.observations,
-      ...currentThread.thread_diagnostic.likely_causes,
-      threadDiagnosticSummary,
-    ].some((entry) => typeof entry === "string" && /brief review/i.test(entry))
-  );
-  const threadActionGuidance = threadNeedsBriefReview
-    ? "Next step: open the thread work items and review the blocking execution brief before queueing more coding work."
-    : null;
-  const recommendation =
-    currentGoal && currentGoal.recommendation && typeof currentGoal.recommendation === "object"
-      ? currentGoal.recommendation
-      : null;
   useEffect(() => {
-    if (!currentContainer) return;
-    writeComposerStoredSelection(workspaceId, currentContainer.selectionParams);
-  }, [currentContainer, workspaceId]);
-  useEffect(() => {
-    if (!composerView?.containers.length && !hasExplicitComposerFocus) {
-      clearComposerStoredSelection(workspaceId);
-    }
-  }, [composerView?.containers.length, hasExplicitComposerFocus, workspaceId]);
-  const currentWork = currentContainer
-    ? {
-      ...(composerView?.currentContext || { title: "Choose an application effort", statusLabel: "Awaiting selection", latestResult: "", latestActivityAt: null, container: null }),
-      title:
-        currentContainer.kind === "application"
-          ? (currentThread?.title || currentGoal?.title || currentContainer.title)
-          : currentContainer.title,
-      statusLabel:
-        currentContainer.kind === "application"
-          ? (
-            currentThread?.status
-            || (currentGoal?.goal_progress?.goal_progress_status
-              ? formatComposerGoalProgressStatus(currentGoal.goal_progress.goal_progress_status)
-              : null)
-            || currentContainer.statusLabel
-          )
-          : currentContainer.statusLabel,
-      latestResult:
-        currentContainer.kind === "application"
-          ? (
-            currentThread?.thread_diagnostic?.provenance?.summary
-            || currentThread?.thread_diagnostic?.observations?.[0]
-            || currentGoal?.recommendation?.summary
-            || currentContainer.latestResult
-          )
-          : currentContainer.latestResult,
-      latestActivityAt:
-        currentContainer.kind === "application"
-          ? latestTimestamp([
-            currentThread?.updated_at,
-            currentGoal?.updated_at,
-            currentContainer.latestActivityAt,
-          ])
-          : currentContainer.latestActivityAt,
-      container: currentContainer,
-    }
-    : (composerView?.currentContext || {
-      title: "Choose an application effort",
-      statusLabel: "Awaiting selection",
-      latestResult: "Select an application effort to view its goals, threads, and latest workflow state.",
-      latestActivityAt: null,
-      container: null,
+    if (!selectedSession) return;
+    writeComposerStoredSelection(workspaceId, {
+      application_id: selectedSession.application_id,
+      solution_change_session_id: selectedSession.id,
     });
-  const stageSummary = payload ? deriveComposerStageSummary(payload, currentWork) : null;
+  }, [selectedSession, workspaceId]);
 
   if (loading) return <p className="muted">Loading composer…</p>;
   if (error) return <p className="danger-text">{error}</p>;
-  if (!payload || !composerView || !stageSummary) return <p className="muted">Composer state unavailable.</p>;
-  const effortVisibilityKey = (container: ComposerWorkContainer) => `${container.kind}:${container.id}`;
-  const isEffortHidden = (container: ComposerWorkContainer) => Boolean(hiddenEffortIds[effortVisibilityKey(container)]);
-  const visibleEffortCount = (filter: ComposerContainerFilter) =>
-    composerView.containers.filter((container) => {
-      const isHidden = isEffortHidden(container);
-      if (filter === "all") return true;
-      if (filter === "archived") return container.lifecycleState === "archived";
-      if (filter === "failed") return !isHidden && container.lifecycleState === "failed";
-      if (isHidden || container.lifecycleState === "archived") return false;
-      if (container.lifecycleState === "failed" && !container.isCurrent && !container.isMostRecent) return false;
-      if (container.isSuperseded && !container.isCurrent && !container.isMostRecent) return false;
-      return true;
-    }).length;
-  // Active view stays focused on current/recent work and hides locally hidden or stale failed
-  // efforts by default. Older failed/archived efforts remain available through the other tabs.
-  const filteredContainers = composerView.containers.filter((container) => {
-    const isHidden = isEffortHidden(container);
-    if (effortFilter === "all") return true;
-    if (effortFilter === "archived") return container.lifecycleState === "archived";
-    if (effortFilter === "failed") return !isHidden && container.lifecycleState === "failed";
-    if (isHidden || container.lifecycleState === "archived") return false;
-    if (container.lifecycleState === "failed" && !container.isCurrent && !container.isMostRecent) return false;
-    if (container.isSuperseded && !container.isCurrent && !container.isMostRecent) return false;
-    return true;
-  });
-  const latestQuickActionReason = currentThread
-    ? threadActionGuidance || "Review the currently focused thread and decide whether it is safe to queue more coding work."
-    : recommendation
-      ? recommendation.summary
-      : currentWork.latestResult;
-  const showPlanningTools = payload.stage === "factory_discovery" || payload.stage === "plan_review";
+  if (!payload || !composerView) return <p className="muted">Composer state unavailable.</p>;
 
-  function renderLifecycleActions(container: ComposerWorkContainer, options?: { compact?: boolean }) {
-    const isHidden = isEffortHidden(container);
-    const canArchive = container.kind === "application" && container.rawStatus !== "archived";
-    const canCancel = container.kind === "application_plan" && container.rawStatus !== "canceled";
-    const canRestart = Boolean(String(container.requestObjective || "").trim());
+  const withSessionGuard = async (action: () => Promise<void>) => {
+    if (!selectedSession || !selectedSessionId) {
+      setMessage("Open a solution change session to continue planning.");
+      return;
+    }
+    try {
+      await action();
+      await reloadComposerState();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Composer action failed");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const selectedOptionTurnPayload = (turn: any) =>
+    turn && typeof turn.payload === "object" && turn.payload
+      ? turn.payload as Record<string, unknown>
+      : {};
+
+  const selectedOptionResponseBySourceTurn = planningTurns.reduce<Record<string, string>>((acc, turn: any) => {
+    const payloadMap = selectedOptionTurnPayload(turn);
+    if (
+      String(turn.actor || "") === "user"
+      && String(turn.kind || "") === "response"
+      && String(payloadMap.response_kind || "") === "option_selection"
+    ) {
+      const sourceId = String(payloadMap.source_turn_id || "");
+      const optionId = String(payloadMap.option_id || "");
+      if (sourceId && optionId) acc[sourceId] = optionId;
+    }
+    return acc;
+  }, {});
+
+  const renderDraftPlanSummary = (turn: any) => {
+    const payloadMap = selectedOptionTurnPayload(turn);
+    const objectiveText = String(payloadMap.objective || payloadMap.request_text || selectedSession?.request_text || "—");
+    const proposedWork = Array.isArray(payloadMap.selected_artifact_ids)
+      ? payloadMap.selected_artifact_ids.map((value) => String(value || "")).filter(Boolean)
+      : [];
+    const keyImpacts = Array.isArray(payloadMap.shared_contracts)
+      ? payloadMap.shared_contracts.map((value) => String(value || "")).filter(Boolean)
+      : [];
+    const validationSteps = Array.isArray(payloadMap.validation_plan)
+      ? payloadMap.validation_plan.map((value) => String(value || "")).filter(Boolean)
+      : [];
+    const nextAction = pendingCheckpoints.length
+      ? "Review and approve the pending checkpoint before staging."
+      : "Continue to stage apply when ready.";
     return (
-      <div className="inline-action-row" style={{ marginTop: options?.compact ? 8 : 12, flexWrap: "wrap" }}>
-        {canRestart ? (
-          <button type="button" className="ghost sm" onClick={() => void handleRestartEffort(container)}>
-            Start Over
-          </button>
-        ) : null}
-        {canArchive ? (
-          <button type="button" className="ghost sm" onClick={() => void handleArchiveApplication(container)}>
-            Archive
-          </button>
-        ) : null}
-        {canCancel ? (
-          <button type="button" className="ghost sm" onClick={() => void handleCancelPlan(container)}>
-            Mark Obsolete
-          </button>
-        ) : null}
-        <button
-          type="button"
-          className="ghost sm"
-          disabled={container.isCurrent && !isHidden}
-          title={container.isCurrent && !isHidden ? "Select another effort before hiding this one from the default active view." : undefined}
-          onClick={() => {
-            setHiddenEffortIds((current) => {
-              const next = { ...current };
-              const key = effortVisibilityKey(container);
-              if (next[key]) delete next[key];
-              else next[key] = true;
-              return next;
-            });
-          }}
-        >
-          {isHidden ? "Show in Active View" : "Hide from Active View"}
-        </button>
+      <div className="composer-draft-plan">
+        <div><span className="field-label">Objective</span><p>{objectiveText}</p></div>
+        <div>
+          <span className="field-label">Proposed Work</span>
+          {proposedWork.length ? (
+            <ul className="detail-list">
+              {proposedWork.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          ) : (
+            <p className="muted small">No selected artifact set provided yet.</p>
+          )}
+        </div>
+        <div>
+          <span className="field-label">Key Impacts</span>
+          {keyImpacts.length ? (
+            <ul className="detail-list">
+              {keyImpacts.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
+            </ul>
+          ) : (
+            <p className="muted small">No shared contract impacts were listed.</p>
+          )}
+        </div>
+        <div>
+          <span className="field-label">Next Action</span>
+          {validationSteps.length ? (
+            <p>{validationSteps[0]}</p>
+          ) : (
+            <p>{nextAction}</p>
+          )}
+        </div>
       </div>
     );
-  }
+  };
 
   return (
     <div className="panel-section-stack">
       <section className="card">
         <div className="card-header">
           <div>
-            <div className="field-label">Current application effort</div>
-            <div className="field-value">{currentWork.title}</div>
+            <div className="field-label">Planning Session</div>
+            <div className="field-value">{selectedSession?.title || "No solution session selected"}</div>
           </div>
-        </div>
-        <div className="composer-stage-strip" role="status" aria-live="polite">
-          <div className="composer-stage-strip__header">
-            <span className="field-label">Current workflow step</span>
-            <span className="pill ghost">{stageSummary.label}</span>
-          </div>
-          <p className="composer-stage-strip__explanation">{stageSummary.explanation}</p>
-          <p className="composer-stage-strip__next-step">
-            <strong>Next:</strong> {stageSummary.nextStep}
-          </p>
         </div>
         <div className="detail-grid">
-          <div><div className="field-label">Overall state</div><div className="field-value">{titleCaseLabel(currentWork.statusLabel)}</div></div>
-          <div><div className="field-label">Selected item</div><div className="field-value">{currentContainer ? `${currentContainer.kind === "application" ? "Application" : "Application plan"} · ${currentContainer.title}` : "No application effort selected"}</div></div>
-          <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(currentWork.latestActivityAt)}</div></div>
+          <div><div className="field-label">Solution / Session</div><div className="field-value">{selectedSession?.title || "Open a solution change session from Solution Detail."}</div></div>
+          <div><div className="field-label">Planning status</div><div className="field-value">{planningStatusLabel}</div></div>
+          <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(latestActivityAt)}</div></div>
         </div>
-        <p className="muted" style={{ marginTop: 12 }}>{currentWork.latestResult}</p>
-        {actionableBreadcrumbs.length ? (
-          <div className="inline-action-row" style={{ flexWrap: "wrap", marginTop: 8 }}>
-            {actionableBreadcrumbs.map((crumb, index) => (
+        {!pendingQuestion ? (
+          <>
+            <p className="muted small" style={{ marginTop: 10, marginBottom: 8 }}>
+              Request a change for the selected solution session.
+            </p>
+            <textarea
+              className="input"
+              rows={3}
+              value={requestDraft}
+              onChange={(event) => setRequestDraft(event.target.value)}
+              placeholder="Describe the change you want planned."
+            />
+            <div className="inline-action-row" style={{ marginTop: 10 }}>
               <button
-                key={`${crumb.kind}:${crumb.id || index}`}
                 type="button"
                 className="ghost sm"
+                disabled={!selectedSession || busyAction === "request" || !requestDraft.trim()}
                 onClick={() => {
-                  if (crumb.kind === "factory" && crumb.id) openComposer({ factory_key: crumb.id });
-                  else if (crumb.kind === "application_plan" && crumb.id) openComposer({ application_plan_id: crumb.id });
-                  else if (crumb.kind === "application" && crumb.id) openComposer({ application_id: crumb.id });
-                  else if (crumb.kind === "goal" && crumb.id) openComposer({ goal_id: crumb.id });
-                  else if (crumb.kind === "thread" && crumb.id) openComposer({ thread_id: crumb.id });
+                  const trimmed = requestDraft.trim();
+                  if (!trimmed || !selectedSession) return;
+                  setBusyAction("request");
+                  void withSessionGuard(async () => {
+                    const response = await replyToSolutionPlanningSession(
+                      String(selectedSession.application_id),
+                      String(selectedSession.id),
+                      { reply_text: trimmed, source_turn_id: undefined }
+                    );
+                    mergeUpdatedSession(response.session);
+                    setRequestDraft("");
+                    setMessage("Recorded change request.");
+                  });
                 }}
               >
-                {crumb.label}
+                Submit Request
               </button>
-            ))}
-          </div>
-        ) : null}
-        <div className="inline-action-row" style={{ marginTop: 12, flexWrap: "wrap" }}>
-          {currentPlan ? (
-            <button type="button" className="ghost sm" disabled={currentPlan.status === "applied"} onClick={() => handleApplyPlan(currentPlan.id)}>
-              Apply Plan
-            </button>
-          ) : null}
-          {currentGoal ? (
-            <button
-              type="button"
-              className="ghost sm"
-              disabled={!recommendation}
-              onClick={() => recommendation && handleApproveNextSlice(currentGoal, String(recommendation.recommendation_id || ""))}
-            >
-              Approve Next Slice
-            </button>
-          ) : null}
-          {currentThread ? (
-            <button type="button" className="ghost sm" onClick={() => onOpenPanel("thread_detail", { thread_id: currentThread.id })}>
-              Review Work Items
-            </button>
-          ) : null}
-        </div>
-        <p className="muted small" style={{ marginTop: 8 }}>{latestQuickActionReason}</p>
-        {!currentContainer ? (
-          <p className="muted small" style={{ marginTop: 8 }}>
-            Composer is not focused on a single effort yet. Choose one from the list below to see its work goals, execution threads, and next steps.
+            </div>
+          </>
+        ) : (
+          <p className="muted small" style={{ marginTop: 10 }}>
+            A planner clarification is pending below. Respond there to continue.
           </p>
-        ) : null}
-        {currentContainer ? renderLifecycleActions(currentContainer, { compact: true }) : null}
+        )}
         {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
+      </section>
+
+      <section className="card composer-planning-card">
+        <div className="card-header">
+          <div>
+            <div className="field-label">Planning Conversation</div>
+            <div className="field-value">Structured planning timeline</div>
+          </div>
+        </div>
+        {!selectedSession ? (
+          <p className="muted">
+            Select a solution change session from Solution Detail to review and approve planning interactions.
+          </p>
+        ) : (
+          <ol className="composer-planning-timeline">
+            {planningTurns.map((turn: any) => {
+              const payloadMap = selectedOptionTurnPayload(turn);
+              const isQuestionTurn = String(turn.kind || "") === "question";
+              const isOptionTurn = String(turn.kind || "") === "option_set";
+              const isDraftPlanTurn = String(turn.kind || "") === "draft_plan";
+              const isCheckpointTurn = String(turn.kind || "") === "checkpoint";
+              const isPendingQuestionTurn = String(pendingQuestion?.id || "") === String(turn.id || "");
+              const isPendingOptionTurn = String(pendingOptionSet?.id || "") === String(turn.id || "");
+              const checkpointId = String(payloadMap.checkpoint_id || "");
+              const checkpoint = checkpointId
+                ? pendingCheckpoints.find((entry: any) => String(entry.id) === checkpointId)
+                || (planning?.checkpoints || []).find((entry: any) => String(entry.id) === checkpointId)
+                : null;
+              const options = Array.isArray(payloadMap.options) ? payloadMap.options : [];
+              const selectedOptionId = selectedOptionByTurn[String(turn.id)] || selectedOptionResponseBySourceTurn[String(turn.id)] || "";
+
+              return (
+                <li key={String(turn.id)} className={`composer-planning-turn turn-${String(turn.actor || "unknown")} turn-kind-${String(turn.kind || "unknown")}`}>
+                  <div className="composer-planning-turn__meta">
+                    <span className="pill ghost">{String(turn.actor || "planner") === "planner" ? "Planner" : "You"}</span>
+                    <span className="pill">{titleCaseLabel(String(turn.kind || "update"))}</span>
+                    <span className="muted small">{formatPanelTimestamp(String(turn.created_at || ""))}</span>
+                  </div>
+                  {String(turn.actor || "") === "user" && String(turn.kind || "") !== "approval" ? (
+                    <p className="composer-planning-turn__body">{String(payloadMap.reply_text || payloadMap.request_text || "Response recorded.")}</p>
+                  ) : null}
+                  {isQuestionTurn ? (
+                    <>
+                      <p className="composer-planning-turn__body">{String(payloadMap.question || "Planner requested clarification.")}</p>
+                      {isPendingQuestionTurn ? (
+                        <div className="composer-planning-action-block">
+                          <textarea
+                            className="input"
+                            rows={3}
+                            value={questionReplyDraft}
+                            onChange={(event) => setQuestionReplyDraft(event.target.value)}
+                            placeholder="Reply to planner question."
+                          />
+                          <div className="inline-action-row" style={{ marginTop: 8 }}>
+                            <button
+                              type="button"
+                              className="ghost sm"
+                              disabled={busyAction === `reply:${turn.id}` || !questionReplyDraft.trim()}
+                              onClick={() => {
+                                if (!selectedSession || !questionReplyDraft.trim()) return;
+                                setBusyAction(`reply:${turn.id}`);
+                                void withSessionGuard(async () => {
+                                  const response = await replyToSolutionPlanningSession(
+                                    String(selectedSession.application_id),
+                                    String(selectedSession.id),
+                                    { reply_text: questionReplyDraft.trim(), source_turn_id: String(turn.id) }
+                                  );
+                                  mergeUpdatedSession(response.session);
+                                  setQuestionReplyDraft("");
+                                  setMessage("Reply recorded.");
+                                });
+                              }}
+                            >
+                              Submit Reply
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {isOptionTurn ? (
+                    <div className="composer-planning-action-block">
+                      <p className="composer-planning-turn__body">{String(payloadMap.question || payloadMap.prompt || "Select one planning option.")}</p>
+                      <div className="composer-option-list">
+                        {options.map((option: any, index: number) => {
+                          const optionId = String(option?.id || `option-${index}`);
+                          const optionLabel = String(option?.label || optionId);
+                          const optionDescription = String(option?.description || "");
+                          return (
+                            <label key={optionId} className="composer-option-item">
+                              <input
+                                type="radio"
+                                name={`planner-option-${turn.id}`}
+                                checked={selectedOptionId === optionId}
+                                onChange={() => setSelectedOptionByTurn((current) => ({ ...current, [String(turn.id)]: optionId }))}
+                              />
+                              <span>
+                                <strong>{optionLabel}</strong>
+                                {optionDescription ? <span className="muted small">{optionDescription}</span> : null}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                      <div className="inline-action-row" style={{ marginTop: 8 }}>
+                        <button
+                          type="button"
+                          className="ghost sm"
+                          disabled={!isPendingOptionTurn || busyAction === `option:${turn.id}` || !selectedOptionId}
+                          onClick={() => {
+                            if (!selectedSession || !selectedOptionId) return;
+                            setBusyAction(`option:${turn.id}`);
+                            void withSessionGuard(async () => {
+                              const response = await selectSolutionPlanningOption(
+                                String(selectedSession.application_id),
+                                String(selectedSession.id),
+                                {
+                                  option_id: selectedOptionId,
+                                  source_turn_id: String(turn.id),
+                                }
+                              );
+                              mergeUpdatedSession(response.session);
+                              setMessage("Option selected.");
+                            });
+                          }}
+                        >
+                          Select Option
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {isDraftPlanTurn ? renderDraftPlanSummary(turn) : null}
+                  {isCheckpointTurn ? (
+                    <div className="composer-planning-action-block">
+                      <p className="composer-planning-turn__body">
+                        {String(payloadMap.label || "Approval checkpoint")}
+                        {" · "}
+                        Required before {String(payloadMap.required_before || "stage")}
+                      </p>
+                      <p className="muted small">Current status: {titleCaseLabel(String(checkpoint?.status || payloadMap.status || "pending"))}</p>
+                      {checkpoint && String(checkpoint.status || "") === "pending" ? (
+                        <>
+                          <textarea
+                            className="input"
+                            rows={2}
+                            value={checkpointNotes[String(checkpoint.id)] || ""}
+                            onChange={(event) =>
+                              setCheckpointNotes((current) => ({ ...current, [String(checkpoint.id)]: event.target.value }))
+                            }
+                            placeholder="Optional decision note."
+                          />
+                          <div className="inline-action-row" style={{ marginTop: 8 }}>
+                            <button
+                              type="button"
+                              className="ghost sm"
+                              disabled={busyAction === `checkpoint-approve:${checkpoint.id}`}
+                              onClick={() => {
+                                if (!selectedSession) return;
+                                setBusyAction(`checkpoint-approve:${checkpoint.id}`);
+                                void withSessionGuard(async () => {
+                                  const response = await decideSolutionPlanningCheckpoint(
+                                    String(selectedSession.application_id),
+                                    String(selectedSession.id),
+                                    String(checkpoint.id),
+                                    {
+                                      decision: "approved",
+                                      notes: checkpointNotes[String(checkpoint.id)] || "",
+                                    }
+                                  );
+                                  mergeUpdatedSession(response.session);
+                                  setMessage("Checkpoint approved.");
+                                });
+                              }}
+                            >
+                              Approve
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost sm"
+                              disabled={busyAction === `checkpoint-reject:${checkpoint.id}`}
+                              onClick={() => {
+                                if (!selectedSession) return;
+                                setBusyAction(`checkpoint-reject:${checkpoint.id}`);
+                                void withSessionGuard(async () => {
+                                  const response = await decideSolutionPlanningCheckpoint(
+                                    String(selectedSession.application_id),
+                                    String(selectedSession.id),
+                                    String(checkpoint.id),
+                                    {
+                                      decision: "rejected",
+                                      notes: checkpointNotes[String(checkpoint.id)] || "",
+                                    }
+                                  );
+                                  mergeUpdatedSession(response.session);
+                                  setMessage("Checkpoint rejected.");
+                                });
+                              }}
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {String(turn.kind || "") === "approval" ? (
+                    <p className="composer-planning-turn__body">
+                      Approval decision: {titleCaseLabel(String(payloadMap.decision || "recorded"))}
+                    </p>
+                  ) : null}
+                </li>
+              );
+            })}
+            {!planningTurns.length ? (
+              <li className="composer-planning-turn">
+                <p className="muted">No planning interaction history has been recorded yet.</p>
+              </li>
+            ) : null}
+          </ol>
+        )}
       </section>
 
       <section className="card">
         <div className="card-header">
           <div>
-            <div className="field-label">Application efforts</div>
-            <div className="field-value">Choose the application or plan you want to continue</div>
+            <div className="field-label">Execution Handoff</div>
+            <div className="field-value">Stage and validation controls</div>
           </div>
         </div>
-        <p className="muted" style={{ marginBottom: 12 }}>
-          Composer groups work by application effort first so each work goal and execution thread is shown under the application or plan it belongs to.
-        </p>
-        <div className="inline-action-row" style={{ marginBottom: 12, flexWrap: "wrap" }}>
-          {(["active", "failed", "archived", "all"] as ComposerContainerFilter[]).map((filter) => (
-            <button
-              key={filter}
-              type="button"
-              className={effortFilter === filter ? "primary sm" : "ghost sm"}
-              aria-pressed={effortFilter === filter}
-              onClick={() => setEffortFilter(filter)}
-            >
-              {filter === "active" ? "Active" : filter === "failed" ? "Failed" : filter === "archived" ? "Archived" : "All"} ({visibleEffortCount(filter)})
-            </button>
-          ))}
-        </div>
-        <div className="composer-effort-grid">
-          {filteredContainers.map((container) => (
-            <article
-              key={`${container.kind}:${container.id}`}
-              className={`composer-effort-card${container.isCurrent ? " is-current" : ""}`}
-            >
-              <div className="composer-effort-header">
-                <div>
-                  <div className="field-label">{container.kind === "application" ? "Application" : "Application plan"}</div>
-                  <h3>{container.title}</h3>
-                </div>
-                <div className="composer-effort-badges">
-                  <span className="pill">{container.statusLabel}</span>
-                  <span className="pill ghost">{container.recencyLabel}</span>
-                  {container.isSuperseded ? <span className="pill ghost">Superseded</span> : null}
-                  {isEffortHidden(container) ? <span className="pill ghost">Hidden</span> : null}
-                </div>
-              </div>
-              <p className="composer-effort-summary">{container.promptSummary}</p>
-              <div className="composer-effort-meta">
-                <span><strong>Updated</strong> {formatPanelTimestamp(container.latestActivityAt)}</span>
-                <span><strong>Work goals</strong> {container.goalCount}</span>
-                <span><strong>Execution threads</strong> {container.threadCount}</span>
-              </div>
-              <p className="muted small">{container.latestResult}</p>
-              {container.kind === "application" ? (
-                <div className="composer-effort-children">
-                  <div className="field-label">Work goals for this application</div>
-                  {container.goals.length ? (
-                    <ul className="detail-list composer-effort-goal-list">
-                      {container.goals.slice(0, 4).map((goal) => (
-                        <li key={goal.id}>
-                          <div className="composer-effort-goal-copy">
-                            <strong>{goal.title}</strong> · {formatComposerGoalProgressStatus(goal.goal_progress_status || goal.planning_status || "planned")} · {formatComposerCountLabel(goal.threads.length, "execution thread")}
-                          </div>
-                          <div className="inline-action-row composer-effort-goal-actions">
-                            <button
-                              type="button"
-                              className="ghost sm"
-                              onClick={() => openComposer({ application_id: container.id, goal_id: goal.id })}
-                            >
-                              Open goal
-                            </button>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="muted small">
-                      {container.goalCount > 0
-                        ? "This application already has work goals, but you need to open the effort to inspect them in detail."
-                        : "No work goals are attached yet."}
-                    </p>
-                  )}
-                </div>
-              ) : null}
-              <div className="inline-action-row" style={{ marginTop: 12 }}>
-                <button
-                  type="button"
-                  className="ghost sm"
-                  disabled={container.isCurrent}
-                  title={container.isCurrent ? "This application effort is already selected." : undefined}
-                  onClick={() => openComposer(container.selectionParams)}
-                >
-                  {container.isCurrent ? "Current effort" : "Open effort"}
-                </button>
-              </div>
-              {renderLifecycleActions(container)}
-            </article>
-          ))}
-          {!filteredContainers.length ? (
-            <p className="muted">
-              {effortFilter === "active"
-                ? "No current application efforts are visible. Switch filters to inspect archived or older blocked work."
-                : effortFilter === "failed"
-                  ? "No blocked or failed efforts are currently visible."
-                  : effortFilter === "archived"
-                    ? "No archived efforts are currently visible."
-                    : "No application efforts have been created in this workspace yet."}
-            </p>
-          ) : null}
-        </div>
-      </section>
-
-      {composerView.unlinkedGoals.length || composerView.unlinkedThreads.length ? (
-        <section className="card">
-          <div className="card-header">
-            <div>
-              <div className="field-label">Unlinked work</div>
-              <div className="field-value">Older coordination items that are not attached to a current application effort</div>
-            </div>
-          </div>
-          <p className="muted" style={{ marginBottom: 12 }}>
-            These items could not be attached to a durable application effort from the current payload, so Composer keeps them separate instead of implying they belong to the selected application.
-          </p>
-          {composerView.unlinkedGoals.length ? (
-            <>
-              <div className="field-label">Work goals</div>
-              <div className="canvas-table-wrap">
-                <table className="canvas-table">
-                  <thead>
-                    <tr>
-                      <th>Goal</th>
-                      <th>Status</th>
-                      <th>Updated</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {composerView.unlinkedGoals.map((goal) => (
-                      <tr key={goal.id}>
-                        <td>{goal.title}</td>
-                        <td>{formatComposerGoalProgressStatus(goal.goal_progress_status || goal.planning_status)}</td>
-                        <td>{formatPanelTimestamp(goal.updated_at)}</td>
-                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: goal.id })}>Open goal</button></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          ) : null}
-          {composerView.unlinkedThreads.length ? (
-            <>
-              <div className="field-label" style={{ marginTop: 12 }}>Execution threads</div>
-              <div className="canvas-table-wrap">
-                <table className="canvas-table">
-                  <thead>
-                    <tr>
-                      <th>Thread</th>
-                      <th>Status</th>
-                      <th>Goal</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {composerView.unlinkedThreads.map((thread) => (
-                      <tr key={thread.id}>
-                        <td>{thread.title}</td>
-                        <td>{formatComposerThreadStatus(thread.status)}</td>
-                        <td>{thread.goal_title || "—"}</td>
-                        <td><button type="button" className="ghost sm" onClick={() => openComposer({ goal_id: thread.goal_id || undefined, thread_id: thread.id })}>Open thread</button></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          ) : null}
-        </section>
-      ) : null}
-
-      {showPlanningTools && (
-        <section className="card">
-          <div className="field-label">Start a new application plan</div>
-          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
-            Describe what you want to build. Composer will turn that request into a reviewable implementation plan.
-          </p>
-          <textarea
-            className="input"
-            value={objective}
-            onChange={(event) => setObjective(event.target.value)}
-            placeholder="Describe the application you want Xyn to plan."
-            rows={4}
-          />
-          <div className="inline-action-row" style={{ marginTop: 12 }}>
-            <button type="button" className="ghost sm" onClick={() => handleGeneratePlan(selectedFactory?.key)}>
-              Build plan
-            </button>
-          </div>
-        </section>
-      )}
-
-      {showPlanningTools && (
-        <section className="card">
-          <div className="field-label">Starting templates</div>
-          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
-            Starting templates help Composer choose the right structure for a new application before detailed planning begins.
-          </p>
-          <div className="canvas-table-wrap">
-            <table className="canvas-table">
-              <thead>
-                <tr>
-                  <th>Template</th>
-                  <th>Description</th>
-                  <th>Best For</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {payload.factory_catalog.map((factory) => (
-                  <tr key={factory.key}>
-                    <td>{factory.name}</td>
-                    <td>{factory.description}</td>
-                    <td>{factory.intended_use_case || "—"}</td>
-                    <td>
-                      <button type="button" className="ghost sm" onClick={() => openComposer({ factory_key: factory.key })}>
-                        Use template
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {currentPlan ? (
-        <section className="card">
-          <div className="card-header"><div><div className="field-label">Selected application plan</div></div></div>
-          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
-            This is the reviewable plan for the selected application effort. Review it, then apply it when you are ready to create durable work.
-          </p>
-          <div className="detail-grid">
-            <div><div className="field-label">Plan</div><div className="field-value">{currentPlan.name}</div></div>
-            <div><div className="field-label">Starting template</div><div className="field-value">{currentPlan.factory?.name || currentPlan.source_factory_key}</div></div>
-            <div><div className="field-label">Status</div><div className="field-value">{formatComposerPlanningStatus(currentPlan.status)}</div></div>
-            <div><div className="field-label">Planned work goals</div><div className="field-value">{currentPlanGoals.length}</div></div>
-          </div>
-          <p className="muted" style={{ marginTop: 12 }}>{currentPlan.summary}</p>
-          <div className="inline-action-row" style={{ marginTop: 12 }}>
-            <button type="button" className="ghost sm" disabled={currentPlan.status === "applied"} onClick={() => handleApplyPlan(currentPlan.id)}>
-              Apply plan
-            </button>
-          </div>
-          {currentContainer?.kind === "application_plan" ? renderLifecycleActions(currentContainer) : null}
-        </section>
-      ) : null}
-
-      {currentApplication ? (
-        <section className="card">
-          <div className="card-header"><div><div className="field-label">Selected application overview</div></div></div>
-          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
-            This is the currently selected application effort and its overall coordination state.
-          </p>
-          <div className="detail-grid">
-            <div><div className="field-label">Application</div><div className="field-value">{currentApplication.name}</div></div>
-            <div><div className="field-label">Starting template</div><div className="field-value">{currentApplication.source_factory_key}</div></div>
-            <div><div className="field-label">Status</div><div className="field-value">{titleCaseLabel(currentContainer?.statusLabel || currentApplication.status)}</div></div>
-            <div><div className="field-label">Work goals</div><div className="field-value">{currentApplication.goals.length}</div></div>
-          </div>
-          {currentApplication.portfolio_state?.recommended_goal ? (
-            <InlineMessage
-              tone="info"
-              title={`Recommended work goal: ${currentApplication.portfolio_state.recommended_goal.title}`}
-              body={currentApplication.portfolio_state.recommended_goal.summary}
-            />
-          ) : null}
-          {currentApplication.portfolio_state?.recommended_goal?.goal_id ? (
-            <div className="inline-action-row" style={{ marginTop: 12, flexWrap: "wrap" }}>
+        {!selectedSession ? (
+          <p className="muted">Execution actions are available after selecting a solution change session.</p>
+        ) : (
+          <>
+            {pendingCheckpoints.length ? (
+              <InlineMessage
+                tone="warn"
+                title="Awaiting planning approval"
+                body="A checkpoint is pending. Stage/apply actions remain blocked until approval is recorded."
+              />
+            ) : null}
+            <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
               <button
                 type="button"
                 className="ghost sm"
-                onClick={() =>
-                  openComposer({
-                    application_id: currentApplication.id,
-                    goal_id: currentApplication.portfolio_state?.recommended_goal?.goal_id,
-                  })}
+                disabled={busyAction === "generate-plan"}
+                onClick={() => {
+                  setBusyAction("generate-plan");
+                  void withSessionGuard(async () => {
+                    const response = await generateSolutionChangePlan(
+                      String(selectedSession.application_id),
+                      String(selectedSession.id)
+                    );
+                    mergeUpdatedSession(response.session);
+                    setMessage("Draft plan generated.");
+                  });
+                }}
               >
-                Open recommended goal
+                Generate Draft Plan
+              </button>
+              <button
+                type="button"
+                className="ghost sm"
+                disabled={pendingCheckpoints.length > 0 || busyAction === "stage-apply"}
+                onClick={() => {
+                  setBusyAction("stage-apply");
+                  void withSessionGuard(async () => {
+                    const response = await stageSolutionChangeApply(
+                      String(selectedSession.application_id),
+                      String(selectedSession.id)
+                    );
+                    mergeUpdatedSession(response.session);
+                    setMessage("Stage apply completed.");
+                  });
+                }}
+              >
+                Stage Apply
+              </button>
+              <button
+                type="button"
+                className="ghost sm"
+                disabled={pendingCheckpoints.length > 0 || busyAction === "prepare-preview"}
+                onClick={() => {
+                  setBusyAction("prepare-preview");
+                  void withSessionGuard(async () => {
+                    const response = await prepareSolutionChangePreview(
+                      String(selectedSession.application_id),
+                      String(selectedSession.id)
+                    );
+                    mergeUpdatedSession(response.session);
+                    setMessage("Preview preparation completed.");
+                  });
+                }}
+              >
+                Prepare Preview
+              </button>
+              <button
+                type="button"
+                className="ghost sm"
+                disabled={busyAction === "validate"}
+                onClick={() => {
+                  setBusyAction("validate");
+                  void withSessionGuard(async () => {
+                    const response = await validateSolutionChangeSession(
+                      String(selectedSession.application_id),
+                      String(selectedSession.id)
+                    );
+                    mergeUpdatedSession(response.session);
+                    setMessage("Validation completed.");
+                  });
+                }}
+              >
+                Validate
               </button>
             </div>
-          ) : null}
-          {currentContainer?.kind === "application" ? renderLifecycleActions(currentContainer) : null}
-        </section>
-      ) : null}
-
-      {currentApplication && Array.isArray(payload?.solution_change_sessions) && payload.solution_change_sessions.length ? (
-        <section className="card">
-          <div className="field-label">Solution change sessions</div>
-          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
-            Application-level cross-artifact planning sessions. Open one to continue impacted-artifact review in Composer context.
-          </p>
-          <div className="canvas-table-wrap">
-            <table className="canvas-table">
-              <thead>
-                <tr>
-                  <th>Session</th>
-                  <th>Status</th>
-                  <th>Selected Artifacts</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {payload.solution_change_sessions.map((session: any) => (
-                  <tr key={String(session.id)}>
-                    <td>{String(session.title || "Change Session")}</td>
-                    <td>{titleCaseLabel(String(session.status || "draft"))}</td>
-                    <td>{Array.isArray(session.selected_artifact_ids) ? session.selected_artifact_ids.length : 0}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="ghost sm"
-                        onClick={() =>
-                          openComposer({
-                            application_id: currentApplication.id,
-                            solution_change_session_id: String(session.id || ""),
-                          })}
-                      >
-                        Open session
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      ) : null}
-
-      {selectedContainerGoals.length ? (
-        <section className="card">
-          <div className="field-label">Work goals for this application</div>
-          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
-            Work goals break the application effort into meaningful outcomes. Open one to review recommendations and next steps.
-          </p>
-          <div className="canvas-table-wrap">
-            <table className="canvas-table">
-              <thead>
-                <tr>
-                  <th>Work goal</th>
-                  <th>Planning</th>
-                  <th>Progress</th>
-                  <th>Threads</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {selectedContainerGoals.map((goal) => (
-                  <tr key={goal.id}>
-                    <td>{goal.title}</td>
-                    <td>{formatComposerPlanningStatus(goal.planning_status)}</td>
-                    <td>{goal.goal_progress_status ? formatComposerGoalProgressStatus(goal.goal_progress_status) : "Not started"}</td>
-                    <td>{goal.threads.length || goal.thread_count}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="ghost sm"
-                        disabled={currentGoalId === goal.id}
-                        title={currentGoalId === goal.id ? "This goal is already focused." : undefined}
-                        onClick={() => openComposer({ application_id: currentApplication?.id, goal_id: goal.id })}
-                      >
-                        {currentGoalId === goal.id ? "Current goal" : "Open goal"}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      ) : null}
-
-      {currentGoal ? (
-        <section className="card">
-          <div className="card-header"><div><div className="field-label">Selected work goal</div></div></div>
-          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
-            This section explains the current goal, how far it has progressed, and the next slice of work Composer recommends.
-          </p>
-          <div className="detail-grid">
-            <div><div className="field-label">Work goal</div><div className="field-value">{currentGoal.title}</div></div>
-            <div><div className="field-label">Planning status</div><div className="field-value">{formatComposerPlanningStatus(currentGoal.planning_status)}</div></div>
-            <div><div className="field-label">Progress</div><div className="field-value">{currentGoal.goal_progress?.goal_progress_status ? formatComposerGoalProgressStatus(currentGoal.goal_progress.goal_progress_status) : "Not started"}</div></div>
-            <div><div className="field-label">Execution threads</div><div className="field-value">{currentGoal.threads.length}</div></div>
-          </div>
-          {recommendation ? (
-            <InlineMessage
-              tone="info"
-              title={`Recommended next slice${recommendation.thread_title ? `: ${recommendation.thread_title}` : ""}`}
-              body={recommendation.reasoning_summary || recommendation.summary || ""}
-            />
-          ) : null}
-          <div className="inline-action-row" style={{ marginTop: 12 }}>
-            <button
-              type="button"
-              className="ghost sm"
-              disabled={!recommendation}
-              onClick={() => recommendation && handleApproveNextSlice(currentGoal, String(recommendation.recommendation_id || ""))}
-            >
-              Approve next slice
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {selectedContainerThreads.length ? (
-        <section className="card">
-          <div className="field-label">Execution threads for this application</div>
-          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
-            Execution threads organize the ongoing implementation work for this application. Open one to inspect work items and dispatch status.
-          </p>
-          <div className="canvas-table-wrap">
-            <table className="canvas-table">
-              <thead>
-                <tr>
-                  <th>Execution thread</th>
-                  <th>Status</th>
-                  <th>Ready</th>
-                  <th>Blocked</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {selectedContainerThreads.map((thread) => (
-                  <tr key={thread.id}>
-                    <td>{thread.title}</td>
-                    <td>{formatComposerThreadStatus(thread.status)}</td>
-                    <td>{thread.queued_work_items}</td>
-                    <td>{thread.awaiting_review_work_items + thread.failed_work_items}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="ghost sm"
-                        disabled={currentThreadId === thread.id}
-                        title={currentThreadId === thread.id ? "This thread is already focused." : undefined}
-                        onClick={() =>
-                          openComposer({
-                            application_id: currentApplication?.id || currentGoal?.application_id || undefined,
-                            goal_id: currentGoal?.id || thread.goal_id || undefined,
-                            thread_id: thread.id,
-                          })
-                        }
-                      >
-                        {currentThreadId === thread.id ? "Current thread" : "Open thread"}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      ) : null}
-
-      {currentGoalThreads.length ? (
-        <section className="card">
-          <div className="field-label">Execution threads for this work goal</div>
-          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
-            These are the execution threads contributing to the selected work goal.
-          </p>
-          <div className="canvas-table-wrap">
-            <table className="canvas-table">
-              <thead>
-                <tr>
-                  <th>Execution thread</th>
-                  <th>Status</th>
-                  <th>Ready</th>
-                  <th>Blocked</th>
-                </tr>
-              </thead>
-              <tbody>
-                {currentGoalThreads.map((thread) => (
-                  <tr key={thread.id}>
-                    <td>{thread.title}</td>
-                    <td>{formatComposerThreadStatus(thread.status)}</td>
-                    <td>{thread.queued_work_items}</td>
-                    <td>{thread.awaiting_review_work_items + thread.failed_work_items}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      ) : null}
-
-      {currentThread ? (
-        <section className="card">
-          <div className="card-header"><div><div className="field-label">Selected execution thread</div></div></div>
-          <p className="muted small" style={{ marginTop: 0, marginBottom: 12 }}>
-            This thread shows the current line of implementation work, whether it is moving, and what you can do next.
-          </p>
-          <div className="detail-grid">
-            <div><div className="field-label">Execution thread</div><div className="field-value">{currentThread.title}</div></div>
-            <div><div className="field-label">Status</div><div className="field-value">{formatComposerThreadStatus(currentThread.status)}</div></div>
-            <div><div className="field-label">Completed</div><div className="field-value">{currentThread.work_items_completed}</div></div>
-            <div><div className="field-label">Blocked</div><div className="field-value">{currentThread.work_items_blocked}</div></div>
-          </div>
-          {threadDiagnosticSummary ? (
-            <InlineMessage tone="info" title="Execution thread summary" body={threadDiagnosticSummary} />
-          ) : null}
-          {threadActionGuidance ? (
-            <InlineMessage tone="warn" title="Review Required Before Resuming" body={threadActionGuidance} />
-          ) : null}
-          <div className="inline-action-row" style={{ marginTop: 12 }}>
-            <button
-              type="button"
-              className="ghost sm"
-              disabled={currentThread.status === "active"}
-              title={currentThread.status === "active" ? "This thread is already active." : undefined}
-              onClick={() => handleThreadReview(currentThread, "resume_thread")}
-            >
-              Resume thread
-            </button>
-            <button
-              type="button"
-              className="ghost sm"
-              disabled={currentThread.status !== "active" || threadNeedsBriefReview}
-              title={
-                threadNeedsBriefReview
-                  ? "Review the blocking execution brief before queueing the next slice."
-                  : currentThread.status !== "active"
-                    ? "Queueing the next slice requires an active thread."
-                    : undefined
-              }
-              onClick={() => handleThreadReview(currentThread, "queue_next_slice")}
-            >
-              Queue next slice
-            </button>
-            <button
-              type="button"
-              className="ghost sm"
-              disabled={currentThread.status === "completed"}
-              title={currentThread.status === "completed" ? "This thread is already completed." : undefined}
-              onClick={() => handleThreadReview(currentThread, "mark_thread_completed")}
-            >
-              Mark thread completed
-            </button>
-            <button type="button" className="ghost sm" onClick={() => onOpenPanel("thread_detail", { thread_id: currentThread.id })}>
-              Review work items
-            </button>
-          </div>
-        </section>
-      ) : null}
-
-      {payload.portfolio_context ? (
-        <section className="card">
-          <div className="field-label">Other related work</div>
-          <p className="muted small" style={{ marginTop: 8, marginBottom: 12 }}>
-            This section shows nearby work that may affect the selected application effort, without implying it is the current focus.
-          </p>
-          <div className="detail-grid">
-            <div><div className="field-label">Work goals</div><div className="field-value">{payload.portfolio_context.goals.length}</div></div>
-            <div><div className="field-label">Insights</div><div className="field-value">{portfolioInsights.length}</div></div>
-            <div><div className="field-label">Recommended work goal</div><div className="field-value">{payload.portfolio_context.recommended_goal?.title || "—"}</div></div>
-          </div>
-        </section>
-      ) : null}
+            <p className="muted small" style={{ marginTop: 8 }}>
+              {pendingCheckpoints.length
+                ? "Execution is blocked while approvals are pending."
+                : "Execution actions are available for this session."}
+            </p>
+          </>
+        )}
+      </section>
     </div>
   );
 }
@@ -5482,55 +4939,10 @@ export default function WorkbenchPanelHost({
   onContextChange?: ContextEmitter;
 }) {
   const [resolvedTitle, setResolvedTitle] = useState("");
-  const [systemReadiness, setSystemReadiness] = useState<SystemReadinessResponse | null>(null);
-  const [aiRoutingStatus, setAiRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
-
-  const refreshAiRoutingStatus = useCallback(() => {
-    getAiRoutingStatus()
-      .then((next) => {
-        setAiRoutingStatus(next);
-      })
-      .catch(() => {
-        setAiRoutingStatus(null);
-      });
-  }, []);
 
   useEffect(() => {
     setResolvedTitle("");
   }, [panel?.panel_id, panel?.key]);
-
-  useEffect(() => {
-    let active = true;
-    getSystemReadiness()
-      .then((next) => {
-        if (active) setSystemReadiness(next);
-      })
-      .catch(() => {
-        if (active) setSystemReadiness(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [workspaceId]);
-
-  useEffect(() => {
-    refreshAiRoutingStatus();
-  }, [refreshAiRoutingStatus, workspaceId]);
-
-  useEffect(() => {
-    const onRoutingUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{ routing?: AiRoutingStatusResponse }>).detail;
-      if (detail?.routing) {
-        setAiRoutingStatus(detail.routing);
-        return;
-      }
-      refreshAiRoutingStatus();
-    };
-    window.addEventListener(AI_ROUTING_UPDATED_EVENT, onRoutingUpdated as EventListener);
-    return () => {
-      window.removeEventListener(AI_ROUTING_UPDATED_EVENT, onRoutingUpdated as EventListener);
-    };
-  }, [refreshAiRoutingStatus]);
 
   const content = useMemo(() => {
     if (!panel || panel.key === "platform_settings") return null;
@@ -5974,33 +5386,23 @@ export default function WorkbenchPanelHost({
 
   if (panel.key === "platform_settings") {
     return (
-      <div>
-        <div className="card ems-panel-host">
-          <PlatformSettingsPanel
-            workspaceId={workspaceId}
-            workspaceName={workspaceName}
-            initialSection={String(panel.params?.section || "")}
-            initialSurface={String(panel.params?.surface || "")}
-            onSectionChange={(next) => {
-              if (panel.params) panel.params.section = next;
-            }}
-            onSurfaceChange={(next) => {
-              if (!panel.params) return;
-              panel.params.surface = next;
-            }}
-          />
-        </div>
-        <AiAgentRoutingCard routing={aiRoutingStatus?.routing || null} />
-        <SystemReadinessBanner readiness={systemReadiness} />
+      <div className="card ems-panel-host">
+        <PlatformSettingsPanel
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          initialSection={String(panel.params?.section || "")}
+          initialSurface={String(panel.params?.surface || "")}
+          onSectionChange={(next) => {
+            if (panel.params) panel.params.section = next;
+          }}
+          onSurfaceChange={(next) => {
+            if (!panel.params) return;
+            panel.params.surface = next;
+          }}
+        />
       </div>
     );
   }
 
-  return (
-    <div>
-      <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>
-      <AiAgentRoutingCard routing={aiRoutingStatus?.routing || null} />
-      <SystemReadinessBanner readiness={systemReadiness} />
-    </div>
-  );
+  return <div className="card ems-panel-host">{content || <p className="muted">Unknown panel.</p>}</div>;
 }
