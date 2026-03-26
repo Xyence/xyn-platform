@@ -4449,7 +4449,6 @@ function ComposerDetailPanel({
   const pendingStageCheckpoint = pendingCheckpoints.find((entry: any) => String(entry.checkpoint_key || "") === "plan_scope_confirmed")
     || pendingCheckpoints[0]
     || null;
-  const inlineDraftCheckpointControlsEnabled = Boolean(latestDraftTurnId && hasPendingCheckpoint && !hasPendingPrompt);
 
   const renderDraftPlanSummary = (turn: any) => {
     const payloadMap = selectedOptionTurnPayload(turn);
@@ -4501,19 +4500,63 @@ function ComposerDetailPanel({
     );
   };
 
+  const latestDraftPayload = (() => {
+    if (latestDraftTurn) return selectedOptionTurnPayload(latestDraftTurn);
+    if (latestDraftPlan && typeof latestDraftPlan.payload === "object" && latestDraftPlan.payload) {
+      return latestDraftPlan.payload as Record<string, unknown>;
+    }
+    return {};
+  })();
+  const draftObjective = String(latestDraftPayload.objective || latestDraftPayload.request_text || selectedSession?.request_text || "—");
+  const draftProposedWork = Array.isArray(latestDraftPayload.selected_artifact_ids)
+    ? latestDraftPayload.selected_artifact_ids.map((value) => String(value || "")).filter(Boolean)
+    : [];
+  const draftImpacts = Array.isArray(latestDraftPayload.shared_contracts)
+    ? latestDraftPayload.shared_contracts.map((value) => String(value || "")).filter(Boolean)
+    : [];
+  const draftValidation = Array.isArray(latestDraftPayload.validation_plan)
+    ? latestDraftPayload.validation_plan.map((value) => String(value || "")).filter(Boolean)
+    : [];
+  const draftOpenQuestions = draftImpacts.filter((item) => /open question/i.test(item));
+  const draftRevisionCount = planningTurns.filter(
+    (turn: any) => String(turn.actor || "") === "planner" && String(turn.kind || "") === "draft_plan"
+  ).length;
+  const currentAgentName = (() => {
+    const payloadMap = latestPlannerTurn ? selectedOptionTurnPayload(latestPlannerTurn) : {};
+    return String(
+      payloadMap.planner_agent_name
+      || payloadMap.agent_name
+      || payloadMap.agent
+      || payloadMap.model
+      || "Planning Agent"
+    ).trim();
+  })();
+  const currentAgentIdentityKey = (() => {
+    const payloadMap = latestPlannerTurn ? selectedOptionTurnPayload(latestPlannerTurn) : {};
+    return String(payloadMap.planner_agent_id || payloadMap.agent_id || currentAgentName || "planner");
+  })();
+
   return (
-    <div className="panel-section-stack">
-      <section className="card">
+    <div className="panel-section-stack composer-cockpit">
+      <section className="card composer-cockpit-header">
         <div className="card-header">
           <div>
             <div className="field-label">Planning Session</div>
             <div className="field-value">{selectedSession?.title || "No solution session selected"}</div>
           </div>
         </div>
-        <div className="detail-grid">
+        <div className="composer-cockpit-header-row">
           <div><div className="field-label">Solution / Session</div><div className="field-value">{selectedSession?.title || "Open a solution change session from Solution Detail."}</div></div>
           <div><div className="field-label">Planning status</div><div className="field-value">{planningStatusLabel}</div></div>
           <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(latestActivityAt)}</div></div>
+          <div className="composer-cockpit-agent">
+            <div className="field-label">Agent</div>
+            <div className="composer-cockpit-agent-row">
+              <Avatar size="sm" name={currentAgentName} identityKey={currentAgentIdentityKey} />
+              <span className="field-value">{currentAgentName}</span>
+            </div>
+          </div>
+          <div><div className="field-label">Revision</div><div className="field-value">{draftRevisionCount ? `Rev ${draftRevisionCount}` : "—"}</div></div>
         </div>
         {showInitialRequestInput || showIterativeRequestInput ? (
           <>
@@ -4568,19 +4611,20 @@ function ComposerDetailPanel({
         {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
       </section>
 
-      <section className="card composer-planning-card">
-        <div className="card-header">
-          <div>
-            <div className="field-label">Planning Conversation</div>
-            <div className="field-value">Structured planning timeline</div>
+      <div className="composer-cockpit-grid">
+        <section className="card composer-planning-card">
+          <div className="card-header">
+            <div>
+              <div className="field-label">Planning Conversation</div>
+              <div className="field-value">Structured planning timeline</div>
+            </div>
           </div>
-        </div>
-        {!selectedSession ? (
-          <p className="muted">
-            Select a solution change session from Solution Detail to review and approve planning interactions.
-          </p>
-        ) : (
-          <ol className="composer-planning-timeline">
+          {!selectedSession ? (
+            <p className="muted">
+              Select a solution change session from Solution Detail to review and approve planning interactions.
+            </p>
+          ) : (
+            <ol className="composer-planning-timeline">
             {planningTurns.map((turn: any) => {
               const payloadMap = selectedOptionTurnPayload(turn);
               const isQuestionTurn = String(turn.kind || "") === "question";
@@ -4796,77 +4840,6 @@ function ComposerDetailPanel({
                           Refine Plan
                         </button>
                       </div>
-                      {pendingStageCheckpoint ? (
-                        <>
-                          <p className="composer-planning-turn__body" style={{ marginTop: 12 }}>
-                            {String(pendingStageCheckpoint.label || "Approval checkpoint")}
-                            {" · "}
-                            Required before {String(pendingStageCheckpoint.required_before || "stage")}
-                          </p>
-                          <p className="muted small">
-                            Current status: {titleCaseLabel(String(pendingStageCheckpoint.status || "pending"))}
-                          </p>
-                          <textarea
-                            className="input"
-                            rows={2}
-                            value={approvalNotes[String(pendingStageCheckpoint.id)] || ""}
-                            onChange={(event) =>
-                              setApprovalNotes((current) => ({ ...current, [String(pendingStageCheckpoint.id)]: event.target.value }))
-                            }
-                            placeholder="Approval note (optional)."
-                          />
-                          <div className="inline-action-row" style={{ marginTop: 8 }}>
-                            <button
-                              type="button"
-                              className="ghost sm"
-                              disabled={busyAction === `checkpoint-approve:${pendingStageCheckpoint.id}`}
-                              onClick={() => {
-                                if (!selectedSession) return;
-                                setBusyAction(`checkpoint-approve:${pendingStageCheckpoint.id}`);
-                                void withSessionGuard(async () => {
-                                  const response = await decideSolutionPlanningCheckpoint(
-                                    String(selectedSession.application_id),
-                                    String(selectedSession.id),
-                                    String(pendingStageCheckpoint.id),
-                                    {
-                                      decision: "approved",
-                                      notes: approvalNotes[String(pendingStageCheckpoint.id)] || "",
-                                    }
-                                  );
-                                  mergeUpdatedSession(response.session);
-                                  setMessage("Checkpoint approved.");
-                                });
-                              }}
-                            >
-                              Approve
-                            </button>
-                            <button
-                              type="button"
-                              className="ghost sm"
-                              disabled={busyAction === `checkpoint-reject:${pendingStageCheckpoint.id}`}
-                              onClick={() => {
-                                if (!selectedSession) return;
-                                setBusyAction(`checkpoint-reject:${pendingStageCheckpoint.id}`);
-                                void withSessionGuard(async () => {
-                                  const response = await decideSolutionPlanningCheckpoint(
-                                    String(selectedSession.application_id),
-                                    String(selectedSession.id),
-                                    String(pendingStageCheckpoint.id),
-                                    {
-                                      decision: "rejected",
-                                      notes: approvalNotes[String(pendingStageCheckpoint.id)] || "",
-                                    }
-                                  );
-                                  mergeUpdatedSession(response.session);
-                                  setMessage("Checkpoint rejected.");
-                                });
-                              }}
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        </>
-                      ) : null}
                     </div>
                   ) : null}
                   {isCheckpointTurn && hasDraftPlan ? (
@@ -4877,69 +4850,6 @@ function ComposerDetailPanel({
                         Required before {String(payloadMap.required_before || "stage")}
                       </p>
                       <p className="muted small">Current status: {titleCaseLabel(String(checkpoint?.status || payloadMap.status || "pending"))}</p>
-                      {checkpoint && String(checkpoint.status || "") === "pending" && !inlineDraftCheckpointControlsEnabled ? (
-                        <>
-                          <textarea
-                            className="input"
-                            rows={2}
-                            value={approvalNotes[String(checkpoint.id)] || ""}
-                            onChange={(event) =>
-                              setApprovalNotes((current) => ({ ...current, [String(checkpoint.id)]: event.target.value }))
-                            }
-                            placeholder="Approval note (optional)."
-                          />
-                          <div className="inline-action-row" style={{ marginTop: 8 }}>
-                            <button
-                              type="button"
-                              className="ghost sm"
-                              disabled={busyAction === `checkpoint-approve:${checkpoint.id}`}
-                              onClick={() => {
-                                if (!selectedSession) return;
-                                setBusyAction(`checkpoint-approve:${checkpoint.id}`);
-                                void withSessionGuard(async () => {
-                                  const response = await decideSolutionPlanningCheckpoint(
-                                    String(selectedSession.application_id),
-                                    String(selectedSession.id),
-                                    String(checkpoint.id),
-                                    {
-                                      decision: "approved",
-                                      notes: approvalNotes[String(checkpoint.id)] || "",
-                                    }
-                                  );
-                                  mergeUpdatedSession(response.session);
-                                  setMessage("Checkpoint approved.");
-                                });
-                              }}
-                            >
-                              Approve
-                            </button>
-                            <button
-                              type="button"
-                              className="ghost sm"
-                              disabled={busyAction === `checkpoint-reject:${checkpoint.id}`}
-                              onClick={() => {
-                                if (!selectedSession) return;
-                                setBusyAction(`checkpoint-reject:${checkpoint.id}`);
-                                void withSessionGuard(async () => {
-                                  const response = await decideSolutionPlanningCheckpoint(
-                                    String(selectedSession.application_id),
-                                    String(selectedSession.id),
-                                    String(checkpoint.id),
-                                    {
-                                      decision: "rejected",
-                                      notes: approvalNotes[String(checkpoint.id)] || "",
-                                    }
-                                  );
-                                  mergeUpdatedSession(response.session);
-                                  setMessage("Checkpoint rejected.");
-                                });
-                              }}
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        </>
-                      ) : null}
                     </div>
                   ) : null}
                   {String(turn.kind || "") === "approval" ? (
@@ -4955,122 +4865,254 @@ function ComposerDetailPanel({
                 <p className="muted">No planning interaction history has been recorded yet.</p>
               </li>
             ) : null}
-          </ol>
-        )}
-      </section>
+            </ol>
+          )}
+        </section>
 
-      <section className="card">
-        <div className="card-header">
-          <div>
-            <div className="field-label">Execution Handoff</div>
-            <div className="field-value">Stage and validation controls</div>
-          </div>
-        </div>
-        {!selectedSession ? (
-          <p className="muted">Execution actions are available after selecting a solution change session.</p>
-        ) : (
-          <>
-            {hasPendingCheckpoint ? (
-              <InlineMessage
-                tone="warn"
-                title="Awaiting planning approval"
-                body="A checkpoint is pending. Stage/apply actions remain blocked until approval is recorded."
-              />
-            ) : null}
-            {!hasDraftPlan && !hasPendingPrompt ? (
-              <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  className="ghost sm"
-                  disabled={busyAction === "generate-plan"}
-                  onClick={() => {
-                    setBusyAction("generate-plan");
-                    void withSessionGuard(async () => {
-                      const response = await generateSolutionChangePlan(
-                        String(selectedSession.application_id),
-                        String(selectedSession.id)
-                      );
-                      mergeUpdatedSession(response.session);
-                      setMessage("Draft plan generated.");
-                    });
-                  }}
-                >
-                  Generate Draft Plan
-                </button>
+        <aside className="composer-cockpit-rail">
+          <section className="card">
+            <div className="field-label">Current Draft</div>
+            {hasDraftPlan ? (
+              <div className="composer-draft-plan">
+                <div><span className="field-label">Objective</span><p>{draftObjective}</p></div>
+                <div>
+                  <span className="field-label">Proposed Work</span>
+                  {draftProposedWork.length ? (
+                    <ul className="detail-list">
+                      {draftProposedWork.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  ) : (
+                    <p className="muted small">No selected artifact set provided yet.</p>
+                  )}
+                </div>
+                <div>
+                  <span className="field-label">Key Impacts / Assumptions</span>
+                  {draftImpacts.length ? (
+                    <ul className="detail-list">
+                      {draftImpacts.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
+                    </ul>
+                  ) : (
+                    <p className="muted small">No key impacts were listed.</p>
+                  )}
+                </div>
+                <div>
+                  <span className="field-label">Open Questions</span>
+                  {draftOpenQuestions.length ? (
+                    <ul className="detail-list">
+                      {draftOpenQuestions.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
+                    </ul>
+                  ) : (
+                    <p className="muted small">No open questions captured.</p>
+                  )}
+                </div>
+                <div>
+                  <span className="field-label">Next Action</span>
+                  <p>{draftValidation[0] || "Review and approve checkpoint to continue execution."}</p>
+                </div>
               </div>
-            ) : null}
-            {canRunExecution ? (
-              <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  className="ghost sm"
-                  disabled={busyAction === "stage-apply"}
-                  onClick={() => {
-                    setBusyAction("stage-apply");
-                    void withSessionGuard(async () => {
-                      const response = await stageSolutionChangeApply(
-                        String(selectedSession.application_id),
-                        String(selectedSession.id)
-                      );
-                      mergeUpdatedSession(response.session);
-                      setMessage("Stage apply completed.");
-                    });
-                  }}
-                >
-                  Stage Apply
-                </button>
-                <button
-                  type="button"
-                  className="ghost sm"
-                  disabled={busyAction === "prepare-preview"}
-                  onClick={() => {
-                    setBusyAction("prepare-preview");
-                    void withSessionGuard(async () => {
-                      const response = await prepareSolutionChangePreview(
-                        String(selectedSession.application_id),
-                        String(selectedSession.id)
-                      );
-                      mergeUpdatedSession(response.session);
-                      setMessage("Preview preparation completed.");
-                    });
-                  }}
-                >
-                  Prepare Preview
-                </button>
-                <button
-                  type="button"
-                  className="ghost sm"
-                  disabled={busyAction === "validate"}
-                  onClick={() => {
-                    setBusyAction("validate");
-                    void withSessionGuard(async () => {
-                      const response = await validateSolutionChangeSession(
-                        String(selectedSession.application_id),
-                        String(selectedSession.id)
-                      );
-                      mergeUpdatedSession(response.session);
-                      setMessage("Validation completed.");
-                    });
-                  }}
-                >
-                  Validate
-                </button>
+            ) : (
+              <p className="muted small">No draft available yet.</p>
+            )}
+          </section>
+
+          <section className="card">
+            <div className="field-label">Approval Gate</div>
+            {!selectedSession ? (
+              <p className="muted small">Select a session to manage checkpoint approvals.</p>
+            ) : pendingStageCheckpoint ? (
+              <div className="composer-planning-action-block">
+                <p className="composer-planning-turn__body">
+                  {String(pendingStageCheckpoint.label || "Approval checkpoint")}
+                  {" · "}
+                  Required before {String(pendingStageCheckpoint.required_before || "stage")}
+                </p>
+                <p className="muted small">
+                  Current status: {titleCaseLabel(String(pendingStageCheckpoint.status || "pending"))}
+                </p>
+                <textarea
+                  className="input"
+                  rows={2}
+                  value={approvalNotes[String(pendingStageCheckpoint.id)] || ""}
+                  onChange={(event) =>
+                    setApprovalNotes((current) => ({ ...current, [String(pendingStageCheckpoint.id)]: event.target.value }))
+                  }
+                  placeholder="Approval note (optional)."
+                />
+                <div className="inline-action-row" style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="ghost sm"
+                    disabled={busyAction === `checkpoint-approve:${pendingStageCheckpoint.id}`}
+                    onClick={() => {
+                      if (!selectedSession) return;
+                      setBusyAction(`checkpoint-approve:${pendingStageCheckpoint.id}`);
+                      void withSessionGuard(async () => {
+                        const response = await decideSolutionPlanningCheckpoint(
+                          String(selectedSession.application_id),
+                          String(selectedSession.id),
+                          String(pendingStageCheckpoint.id),
+                          {
+                            decision: "approved",
+                            notes: approvalNotes[String(pendingStageCheckpoint.id)] || "",
+                          }
+                        );
+                        mergeUpdatedSession(response.session);
+                        setMessage("Checkpoint approved.");
+                      });
+                    }}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost sm"
+                    disabled={busyAction === `checkpoint-reject:${pendingStageCheckpoint.id}`}
+                    onClick={() => {
+                      if (!selectedSession) return;
+                      setBusyAction(`checkpoint-reject:${pendingStageCheckpoint.id}`);
+                      void withSessionGuard(async () => {
+                        const response = await decideSolutionPlanningCheckpoint(
+                          String(selectedSession.application_id),
+                          String(selectedSession.id),
+                          String(pendingStageCheckpoint.id),
+                          {
+                            decision: "rejected",
+                            notes: approvalNotes[String(pendingStageCheckpoint.id)] || "",
+                          }
+                        );
+                        mergeUpdatedSession(response.session);
+                        setMessage("Checkpoint rejected.");
+                      });
+                    }}
+                  >
+                    Reject
+                  </button>
+                </div>
               </div>
-            ) : null}
-            <p className="muted small" style={{ marginTop: 8 }}>
-              {hasPendingPrompt
-                ? "Execution is blocked while planner prompts are unresolved."
-                : !hasDraftPlan
-                  ? "Execution unlocks after a draft plan is available."
-                  : hasPendingCheckpoint
-                    ? "Execution is blocked while approvals are pending."
-                    : !hasApprovedStageCheckpoint
-                      ? "Execution remains blocked until the planning checkpoint is approved."
-                      : "Execution actions are available for this session."}
-            </p>
-          </>
-        )}
-      </section>
+            ) : (
+              <p className="muted small">
+                {hasDraftPlan
+                  ? "No pending approval checkpoint."
+                  : "A draft plan is required before approval can be recorded."}
+              </p>
+            )}
+          </section>
+
+          <section className="card">
+            <div className="field-label">Execution Controls</div>
+            <div className="field-value">Execution Handoff</div>
+            {!selectedSession ? (
+              <p className="muted small">Execution actions are available after selecting a solution change session.</p>
+            ) : (
+              <>
+                {!hasDraftPlan && !hasPendingPrompt ? (
+                  <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      className="ghost sm"
+                      disabled={busyAction === "generate-plan"}
+                      onClick={() => {
+                        setBusyAction("generate-plan");
+                        void withSessionGuard(async () => {
+                          const response = await generateSolutionChangePlan(
+                            String(selectedSession.application_id),
+                            String(selectedSession.id)
+                          );
+                          mergeUpdatedSession(response.session);
+                          setMessage("Draft plan generated.");
+                        });
+                      }}
+                    >
+                      Generate Draft Plan
+                    </button>
+                  </div>
+                ) : null}
+                <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="ghost sm"
+                    disabled={!canRunExecution || busyAction === "stage-apply"}
+                    onClick={() => {
+                      setBusyAction("stage-apply");
+                      void withSessionGuard(async () => {
+                        const response = await stageSolutionChangeApply(
+                          String(selectedSession.application_id),
+                          String(selectedSession.id)
+                        );
+                        mergeUpdatedSession(response.session);
+                        setMessage("Stage apply completed.");
+                      });
+                    }}
+                  >
+                    Stage Apply
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost sm"
+                    disabled={!canRunExecution || busyAction === "prepare-preview"}
+                    onClick={() => {
+                      setBusyAction("prepare-preview");
+                      void withSessionGuard(async () => {
+                        const response = await prepareSolutionChangePreview(
+                          String(selectedSession.application_id),
+                          String(selectedSession.id)
+                        );
+                        mergeUpdatedSession(response.session);
+                        setMessage("Preview preparation completed.");
+                      });
+                    }}
+                  >
+                    Prepare Preview
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost sm"
+                    disabled={!canRunExecution || busyAction === "validate"}
+                    onClick={() => {
+                      setBusyAction("validate");
+                      void withSessionGuard(async () => {
+                        const response = await validateSolutionChangeSession(
+                          String(selectedSession.application_id),
+                          String(selectedSession.id)
+                        );
+                        mergeUpdatedSession(response.session);
+                        setMessage("Validation completed.");
+                      });
+                    }}
+                  >
+                    Validate
+                  </button>
+                </div>
+                <p className="muted small" style={{ marginTop: 8 }}>
+                  {hasPendingPrompt
+                    ? "Blocked: unresolved planner question or option set."
+                    : !hasDraftPlan
+                      ? "Blocked: no draft plan yet."
+                      : hasPendingCheckpoint
+                        ? "Blocked: checkpoint approval pending."
+                        : !hasApprovedStageCheckpoint
+                          ? "Blocked: required checkpoint is not approved."
+                          : "Execution actions are available."}
+                </p>
+              </>
+            )}
+          </section>
+
+          <section className="card">
+            <div className="field-label">Execution Status</div>
+            {!selectedSession ? (
+              <p className="muted small">No session selected.</p>
+            ) : (
+              <div className="composer-execution-status">
+                <div><span className="field-label">Session status</span><p>{titleCaseLabel(String(selectedSession.status || "draft"))}</p></div>
+                <div><span className="field-label">Execution</span><p>{titleCaseLabel(String(selectedSession.execution_status || "not_started"))}</p></div>
+                <div><span className="field-label">Preview</span><p>{selectedSession.preview?.status ? titleCaseLabel(String(selectedSession.preview.status)) : "Not prepared"}</p></div>
+                <div><span className="field-label">Validation</span><p>{selectedSession.validation?.status ? titleCaseLabel(String(selectedSession.validation.status)) : "Not run"}</p></div>
+              </div>
+            )}
+          </section>
+        </aside>
+      </div>
     </div>
   );
 }

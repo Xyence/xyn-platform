@@ -977,7 +977,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
     expect(screen.queryByPlaceholderText("Describe the change you want planned.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stage Apply" })).toBeDisabled();
     fireEvent.click(screen.getByRole("radio", { name: /Conservative/i }));
     fireEvent.click(screen.getByRole("button", { name: "Select Option" }));
     await waitFor(() =>
@@ -1251,7 +1251,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
     expect(screen.getByText("Refine or respond to this plan (optional)")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stage Apply" })).toBeDisabled();
     expect(screen.getByPlaceholderText("Approval note (optional).")).toBeInTheDocument();
     expect(screen.queryByPlaceholderText("Describe the change you want planned.")).not.toBeInTheDocument();
     expect(screen.getAllByPlaceholderText("Approval note (optional).")).toHaveLength(1);

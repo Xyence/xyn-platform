@@ -5668,6 +5668,35 @@ button.sm {
   min-height: 280px;
 }
 
+.composer-cockpit-header {
+  padding-bottom: 12px;
+}
+
+.composer-cockpit-header-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px 14px;
+  align-items: start;
+}
+
+.composer-cockpit-agent-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.composer-cockpit-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.composer-cockpit-rail {
+  display: grid;
+  gap: 12px;
+}
+
 .composer-planning-timeline {
   margin: 0;
   padding: 0;
@@ -5766,6 +5795,11 @@ button.sm {
   margin: 2px 0 0;
 }
 
+.composer-execution-status {
+  display: grid;
+  gap: 8px;
+}
+
 @media (max-width: 768px) {
   .app-draft-layout {
     grid-template-columns: 1fr;
@@ -5784,6 +5818,14 @@ button.sm {
     left: 50%;
     right: auto;
     transform: translateX(-50%);
+  }
+
+  .composer-cockpit-header-row {
+    grid-template-columns: 1fr;
+  }
+
+  .composer-cockpit-grid {
+    grid-template-columns: 1fr;
   }
 
   .xyn-console-anchor {
