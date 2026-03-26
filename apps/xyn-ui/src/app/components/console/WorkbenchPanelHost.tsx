@@ -4250,7 +4250,8 @@ function ComposerDetailPanel({
   const [approvalNotes, setApprovalNotes] = useState<Record<string, string>>({});
   const [selectedOptionByTurn, setSelectedOptionByTurn] = useState<Record<string, string>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const latestPlannerTurnRef = useRef<HTMLLIElement | null>(null);
+  const latestTurnRef = useRef<HTMLLIElement | null>(null);
+  const shouldAutoScrollToLatestTurnRef = useRef(false);
 
   useEffect(() => {
     writeComposerStoredSelection(workspaceId, {
@@ -4358,10 +4359,11 @@ function ComposerDetailPanel({
   const showInitialRequestInput = !hasDraftPlan && !hasPendingPrompt;
   const showIterativeRequestInput = hasExecutionProgress && !hasPendingPrompt && !hasPendingCheckpoint;
   const latestPlannerTurn = [...planningTurns].reverse().find((turn: any) => String(turn.actor || "") === "planner") || null;
+  const latestTurn = planningTurns.length ? planningTurns[planningTurns.length - 1] : null;
+  const latestTurnId = latestTurn ? String(latestTurn.id || "") : "";
   const latestDraftTurn = [...planningTurns]
     .reverse()
     .find((turn: any) => String(turn.actor || "") === "planner" && String(turn.kind || "") === "draft_plan") || null;
-  const latestPlannerTurnId = latestPlannerTurn ? String(latestPlannerTurn.id || "") : "";
   const latestDraftTurnId = latestDraftTurn ? String(latestDraftTurn.id || "") : "";
   const latestActivityAt = planningTurns.length
     ? String(planningTurns[planningTurns.length - 1]?.created_at || selectedSession?.updated_at || "")
@@ -4402,12 +4404,13 @@ function ComposerDetailPanel({
     });
   }, [selectedSession, workspaceId]);
   useEffect(() => {
-    if (!latestPlannerTurnId) return;
-    const target = latestPlannerTurnRef.current as (HTMLLIElement & { scrollIntoView?: (options?: any) => void }) | null;
+    if (!latestTurnId || !shouldAutoScrollToLatestTurnRef.current) return;
+    const target = latestTurnRef.current as (HTMLLIElement & { scrollIntoView?: (options?: any) => void }) | null;
     if (typeof target?.scrollIntoView === "function") {
       target.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
-  }, [latestPlannerTurnId]);
+    shouldAutoScrollToLatestTurnRef.current = false;
+  }, [latestTurnId]);
 
   if (loading) return <p className="muted">Loading composer…</p>;
   if (error) return <p className="danger-text">{error}</p>;
@@ -4584,6 +4587,7 @@ function ComposerDetailPanel({
                 onClick={() => {
                   const trimmed = requestDraft.trim();
                   if (!trimmed || !selectedSession) return;
+                  shouldAutoScrollToLatestTurnRef.current = true;
                   setBusyAction("request");
                   void withSessionGuard(async () => {
                     const response = await replyToSolutionPlanningSession(
@@ -4624,8 +4628,9 @@ function ComposerDetailPanel({
               Select a solution change session from Solution Detail to review and approve planning interactions.
             </p>
           ) : (
-            <ol className="composer-planning-timeline">
-            {planningTurns.map((turn: any) => {
+            <div className="composer-planning-scroll">
+              <ol className="composer-planning-timeline">
+              {planningTurns.map((turn: any) => {
               const payloadMap = selectedOptionTurnPayload(turn);
               const isQuestionTurn = String(turn.kind || "") === "question";
               const isOptionTurn = String(turn.kind || "") === "option_set";
@@ -4640,7 +4645,7 @@ function ComposerDetailPanel({
                 : null;
               const options = Array.isArray(payloadMap.options) ? payloadMap.options : [];
               const selectedOptionId = selectedOptionByTurn[String(turn.id)] || selectedOptionResponseBySourceTurn[String(turn.id)] || "";
-              const isLatestPlannerTurn = String(turn.id || "") === latestPlannerTurnId;
+              const isLatestTurn = String(turn.id || "") === latestTurnId;
               const isLatestDraftTurn = String(turn.id || "") === latestDraftTurnId;
               const draftTurnShowsRefinement = isDraftPlanTurn && isLatestDraftTurn && hasPendingCheckpoint && !hasPendingPrompt;
               const actorType = String(turn.actor || "planner") === "planner" ? "planner" : "user";
@@ -4659,7 +4664,7 @@ function ComposerDetailPanel({
               return (
                 <li
                   key={String(turn.id)}
-                  ref={isLatestPlannerTurn ? latestPlannerTurnRef : null}
+                  ref={isLatestTurn ? latestTurnRef : null}
                   className={`composer-planning-turn turn-${String(turn.actor || "unknown")} turn-kind-${String(turn.kind || "unknown")}`}
                 >
                   <div className="composer-planning-turn__meta">
@@ -4697,6 +4702,7 @@ function ComposerDetailPanel({
                               disabled={busyAction === `reply:${turn.id}` || !questionReplyDraft.trim()}
                               onClick={() => {
                                 if (!selectedSession || !questionReplyDraft.trim()) return;
+                                shouldAutoScrollToLatestTurnRef.current = true;
                                 setBusyAction(`reply:${turn.id}`);
                                 void withSessionGuard(async () => {
                                   const response = await replyToSolutionPlanningSession(
@@ -4752,6 +4758,7 @@ function ComposerDetailPanel({
                               onClick={() => {
                                 const effectiveSelectedOptionId = selectedOptionId || String(options[0]?.id || "");
                                 if (!selectedSession || !effectiveSelectedOptionId) return;
+                                shouldAutoScrollToLatestTurnRef.current = true;
                                 setBusyAction(`option:${turn.id}`);
                                 void withSessionGuard(async () => {
                                   const response = await selectSolutionPlanningOption(
@@ -4785,6 +4792,7 @@ function ComposerDetailPanel({
                               disabled={!isPendingOptionTurn || busyAction === `regen-options:${turn.id}`}
                               onClick={() => {
                                 if (!selectedSession) return;
+                                shouldAutoScrollToLatestTurnRef.current = true;
                                 setBusyAction(`regen-options:${turn.id}`);
                                 void withSessionGuard(async () => {
                                   const response = await regenerateSolutionPlanningOptions(
@@ -4824,6 +4832,7 @@ function ComposerDetailPanel({
                           onClick={() => {
                             const trimmed = refinementDraft.trim();
                             if (!trimmed || !selectedSession) return;
+                            shouldAutoScrollToLatestTurnRef.current = true;
                             setBusyAction("refine");
                             void withSessionGuard(async () => {
                               const response = await replyToSolutionPlanningSession(
@@ -4860,12 +4869,13 @@ function ComposerDetailPanel({
                 </li>
               );
             })}
-            {!planningTurns.length ? (
-              <li className="composer-planning-turn">
-                <p className="muted">No planning interaction history has been recorded yet.</p>
-              </li>
-            ) : null}
-            </ol>
+              {!planningTurns.length ? (
+                <li className="composer-planning-turn">
+                  <p className="muted">No planning interaction history has been recorded yet.</p>
+                </li>
+              ) : null}
+              </ol>
+            </div>
           )}
         </section>
 
@@ -4945,6 +4955,7 @@ function ComposerDetailPanel({
                     disabled={busyAction === `checkpoint-approve:${pendingStageCheckpoint.id}`}
                     onClick={() => {
                       if (!selectedSession) return;
+                      shouldAutoScrollToLatestTurnRef.current = true;
                       setBusyAction(`checkpoint-approve:${pendingStageCheckpoint.id}`);
                       void withSessionGuard(async () => {
                         const response = await decideSolutionPlanningCheckpoint(
@@ -4969,6 +4980,7 @@ function ComposerDetailPanel({
                     disabled={busyAction === `checkpoint-reject:${pendingStageCheckpoint.id}`}
                     onClick={() => {
                       if (!selectedSession) return;
+                      shouldAutoScrollToLatestTurnRef.current = true;
                       setBusyAction(`checkpoint-reject:${pendingStageCheckpoint.id}`);
                       void withSessionGuard(async () => {
                         const response = await decideSolutionPlanningCheckpoint(
@@ -5012,6 +5024,7 @@ function ComposerDetailPanel({
                       className="ghost sm"
                       disabled={busyAction === "generate-plan"}
                       onClick={() => {
+                        shouldAutoScrollToLatestTurnRef.current = true;
                         setBusyAction("generate-plan");
                         void withSessionGuard(async () => {
                           const response = await generateSolutionChangePlan(

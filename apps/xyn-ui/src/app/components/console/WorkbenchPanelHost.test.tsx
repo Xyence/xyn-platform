@@ -865,6 +865,14 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
   it("keeps composer phase-gated and allows selecting pending planner options", async () => {
     const onOpenPanel = vi.fn();
+    const scrollIntoViewMock = vi.fn();
+    const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value: scrollIntoViewMock,
+    });
+
     const sessionPayload = {
       id: "session-1",
       workspace_id: "ws-1",
@@ -929,7 +937,50 @@ describe("WorkbenchPanelHost entity refresh", () => {
       created_at: "2026-03-20T10:00:00Z",
       updated_at: "2026-03-20T10:03:00Z",
     };
-    apiMocks.getComposerState.mockResolvedValue({
+    const updatedSessionPayload = {
+      ...sessionPayload,
+      planning: {
+        ...sessionPayload.planning,
+        turns: [
+          ...sessionPayload.planning.turns,
+          {
+            id: "turn-draft",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "planner",
+            kind: "draft_plan",
+            sequence: 3,
+            payload: {
+              objective: "Improve campaign creation UX",
+              selected_artifact_ids: ["artifact-1"],
+              shared_contracts: ["Keep the session panel compact"],
+              validation_plan: ["Validate the pending approval gate behavior"],
+            },
+            created_at: "2026-03-20T10:04:00Z",
+            updated_at: "2026-03-20T10:04:00Z",
+          },
+        ],
+        pending_option_set: null,
+        latest_draft_plan: {
+          id: "turn-draft",
+          workspace_id: "ws-1",
+          session_id: "session-1",
+          actor: "planner",
+          kind: "draft_plan",
+          sequence: 3,
+          payload: {
+            objective: "Improve campaign creation UX",
+            selected_artifact_ids: ["artifact-1"],
+            shared_contracts: ["Keep the session panel compact"],
+            validation_plan: ["Validate the pending approval gate behavior"],
+          },
+          created_at: "2026-03-20T10:04:00Z",
+          updated_at: "2026-03-20T10:04:00Z",
+        },
+      },
+      updated_at: "2026-03-20T10:04:00Z",
+    };
+    apiMocks.getComposerState.mockResolvedValueOnce({
       workspace_id: "ws-1",
       stage: "application_overview",
       context: {
@@ -955,38 +1006,75 @@ describe("WorkbenchPanelHost entity refresh", () => {
       breadcrumbs: [{ kind: "composer", label: "Composer" }],
       available_actions: [],
     });
+    apiMocks.getComposerState.mockResolvedValueOnce({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: "app-1",
+        goal_id: null,
+        thread_id: null,
+        solution_change_session_id: "session-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      solution_change_sessions: [updatedSessionPayload],
+      solution_change_session: updatedSessionPayload,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
     apiMocks.replyToSolutionPlanningSession.mockResolvedValue({ recorded: true, session: sessionPayload });
-    apiMocks.selectSolutionPlanningOption.mockResolvedValue({ recorded: true, session: sessionPayload });
+    apiMocks.selectSolutionPlanningOption.mockResolvedValue({ recorded: true, session: updatedSessionPayload });
 
-    render(
-      <MemoryRouter>
-        <WorkbenchPanelHost
-          workspaceId="ws-1"
-          panel={{
-            panel_id: "composer-session-1",
-            panel_type: "detail",
-            instance_key: "composer:ws-1",
-            key: "composer_detail",
-            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
-          }}
-          onOpenPanel={onOpenPanel}
-        />
-      </MemoryRouter>
-    );
+    try {
+      const { container } = render(
+        <MemoryRouter>
+          <WorkbenchPanelHost
+            workspaceId="ws-1"
+            panel={{
+              panel_id: "composer-session-1",
+              panel_type: "detail",
+              instance_key: "composer:ws-1",
+              key: "composer_detail",
+              params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+            }}
+            onOpenPanel={onOpenPanel}
+          />
+        </MemoryRouter>
+      );
 
-    await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
-    expect(screen.queryByPlaceholderText("Describe the change you want planned.")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Stage Apply" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("radio", { name: /Conservative/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Select Option" }));
-    await waitFor(() =>
-      expect(apiMocks.selectSolutionPlanningOption).toHaveBeenCalledWith("app-1", "session-1", {
-        option_id: "option-1",
-        source_turn_id: "turn-options",
-      })
-    );
-    expect(apiMocks.decideSolutionPlanningCheckpoint).not.toHaveBeenCalled();
+      await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
+      expect(container.querySelector(".composer-planning-scroll")).toBeTruthy();
+      expect(screen.queryByPlaceholderText("Describe the change you want planned.")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Stage Apply" })).toBeDisabled();
+      expect(scrollIntoViewMock).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("radio", { name: /Conservative/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Select Option" }));
+      await waitFor(() =>
+        expect(apiMocks.selectSolutionPlanningOption).toHaveBeenCalledWith("app-1", "session-1", {
+          option_id: "option-1",
+          source_turn_id: "turn-options",
+        })
+      );
+      await waitFor(() => expect(scrollIntoViewMock).toHaveBeenCalled());
+      expect(apiMocks.decideSolutionPlanningCheckpoint).not.toHaveBeenCalled();
+    } finally {
+      if (originalScrollIntoView) {
+        Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
+      } else {
+        delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      }
+    }
   });
 
   it("shows a regenerate-options fallback when planner option payload is empty", async () => {

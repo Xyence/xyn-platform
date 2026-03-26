@@ -5705,6 +5705,10 @@ button.sm {
   gap: 10px;
 }
 
+.composer-planning-scroll {
+  min-height: 0;
+}
+
 .composer-planning-turn {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -5798,6 +5802,23 @@ button.sm {
 .composer-execution-status {
   display: grid;
   gap: 8px;
+}
+
+@media (min-width: 769px) {
+  .composer-planning-card {
+    display: flex;
+    flex-direction: column;
+    max-height: clamp(420px, calc(100vh - 260px), 760px);
+    min-height: 360px;
+  }
+
+  .composer-planning-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    margin-top: 8px;
+    padding-right: 4px;
+  }
 }
 
 @media (max-width: 768px) {
