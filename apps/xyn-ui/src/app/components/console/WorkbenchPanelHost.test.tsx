@@ -1094,6 +1094,179 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
   });
 
+  it("renders refinement input while checkpoint is pending and submits plan refinement replies", async () => {
+    const onOpenPanel = vi.fn();
+    const sessionPayload = {
+      id: "session-1",
+      workspace_id: "ws-1",
+      application_id: "app-1",
+      title: "Deal Finder Session",
+      request_text: "Improve campaign creation UX",
+      status: "planned",
+      selected_artifact_ids: ["artifact-1"],
+      planning: {
+        turns: [
+          {
+            id: "turn-request",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "user",
+            kind: "request",
+            sequence: 1,
+            payload: { request_text: "Improve campaign creation UX" },
+            created_at: "2026-03-20T10:00:00Z",
+            updated_at: "2026-03-20T10:00:00Z",
+          },
+          {
+            id: "turn-draft",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "planner",
+            kind: "draft_plan",
+            sequence: 2,
+            payload: {
+              objective: "Improve campaign creation UX",
+              selected_artifact_ids: ["artifact-1"],
+              shared_contracts: ["Update form contract"],
+              validation_plan: ["Validate campaign form submission"],
+            },
+            created_at: "2026-03-20T10:02:00Z",
+            updated_at: "2026-03-20T10:02:00Z",
+          },
+          {
+            id: "turn-checkpoint",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "planner",
+            kind: "checkpoint",
+            sequence: 3,
+            payload: {
+              checkpoint_id: "checkpoint-1",
+              checkpoint_key: "plan_scope_confirmed",
+              label: "Approve draft plan scope",
+              required_before: "stage",
+              status: "pending",
+            },
+            created_at: "2026-03-20T10:03:00Z",
+            updated_at: "2026-03-20T10:03:00Z",
+          },
+        ],
+        checkpoints: [
+          {
+            id: "checkpoint-1",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            checkpoint_key: "plan_scope_confirmed",
+            label: "Approve draft plan scope",
+            required_before: "stage",
+            status: "pending",
+            payload: {},
+            decided_by: null,
+            decided_at: null,
+            created_at: "2026-03-20T10:03:00Z",
+            updated_at: "2026-03-20T10:03:00Z",
+          },
+        ],
+        pending_question: null,
+        pending_option_set: null,
+        pending_checkpoints: [
+          {
+            id: "checkpoint-1",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            checkpoint_key: "plan_scope_confirmed",
+            label: "Approve draft plan scope",
+            required_before: "stage",
+            status: "pending",
+            payload: {},
+            decided_by: null,
+            decided_at: null,
+            created_at: "2026-03-20T10:03:00Z",
+            updated_at: "2026-03-20T10:03:00Z",
+          },
+        ],
+        latest_draft_plan: {
+          id: "turn-draft",
+          workspace_id: "ws-1",
+          session_id: "session-1",
+          actor: "planner",
+          kind: "draft_plan",
+          sequence: 2,
+          payload: {
+            objective: "Improve campaign creation UX",
+            selected_artifact_ids: ["artifact-1"],
+            shared_contracts: ["Update form contract"],
+            validation_plan: ["Validate campaign form submission"],
+          },
+          created_at: "2026-03-20T10:02:00Z",
+          updated_at: "2026-03-20T10:02:00Z",
+        },
+      },
+      created_at: "2026-03-20T10:00:00Z",
+      updated_at: "2026-03-20T10:03:00Z",
+    };
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: "app-1",
+        goal_id: null,
+        thread_id: null,
+        solution_change_session_id: "session-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      solution_change_sessions: [sessionPayload],
+      solution_change_session: sessionPayload,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+    apiMocks.replyToSolutionPlanningSession.mockResolvedValue({ recorded: true, session: sessionPayload });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
+    expect(screen.getByText("Refine or respond to this plan (optional)")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Approval note (optional).")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Answer open questions or request plan changes."), {
+      target: { value: "Please prioritize campaign map usability and validation copy." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Refine Plan" }));
+
+    await waitFor(() =>
+      expect(apiMocks.replyToSolutionPlanningSession).toHaveBeenCalledWith("app-1", "session-1", {
+        reply_text: "Please prioritize campaign map usability and validation copy.",
+        source_turn_id: undefined,
+      })
+    );
+  });
+
   it("shows session-required guidance when Composer opens without a selected solution session", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.getComposerState.mockResolvedValue({

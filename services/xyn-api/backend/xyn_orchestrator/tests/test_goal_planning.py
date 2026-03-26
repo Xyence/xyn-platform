@@ -1392,6 +1392,104 @@ class GoalPlanningTests(TestCase):
         self.assertIn("response", kinds)
         self.assertIn("approval", kinds)
 
+    def test_solution_change_session_refinement_reply_generates_revised_draft_and_resets_checkpoint(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"df-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Campaign UX update",
+                        "request_text": "Update campaign UX and signal review flow end to end.",
+                    }
+                ),
+            )
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            create_payload = json.loads(create_response.content)
+            session_id = str((create_payload.get("session") or {}).get("id") or "")
+            session = SolutionChangeSession.objects.get(id=session_id)
+
+            option_turn = (
+                SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="option_set")
+                .order_by("-sequence")
+                .first()
+            )
+            self.assertIsNotNone(option_turn)
+            option_payload = option_turn.payload_json if isinstance(option_turn.payload_json, dict) else {}
+            option_rows = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+            self.assertTrue(option_rows)
+            option_id = str((option_rows[0] if isinstance(option_rows[0], dict) else {}).get("id") or "")
+
+            select_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/select-option",
+                method="post",
+                data=json.dumps({"source_turn_id": str(option_turn.id), "option_id": option_id}),
+            )
+            select_response = application_solution_change_session_select_option(select_request, str(application.id), str(session.id))
+            self.assertEqual(select_response.status_code, 200)
+
+            checkpoint = SolutionPlanningCheckpoint.objects.filter(session=session).first()
+            self.assertIsNotNone(checkpoint)
+            checkpoint_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/checkpoints/{checkpoint.id}/decision",
+                method="post",
+                data=json.dumps({"decision": "approved", "notes": "Looks good."}),
+            )
+            checkpoint_response = application_solution_change_session_checkpoint_decision(
+                checkpoint_request,
+                str(application.id),
+                str(session.id),
+                str(checkpoint.id),
+            )
+            self.assertEqual(checkpoint_response.status_code, 200)
+
+            reply_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/reply",
+                method="post",
+                data=json.dumps({"reply_text": "Focus first on campaign creation and map validation."}),
+            )
+            reply_response = application_solution_change_session_reply(reply_request, str(application.id), str(session.id))
+        self.assertEqual(reply_response.status_code, 200)
+
+        session.refresh_from_db()
+        checkpoint.refresh_from_db()
+        self.assertTrue(isinstance(session.plan_json, dict) and session.plan_json)
+        self.assertEqual(checkpoint.status, "pending")
+
+        turns = list(SolutionPlanningTurn.objects.filter(session=session).order_by("sequence"))
+        self.assertGreaterEqual(len(turns), 5)
+        self.assertEqual(turns[-3].kind, "response")
+        self.assertEqual(turns[-2].kind, "draft_plan")
+        self.assertIn("Revised draft plan", str((turns[-2].payload_json or {}).get("summary") or ""))
+        self.assertEqual(turns[-1].kind, "checkpoint")
+
     def test_solution_change_session_update_and_plan_generation(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(

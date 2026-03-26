@@ -4244,8 +4244,9 @@ function ComposerDetailPanel({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [requestDraft, setRequestDraft] = useState("");
+  const [refinementDraft, setRefinementDraft] = useState("");
   const [questionReplyDraft, setQuestionReplyDraft] = useState("");
-  const [checkpointNotes, setCheckpointNotes] = useState<Record<string, string>>({});
+  const [approvalNotes, setApprovalNotes] = useState<Record<string, string>>({});
   const [selectedOptionByTurn, setSelectedOptionByTurn] = useState<Record<string, string>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
@@ -4353,6 +4354,7 @@ function ComposerDetailPanel({
     String(selectedSession?.execution_status || "").toLowerCase()
   );
   const showInitialRequestInput = !hasDraftPlan && !hasPendingPrompt;
+  const showRefinementInput = hasDraftPlan && hasPendingCheckpoint && !hasPendingPrompt;
   const showIterativeRequestInput = hasExecutionProgress && !hasPendingPrompt && !hasPendingCheckpoint;
   const latestActivityAt = planningTurns.length
     ? String(planningTurns[planningTurns.length - 1]?.created_at || selectedSession?.updated_at || "")
@@ -4495,29 +4497,41 @@ function ComposerDetailPanel({
           <div><div className="field-label">Planning status</div><div className="field-value">{planningStatusLabel}</div></div>
           <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(latestActivityAt)}</div></div>
         </div>
-        {showInitialRequestInput || showIterativeRequestInput ? (
+        {showInitialRequestInput || showRefinementInput || showIterativeRequestInput ? (
           <>
             <p className="muted small" style={{ marginTop: 10, marginBottom: 8 }}>
-              {showIterativeRequestInput
+              {showRefinementInput
+                ? "Refine or respond to this plan (optional)"
+                : showIterativeRequestInput
                 ? "Describe the next change to continue this planning session."
                 : "Request a change for the selected solution session."}
             </p>
             <textarea
               className="input"
               rows={3}
-              value={requestDraft}
-              onChange={(event) => setRequestDraft(event.target.value)}
-              placeholder="Describe the change you want planned."
+              value={showRefinementInput ? refinementDraft : requestDraft}
+              onChange={(event) => {
+                if (showRefinementInput) {
+                  setRefinementDraft(event.target.value);
+                } else {
+                  setRequestDraft(event.target.value);
+                }
+              }}
+              placeholder={showRefinementInput ? "Answer open questions or request plan changes." : "Describe the change you want planned."}
             />
             <div className="inline-action-row" style={{ marginTop: 10 }}>
               <button
                 type="button"
                 className="ghost sm"
-                disabled={!selectedSession || busyAction === "request" || !requestDraft.trim()}
+                disabled={
+                  !selectedSession
+                  || busyAction === (showRefinementInput ? "refine" : "request")
+                  || !(showRefinementInput ? refinementDraft.trim() : requestDraft.trim())
+                }
                 onClick={() => {
-                  const trimmed = requestDraft.trim();
+                  const trimmed = (showRefinementInput ? refinementDraft : requestDraft).trim();
                   if (!trimmed || !selectedSession) return;
-                  setBusyAction("request");
+                  setBusyAction(showRefinementInput ? "refine" : "request");
                   void withSessionGuard(async () => {
                     const response = await replyToSolutionPlanningSession(
                       String(selectedSession.application_id),
@@ -4525,12 +4539,17 @@ function ComposerDetailPanel({
                       { reply_text: trimmed, source_turn_id: undefined }
                     );
                     mergeUpdatedSession(response.session);
-                    setRequestDraft("");
-                    setMessage(showIterativeRequestInput ? "Recorded iterative change request." : "Recorded change request.");
+                    if (showRefinementInput) {
+                      setRefinementDraft("");
+                      setMessage("Plan refinement submitted.");
+                    } else {
+                      setRequestDraft("");
+                      setMessage(showIterativeRequestInput ? "Recorded iterative change request." : "Recorded change request.");
+                    }
                   });
                 }}
               >
-                {showIterativeRequestInput ? "Describe Change" : "Submit Request"}
+                {showRefinementInput ? "Refine Plan" : showIterativeRequestInput ? "Describe Change" : "Submit Request"}
               </button>
             </div>
           </>
@@ -4722,11 +4741,11 @@ function ComposerDetailPanel({
                           <textarea
                             className="input"
                             rows={2}
-                            value={checkpointNotes[String(checkpoint.id)] || ""}
+                            value={approvalNotes[String(checkpoint.id)] || ""}
                             onChange={(event) =>
-                              setCheckpointNotes((current) => ({ ...current, [String(checkpoint.id)]: event.target.value }))
+                              setApprovalNotes((current) => ({ ...current, [String(checkpoint.id)]: event.target.value }))
                             }
-                            placeholder="Optional decision note."
+                            placeholder="Approval note (optional)."
                           />
                           <div className="inline-action-row" style={{ marginTop: 8 }}>
                             <button
@@ -4743,7 +4762,7 @@ function ComposerDetailPanel({
                                     String(checkpoint.id),
                                     {
                                       decision: "approved",
-                                      notes: checkpointNotes[String(checkpoint.id)] || "",
+                                      notes: approvalNotes[String(checkpoint.id)] || "",
                                     }
                                   );
                                   mergeUpdatedSession(response.session);
@@ -4767,7 +4786,7 @@ function ComposerDetailPanel({
                                     String(checkpoint.id),
                                     {
                                       decision: "rejected",
-                                      notes: checkpointNotes[String(checkpoint.id)] || "",
+                                      notes: approvalNotes[String(checkpoint.id)] || "",
                                     }
                                   );
                                   mergeUpdatedSession(response.session);

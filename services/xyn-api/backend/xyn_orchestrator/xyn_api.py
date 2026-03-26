@@ -28699,6 +28699,7 @@ def _maybe_emit_solution_checkpoint_turn(
     *,
     session: SolutionChangeSession,
     checkpoint: SolutionPlanningCheckpoint,
+    force_emit: bool = False,
 ) -> None:
     latest_checkpoint_turn = (
         SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="checkpoint")
@@ -28707,7 +28708,8 @@ def _maybe_emit_solution_checkpoint_turn(
     )
     latest_payload = latest_checkpoint_turn.payload_json if isinstance(getattr(latest_checkpoint_turn, "payload_json", None), dict) else {}
     if (
-        latest_checkpoint_turn is not None
+        not force_emit
+        and latest_checkpoint_turn is not None
         and str(latest_payload.get("checkpoint_id") or "") == str(checkpoint.id)
         and str(latest_payload.get("status") or "") == str(checkpoint.status or "")
     ):
@@ -28726,6 +28728,41 @@ def _maybe_emit_solution_checkpoint_turn(
     )
 
 
+def _record_solution_draft_plan(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+    summary: str,
+) -> Dict[str, Any]:
+    plan = _generate_solution_change_plan(session=session, memberships=memberships)
+    session.plan_json = plan
+    session.status = "planned"
+    session.save(update_fields=["plan_json", "status", "updated_at"])
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="draft_plan",
+        payload={
+            "summary": summary,
+            "objective": str(session.request_text or ""),
+            "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+            "shared_contracts": list(plan.get("shared_contracts") or []),
+            "validation_plan": list(plan.get("validation_plan") or []),
+        },
+    )
+    return plan
+
+
+def _reset_solution_stage_checkpoint(*, session: SolutionChangeSession) -> SolutionPlanningCheckpoint:
+    checkpoint = _ensure_solution_stage_checkpoint(session=session)
+    if str(checkpoint.status or "") != "pending":
+        checkpoint.status = "pending"
+        checkpoint.decided_by = None
+        checkpoint.decided_at = None
+        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+    return checkpoint
+
+
 def _advance_solution_planning_after_user_response(
     *,
     session: SolutionChangeSession,
@@ -28734,30 +28771,22 @@ def _advance_solution_planning_after_user_response(
     planning_state = _solution_planning_state(session)
     if planning_state.get("pending_question") or planning_state.get("pending_option_set"):
         return
-    if not isinstance(session.plan_json, dict) or not session.plan_json:
-        plan = _generate_solution_change_plan(session=session, memberships=memberships)
-        session.plan_json = plan
-        session.status = "planned"
-        session.save(update_fields=["plan_json", "status", "updated_at"])
-        _append_solution_planning_turn(
-            session=session,
-            actor="planner",
-            kind="draft_plan",
-            payload={
-                "summary": "Generated structured cross-artifact draft plan.",
-                "objective": str(session.request_text or ""),
-                "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
-                "shared_contracts": list(plan.get("shared_contracts") or []),
-                "validation_plan": list(plan.get("validation_plan") or []),
-            },
-        )
-    checkpoint = _ensure_solution_stage_checkpoint(session=session)
-    if str(checkpoint.status or "") != "pending":
-        checkpoint.status = "pending"
-        checkpoint.decided_by = None
-        checkpoint.decided_at = None
-        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
-    _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+    has_existing_plan = isinstance(session.plan_json, dict) and bool(session.plan_json)
+    _record_solution_draft_plan(
+        session=session,
+        memberships=memberships,
+        summary=(
+            "Generated structured cross-artifact draft plan."
+            if not has_existing_plan
+            else "Revised draft plan using your latest planning response."
+        ),
+    )
+    checkpoint = _reset_solution_stage_checkpoint(session=session)
+    _maybe_emit_solution_checkpoint_turn(
+        session=session,
+        checkpoint=checkpoint,
+        force_emit=has_existing_plan,
+    )
 
 
 def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
@@ -28844,28 +28873,12 @@ def _seed_solution_planning_state_on_create(
                 },
             )
             return
-        plan = _generate_solution_change_plan(session=session, memberships=memberships)
-        session.plan_json = plan
-        session.status = "planned"
-        session.save(update_fields=["plan_json", "status", "updated_at"])
-        _append_solution_planning_turn(
+        _record_solution_draft_plan(
             session=session,
-            actor="planner",
-            kind="draft_plan",
-            payload={
-                "summary": "Generated an initial draft plan from your request.",
-                "objective": str(session.request_text or ""),
-                "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
-                "shared_contracts": list(plan.get("shared_contracts") or []),
-                "validation_plan": list(plan.get("validation_plan") or []),
-            },
+            memberships=memberships,
+            summary="Generated an initial draft plan from your request.",
         )
-        checkpoint = _ensure_solution_stage_checkpoint(session=session)
-        if str(checkpoint.status or "") != "pending":
-            checkpoint.status = "pending"
-            checkpoint.decided_by = None
-            checkpoint.decided_at = None
-            checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+        checkpoint = _reset_solution_stage_checkpoint(session=session)
         _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
         return
 
@@ -32778,28 +32791,12 @@ def application_solution_change_session_plan(
         return JsonResponse({"error": "planner clarification is pending; submit a reply before generating a draft plan"}, status=409)
     if planning_state.get("pending_option_set"):
         return JsonResponse({"error": "planner option selection is pending; select an option before generating a draft plan"}, status=409)
-    plan = _generate_solution_change_plan(session=session, memberships=memberships)
-    session.plan_json = plan
-    session.status = "planned"
-    session.save(update_fields=["plan_json", "status", "updated_at"])
-    _append_solution_planning_turn(
+    _record_solution_draft_plan(
         session=session,
-        actor="planner",
-        kind="draft_plan",
-        payload={
-            "summary": "Generated structured cross-artifact draft plan.",
-            "objective": str(session.request_text or ""),
-            "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
-            "shared_contracts": list(plan.get("shared_contracts") or []),
-            "validation_plan": list(plan.get("validation_plan") or []),
-        },
+        memberships=memberships,
+        summary="Generated structured cross-artifact draft plan.",
     )
-    checkpoint = _ensure_solution_stage_checkpoint(session=session)
-    if str(checkpoint.status or "") != "pending":
-        checkpoint.status = "pending"
-        checkpoint.decided_by = None
-        checkpoint.decided_at = None
-        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+    checkpoint = _reset_solution_stage_checkpoint(session=session)
     _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
