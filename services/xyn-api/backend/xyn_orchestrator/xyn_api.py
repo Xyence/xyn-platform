@@ -28735,6 +28735,17 @@ def _record_solution_draft_plan(
     summary: str,
 ) -> Dict[str, Any]:
     plan = _generate_solution_change_plan(session=session, memberships=memberships)
+    objective_summary = str(
+        plan.get("planner_objective_text")
+        or plan.get("request_text")
+        or session.request_text
+        or ""
+    )
+    user_refinements = (
+        [str(item).strip() for item in plan.get("user_refinements", []) if str(item).strip()]
+        if isinstance(plan.get("user_refinements"), list)
+        else []
+    )
     session.plan_json = plan
     session.status = "planned"
     session.save(update_fields=["plan_json", "status", "updated_at"])
@@ -28744,7 +28755,9 @@ def _record_solution_draft_plan(
         kind="draft_plan",
         payload={
             "summary": summary,
-            "objective": str(session.request_text or ""),
+            "objective": objective_summary,
+            "request_text": str(session.request_text or ""),
+            "user_refinements": user_refinements,
             "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
             "shared_contracts": list(plan.get("shared_contracts") or []),
             "validation_plan": list(plan.get("validation_plan") or []),
@@ -28999,12 +29012,46 @@ def _generate_solution_change_plan(
     session: SolutionChangeSession,
     memberships: List[ApplicationArtifactMembership],
 ) -> Dict[str, Any]:
+    planning_turns = list(
+        SolutionPlanningTurn.objects.filter(session=session)
+        .order_by("sequence", "created_at")
+    )
+    original_request = str(session.request_text or "").strip()
+    user_refinements: List[str] = []
+    for turn in planning_turns:
+        if str(turn.actor or "") != "user" or str(turn.kind or "") != "response":
+            continue
+        payload = turn.payload_json if isinstance(turn.payload_json, dict) else {}
+        if str(payload.get("response_kind") or "response") != "response":
+            continue
+        reply_text = str(payload.get("reply_text") or "").strip()
+        if reply_text:
+            user_refinements.append(reply_text)
+    latest_draft_summary = ""
+    for turn in reversed(planning_turns):
+        if str(turn.actor or "") == "planner" and str(turn.kind or "") == "draft_plan":
+            payload = turn.payload_json if isinstance(turn.payload_json, dict) else {}
+            latest_draft_summary = str(payload.get("summary") or "").strip()
+            if not latest_draft_summary:
+                latest_draft_summary = str(payload.get("objective") or "").strip()
+            break
+    planner_objective_text = original_request
+    if user_refinements:
+        planner_objective_text = (
+            "User is refining a solution plan.\n"
+            f"Original request: {original_request or 'n/a'}\n"
+            "User refinements:\n"
+            + "\n".join(f"- {item}" for item in user_refinements)
+        )
+        if latest_draft_summary:
+            planner_objective_text += f"\nPrior draft summary: {latest_draft_summary}"
+
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
     if not selected_members:
         selected_members = memberships
     if not selected_members:
-        objective_text = str(session.request_text or "").strip()
+        objective_text = planner_objective_text
         first_focus = "Start by shaping the primary data model and first user-facing workflow."
         objective_lower = objective_text.lower()
         if any(token in objective_lower for token in {"api", "integration", "sync", "pipeline", "import"}):
@@ -29021,11 +29068,15 @@ def _generate_solution_change_plan(
             "Open question: should v1 support a single-user or multi-user collaboration model?",
             "Open question: which external integrations are required in v1 versus later phases?",
         ]
+        if user_refinements:
+            assumptions.append(f"User refinements to incorporate: {'; '.join(user_refinements[:3])}")
         return {
             "session_id": str(session.id),
             "application_id": str(session.application_id),
             "title": session.title,
-            "request_text": session.request_text or "",
+            "request_text": original_request,
+            "planner_objective_text": planner_objective_text,
+            "user_refinements": user_refinements,
             "generated_at": timezone.now().isoformat(),
             "selected_artifact_ids": initial_workstreams,
             "per_artifact_work": [],
@@ -29061,27 +29112,34 @@ def _generate_solution_change_plan(
                     focus,
                     "add/adjust tests for changed behavior",
                     "document any contract changes for consuming artifacts",
-                ],
+                ] + ([f"incorporate user refinements: {'; '.join(user_refinements[:2])}"] if user_refinements else []),
             }
         )
+    shared_contracts = [
+        "Cross-artifact API/schema compatibility",
+        "Event/payload shape compatibility where artifacts exchange runtime data",
+        "Generated surface/action metadata consistency for shell navigation",
+    ]
+    validation_plan = [
+        "Run artifact-local unit tests for each changed artifact",
+        "Run integration tests covering cross-artifact contract seams",
+        "Run shell/workbench smoke route checks for affected user paths",
+    ]
+    if user_refinements:
+        shared_contracts.append(f"Planner must incorporate user refinements: {'; '.join(user_refinements[:3])}")
+        validation_plan.insert(0, f"Validate refinement constraints were applied: {'; '.join(user_refinements[:2])}")
     return {
         "session_id": str(session.id),
         "application_id": str(session.application_id),
         "title": session.title,
-        "request_text": session.request_text or "",
+        "request_text": original_request,
+        "planner_objective_text": planner_objective_text,
+        "user_refinements": user_refinements,
         "generated_at": timezone.now().isoformat(),
         "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
         "per_artifact_work": per_artifact,
-        "shared_contracts": [
-            "Cross-artifact API/schema compatibility",
-            "Event/payload shape compatibility where artifacts exchange runtime data",
-            "Generated surface/action metadata consistency for shell navigation",
-        ],
-        "validation_plan": [
-            "Run artifact-local unit tests for each changed artifact",
-            "Run integration tests covering cross-artifact contract seams",
-            "Run shell/workbench smoke route checks for affected user paths",
-        ],
+        "shared_contracts": shared_contracts,
+        "validation_plan": validation_plan,
         "preview_implications": [
             "Preview instance should include all changed artifacts in one sibling deploy set",
             "Cross-artifact regression checks are required before promotion",
