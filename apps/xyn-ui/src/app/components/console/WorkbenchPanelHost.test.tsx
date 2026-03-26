@@ -1340,9 +1340,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
     expect(screen.getByText("Refine or respond to this plan (optional)")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stage Apply" })).toBeDisabled();
-    expect(screen.getByPlaceholderText("Approval note (optional).")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Approval note (optional).")).not.toBeInTheDocument();
     expect(screen.queryByPlaceholderText("Describe the change you want planned.")).not.toBeInTheDocument();
-    expect(screen.getAllByPlaceholderText("Approval note (optional).")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Approve options" }));
+    expect(screen.getByPlaceholderText("Approval note (optional).")).toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText("Answer open questions or request plan changes."), {
       target: { value: "Please prioritize campaign map usability and validation copy." },

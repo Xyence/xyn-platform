@@ -4248,6 +4248,7 @@ function ComposerDetailPanel({
   const [refinementDraft, setRefinementDraft] = useState("");
   const [questionReplyDraft, setQuestionReplyDraft] = useState("");
   const [approvalNotes, setApprovalNotes] = useState<Record<string, string>>({});
+  const [showApprovalNoteByCheckpoint, setShowApprovalNoteByCheckpoint] = useState<Record<string, boolean>>({});
   const [selectedOptionByTurn, setSelectedOptionByTurn] = useState<Record<string, string>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const latestTurnRef = useRef<HTMLLIElement | null>(null);
@@ -4452,6 +4453,7 @@ function ComposerDetailPanel({
   const pendingStageCheckpoint = pendingCheckpoints.find((entry: any) => String(entry.checkpoint_key || "") === "plan_scope_confirmed")
     || pendingCheckpoints[0]
     || null;
+  const showRefinementFooter = Boolean(selectedSession && hasDraftPlan && hasPendingCheckpoint && !hasPendingPrompt);
 
   const renderDraftPlanSummary = (turn: any) => {
     const payloadMap = selectedOptionTurnPayload(turn);
@@ -4628,8 +4630,9 @@ function ComposerDetailPanel({
               Select a solution change session from Solution Detail to review and approve planning interactions.
             </p>
           ) : (
-            <div className="composer-planning-scroll">
-              <ol className="composer-planning-timeline">
+            <>
+              <div className="composer-planning-scroll">
+                <ol className="composer-planning-timeline">
               {planningTurns.map((turn: any) => {
               const payloadMap = selectedOptionTurnPayload(turn);
               const isQuestionTurn = String(turn.kind || "") === "question";
@@ -4647,7 +4650,6 @@ function ComposerDetailPanel({
               const selectedOptionId = selectedOptionByTurn[String(turn.id)] || selectedOptionResponseBySourceTurn[String(turn.id)] || "";
               const isLatestTurn = String(turn.id || "") === latestTurnId;
               const isLatestDraftTurn = String(turn.id || "") === latestDraftTurnId;
-              const draftTurnShowsRefinement = isDraftPlanTurn && isLatestDraftTurn && hasPendingCheckpoint && !hasPendingPrompt;
               const actorType = String(turn.actor || "planner") === "planner" ? "planner" : "user";
               const plannerName = String(
                 payloadMap.planner_agent_name
@@ -4812,54 +4814,14 @@ function ComposerDetailPanel({
                     </div>
                   ) : null}
                   {isDraftPlanTurn ? renderDraftPlanSummary(turn) : null}
-                  {draftTurnShowsRefinement ? (
-                    <div className="composer-planning-action-block">
-                      <p className="muted small" style={{ marginBottom: 8 }}>
-                        Refine or respond to this plan (optional)
-                      </p>
-                      <textarea
-                        className="input"
-                        rows={3}
-                        value={refinementDraft}
-                        onChange={(event) => setRefinementDraft(event.target.value)}
-                        placeholder="Answer open questions or request plan changes."
-                      />
-                      <div className="inline-action-row" style={{ marginTop: 8 }}>
-                        <button
-                          type="button"
-                          className="ghost sm"
-                          disabled={!selectedSession || busyAction === "refine" || !refinementDraft.trim()}
-                          onClick={() => {
-                            const trimmed = refinementDraft.trim();
-                            if (!trimmed || !selectedSession) return;
-                            shouldAutoScrollToLatestTurnRef.current = true;
-                            setBusyAction("refine");
-                            void withSessionGuard(async () => {
-                              const response = await replyToSolutionPlanningSession(
-                                String(selectedSession.application_id),
-                                String(selectedSession.id),
-                                { reply_text: trimmed, source_turn_id: undefined }
-                              );
-                              mergeUpdatedSession(response.session);
-                              setRefinementDraft("");
-                              setMessage("Plan refinement submitted.");
-                            });
-                          }}
-                        >
-                          Refine Plan
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
                   {isCheckpointTurn && hasDraftPlan ? (
-                    <div className="composer-planning-action-block">
-                      <p className="composer-planning-turn__body">
-                        {String(payloadMap.label || "Approval checkpoint")}
-                        {" · "}
-                        Required before {String(payloadMap.required_before || "stage")}
-                      </p>
-                      <p className="muted small">Current status: {titleCaseLabel(String(checkpoint?.status || payloadMap.status || "pending"))}</p>
-                    </div>
+                    <p className="muted small composer-checkpoint-history">
+                      {String(payloadMap.label || "Approval checkpoint")}
+                      {" · "}
+                      Required before {String(payloadMap.required_before || "stage")}
+                      {" · "}
+                      {titleCaseLabel(String(checkpoint?.status || payloadMap.status || "pending"))}
+                    </p>
                   ) : null}
                   {String(turn.kind || "") === "approval" ? (
                     <p className="composer-planning-turn__body">
@@ -4874,55 +4836,105 @@ function ComposerDetailPanel({
                   <p className="muted">No planning interaction history has been recorded yet.</p>
                 </li>
               ) : null}
-              </ol>
-            </div>
+                </ol>
+              </div>
+              <div className="composer-planning-footer">
+                {showRefinementFooter ? (
+                  <>
+                    <p className="muted small">Refine or respond to this plan (optional)</p>
+                    <textarea
+                      className="input"
+                      rows={3}
+                      value={refinementDraft}
+                      onChange={(event) => setRefinementDraft(event.target.value)}
+                      placeholder="Answer open questions or request plan changes."
+                    />
+                    <div className="composer-planning-footer-actions">
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        disabled={!selectedSession || busyAction === "refine" || !refinementDraft.trim()}
+                        onClick={() => {
+                          const trimmed = refinementDraft.trim();
+                          if (!trimmed || !selectedSession) return;
+                          shouldAutoScrollToLatestTurnRef.current = true;
+                          setBusyAction("refine");
+                          void withSessionGuard(async () => {
+                            const response = await replyToSolutionPlanningSession(
+                              String(selectedSession.application_id),
+                              String(selectedSession.id),
+                              { reply_text: trimmed, source_turn_id: undefined }
+                            );
+                            mergeUpdatedSession(response.session);
+                            setRefinementDraft("");
+                            setMessage("Plan refinement submitted.");
+                          });
+                        }}
+                      >
+                        Refine Plan
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="muted small">
+                    {hasPendingPrompt
+                      ? "Respond to the pending planner prompt above to continue."
+                      : hasDraftPlan
+                        ? "Approval gate controls are available in the right rail."
+                        : "A draft plan is required before refinement is available."}
+                  </p>
+                )}
+              </div>
+            </>
           )}
         </section>
 
         <aside className="composer-cockpit-rail">
-          <section className="card">
+          <section className="card composer-draft-card">
             <div className="field-label">Current Draft</div>
-            {hasDraftPlan ? (
-              <div className="composer-draft-plan">
-                <div><span className="field-label">Objective</span><p>{draftObjective}</p></div>
-                <div>
-                  <span className="field-label">Proposed Work</span>
-                  {draftProposedWork.length ? (
-                    <ul className="detail-list">
-                      {draftProposedWork.map((item) => <li key={item}>{item}</li>)}
-                    </ul>
-                  ) : (
-                    <p className="muted small">No selected artifact set provided yet.</p>
-                  )}
+            <div className="composer-draft-scroll">
+              {hasDraftPlan ? (
+                <div className="composer-draft-plan">
+                  <div><span className="field-label">Objective</span><p>{draftObjective}</p></div>
+                  <div>
+                    <span className="field-label">Proposed Work</span>
+                    {draftProposedWork.length ? (
+                      <ul className="detail-list">
+                        {draftProposedWork.map((item) => <li key={item}>{item}</li>)}
+                      </ul>
+                    ) : (
+                      <p className="muted small">No selected artifact set provided yet.</p>
+                    )}
+                  </div>
+                  <div>
+                    <span className="field-label">Key Impacts / Assumptions</span>
+                    {draftImpacts.length ? (
+                      <ul className="detail-list">
+                        {draftImpacts.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
+                      </ul>
+                    ) : (
+                      <p className="muted small">No key impacts were listed.</p>
+                    )}
+                  </div>
+                  <div>
+                    <span className="field-label">Open Questions</span>
+                    {draftOpenQuestions.length ? (
+                      <ul className="detail-list">
+                        {draftOpenQuestions.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
+                      </ul>
+                    ) : (
+                      <p className="muted small">No open questions captured.</p>
+                    )}
+                  </div>
+                  <div>
+                    <span className="field-label">Next Action</span>
+                    <p>{draftValidation[0] || "Review and approve checkpoint to continue execution."}</p>
+                  </div>
                 </div>
-                <div>
-                  <span className="field-label">Key Impacts / Assumptions</span>
-                  {draftImpacts.length ? (
-                    <ul className="detail-list">
-                      {draftImpacts.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
-                    </ul>
-                  ) : (
-                    <p className="muted small">No key impacts were listed.</p>
-                  )}
-                </div>
-                <div>
-                  <span className="field-label">Open Questions</span>
-                  {draftOpenQuestions.length ? (
-                    <ul className="detail-list">
-                      {draftOpenQuestions.map((item, index) => <li key={`${item}:${index}`}>{item}</li>)}
-                    </ul>
-                  ) : (
-                    <p className="muted small">No open questions captured.</p>
-                  )}
-                </div>
-                <div>
-                  <span className="field-label">Next Action</span>
-                  <p>{draftValidation[0] || "Review and approve checkpoint to continue execution."}</p>
-                </div>
-              </div>
-            ) : (
-              <p className="muted small">No draft available yet.</p>
-            )}
+              ) : (
+                <p className="muted small">No draft available yet.</p>
+              )}
+            </div>
           </section>
 
           <section className="card">
@@ -4939,19 +4951,21 @@ function ComposerDetailPanel({
                 <p className="muted small">
                   Current status: {titleCaseLabel(String(pendingStageCheckpoint.status || "pending"))}
                 </p>
-                <textarea
-                  className="input"
-                  rows={2}
-                  value={approvalNotes[String(pendingStageCheckpoint.id)] || ""}
-                  onChange={(event) =>
-                    setApprovalNotes((current) => ({ ...current, [String(pendingStageCheckpoint.id)]: event.target.value }))
-                  }
-                  placeholder="Approval note (optional)."
-                />
-                <div className="inline-action-row" style={{ marginTop: 8 }}>
+                {showApprovalNoteByCheckpoint[String(pendingStageCheckpoint.id)] ? (
+                  <textarea
+                    className="input"
+                    rows={2}
+                    value={approvalNotes[String(pendingStageCheckpoint.id)] || ""}
+                    onChange={(event) =>
+                      setApprovalNotes((current) => ({ ...current, [String(pendingStageCheckpoint.id)]: event.target.value }))
+                    }
+                    placeholder="Approval note (optional)."
+                  />
+                ) : null}
+                <div className="inline-action-row composer-approval-actions" style={{ marginTop: 8 }}>
                   <button
                     type="button"
-                    className="ghost sm"
+                    className="primary sm"
                     disabled={busyAction === `checkpoint-approve:${pendingStageCheckpoint.id}`}
                     onClick={() => {
                       if (!selectedSession) return;
@@ -4973,6 +4987,19 @@ function ComposerDetailPanel({
                     }}
                   >
                     Approve
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost sm"
+                    aria-label="Approve options"
+                    onClick={() =>
+                      setShowApprovalNoteByCheckpoint((current) => ({
+                        ...current,
+                        [String(pendingStageCheckpoint.id)]: !current[String(pendingStageCheckpoint.id)],
+                      }))
+                    }
+                  >
+                    ▾
                   </button>
                   <button
                     type="button"

@@ -5666,6 +5666,8 @@ button.sm {
 
 .composer-planning-card {
   min-height: 280px;
+  display: flex;
+  flex-direction: column;
 }
 
 .composer-cockpit-header {
@@ -5707,6 +5709,25 @@ button.sm {
 
 .composer-planning-scroll {
   min-height: 0;
+  flex: 1 1 auto;
+}
+
+.composer-planning-footer {
+  border-top: 1px solid var(--border);
+  margin-top: 10px;
+  padding-top: 10px;
+  display: grid;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.composer-planning-footer-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.composer-checkpoint-history {
+  margin: 0;
 }
 
 .composer-planning-turn {
@@ -5799,6 +5820,15 @@ button.sm {
   margin: 2px 0 0;
 }
 
+.composer-draft-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.composer-draft-scroll {
+  min-height: 0;
+}
+
 .composer-execution-status {
   display: grid;
   gap: 8px;
@@ -5806,18 +5836,26 @@ button.sm {
 
 @media (min-width: 769px) {
   .composer-planning-card {
-    display: flex;
-    flex-direction: column;
     max-height: clamp(420px, calc(100vh - 260px), 760px);
     min-height: 360px;
   }
 
   .composer-planning-scroll {
-    flex: 1 1 auto;
-    min-height: 0;
     overflow-y: auto;
     margin-top: 8px;
     padding-right: 4px;
+  }
+
+  .composer-draft-card {
+    max-height: clamp(300px, calc(100vh - 420px), 560px);
+    min-height: 220px;
+  }
+
+  .composer-draft-scroll {
+    overflow-y: auto;
+    margin-top: 8px;
+    padding-right: 4px;
+    flex: 1 1 auto;
   }
 }
 
