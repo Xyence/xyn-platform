@@ -28678,6 +28678,23 @@ def _solution_option_rows(
     return options
 
 
+def _has_meaningful_solution_memberships(memberships: List[ApplicationArtifactMembership]) -> bool:
+    meaningful_roles = {
+        "primary_ui",
+        "primary_api",
+        "integration_adapter",
+        "worker",
+        "runtime_service",
+        "shared_library",
+    }
+    return any(str(member.role or "") in meaningful_roles for member in memberships)
+
+
+def _request_requires_initial_clarification(request_text: str) -> bool:
+    tokens = [token for token in re.findall(r"[a-z0-9_]+", str(request_text or "").lower()) if len(token) >= 2]
+    return len(tokens) <= 4
+
+
 def _maybe_emit_solution_checkpoint_turn(
     *,
     session: SolutionChangeSession,
@@ -28811,6 +28828,47 @@ def _seed_solution_planning_state_on_create(
         )
 
     token_count = len([token for token in re.findall(r"[a-z0-9_]+", request_text.lower()) if len(token) >= 2])
+    has_meaningful_memberships = _has_meaningful_solution_memberships(memberships)
+    if request_text and not has_meaningful_memberships:
+        if _request_requires_initial_clarification(request_text):
+            _append_solution_planning_turn(
+                session=session,
+                actor="planner",
+                kind="question",
+                payload={
+                    "question": (
+                        "Before I draft the first plan: should this start as a single-user or multi-user app, "
+                        "and should we prioritize data modeling or UI first?"
+                    ),
+                    "reason": "initial_scope_clarification",
+                },
+            )
+            return
+        plan = _generate_solution_change_plan(session=session, memberships=memberships)
+        session.plan_json = plan
+        session.status = "planned"
+        session.save(update_fields=["plan_json", "status", "updated_at"])
+        _append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="draft_plan",
+            payload={
+                "summary": "Generated an initial draft plan from your request.",
+                "objective": str(session.request_text or ""),
+                "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+                "shared_contracts": list(plan.get("shared_contracts") or []),
+                "validation_plan": list(plan.get("validation_plan") or []),
+            },
+        )
+        checkpoint = _ensure_solution_stage_checkpoint(session=session)
+        if str(checkpoint.status or "") != "pending":
+            checkpoint.status = "pending"
+            checkpoint.decided_by = None
+            checkpoint.decided_at = None
+            checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+        _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+        return
+
     if token_count <= 6:
         _append_solution_planning_turn(
             session=session,
@@ -28932,6 +28990,41 @@ def _generate_solution_change_plan(
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
     if not selected_members:
         selected_members = memberships
+    if not selected_members:
+        objective_text = str(session.request_text or "").strip()
+        first_focus = "Start by shaping the primary data model and first user-facing workflow."
+        objective_lower = objective_text.lower()
+        if any(token in objective_lower for token in {"api", "integration", "sync", "pipeline", "import"}):
+            first_focus = "Start by defining backend contracts and integration seams for the first vertical slice."
+        elif any(token in objective_lower for token in {"ui", "ux", "screen", "dashboard", "workflow"}):
+            first_focus = "Start by designing the first end-to-end user workflow and its supporting API contract."
+        initial_workstreams = [
+            "Core domain model and storage",
+            "Primary user workflow surface",
+            "Basic API/service contract",
+        ]
+        assumptions = [
+            "Assumption: initial release targets internal authenticated users.",
+            "Open question: should v1 support a single-user or multi-user collaboration model?",
+            "Open question: which external integrations are required in v1 versus later phases?",
+        ]
+        return {
+            "session_id": str(session.id),
+            "application_id": str(session.application_id),
+            "title": session.title,
+            "request_text": session.request_text or "",
+            "generated_at": timezone.now().isoformat(),
+            "selected_artifact_ids": initial_workstreams,
+            "per_artifact_work": [],
+            "shared_contracts": assumptions,
+            "validation_plan": [
+                first_focus,
+                "Validate the first vertical slice end-to-end before broadening scope.",
+            ],
+            "preview_implications": [
+                "Use preview to validate the first vertical slice with representative data.",
+            ],
+        }
     per_artifact: List[Dict[str, Any]] = []
     for member in selected_members:
         artifact = member.artifact

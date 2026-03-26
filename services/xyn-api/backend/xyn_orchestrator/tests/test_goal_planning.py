@@ -1228,6 +1228,72 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(len(checkpoints), 0)
         self.assertIsNone(planning.get("latest_draft_plan"))
 
+    def test_solution_change_session_create_without_memberships_seeds_initial_draft_plan(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Personal Knowledgebase",
+            summary="Knowledgebase app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Create a personal knowledgebase application.",
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Initial plan",
+                    "request_text": "Create a personal knowledgebase application that tracks notes and searchable information.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 201)
+        planning = ((payload.get("session") or {}).get("planning") or {})
+        latest_draft = planning.get("latest_draft_plan") or {}
+        self.assertEqual(str(latest_draft.get("kind") or ""), "draft_plan")
+        self.assertTrue((latest_draft.get("payload") or {}).get("selected_artifact_ids"))
+        self.assertIsNone(planning.get("pending_question"))
+        self.assertIsNone(planning.get("pending_option_set"))
+        pending_checkpoints = planning.get("pending_checkpoints") or []
+        self.assertEqual(len(pending_checkpoints), 1)
+        self.assertEqual(str((pending_checkpoints[0] or {}).get("status") or ""), "pending")
+
+    def test_solution_change_session_create_without_memberships_asks_plain_language_clarification_when_ambiguous(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="New App",
+            summary="New app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build app",
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "Initial plan", "request_text": "knowledgebase app"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 201)
+        planning = ((payload.get("session") or {}).get("planning") or {})
+        self.assertIsNone(planning.get("latest_draft_plan"))
+        self.assertIsNone(planning.get("pending_option_set"))
+        pending_question = planning.get("pending_question") or {}
+        question_text = str(((pending_question.get("payload") or {}).get("question")) or "")
+        self.assertTrue(question_text)
+        lowered = question_text.lower()
+        self.assertNotIn("membership", lowered)
+        self.assertNotIn("selectable artifacts", lowered)
+        self.assertNotIn("regenerate options", lowered)
+
     def test_solution_change_session_reply_option_and_checkpoint_decision_are_persisted(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
