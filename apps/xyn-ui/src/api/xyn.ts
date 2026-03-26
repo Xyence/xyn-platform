@@ -4697,6 +4697,7 @@ export async function replyToSolutionPlanningSession(
   payload: {
     reply_text: string;
     source_turn_id?: string;
+    use_planner_interpretation?: boolean;
   }
 ): Promise<{ recorded: boolean; session: SolutionChangeSession }> {
   const apiBaseUrl = resolveApiBaseUrl();

@@ -4540,6 +4540,49 @@ function ComposerDetailPanel({
     const payloadMap = latestPlannerTurn ? selectedOptionTurnPayload(latestPlannerTurn) : {};
     return String(payloadMap.planner_agent_id || payloadMap.agent_id || currentAgentName || "planner");
   })();
+  const interpretationForTurn = (turn: any): Record<string, unknown> => {
+    const payloadMap = selectedOptionTurnPayload(turn);
+    return payloadMap.interpretation && typeof payloadMap.interpretation === "object"
+      ? payloadMap.interpretation as Record<string, unknown>
+      : {};
+  };
+  const interpretationBadgeForTurn = (turn: any): string => {
+    const interp = interpretationForTurn(turn);
+    const mode = String(interp.mode || "").trim().toLowerCase();
+    const resultType = String(interp.result_type || "").trim().toLowerCase();
+    if (mode === "agent_fallback" && (resultType === "answer_resolution" || resultType === "plan_revision")) {
+      return "Interpreted by planner";
+    }
+    if (resultType === "clarification_request") return "Planner requested clarification";
+    if (resultType === "cannot_interpret") return "Could not safely interpret";
+    return "";
+  };
+  const fallbackQuestionReasonLabel = (turn: any): string => {
+    const payloadMap = selectedOptionTurnPayload(turn);
+    const reason = String(payloadMap.reason || "").trim().toLowerCase();
+    if (reason === "clarification_request") return "Planner requested clarification";
+    if (reason === "cannot_interpret") return "Could not safely interpret";
+    return "";
+  };
+  const submitRefinement = async (trimmed: string, usePlannerInterpretation: boolean) => {
+    if (!selectedSession || !trimmed) return;
+    shouldAutoScrollToLatestTurnRef.current = true;
+    setBusyAction(usePlannerInterpretation ? "refine-planner" : "refine");
+    await withSessionGuard(async () => {
+      const response = await replyToSolutionPlanningSession(
+        String(selectedSession.application_id),
+        String(selectedSession.id),
+        {
+          reply_text: trimmed,
+          source_turn_id: undefined,
+          use_planner_interpretation: usePlannerInterpretation,
+        }
+      );
+      mergeUpdatedSession(response.session);
+      setRefinementDraft("");
+      setMessage(usePlannerInterpretation ? "Submitted using planner interpretation." : "Plan refinement submitted.");
+    });
+  };
 
   return (
     <div className="panel-section-stack composer-cockpit">
@@ -4600,6 +4643,12 @@ function ComposerDetailPanel({
                       <span className="composer-turn-actor-label">{actorLabel}</span>
                     </span>
                     <span className="pill">{titleCaseLabel(String(turn.kind || "update"))}</span>
+                    {interpretationBadgeForTurn(turn) ? (
+                      <span className="pill">{interpretationBadgeForTurn(turn)}</span>
+                    ) : null}
+                    {!interpretationBadgeForTurn(turn) && isQuestionTurn && fallbackQuestionReasonLabel(turn) ? (
+                      <span className="pill">{fallbackQuestionReasonLabel(turn)}</span>
+                    ) : null}
                     <span className="muted small">{formatPanelTimestamp(String(turn.created_at || ""))}</span>
                   </div>
                   {String(turn.actor || "") === "user" && String(turn.kind || "") !== "approval" ? (
@@ -4824,25 +4873,26 @@ function ComposerDetailPanel({
                       <button
                         type="button"
                         className="ghost sm"
-                        disabled={!selectedSession || busyAction === "refine" || !refinementDraft.trim()}
+                        disabled={!selectedSession || (busyAction === "refine" || busyAction === "refine-planner") || !refinementDraft.trim()}
                         onClick={() => {
                           const trimmed = refinementDraft.trim();
                           if (!trimmed || !selectedSession) return;
-                          shouldAutoScrollToLatestTurnRef.current = true;
-                          setBusyAction("refine");
-                          void withSessionGuard(async () => {
-                            const response = await replyToSolutionPlanningSession(
-                              String(selectedSession.application_id),
-                              String(selectedSession.id),
-                              { reply_text: trimmed, source_turn_id: undefined }
-                            );
-                            mergeUpdatedSession(response.session);
-                            setRefinementDraft("");
-                            setMessage("Plan refinement submitted.");
-                          });
+                          void submitRefinement(trimmed, false);
                         }}
                       >
                         Refine Plan
+                      </button>
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        disabled={!selectedSession || (busyAction === "refine" || busyAction === "refine-planner") || !refinementDraft.trim()}
+                        onClick={() => {
+                          const trimmed = refinementDraft.trim();
+                          if (!trimmed || !selectedSession) return;
+                          void submitRefinement(trimmed, true);
+                        }}
+                      >
+                        Use planner interpretation
                       </button>
                     </div>
                   </>
