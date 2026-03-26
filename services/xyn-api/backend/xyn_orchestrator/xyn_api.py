@@ -29027,6 +29027,78 @@ def _generate_solution_change_plan(
         reply_text = str(payload.get("reply_text") or "").strip()
         if reply_text:
             user_refinements.append(reply_text)
+
+    def _compact_objective(text: str) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return "Deliver the requested solution scope with a validated first iteration."
+        first_line = re.split(r"[\n\.]", value, maxsplit=1)[0].strip()
+        compact = first_line or value
+        return compact[:220].rstrip()
+
+    def _refinement_state(refinements: List[str]) -> Dict[str, Any]:
+        state: Dict[str, Any] = {
+            "integration_v1": None,  # True/False/None
+            "collaboration": None,  # "single" | "multi" | None
+            "rich_text": False,
+            "resolved_assumptions": [],
+            "constraints": [],
+        }
+        for refinement in refinements:
+            text = str(refinement or "").strip()
+            lowered = text.lower()
+            if not lowered:
+                continue
+            if (
+                ("no external integration" in lowered)
+                or ("no external integrations" in lowered)
+                or ("without external integration" in lowered)
+                or ("without external integrations" in lowered)
+            ):
+                state["integration_v1"] = False
+            elif ("external integration" in lowered) or ("external integrations" in lowered):
+                state["integration_v1"] = True
+
+            if ("single-user" in lowered) or ("single user" in lowered):
+                state["collaboration"] = "single"
+            if (
+                ("multi-user" in lowered)
+                or ("multi user" in lowered)
+                or ("collaboration" in lowered)
+                or ("editor/reader" in lowered)
+                or ("editor and reader" in lowered)
+                or ("editor role" in lowered and "reader role" in lowered)
+            ):
+                state["collaboration"] = "multi"
+
+            if ("rich text" in lowered) or ("wysiwyg" in lowered) or ("editor support" in lowered):
+                state["rich_text"] = True
+
+        resolved_assumptions: List[str] = []
+        constraints: List[str] = []
+        if state["integration_v1"] is False:
+            resolved_assumptions.append("Resolved: v1 excludes external integrations.")
+            constraints.append("Scope constraint: keep v1 self-contained with no external integrations.")
+        elif state["integration_v1"] is True:
+            resolved_assumptions.append("Resolved: v1 requires at least one external integration seam.")
+            constraints.append("Scope constraint: define integration boundaries for v1.")
+
+        if state["collaboration"] == "single":
+            resolved_assumptions.append("Resolved: v1 targets a single-user workflow.")
+            constraints.append("Design around single-user editing and retrieval flows.")
+        elif state["collaboration"] == "multi":
+            resolved_assumptions.append("Resolved: v1 supports multi-user collaboration with role boundaries.")
+            constraints.append("Include role-aware collaboration (editor/reader) in the first iteration.")
+
+        if state["rich_text"]:
+            resolved_assumptions.append("Resolved: rich text editing is required in the first iteration.")
+            constraints.append("Include rich text editor capabilities in the initial build slice.")
+
+        state["resolved_assumptions"] = resolved_assumptions
+        state["constraints"] = constraints
+        return state
+
+    refinement_state = _refinement_state(user_refinements)
     latest_draft_summary = ""
     for turn in reversed(planning_turns):
         if str(turn.actor or "") == "planner" and str(turn.kind or "") == "draft_plan":
@@ -29035,23 +29107,24 @@ def _generate_solution_change_plan(
             if not latest_draft_summary:
                 latest_draft_summary = str(payload.get("objective") or "").strip()
             break
-    planner_objective_text = original_request
+    planner_objective_text = _compact_objective(original_request)
+    planner_context_text = planner_objective_text
     if user_refinements:
-        planner_objective_text = (
+        planner_context_text = (
             "User is refining a solution plan.\n"
             f"Original request: {original_request or 'n/a'}\n"
-            "User refinements:\n"
-            + "\n".join(f"- {item}" for item in user_refinements)
+            + ("Resolved assumptions:\n" + "\n".join(f"- {item}" for item in refinement_state["resolved_assumptions"]) + "\n" if refinement_state["resolved_assumptions"] else "")
+            + ("Refinement constraints:\n" + "\n".join(f"- {item}" for item in refinement_state["constraints"]) + "\n" if refinement_state["constraints"] else "")
         )
         if latest_draft_summary:
-            planner_objective_text += f"\nPrior draft summary: {latest_draft_summary}"
+            planner_context_text += f"\nPrior draft summary: {latest_draft_summary}"
 
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
     if not selected_members:
         selected_members = memberships
     if not selected_members:
-        objective_text = planner_objective_text
+        objective_text = _compact_objective(original_request)
         first_focus = "Start by shaping the primary data model and first user-facing workflow."
         objective_lower = objective_text.lower()
         if any(token in objective_lower for token in {"api", "integration", "sync", "pipeline", "import"}):
@@ -29063,19 +29136,24 @@ def _generate_solution_change_plan(
             "Primary user workflow surface",
             "Basic API/service contract",
         ]
-        assumptions = [
+        if refinement_state["rich_text"]:
+            initial_workstreams[1] = "Primary user workflow surface with rich text editing"
+        assumptions: List[str] = [
             "Assumption: initial release targets internal authenticated users.",
-            "Open question: should v1 support a single-user or multi-user collaboration model?",
-            "Open question: which external integrations are required in v1 versus later phases?",
         ]
-        if user_refinements:
-            assumptions.append(f"User refinements to incorporate: {'; '.join(user_refinements[:3])}")
+        assumptions.extend(refinement_state["resolved_assumptions"])
+        if not refinement_state["collaboration"]:
+            assumptions.append("Open question: should v1 support a single-user or multi-user collaboration model?")
+        if refinement_state["integration_v1"] is None:
+            assumptions.append("Open question: which external integrations are required in v1 versus later phases?")
+        assumptions.extend(refinement_state["constraints"][:2])
         return {
             "session_id": str(session.id),
             "application_id": str(session.application_id),
             "title": session.title,
             "request_text": original_request,
             "planner_objective_text": planner_objective_text,
+            "planner_context_text": planner_context_text,
             "user_refinements": user_refinements,
             "generated_at": timezone.now().isoformat(),
             "selected_artifact_ids": initial_workstreams,
@@ -29112,9 +29190,17 @@ def _generate_solution_change_plan(
                     focus,
                     "add/adjust tests for changed behavior",
                     "document any contract changes for consuming artifacts",
-                ] + ([f"incorporate user refinements: {'; '.join(user_refinements[:2])}"] if user_refinements else []),
+                ],
             }
         )
+        if refinement_state["rich_text"] and role == "primary_ui":
+            per_artifact[-1]["planned_work"].append("support rich text editing workflows in the first user-facing slice")
+        if refinement_state["integration_v1"] is False:
+            per_artifact[-1]["planned_work"].append("defer external integrations from v1 implementation scope")
+        if refinement_state["collaboration"] == "multi":
+            per_artifact[-1]["planned_work"].append("introduce role-aware collaboration semantics (editor/reader)")
+        if refinement_state["collaboration"] == "single":
+            per_artifact[-1]["planned_work"].append("optimize flows for single-user v1 operation")
     shared_contracts = [
         "Cross-artifact API/schema compatibility",
         "Event/payload shape compatibility where artifacts exchange runtime data",
@@ -29125,15 +29211,21 @@ def _generate_solution_change_plan(
         "Run integration tests covering cross-artifact contract seams",
         "Run shell/workbench smoke route checks for affected user paths",
     ]
-    if user_refinements:
-        shared_contracts.append(f"Planner must incorporate user refinements: {'; '.join(user_refinements[:3])}")
-        validation_plan.insert(0, f"Validate refinement constraints were applied: {'; '.join(user_refinements[:2])}")
+    shared_contracts.extend(refinement_state["resolved_assumptions"])
+    if refinement_state["collaboration"] is None:
+        shared_contracts.append("Open question: should v1 collaboration be single-user or multi-user?")
+    if refinement_state["integration_v1"] is None:
+        shared_contracts.append("Open question: are external integrations required in v1?")
+    shared_contracts.extend(refinement_state["constraints"])
+    if refinement_state["constraints"]:
+        validation_plan.insert(0, "Validate that revision constraints are reflected in scope and acceptance checks.")
     return {
         "session_id": str(session.id),
         "application_id": str(session.application_id),
         "title": session.title,
         "request_text": original_request,
         "planner_objective_text": planner_objective_text,
+        "planner_context_text": planner_context_text,
         "user_refinements": user_refinements,
         "generated_at": timezone.now().isoformat(),
         "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
