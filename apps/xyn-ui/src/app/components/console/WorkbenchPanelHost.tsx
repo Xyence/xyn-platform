@@ -4360,8 +4360,8 @@ function ComposerDetailPanel({
   const showInitialRequestInput = !hasDraftPlan && !hasPendingPrompt;
   const showIterativeRequestInput = hasExecutionProgress && !hasPendingPrompt && !hasPendingCheckpoint;
   const latestPlannerTurn = [...planningTurns].reverse().find((turn: any) => String(turn.actor || "") === "planner") || null;
-  const latestTurn = planningTurns.length ? planningTurns[planningTurns.length - 1] : null;
-  const latestTurnId = latestTurn ? String(latestTurn.id || "") : "";
+  const latestVisibleTurn = [...planningTurns].reverse().find((turn: any) => String(turn.kind || "") !== "checkpoint") || null;
+  const latestVisibleTurnId = latestVisibleTurn ? String(latestVisibleTurn.id || "") : "";
   const latestDraftTurn = [...planningTurns]
     .reverse()
     .find((turn: any) => String(turn.actor || "") === "planner" && String(turn.kind || "") === "draft_plan") || null;
@@ -4405,13 +4405,13 @@ function ComposerDetailPanel({
     });
   }, [selectedSession, workspaceId]);
   useEffect(() => {
-    if (!latestTurnId || !shouldAutoScrollToLatestTurnRef.current) return;
+    if (!latestVisibleTurnId || !shouldAutoScrollToLatestTurnRef.current) return;
     const target = latestTurnRef.current as (HTMLLIElement & { scrollIntoView?: (options?: any) => void }) | null;
     if (typeof target?.scrollIntoView === "function") {
       target.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
     shouldAutoScrollToLatestTurnRef.current = false;
-  }, [latestTurnId]);
+  }, [latestVisibleTurnId]);
 
   if (loading) return <p className="muted">Loading composer…</p>;
   if (error) return <p className="danger-text">{error}</p>;
@@ -4543,81 +4543,8 @@ function ComposerDetailPanel({
 
   return (
     <div className="panel-section-stack composer-cockpit">
-      <section className="card composer-cockpit-header">
-        <div className="card-header">
-          <div>
-            <div className="field-label">Planning Session</div>
-            <div className="field-value">{selectedSession?.title || "No solution session selected"}</div>
-          </div>
-        </div>
-        <div className="composer-cockpit-header-row">
-          <div><div className="field-label">Solution / Session</div><div className="field-value">{selectedSession?.title || "Open a solution change session from Solution Detail."}</div></div>
-          <div><div className="field-label">Planning status</div><div className="field-value">{planningStatusLabel}</div></div>
-          <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(latestActivityAt)}</div></div>
-          <div className="composer-cockpit-agent">
-            <div className="field-label">Agent</div>
-            <div className="composer-cockpit-agent-row">
-              <Avatar size="sm" name={currentAgentName} identityKey={currentAgentIdentityKey} />
-              <span className="field-value">{currentAgentName}</span>
-            </div>
-          </div>
-          <div><div className="field-label">Revision</div><div className="field-value">{draftRevisionCount ? `Rev ${draftRevisionCount}` : "—"}</div></div>
-        </div>
-        {showInitialRequestInput || showIterativeRequestInput ? (
-          <>
-            <p className="muted small" style={{ marginTop: 10, marginBottom: 8 }}>
-              {showIterativeRequestInput
-                ? "Describe the next change to continue this planning session."
-                : "Request a change for the selected solution session."}
-            </p>
-            <textarea
-              className="input"
-              rows={3}
-              value={requestDraft}
-              onChange={(event) => setRequestDraft(event.target.value)}
-              placeholder="Describe the change you want planned."
-            />
-            <div className="inline-action-row" style={{ marginTop: 10 }}>
-              <button
-                type="button"
-                className="ghost sm"
-                disabled={
-                  !selectedSession
-                  || busyAction === "request"
-                  || !requestDraft.trim()
-                }
-                onClick={() => {
-                  const trimmed = requestDraft.trim();
-                  if (!trimmed || !selectedSession) return;
-                  shouldAutoScrollToLatestTurnRef.current = true;
-                  setBusyAction("request");
-                  void withSessionGuard(async () => {
-                    const response = await replyToSolutionPlanningSession(
-                      String(selectedSession.application_id),
-                      String(selectedSession.id),
-                      { reply_text: trimmed, source_turn_id: undefined }
-                    );
-                    mergeUpdatedSession(response.session);
-                    setRequestDraft("");
-                    setMessage(showIterativeRequestInput ? "Recorded iterative change request." : "Recorded change request.");
-                  });
-                }}
-              >
-                {showIterativeRequestInput ? "Describe Change" : "Submit Request"}
-              </button>
-            </div>
-          </>
-        ) : (
-          <p className="muted small" style={{ marginTop: 10 }}>
-            {hasDraftPlan
-              ? "A draft plan is available. Continue planning interactions in the timeline below."
-              : "A planner clarification or option selection is pending below. Respond there to continue."}
-          </p>
-        )}
-        {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
-      </section>
-
       <div className="composer-cockpit-grid">
+        <div className="composer-cockpit-main">
         <section className="card composer-planning-card">
           <div className="card-header">
             <div>
@@ -4625,11 +4552,6 @@ function ComposerDetailPanel({
               <div className="field-value">Structured planning timeline</div>
             </div>
           </div>
-          {!selectedSession ? (
-            <p className="muted">
-              Select a solution change session from Solution Detail to review and approve planning interactions.
-            </p>
-          ) : (
             <>
               <div className="composer-planning-scroll">
                 <ol className="composer-planning-timeline">
@@ -4641,15 +4563,11 @@ function ComposerDetailPanel({
               const isCheckpointTurn = String(turn.kind || "") === "checkpoint";
               const isPendingQuestionTurn = String(pendingQuestion?.id || "") === String(turn.id || "");
               const isPendingOptionTurn = String(pendingOptionSet?.id || "") === String(turn.id || "");
-              const checkpointId = String(payloadMap.checkpoint_id || "");
-              const checkpoint = checkpointId
-                ? pendingCheckpoints.find((entry: any) => String(entry.id) === checkpointId)
-                || (planning?.checkpoints || []).find((entry: any) => String(entry.id) === checkpointId)
-                : null;
               const options = Array.isArray(payloadMap.options) ? payloadMap.options : [];
               const selectedOptionId = selectedOptionByTurn[String(turn.id)] || selectedOptionResponseBySourceTurn[String(turn.id)] || "";
-              const isLatestTurn = String(turn.id || "") === latestTurnId;
+              const isLatestTurn = String(turn.id || "") === latestVisibleTurnId;
               const isLatestDraftTurn = String(turn.id || "") === latestDraftTurnId;
+              const associatedCheckpoint = isLatestDraftTurn ? pendingStageCheckpoint : null;
               const actorType = String(turn.actor || "planner") === "planner" ? "planner" : "user";
               const plannerName = String(
                 payloadMap.planner_agent_name
@@ -4662,6 +4580,8 @@ function ComposerDetailPanel({
               const actorIdentityKey = actorType === "planner"
                 ? String(payloadMap.planner_agent_id || payloadMap.agent_id || plannerName || "planner")
                 : String(turn.created_by || selectedSession?.created_by || "current-user");
+
+              if (isCheckpointTurn) return null;
 
               return (
                 <li
@@ -4813,15 +4733,18 @@ function ComposerDetailPanel({
                       )}
                     </div>
                   ) : null}
-                  {isDraftPlanTurn ? renderDraftPlanSummary(turn) : null}
-                  {isCheckpointTurn && hasDraftPlan ? (
-                    <p className="muted small composer-checkpoint-history">
-                      {String(payloadMap.label || "Approval checkpoint")}
-                      {" · "}
-                      Required before {String(payloadMap.required_before || "stage")}
-                      {" · "}
-                      {titleCaseLabel(String(checkpoint?.status || payloadMap.status || "pending"))}
-                    </p>
+                  {isDraftPlanTurn ? (
+                    <>
+                      {renderDraftPlanSummary(turn)}
+                      {associatedCheckpoint ? (
+                        <div className="composer-draft-approval-summary">
+                          <span className="pill warn">Approval Required</span>
+                          <p className="muted small">
+                            {String(associatedCheckpoint.label || "Review the draft plan and approve in Approval Gate.")}
+                          </p>
+                        </div>
+                      ) : null}
+                    </>
                   ) : null}
                   {String(turn.kind || "") === "approval" ? (
                     <p className="composer-planning-turn__body">
@@ -4833,13 +4756,61 @@ function ComposerDetailPanel({
             })}
               {!planningTurns.length ? (
                 <li className="composer-planning-turn">
-                  <p className="muted">No planning interaction history has been recorded yet.</p>
+                  <p className="muted">
+                    {selectedSession
+                      ? "No planning interaction history has been recorded yet."
+                      : "Select a solution change session from Solution Detail to review and approve planning interactions."}
+                  </p>
                 </li>
               ) : null}
                 </ol>
               </div>
               <div className="composer-planning-footer">
-                {showRefinementFooter ? (
+                {showInitialRequestInput || showIterativeRequestInput ? (
+                  <>
+                    <p className="muted small">
+                      {showIterativeRequestInput
+                        ? "Describe the next change to continue this planning session."
+                        : "Request a change for the selected solution session."}
+                    </p>
+                    <textarea
+                      className="input"
+                      rows={3}
+                      value={requestDraft}
+                      onChange={(event) => setRequestDraft(event.target.value)}
+                      placeholder="Describe the change you want planned."
+                    />
+                    <div className="composer-planning-footer-actions">
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        disabled={
+                          !selectedSession
+                          || busyAction === "request"
+                          || !requestDraft.trim()
+                        }
+                        onClick={() => {
+                          const trimmed = requestDraft.trim();
+                          if (!trimmed || !selectedSession) return;
+                          shouldAutoScrollToLatestTurnRef.current = true;
+                          setBusyAction("request");
+                          void withSessionGuard(async () => {
+                            const response = await replyToSolutionPlanningSession(
+                              String(selectedSession.application_id),
+                              String(selectedSession.id),
+                              { reply_text: trimmed, source_turn_id: undefined }
+                            );
+                            mergeUpdatedSession(response.session);
+                            setRequestDraft("");
+                            setMessage(showIterativeRequestInput ? "Recorded iterative change request." : "Recorded change request.");
+                          });
+                        }}
+                      >
+                        {showIterativeRequestInput ? "Describe Change" : "Submit Request"}
+                      </button>
+                    </div>
+                  </>
+                ) : showRefinementFooter ? (
                   <>
                     <p className="muted small">Refine or respond to this plan (optional)</p>
                     <textarea
@@ -4886,8 +4857,30 @@ function ComposerDetailPanel({
                 )}
               </div>
             </>
-          )}
         </section>
+        <section className="card composer-session-summary">
+          <div className="field-label">Planning Session</div>
+          <div className="composer-cockpit-header-row">
+            <div><div className="field-label">Solution / Session</div><div className="field-value">{selectedSession?.title || "No solution session selected"}</div></div>
+            <div><div className="field-label">Planning status</div><div className="field-value">{planningStatusLabel}</div></div>
+            <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(latestActivityAt)}</div></div>
+            <div className="composer-cockpit-agent">
+              <div className="field-label">Agent</div>
+              <div className="composer-cockpit-agent-row">
+                <Avatar size="sm" name={currentAgentName} identityKey={currentAgentIdentityKey} />
+                <span className="field-value">{currentAgentName}</span>
+              </div>
+            </div>
+            <div><div className="field-label">Revision</div><div className="field-value">{draftRevisionCount ? `Rev ${draftRevisionCount}` : "—"}</div></div>
+          </div>
+          {!selectedSession ? (
+            <p className="muted small" style={{ marginTop: 8 }}>
+              Open a solution change session from Solution Detail.
+            </p>
+          ) : null}
+          {message ? <InlineMessage tone="info" title="Composer" body={message} /> : null}
+        </section>
+        </div>
 
         <aside className="composer-cockpit-rail">
           <section className="card composer-draft-card">

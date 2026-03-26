@@ -5694,6 +5694,12 @@ button.sm {
   align-items: start;
 }
 
+.composer-cockpit-main {
+  display: grid;
+  gap: 12px;
+  align-items: start;
+}
+
 .composer-cockpit-rail {
   display: grid;
   gap: 12px;
@@ -5728,6 +5734,14 @@ button.sm {
 
 .composer-checkpoint-history {
   margin: 0;
+}
+
+.composer-draft-approval-summary {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  display: grid;
+  gap: 6px;
 }
 
 .composer-planning-turn {
@@ -5834,6 +5848,18 @@ button.sm {
   gap: 8px;
 }
 
+.composer-approval-actions {
+  justify-content: flex-start;
+}
+
+.composer-session-summary {
+  padding-top: 12px;
+}
+
+.composer-session-summary .composer-cockpit-header-row {
+  margin-top: 8px;
+}
+
 @media (min-width: 769px) {
   .composer-planning-card {
     max-height: clamp(420px, calc(100vh - 260px), 760px);
@@ -5856,6 +5882,10 @@ button.sm {
     margin-top: 8px;
     padding-right: 4px;
     flex: 1 1 auto;
+  }
+
+  .composer-session-summary {
+    max-width: 100%;
   }
 }
 
