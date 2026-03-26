@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   applyApplicationPlan,
@@ -4249,6 +4249,7 @@ function ComposerDetailPanel({
   const [approvalNotes, setApprovalNotes] = useState<Record<string, string>>({});
   const [selectedOptionByTurn, setSelectedOptionByTurn] = useState<Record<string, string>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const latestPlannerTurnRef = useRef<HTMLLIElement | null>(null);
 
   useEffect(() => {
     writeComposerStoredSelection(workspaceId, {
@@ -4354,8 +4355,13 @@ function ComposerDetailPanel({
     String(selectedSession?.execution_status || "").toLowerCase()
   );
   const showInitialRequestInput = !hasDraftPlan && !hasPendingPrompt;
-  const showRefinementInput = hasDraftPlan && hasPendingCheckpoint && !hasPendingPrompt;
   const showIterativeRequestInput = hasExecutionProgress && !hasPendingPrompt && !hasPendingCheckpoint;
+  const latestPlannerTurn = [...planningTurns].reverse().find((turn: any) => String(turn.actor || "") === "planner") || null;
+  const latestDraftTurn = [...planningTurns]
+    .reverse()
+    .find((turn: any) => String(turn.actor || "") === "planner" && String(turn.kind || "") === "draft_plan") || null;
+  const latestPlannerTurnId = latestPlannerTurn ? String(latestPlannerTurn.id || "") : "";
+  const latestDraftTurnId = latestDraftTurn ? String(latestDraftTurn.id || "") : "";
   const latestActivityAt = planningTurns.length
     ? String(planningTurns[planningTurns.length - 1]?.created_at || selectedSession?.updated_at || "")
     : String(selectedSession?.updated_at || "");
@@ -4394,6 +4400,13 @@ function ComposerDetailPanel({
       solution_change_session_id: selectedSession.id,
     });
   }, [selectedSession, workspaceId]);
+  useEffect(() => {
+    if (!latestPlannerTurnId) return;
+    const target = latestPlannerTurnRef.current as (HTMLLIElement & { scrollIntoView?: (options?: any) => void }) | null;
+    if (typeof target?.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [latestPlannerTurnId]);
 
   if (loading) return <p className="muted">Loading composer…</p>;
   if (error) return <p className="danger-text">{error}</p>;
@@ -4432,6 +4445,10 @@ function ComposerDetailPanel({
     }
     return acc;
   }, {});
+  const pendingStageCheckpoint = pendingCheckpoints.find((entry: any) => String(entry.checkpoint_key || "") === "plan_scope_confirmed")
+    || pendingCheckpoints[0]
+    || null;
+  const inlineDraftCheckpointControlsEnabled = Boolean(latestDraftTurnId && hasPendingCheckpoint && !hasPendingPrompt);
 
   const renderDraftPlanSummary = (turn: any) => {
     const payloadMap = selectedOptionTurnPayload(turn);
@@ -4497,27 +4514,19 @@ function ComposerDetailPanel({
           <div><div className="field-label">Planning status</div><div className="field-value">{planningStatusLabel}</div></div>
           <div><div className="field-label">Latest activity</div><div className="field-value">{formatPanelTimestamp(latestActivityAt)}</div></div>
         </div>
-        {showInitialRequestInput || showRefinementInput || showIterativeRequestInput ? (
+        {showInitialRequestInput || showIterativeRequestInput ? (
           <>
             <p className="muted small" style={{ marginTop: 10, marginBottom: 8 }}>
-              {showRefinementInput
-                ? "Refine or respond to this plan (optional)"
-                : showIterativeRequestInput
+              {showIterativeRequestInput
                 ? "Describe the next change to continue this planning session."
                 : "Request a change for the selected solution session."}
             </p>
             <textarea
               className="input"
               rows={3}
-              value={showRefinementInput ? refinementDraft : requestDraft}
-              onChange={(event) => {
-                if (showRefinementInput) {
-                  setRefinementDraft(event.target.value);
-                } else {
-                  setRequestDraft(event.target.value);
-                }
-              }}
-              placeholder={showRefinementInput ? "Answer open questions or request plan changes." : "Describe the change you want planned."}
+              value={requestDraft}
+              onChange={(event) => setRequestDraft(event.target.value)}
+              placeholder="Describe the change you want planned."
             />
             <div className="inline-action-row" style={{ marginTop: 10 }}>
               <button
@@ -4525,13 +4534,13 @@ function ComposerDetailPanel({
                 className="ghost sm"
                 disabled={
                   !selectedSession
-                  || busyAction === (showRefinementInput ? "refine" : "request")
-                  || !(showRefinementInput ? refinementDraft.trim() : requestDraft.trim())
+                  || busyAction === "request"
+                  || !requestDraft.trim()
                 }
                 onClick={() => {
-                  const trimmed = (showRefinementInput ? refinementDraft : requestDraft).trim();
+                  const trimmed = requestDraft.trim();
                   if (!trimmed || !selectedSession) return;
-                  setBusyAction(showRefinementInput ? "refine" : "request");
+                  setBusyAction("request");
                   void withSessionGuard(async () => {
                     const response = await replyToSolutionPlanningSession(
                       String(selectedSession.application_id),
@@ -4539,24 +4548,19 @@ function ComposerDetailPanel({
                       { reply_text: trimmed, source_turn_id: undefined }
                     );
                     mergeUpdatedSession(response.session);
-                    if (showRefinementInput) {
-                      setRefinementDraft("");
-                      setMessage("Plan refinement submitted.");
-                    } else {
-                      setRequestDraft("");
-                      setMessage(showIterativeRequestInput ? "Recorded iterative change request." : "Recorded change request.");
-                    }
+                    setRequestDraft("");
+                    setMessage(showIterativeRequestInput ? "Recorded iterative change request." : "Recorded change request.");
                   });
                 }}
               >
-                {showRefinementInput ? "Refine Plan" : showIterativeRequestInput ? "Describe Change" : "Submit Request"}
+                {showIterativeRequestInput ? "Describe Change" : "Submit Request"}
               </button>
             </div>
           </>
         ) : (
           <p className="muted small" style={{ marginTop: 10 }}>
             {hasDraftPlan
-              ? "A draft plan is available. Complete approval to unlock execution controls."
+              ? "A draft plan is available. Continue planning interactions in the timeline below."
               : "A planner clarification or option selection is pending below. Respond there to continue."}
           </p>
         )}
@@ -4591,9 +4595,16 @@ function ComposerDetailPanel({
                 : null;
               const options = Array.isArray(payloadMap.options) ? payloadMap.options : [];
               const selectedOptionId = selectedOptionByTurn[String(turn.id)] || selectedOptionResponseBySourceTurn[String(turn.id)] || "";
+              const isLatestPlannerTurn = String(turn.id || "") === latestPlannerTurnId;
+              const isLatestDraftTurn = String(turn.id || "") === latestDraftTurnId;
+              const draftTurnShowsRefinement = isDraftPlanTurn && isLatestDraftTurn && hasPendingCheckpoint && !hasPendingPrompt;
 
               return (
-                <li key={String(turn.id)} className={`composer-planning-turn turn-${String(turn.actor || "unknown")} turn-kind-${String(turn.kind || "unknown")}`}>
+                <li
+                  key={String(turn.id)}
+                  ref={isLatestPlannerTurn ? latestPlannerTurnRef : null}
+                  className={`composer-planning-turn turn-${String(turn.actor || "unknown")} turn-kind-${String(turn.kind || "unknown")}`}
+                >
                   <div className="composer-planning-turn__meta">
                     <span className="pill ghost">{String(turn.actor || "planner") === "planner" ? "Planner" : "You"}</span>
                     <span className="pill">{titleCaseLabel(String(turn.kind || "update"))}</span>
@@ -4728,6 +4739,115 @@ function ComposerDetailPanel({
                     </div>
                   ) : null}
                   {isDraftPlanTurn ? renderDraftPlanSummary(turn) : null}
+                  {draftTurnShowsRefinement ? (
+                    <div className="composer-planning-action-block">
+                      <p className="muted small" style={{ marginBottom: 8 }}>
+                        Refine or respond to this plan (optional)
+                      </p>
+                      <textarea
+                        className="input"
+                        rows={3}
+                        value={refinementDraft}
+                        onChange={(event) => setRefinementDraft(event.target.value)}
+                        placeholder="Answer open questions or request plan changes."
+                      />
+                      <div className="inline-action-row" style={{ marginTop: 8 }}>
+                        <button
+                          type="button"
+                          className="ghost sm"
+                          disabled={!selectedSession || busyAction === "refine" || !refinementDraft.trim()}
+                          onClick={() => {
+                            const trimmed = refinementDraft.trim();
+                            if (!trimmed || !selectedSession) return;
+                            setBusyAction("refine");
+                            void withSessionGuard(async () => {
+                              const response = await replyToSolutionPlanningSession(
+                                String(selectedSession.application_id),
+                                String(selectedSession.id),
+                                { reply_text: trimmed, source_turn_id: undefined }
+                              );
+                              mergeUpdatedSession(response.session);
+                              setRefinementDraft("");
+                              setMessage("Plan refinement submitted.");
+                            });
+                          }}
+                        >
+                          Refine Plan
+                        </button>
+                      </div>
+                      {pendingStageCheckpoint ? (
+                        <>
+                          <p className="composer-planning-turn__body" style={{ marginTop: 12 }}>
+                            {String(pendingStageCheckpoint.label || "Approval checkpoint")}
+                            {" · "}
+                            Required before {String(pendingStageCheckpoint.required_before || "stage")}
+                          </p>
+                          <p className="muted small">
+                            Current status: {titleCaseLabel(String(pendingStageCheckpoint.status || "pending"))}
+                          </p>
+                          <textarea
+                            className="input"
+                            rows={2}
+                            value={approvalNotes[String(pendingStageCheckpoint.id)] || ""}
+                            onChange={(event) =>
+                              setApprovalNotes((current) => ({ ...current, [String(pendingStageCheckpoint.id)]: event.target.value }))
+                            }
+                            placeholder="Approval note (optional)."
+                          />
+                          <div className="inline-action-row" style={{ marginTop: 8 }}>
+                            <button
+                              type="button"
+                              className="ghost sm"
+                              disabled={busyAction === `checkpoint-approve:${pendingStageCheckpoint.id}`}
+                              onClick={() => {
+                                if (!selectedSession) return;
+                                setBusyAction(`checkpoint-approve:${pendingStageCheckpoint.id}`);
+                                void withSessionGuard(async () => {
+                                  const response = await decideSolutionPlanningCheckpoint(
+                                    String(selectedSession.application_id),
+                                    String(selectedSession.id),
+                                    String(pendingStageCheckpoint.id),
+                                    {
+                                      decision: "approved",
+                                      notes: approvalNotes[String(pendingStageCheckpoint.id)] || "",
+                                    }
+                                  );
+                                  mergeUpdatedSession(response.session);
+                                  setMessage("Checkpoint approved.");
+                                });
+                              }}
+                            >
+                              Approve
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost sm"
+                              disabled={busyAction === `checkpoint-reject:${pendingStageCheckpoint.id}`}
+                              onClick={() => {
+                                if (!selectedSession) return;
+                                setBusyAction(`checkpoint-reject:${pendingStageCheckpoint.id}`);
+                                void withSessionGuard(async () => {
+                                  const response = await decideSolutionPlanningCheckpoint(
+                                    String(selectedSession.application_id),
+                                    String(selectedSession.id),
+                                    String(pendingStageCheckpoint.id),
+                                    {
+                                      decision: "rejected",
+                                      notes: approvalNotes[String(pendingStageCheckpoint.id)] || "",
+                                    }
+                                  );
+                                  mergeUpdatedSession(response.session);
+                                  setMessage("Checkpoint rejected.");
+                                });
+                              }}
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
                   {isCheckpointTurn && hasDraftPlan ? (
                     <div className="composer-planning-action-block">
                       <p className="composer-planning-turn__body">
@@ -4736,7 +4856,7 @@ function ComposerDetailPanel({
                         Required before {String(payloadMap.required_before || "stage")}
                       </p>
                       <p className="muted small">Current status: {titleCaseLabel(String(checkpoint?.status || payloadMap.status || "pending"))}</p>
-                      {checkpoint && String(checkpoint.status || "") === "pending" ? (
+                      {checkpoint && String(checkpoint.status || "") === "pending" && !inlineDraftCheckpointControlsEnabled ? (
                         <>
                           <textarea
                             className="input"

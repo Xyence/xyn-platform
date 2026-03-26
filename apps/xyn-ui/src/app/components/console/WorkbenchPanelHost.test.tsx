@@ -1253,6 +1253,8 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Refine or respond to this plan (optional)")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText("Approval note (optional).")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Describe the change you want planned.")).not.toBeInTheDocument();
+    expect(screen.getAllByPlaceholderText("Approval note (optional).")).toHaveLength(1);
 
     fireEvent.change(screen.getByPlaceholderText("Answer open questions or request plan changes."), {
       target: { value: "Please prioritize campaign map usability and validation copy." },
