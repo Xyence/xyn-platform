@@ -29036,11 +29036,29 @@ def _generate_solution_change_plan(
         compact = first_line or value
         return compact[:220].rstrip()
 
+    def _clean_refinement_value(value: str) -> str:
+        cleaned = str(value or "").strip().strip("\"'").strip()
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned.rstrip(".,;:").strip()
+
+    def _append_unique(target: List[str], value: str) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        lowered = text.lower()
+        if any(str(existing or "").strip().lower() == lowered for existing in target):
+            return
+        target.append(text)
+
     def _refinement_state(refinements: List[str]) -> Dict[str, Any]:
         state: Dict[str, Any] = {
             "integration_v1": None,  # True/False/None
             "collaboration": None,  # "single" | "multi" | None
             "rich_text": False,
+            "name": None,  # Optional display name override
+            "ui_preferences": {},
+            "features": [],
+            "additional_considerations": [],
             "resolved_assumptions": [],
             "constraints": [],
         }
@@ -29049,6 +29067,32 @@ def _generate_solution_change_plan(
             lowered = text.lower()
             if not lowered:
                 continue
+            recognized = False
+
+            name_match = re.search(r"\bname\s+the\s+application\s+(.+)$", text, re.IGNORECASE)
+            if not name_match:
+                name_match = re.search(r"\bcall\s+it\s+(.+)$", text, re.IGNORECASE)
+            if name_match:
+                candidate_name = _clean_refinement_value(name_match.group(1))
+                if candidate_name:
+                    state["name"] = candidate_name[:120]
+                    recognized = True
+
+            if (
+                ("default theme to light" in lowered)
+                or ("use light theme" in lowered)
+                or ("use light mode" in lowered)
+            ):
+                state["ui_preferences"]["theme"] = "light"
+                recognized = True
+            elif (
+                ("default theme to dark" in lowered)
+                or ("use dark theme" in lowered)
+                or ("use dark mode" in lowered)
+            ):
+                state["ui_preferences"]["theme"] = "dark"
+                recognized = True
+
             if (
                 ("no external integration" in lowered)
                 or ("no external integrations" in lowered)
@@ -29056,11 +29100,14 @@ def _generate_solution_change_plan(
                 or ("without external integrations" in lowered)
             ):
                 state["integration_v1"] = False
+                recognized = True
             elif ("external integration" in lowered) or ("external integrations" in lowered):
                 state["integration_v1"] = True
+                recognized = True
 
             if ("single-user" in lowered) or ("single user" in lowered):
                 state["collaboration"] = "single"
+                recognized = True
             if (
                 ("multi-user" in lowered)
                 or ("multi user" in lowered)
@@ -29070,12 +29117,30 @@ def _generate_solution_change_plan(
                 or ("editor role" in lowered and "reader role" in lowered)
             ):
                 state["collaboration"] = "multi"
+                recognized = True
 
             if ("rich text" in lowered) or ("wysiwyg" in lowered) or ("editor support" in lowered):
                 state["rich_text"] = True
+                recognized = True
+
+            feature_match = re.search(r"\b(?:add|include|support)\s+(.+)$", text, re.IGNORECASE)
+            if feature_match:
+                feature_candidate = _clean_refinement_value(feature_match.group(1))
+                feature_lower = feature_candidate.lower()
+                if feature_candidate:
+                    if ("rich text" in feature_lower) or ("wysiwyg" in feature_lower):
+                        state["rich_text"] = True
+                        recognized = True
+                    else:
+                        _append_unique(state["features"], feature_candidate)
+                        recognized = True
+
+            if not recognized:
+                _append_unique(state["additional_considerations"], _clean_refinement_value(text))
 
         resolved_assumptions: List[str] = []
         constraints: List[str] = []
+        additional_considerations: List[str] = []
         if state["integration_v1"] is False:
             resolved_assumptions.append("Resolved: v1 excludes external integrations.")
             constraints.append("Scope constraint: keep v1 self-contained with no external integrations.")
@@ -29094,8 +29159,18 @@ def _generate_solution_change_plan(
             resolved_assumptions.append("Resolved: rich text editing is required in the first iteration.")
             constraints.append("Include rich text editor capabilities in the initial build slice.")
 
+        if str((state.get("ui_preferences") or {}).get("theme") or "") in {"light", "dark"}:
+            theme = str(state["ui_preferences"]["theme"])
+            resolved_assumptions.append(f"Resolved UI default: use {theme} theme.")
+
+        for feature in state["features"]:
+            constraints.append(f"Feature scope: include {feature} in the initial plan.")
+        for item in state["additional_considerations"]:
+            additional_considerations.append(f"Additional consideration: {item}")
+
         state["resolved_assumptions"] = resolved_assumptions
         state["constraints"] = constraints
+        state["additional_considerations"] = additional_considerations
         return state
 
     refinement_state = _refinement_state(user_refinements)
@@ -29123,6 +29198,7 @@ def _generate_solution_change_plan(
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
     if not selected_members:
         selected_members = memberships
+    plan_title = str(refinement_state.get("name") or session.title or "").strip() or session.title
     if not selected_members:
         objective_text = _compact_objective(original_request)
         first_focus = "Start by shaping the primary data model and first user-facing workflow."
@@ -29147,10 +29223,11 @@ def _generate_solution_change_plan(
         if refinement_state["integration_v1"] is None:
             assumptions.append("Open question: which external integrations are required in v1 versus later phases?")
         assumptions.extend(refinement_state["constraints"][:2])
+        assumptions.extend(refinement_state["additional_considerations"][:2])
         return {
             "session_id": str(session.id),
             "application_id": str(session.application_id),
-            "title": session.title,
+            "title": plan_title,
             "request_text": original_request,
             "planner_objective_text": planner_objective_text,
             "planner_context_text": planner_context_text,
@@ -29201,6 +29278,11 @@ def _generate_solution_change_plan(
             per_artifact[-1]["planned_work"].append("introduce role-aware collaboration semantics (editor/reader)")
         if refinement_state["collaboration"] == "single":
             per_artifact[-1]["planned_work"].append("optimize flows for single-user v1 operation")
+        theme = str((refinement_state.get("ui_preferences") or {}).get("theme") or "").strip()
+        if theme and role == "primary_ui":
+            per_artifact[-1]["planned_work"].append(f"set default UI theme to {theme}")
+        for feature in refinement_state.get("features") or []:
+            per_artifact[-1]["planned_work"].append(f"add support for {feature}")
     shared_contracts = [
         "Cross-artifact API/schema compatibility",
         "Event/payload shape compatibility where artifacts exchange runtime data",
@@ -29217,12 +29299,13 @@ def _generate_solution_change_plan(
     if refinement_state["integration_v1"] is None:
         shared_contracts.append("Open question: are external integrations required in v1?")
     shared_contracts.extend(refinement_state["constraints"])
+    shared_contracts.extend(refinement_state["additional_considerations"][:2])
     if refinement_state["constraints"]:
         validation_plan.insert(0, "Validate that revision constraints are reflected in scope and acceptance checks.")
     return {
         "session_id": str(session.id),
         "application_id": str(session.application_id),
-        "title": session.title,
+        "title": plan_title,
         "request_text": original_request,
         "planner_objective_text": planner_objective_text,
         "planner_context_text": planner_context_text,
