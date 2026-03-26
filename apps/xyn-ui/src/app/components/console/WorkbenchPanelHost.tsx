@@ -85,6 +85,7 @@ import type {
 } from "../../../api/types";
 import CanvasRenderer from "../../../components/canvas/CanvasRenderer";
 import InlineMessage from "../../../components/InlineMessage";
+import Avatar from "../common/Avatar";
 import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityRegistry";
 import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail } from "../../utils/entityChangeEvents";
 import { applyRuntimeEventToRunDetail, applyRuntimeEventToRuns, refreshRuntimeRunDetail, refreshRuntimeRunSummary, subscribeRuntimeEventStream } from "../../utils/runtimeEventStream";
@@ -4598,6 +4599,18 @@ function ComposerDetailPanel({
               const isLatestPlannerTurn = String(turn.id || "") === latestPlannerTurnId;
               const isLatestDraftTurn = String(turn.id || "") === latestDraftTurnId;
               const draftTurnShowsRefinement = isDraftPlanTurn && isLatestDraftTurn && hasPendingCheckpoint && !hasPendingPrompt;
+              const actorType = String(turn.actor || "planner") === "planner" ? "planner" : "user";
+              const plannerName = String(
+                payloadMap.planner_agent_name
+                || payloadMap.agent_name
+                || payloadMap.agent
+                || payloadMap.model
+                || "Planning Agent"
+              ).trim();
+              const actorLabel = actorType === "planner" ? plannerName : "User";
+              const actorIdentityKey = actorType === "planner"
+                ? String(payloadMap.planner_agent_id || payloadMap.agent_id || plannerName || "planner")
+                : String(turn.created_by || selectedSession?.created_by || "current-user");
 
               return (
                 <li
@@ -4606,7 +4619,15 @@ function ComposerDetailPanel({
                   className={`composer-planning-turn turn-${String(turn.actor || "unknown")} turn-kind-${String(turn.kind || "unknown")}`}
                 >
                   <div className="composer-planning-turn__meta">
-                    <span className="pill ghost">{String(turn.actor || "planner") === "planner" ? "Planner" : "You"}</span>
+                    <span className="composer-turn-actor-chip">
+                      <Avatar
+                        size="sm"
+                        name={actorLabel}
+                        identityKey={actorIdentityKey}
+                        className="composer-turn-avatar"
+                      />
+                      <span className="composer-turn-actor-label">{actorLabel}</span>
+                    </span>
                     <span className="pill">{titleCaseLabel(String(turn.kind || "update"))}</span>
                     <span className="muted small">{formatPanelTimestamp(String(turn.created_at || ""))}</span>
                   </div>
