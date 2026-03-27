@@ -4455,12 +4455,44 @@ function ComposerDetailPanel({
     || null;
   const showRefinementFooter = Boolean(selectedSession && hasDraftPlan && hasPendingCheckpoint && !hasPendingPrompt);
 
+  const WORKSTREAM_LABELS: Record<string, string> = {
+    ui: "UI / presentation",
+    api: "API / service",
+    data: "Data / storage",
+    workflow: "Workflow / orchestration",
+    validation: "Validation / verification",
+    behavior: "Behavior / interaction logic",
+  };
+
+  const normalizeWorkstreamToken = (value: unknown): string => String(value || "").trim().toLowerCase();
+  const dedupeList = (values: string[]): string[] => {
+    const output: string[] = [];
+    values.forEach((item) => {
+      if (item && !output.includes(item)) output.push(item);
+    });
+    return output;
+  };
+  const collectWorkstreamFocus = (payloadMap: Record<string, unknown>): string[] => {
+    const confirmed = Array.isArray(payloadMap.confirmed_workstreams)
+      ? payloadMap.confirmed_workstreams.map(normalizeWorkstreamToken).filter(Boolean)
+      : [];
+    const suggested = Array.isArray(payloadMap.suggested_workstreams)
+      ? payloadMap.suggested_workstreams.map(normalizeWorkstreamToken).filter(Boolean)
+      : [];
+    const sessionConfirmed = Array.isArray(selectedSession?.confirmed_workstreams)
+      ? selectedSession.confirmed_workstreams.map(normalizeWorkstreamToken).filter(Boolean)
+      : [];
+    return dedupeList([...confirmed, ...suggested, ...sessionConfirmed]);
+  };
+  const formatWorkstreamLabel = (value: string): string => WORKSTREAM_LABELS[value] || value;
+
   const renderDraftPlanSummary = (turn: any) => {
     const payloadMap = selectedOptionTurnPayload(turn);
     const objectiveText = String(payloadMap.objective || payloadMap.request_text || selectedSession?.request_text || "—");
     const proposedWork = Array.isArray(payloadMap.selected_artifact_ids)
       ? payloadMap.selected_artifact_ids.map((value) => String(value || "")).filter(Boolean)
       : [];
+    const workstreamFocus = collectWorkstreamFocus(payloadMap);
     const keyImpacts = Array.isArray(payloadMap.shared_contracts)
       ? payloadMap.shared_contracts.map((value) => String(value || "")).filter(Boolean)
       : [];
@@ -4478,6 +4510,10 @@ function ComposerDetailPanel({
           {proposedWork.length ? (
             <ul className="detail-list">
               {proposedWork.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          ) : workstreamFocus.length ? (
+            <ul className="detail-list">
+              {workstreamFocus.map((item) => <li key={item}>{formatWorkstreamLabel(item)}</li>)}
             </ul>
           ) : (
             <p className="muted small">No selected artifact set provided yet.</p>
@@ -4516,6 +4552,7 @@ function ComposerDetailPanel({
   const draftProposedWork = Array.isArray(latestDraftPayload.selected_artifact_ids)
     ? latestDraftPayload.selected_artifact_ids.map((value) => String(value || "")).filter(Boolean)
     : [];
+  const draftWorkstreamFocus = collectWorkstreamFocus(latestDraftPayload);
   const draftImpacts = Array.isArray(latestDraftPayload.shared_contracts)
     ? latestDraftPayload.shared_contracts.map((value) => String(value || "")).filter(Boolean)
     : [];
@@ -4944,6 +4981,10 @@ function ComposerDetailPanel({
                     {draftProposedWork.length ? (
                       <ul className="detail-list">
                         {draftProposedWork.map((item) => <li key={item}>{item}</li>)}
+                      </ul>
+                    ) : draftWorkstreamFocus.length ? (
+                      <ul className="detail-list">
+                        {draftWorkstreamFocus.map((item) => <li key={item}>{formatWorkstreamLabel(item)}</li>)}
                       </ul>
                     ) : (
                       <p className="muted small">No selected artifact set provided yet.</p>

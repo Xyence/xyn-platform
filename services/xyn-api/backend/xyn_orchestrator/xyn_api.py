@@ -29387,6 +29387,7 @@ def _record_solution_draft_plan(
             "request_text": str(session.request_text or ""),
             "user_refinements": user_refinements,
             "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+            "confirmed_workstreams": list(plan.get("confirmed_workstreams") or []),
             "suggested_workstreams": list(plan.get("suggested_workstreams") or []),
             "implementation_steps": list(plan.get("implementation_steps") or []),
             "shared_contracts": list(plan.get("shared_contracts") or []),
@@ -30096,7 +30097,7 @@ def _generate_solution_change_plan(
     fallback_title = _compact_objective(original_request)[:120] if _is_default_change_session_title(session.title) else session.title
     plan_title = str(refinement_state.get("name") or fallback_title or "").strip() or fallback_title
     if not selected_members:
-        if not _is_greenfield_initial_solution_plan():
+        if confirmed_workstreams or not _is_greenfield_initial_solution_plan():
             return _existing_solution_no_membership_plan(
                 objective_text=_compact_objective(original_request),
                 plan_title_value=plan_title,

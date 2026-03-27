@@ -2595,6 +2595,67 @@ class GoalPlanningTests(TestCase):
         patch_payload = json.loads(patch_response.content)
         self.assertEqual(patch_payload.get("confirmed_workstreams"), ["ui"])
 
+    def test_confirmed_workstreams_force_targeted_plan_for_first_session_without_memberships(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Workbench",
+            summary="Workbench updates",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Improve workbench interactions",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Narrow selector width",
+                        "request_text": "Make the workspace selector input use full pane width on this view.",
+                    }
+                ),
+            )
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            session = (json.loads(create_response.content).get("session") or {})
+
+            patch_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.get('id')}",
+                method="patch",
+                data=json.dumps({"confirmed_workstreams": ["ui"]}),
+            )
+            patch_response = application_solution_change_session_detail(
+                patch_request,
+                str(application.id),
+                str(session.get("id")),
+            )
+            self.assertEqual(patch_response.status_code, 200)
+
+            plan_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.get('id')}/plan",
+                method="post",
+                data=json.dumps({}),
+            )
+            plan_response = application_solution_change_session_plan(
+                plan_request,
+                str(application.id),
+                str(session.get("id")),
+            )
+        self.assertEqual(plan_response.status_code, 200)
+        plan_payload = json.loads(plan_response.content)
+        planning = ((plan_payload.get("session") or {}).get("planning") or {})
+        latest_draft = planning.get("latest_draft_plan") or {}
+        draft_payload = latest_draft.get("payload") if isinstance(latest_draft.get("payload"), dict) else {}
+        self.assertEqual(draft_payload.get("confirmed_workstreams"), ["ui"])
+        self.assertIn("ui", [str(item) for item in (draft_payload.get("suggested_workstreams") or [])])
+        shared_contracts_text = " ".join(str(item) for item in (draft_payload.get("shared_contracts") or [])).lower()
+        self.assertNotIn("single-user or multi-user", shared_contracts_text)
+        self.assertNotIn("external integrations", shared_contracts_text)
+        validation_text = " ".join(str(item) for item in (draft_payload.get("validation_plan") or [])).lower()
+        self.assertIn("ui behavior", validation_text)
+
     def test_solution_change_session_stage_uses_confirmed_workstreams_when_no_selected_ids(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(

@@ -1077,6 +1077,154 @@ describe("WorkbenchPanelHost entity refresh", () => {
     }
   });
 
+  it("renders confirmed workstream-focused draft content consistently in timeline and current draft rail", async () => {
+    const onOpenPanel = vi.fn();
+    const sessionPayload = {
+      id: "session-1",
+      workspace_id: "ws-1",
+      application_id: "app-1",
+      title: "Deal Finder Session",
+      request_text: "Widen requested change input in solution pane.",
+      status: "planned",
+      selected_artifact_ids: [],
+      confirmed_workstreams: ["ui"],
+      planning: {
+        turns: [
+          {
+            id: "turn-request",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "user",
+            kind: "request",
+            sequence: 1,
+            payload: { request_text: "Widen requested change input in solution pane." },
+            created_at: "2026-03-20T10:00:00Z",
+            updated_at: "2026-03-20T10:00:00Z",
+          },
+          {
+            id: "turn-draft",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "planner",
+            kind: "draft_plan",
+            sequence: 2,
+            payload: {
+              objective: "Widen requested change input in solution pane.",
+              selected_artifact_ids: [],
+              confirmed_workstreams: ["ui"],
+              suggested_workstreams: ["ui"],
+              shared_contracts: ["Plan against the current solution baseline."],
+              validation_plan: ["Validate the updated UI behavior in the target view."],
+            },
+            created_at: "2026-03-20T10:02:00Z",
+            updated_at: "2026-03-20T10:02:00Z",
+          },
+        ],
+        checkpoints: [
+          {
+            id: "checkpoint-1",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            checkpoint_key: "plan_scope_confirmed",
+            label: "Approve planning scope before stage apply",
+            status: "pending",
+            required_before: "stage",
+            payload: {},
+            decided_by: null,
+            decided_at: null,
+            created_at: "2026-03-20T10:02:10Z",
+            updated_at: "2026-03-20T10:02:10Z",
+          },
+        ],
+        pending_question: null,
+        pending_option_set: null,
+        pending_checkpoints: [
+          {
+            id: "checkpoint-1",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            checkpoint_key: "plan_scope_confirmed",
+            label: "Approve planning scope before stage apply",
+            status: "pending",
+            required_before: "stage",
+            payload: {},
+            decided_by: null,
+            decided_at: null,
+            created_at: "2026-03-20T10:02:10Z",
+            updated_at: "2026-03-20T10:02:10Z",
+          },
+        ],
+        latest_draft_plan: {
+          id: "turn-draft",
+          workspace_id: "ws-1",
+          session_id: "session-1",
+          actor: "planner",
+          kind: "draft_plan",
+          sequence: 2,
+          payload: {
+            objective: "Widen requested change input in solution pane.",
+            selected_artifact_ids: [],
+            confirmed_workstreams: ["ui"],
+            suggested_workstreams: ["ui"],
+            shared_contracts: ["Plan against the current solution baseline."],
+            validation_plan: ["Validate the updated UI behavior in the target view."],
+          },
+          created_at: "2026-03-20T10:02:00Z",
+          updated_at: "2026-03-20T10:02:00Z",
+        },
+      },
+      created_at: "2026-03-20T10:00:00Z",
+      updated_at: "2026-03-20T10:03:00Z",
+    };
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: "app-1",
+        goal_id: null,
+        thread_id: null,
+        solution_change_session_id: "session-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      solution_change_sessions: [sessionPayload],
+      solution_change_session: sessionPayload,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-workstream",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
+    const labels = screen.getAllByText("UI / presentation");
+    expect(labels.length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryAllByText("No selected artifact set provided yet.")).toHaveLength(0);
+  });
+
   it("shows a regenerate-options fallback when planner option payload is empty", async () => {
     const onOpenPanel = vi.fn();
     const sessionPayload = {
