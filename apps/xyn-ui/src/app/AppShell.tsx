@@ -1011,7 +1011,16 @@ export default function AppShell() {
           <Suspense fallback={<RouteLoadingFallback />}>
           <Routes>
             <Route path="/" element={<Navigate to={inWorkspaceScope ? DEFAULT_WORKSPACE_SUBPATH : "/"} replace />} />
-            <Route path="workbench" element={<WorkbenchPage workspaceName={activeWorkspace?.name || ""} workspaceColor={workspaceRoute.workspaceColor} />} />
+            <Route
+              path="workbench"
+              element={(
+                <WorkbenchPage
+                  workspaceName={activeWorkspace?.name || ""}
+                  workspaceColor={workspaceRoute.workspaceColor}
+                  currentUser={authUser}
+                />
+              )}
+            />
             <Route path="capabilities" element={<CapabilityExplorerPage />} />
             <Route path="console" element={<Navigate to={workspaceScopedTarget(DEFAULT_WORKSPACE_SUBPATH)} replace />} />
             <Route path="apps/articles/edit" element={<ArticleSurfaceEditorRedirectPage />} />

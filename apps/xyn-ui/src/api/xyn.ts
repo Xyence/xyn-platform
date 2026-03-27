@@ -2486,6 +2486,7 @@ export async function listAiAgents(params?: { purpose?: string; enabled?: boolea
 export async function createAiAgent(payload: {
   slug: string;
   name: string;
+  avatar_url?: string;
   model_config_id: string;
   override_prompt_text?: string;
   default_context_pack_refs_json?: unknown[];
@@ -2511,6 +2512,7 @@ export async function updateAiAgent(
   payload: Partial<{
     slug: string;
     name: string;
+    avatar_url: string;
     model_config_id: string;
     override_prompt_text: string;
     default_context_pack_refs_json: unknown[];
@@ -4627,6 +4629,7 @@ export async function updateSolutionChangeSession(
     title?: string;
     status?: "draft" | "planned" | "archived" | string;
     selected_artifact_ids?: string[];
+    confirmed_workstreams?: string[];
   }
 ): Promise<SolutionChangeSession> {
   const apiBaseUrl = resolveApiBaseUrl();
@@ -4637,6 +4640,19 @@ export async function updateSolutionChangeSession(
     body: JSON.stringify(payload),
   });
   return handle<SolutionChangeSession>(response);
+}
+
+export async function deleteSolutionChangeSession(
+  applicationId: string,
+  sessionId: string
+): Promise<{ deleted: boolean; application_id: string; session_id: string }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}`, {
+    method: "DELETE",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ deleted: boolean; application_id: string; session_id: string }>(response);
 }
 
 export async function generateSolutionChangePlan(

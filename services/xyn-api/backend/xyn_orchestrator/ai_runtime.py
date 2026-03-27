@@ -479,10 +479,10 @@ def _default_runtime_agent() -> Optional[AgentDefinition]:
     )
 
 
-def _fallback_agent_payload(agent: Optional[AgentDefinition]) -> Tuple[Optional[str], Optional[str]]:
+def _fallback_agent_payload(agent: Optional[AgentDefinition]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     if not agent:
-        return None, None
-    return str(agent.id), str(agent.name or "")
+        return None, None, None
+    return str(agent.id), str(agent.name or ""), str(agent.avatar_url or "").strip()
 
 
 def _build_resolution_payload(
@@ -493,14 +493,16 @@ def _build_resolution_payload(
     source: str,
     reason: str,
 ) -> Dict[str, Any]:
-    fallback_id, fallback_name = _fallback_agent_payload(fallback_agent)
+    fallback_id, fallback_name, fallback_avatar_url = _fallback_agent_payload(fallback_agent)
     return {
         "purpose": purpose or "coding",
         "resolved_agent_id": str(resolved.id) if resolved else None,
         "resolved_agent_name": str(resolved.name or "") if resolved else None,
+        "resolved_agent_avatar_url": str(resolved.avatar_url or "").strip() if resolved else None,
         "resolution_source": source,
         "fallback_agent_id": fallback_id,
         "fallback_agent_name": fallback_name,
+        "fallback_agent_avatar_url": fallback_avatar_url,
         "reason": reason,
     }
 

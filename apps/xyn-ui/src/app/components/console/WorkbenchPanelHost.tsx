@@ -86,6 +86,7 @@ import type {
 import CanvasRenderer from "../../../components/canvas/CanvasRenderer";
 import InlineMessage from "../../../components/InlineMessage";
 import Avatar from "../common/Avatar";
+import { resolveUserProfile } from "../common/userProfile";
 import type { OpenDetailTarget } from "../../../components/canvas/datasetEntityRegistry";
 import { XYN_ENTITY_CHANGE_EVENT, inferEntityListPrompt, type EntityChangeDetail } from "../../utils/entityChangeEvents";
 import { applyRuntimeEventToRunDetail, applyRuntimeEventToRuns, refreshRuntimeRunDetail, refreshRuntimeRunSummary, subscribeRuntimeEventStream } from "../../utils/runtimeEventStream";
@@ -4222,6 +4223,7 @@ function ApplicationDetailPanel({
 
 function ComposerDetailPanel({
   workspaceId,
+  currentUser,
   factoryKey,
   applicationPlanId,
   applicationId,
@@ -4232,6 +4234,7 @@ function ComposerDetailPanel({
   onTitleChange,
 }: {
   workspaceId: string;
+  currentUser?: Record<string, unknown> | null;
   factoryKey?: string;
   applicationPlanId?: string;
   applicationId?: string;
@@ -4251,8 +4254,14 @@ function ComposerDetailPanel({
   const [showApprovalNoteByCheckpoint, setShowApprovalNoteByCheckpoint] = useState<Record<string, boolean>>({});
   const [selectedOptionByTurn, setSelectedOptionByTurn] = useState<Record<string, string>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [planningRoutingStatus, setPlanningRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
+  const [availableAgents, setAvailableAgents] = useState<AiAgent[]>([]);
   const latestTurnRef = useRef<HTMLLIElement | null>(null);
   const shouldAutoScrollToLatestTurnRef = useRef(false);
+  const currentUserProfile = useMemo(
+    () => resolveUserProfile((currentUser as Record<string, unknown>) || {}),
+    [currentUser]
+  );
 
   useEffect(() => {
     writeComposerStoredSelection(workspaceId, {
@@ -4308,6 +4317,25 @@ function ComposerDetailPanel({
   useEffect(() => {
     onTitleChange?.("Composer");
   }, [onTitleChange]);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const [routing, agentList] = await Promise.all([getAiRoutingStatus(), listAiAgents({ enabled: true })]);
+        if (!active) return;
+        setPlanningRoutingStatus(routing);
+        setAvailableAgents(agentList.agents || []);
+      } catch {
+        if (!active) return;
+        setPlanningRoutingStatus(null);
+        setAvailableAgents([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const openComposer = (params?: Record<string, unknown>) => {
     const nextParams = {
@@ -4455,12 +4483,44 @@ function ComposerDetailPanel({
     || null;
   const showRefinementFooter = Boolean(selectedSession && hasDraftPlan && hasPendingCheckpoint && !hasPendingPrompt);
 
+  const WORKSTREAM_LABELS: Record<string, string> = {
+    ui: "UI / presentation",
+    api: "API / service",
+    data: "Data / storage",
+    workflow: "Workflow / orchestration",
+    validation: "Validation / verification",
+    behavior: "Behavior / interaction logic",
+  };
+
+  const normalizeWorkstreamToken = (value: unknown): string => String(value || "").trim().toLowerCase();
+  const dedupeList = (values: string[]): string[] => {
+    const output: string[] = [];
+    values.forEach((item) => {
+      if (item && !output.includes(item)) output.push(item);
+    });
+    return output;
+  };
+  const collectWorkstreamFocus = (payloadMap: Record<string, unknown>): string[] => {
+    const confirmed = Array.isArray(payloadMap.confirmed_workstreams)
+      ? payloadMap.confirmed_workstreams.map(normalizeWorkstreamToken).filter(Boolean)
+      : [];
+    const suggested = Array.isArray(payloadMap.suggested_workstreams)
+      ? payloadMap.suggested_workstreams.map(normalizeWorkstreamToken).filter(Boolean)
+      : [];
+    const sessionConfirmed = Array.isArray(selectedSession?.confirmed_workstreams)
+      ? selectedSession.confirmed_workstreams.map(normalizeWorkstreamToken).filter(Boolean)
+      : [];
+    return dedupeList([...confirmed, ...suggested, ...sessionConfirmed]);
+  };
+  const formatWorkstreamLabel = (value: string): string => WORKSTREAM_LABELS[value] || value;
+
   const renderDraftPlanSummary = (turn: any) => {
     const payloadMap = selectedOptionTurnPayload(turn);
     const objectiveText = String(payloadMap.objective || payloadMap.request_text || selectedSession?.request_text || "—");
     const proposedWork = Array.isArray(payloadMap.selected_artifact_ids)
       ? payloadMap.selected_artifact_ids.map((value) => String(value || "")).filter(Boolean)
       : [];
+    const workstreamFocus = collectWorkstreamFocus(payloadMap);
     const keyImpacts = Array.isArray(payloadMap.shared_contracts)
       ? payloadMap.shared_contracts.map((value) => String(value || "")).filter(Boolean)
       : [];
@@ -4478,6 +4538,10 @@ function ComposerDetailPanel({
           {proposedWork.length ? (
             <ul className="detail-list">
               {proposedWork.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          ) : workstreamFocus.length ? (
+            <ul className="detail-list">
+              {workstreamFocus.map((item) => <li key={item}>{formatWorkstreamLabel(item)}</li>)}
             </ul>
           ) : (
             <p className="muted small">No selected artifact set provided yet.</p>
@@ -4516,6 +4580,7 @@ function ComposerDetailPanel({
   const draftProposedWork = Array.isArray(latestDraftPayload.selected_artifact_ids)
     ? latestDraftPayload.selected_artifact_ids.map((value) => String(value || "")).filter(Boolean)
     : [];
+  const draftWorkstreamFocus = collectWorkstreamFocus(latestDraftPayload);
   const draftImpacts = Array.isArray(latestDraftPayload.shared_contracts)
     ? latestDraftPayload.shared_contracts.map((value) => String(value || "")).filter(Boolean)
     : [];
@@ -4526,20 +4591,37 @@ function ComposerDetailPanel({
   const draftRevisionCount = planningTurns.filter(
     (turn: any) => String(turn.actor || "") === "planner" && String(turn.kind || "") === "draft_plan"
   ).length;
-  const currentAgentName = (() => {
-    const payloadMap = latestPlannerTurn ? selectedOptionTurnPayload(latestPlannerTurn) : {};
-    return String(
-      payloadMap.planner_agent_name
-      || payloadMap.agent_name
-      || payloadMap.agent
-      || payloadMap.model
-      || "Planning Agent"
-    ).trim();
-  })();
-  const currentAgentIdentityKey = (() => {
-    const payloadMap = latestPlannerTurn ? selectedOptionTurnPayload(latestPlannerTurn) : {};
-    return String(payloadMap.planner_agent_id || payloadMap.agent_id || currentAgentName || "planner");
-  })();
+  const latestPlannerPayload = latestPlannerTurn ? selectedOptionTurnPayload(latestPlannerTurn) : {};
+  const planningRoute = routingPurposeRow(planningRoutingStatus?.routing || [], "planning");
+  const plannerAgentId = String(
+    latestPlannerPayload.planner_agent_id
+    || latestPlannerPayload.agent_id
+    || planningRoute?.resolved_agent_id
+    || planningRoute?.explicit_agent_id
+    || ""
+  ).trim();
+  const plannerAgentById = plannerAgentId
+    ? availableAgents.find((item) => String(item.id || "").trim() === plannerAgentId)
+    : null;
+  const plannerAgentName = String(
+    latestPlannerPayload.planner_agent_name
+    || latestPlannerPayload.agent_name
+    || latestPlannerPayload.agent
+    || plannerAgentById?.name
+    || planningRoute?.resolved_agent_name
+    || planningRoute?.explicit_agent_name
+    || latestPlannerPayload.model
+    || "Planning Agent"
+  ).trim();
+  const plannerAgentAvatarUrl = String(
+    latestPlannerPayload.planner_agent_avatar_url
+    || latestPlannerPayload.agent_avatar_url
+    || plannerAgentById?.avatar_url
+    || planningRoute?.resolved_agent_avatar_url
+    || planningRoute?.explicit_agent_avatar_url
+    || ""
+  ).trim();
+  const plannerAgentIdentityKey = String(plannerAgentId || plannerAgentName || "planner").trim();
   const interpretationForTurn = (turn: any): Record<string, unknown> => {
     const payloadMap = selectedOptionTurnPayload(turn);
     return payloadMap.interpretation && typeof payloadMap.interpretation === "object"
@@ -4612,17 +4694,34 @@ function ComposerDetailPanel({
               const isLatestDraftTurn = String(turn.id || "") === latestDraftTurnId;
               const associatedCheckpoint = isLatestDraftTurn ? pendingStageCheckpoint : null;
               const actorType = String(turn.actor || "planner") === "planner" ? "planner" : "user";
-              const plannerName = String(
+              const turnPlannerAgentId = String(
+                payloadMap.planner_agent_id || payloadMap.agent_id || plannerAgentId || ""
+              ).trim();
+              const turnPlannerAgent = turnPlannerAgentId
+                ? availableAgents.find((item) => String(item.id || "").trim() === turnPlannerAgentId)
+                : null;
+              const turnPlannerName = String(
                 payloadMap.planner_agent_name
                 || payloadMap.agent_name
                 || payloadMap.agent
+                || turnPlannerAgent?.name
+                || plannerAgentName
                 || payloadMap.model
                 || "Planning Agent"
               ).trim();
-              const actorLabel = actorType === "planner" ? plannerName : "User";
+              const turnPlannerAvatar = String(
+                payloadMap.planner_agent_avatar_url
+                || payloadMap.agent_avatar_url
+                || turnPlannerAgent?.avatar_url
+                || plannerAgentAvatarUrl
+                || ""
+              ).trim();
+              const actorLabel = actorType === "planner" ? turnPlannerName : currentUserProfile.displayName || "User";
+              const actorAvatar = actorType === "planner" ? turnPlannerAvatar : currentUserProfile.picture;
+              const actorEmail = actorType === "planner" ? "" : currentUserProfile.email;
               const actorIdentityKey = actorType === "planner"
-                ? String(payloadMap.planner_agent_id || payloadMap.agent_id || plannerName || "planner")
-                : String(turn.created_by || selectedSession?.created_by || "current-user");
+                ? String(turnPlannerAgentId || turnPlannerName || plannerAgentIdentityKey || "planner")
+                : String(currentUserProfile.subject || currentUserProfile.email || turn.created_by || selectedSession?.created_by || "current-user");
 
               if (isCheckpointTurn) return null;
 
@@ -4636,7 +4735,9 @@ function ComposerDetailPanel({
                     <span className="composer-turn-actor-chip">
                       <Avatar
                         size="sm"
+                        src={actorAvatar || undefined}
                         name={actorLabel}
+                        email={actorEmail || undefined}
                         identityKey={actorIdentityKey}
                         className="composer-turn-avatar"
                       />
@@ -4917,8 +5018,13 @@ function ComposerDetailPanel({
             <div className="composer-cockpit-agent">
               <div className="field-label">Agent</div>
               <div className="composer-cockpit-agent-row">
-                <Avatar size="sm" name={currentAgentName} identityKey={currentAgentIdentityKey} />
-                <span className="field-value">{currentAgentName}</span>
+                <Avatar
+                  size="sm"
+                  src={plannerAgentAvatarUrl || undefined}
+                  name={plannerAgentName}
+                  identityKey={plannerAgentIdentityKey}
+                />
+                <span className="field-value">{plannerAgentName}</span>
               </div>
             </div>
             <div><div className="field-label">Revision</div><div className="field-value">{draftRevisionCount ? `Rev ${draftRevisionCount}` : "—"}</div></div>
@@ -4944,6 +5050,10 @@ function ComposerDetailPanel({
                     {draftProposedWork.length ? (
                       <ul className="detail-list">
                         {draftProposedWork.map((item) => <li key={item}>{item}</li>)}
+                      </ul>
+                    ) : draftWorkstreamFocus.length ? (
+                      <ul className="detail-list">
+                        {draftWorkstreamFocus.map((item) => <li key={item}>{formatWorkstreamLabel(item)}</li>)}
                       </ul>
                     ) : (
                       <p className="muted small">No selected artifact set provided yet.</p>
@@ -5275,6 +5385,7 @@ export default function WorkbenchPanelHost({
   workspaceId,
   workspaceName,
   workspaceColor,
+  currentUser,
   onOpenPanel,
   onClosePanel,
   onContextChange,
@@ -5283,6 +5394,7 @@ export default function WorkbenchPanelHost({
   workspaceId: string;
   workspaceName?: string;
   workspaceColor?: string;
+  currentUser?: Record<string, unknown> | null;
   onOpenPanel: (panel: ConsolePanelSpec) => void;
   onClosePanel?: () => void;
   onContextChange?: ContextEmitter;
@@ -5312,6 +5424,7 @@ export default function WorkbenchPanelHost({
       return (
         <ComposerDetailPanel
           workspaceId={workspaceId}
+          currentUser={currentUser}
           factoryKey={String(panel.params?.factory_key || "") || undefined}
           applicationPlanId={String(panel.params?.application_plan_id || "") || undefined}
           applicationId={String(panel.params?.application_id || "") || undefined}

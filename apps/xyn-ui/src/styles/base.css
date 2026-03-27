@@ -3259,6 +3259,59 @@ button.sm {
   gap: 8px;
 }
 
+.solution-stage-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.solution-stage-pill {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.74rem;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 88%, var(--border) 12%);
+}
+
+.solution-stage-pill.is-complete {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border) 65%);
+  color: color-mix(in srgb, var(--success) 78%, white 22%);
+}
+
+.solution-stage-pill.is-current {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border) 55%);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface) 88%);
+  font-weight: 600;
+}
+
+.solution-next-step-callout {
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border) 78%);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface) 92%);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.solution-actions-block {
+  display: grid;
+  gap: 8px;
+}
+
+.solution-plan-summary-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.solution-summary-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
 @media (max-width: 1100px) {
   .solution-detail-grid {
     grid-template-columns: 1fr;

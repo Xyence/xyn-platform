@@ -2692,6 +2692,7 @@ class AgentDefinition(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     slug = models.SlugField(max_length=120, unique=True)
     name = models.CharField(max_length=160)
+    avatar_url = models.URLField(max_length=500, blank=True)
     model_config = models.ForeignKey(ModelConfig, on_delete=models.PROTECT, related_name="agent_definitions")
     system_prompt_text = models.TextField(blank=True)
     context_pack_refs_json = models.JSONField(default=list, blank=True)

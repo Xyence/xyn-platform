@@ -1837,6 +1837,7 @@ export type AiAgent = {
   id: string;
   slug: string;
   name: string;
+  avatar_url?: string;
   model_config_id: string;
   model_config?: AiModelConfig;
   override_prompt_text?: string;
@@ -1896,12 +1897,15 @@ export type AiAgentResolution = {
   purpose: string;
   resolved_agent_id?: string | null;
   resolved_agent_name?: string | null;
+  resolved_agent_avatar_url?: string | null;
   resolution_source: "explicit" | "default_fallback" | string;
   resolution_type?: "required_default" | "explicit" | "falls_back_to_default" | string;
   explicit_agent_id?: string | null;
   explicit_agent_name?: string | null;
+  explicit_agent_avatar_url?: string | null;
   fallback_agent_id?: string | null;
   fallback_agent_name?: string | null;
+  fallback_agent_avatar_url?: string | null;
   reason?: string | null;
 };
 
@@ -2871,6 +2875,7 @@ export type SolutionChangeSession = {
   created_by?: string | null;
   analysis?: Record<string, unknown>;
   selected_artifact_ids: string[];
+  confirmed_workstreams?: string[];
   selected_artifacts?: Array<{
     artifact_id: string;
     artifact_title: string;

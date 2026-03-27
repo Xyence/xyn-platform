@@ -17025,6 +17025,9 @@ def _serialize_ai_routing_status() -> Dict[str, Any]:
         purpose_routing["explicit_agent_name"] = (
             str(explicit_assignment.agent_definition.name or "") if explicit_assignment else None
         )
+        purpose_routing["explicit_agent_avatar_url"] = (
+            str(explicit_assignment.agent_definition.avatar_url or "").strip() if explicit_assignment else None
+        )
         routing.append(purpose_routing)
 
     recent: List[Dict[str, Any]] = []
@@ -17045,6 +17048,7 @@ def _serialize_ai_routing_status() -> Dict[str, Any]:
                 "purpose": str(resolution.get("purpose") or ""),
                 "resolved_agent_id": resolution.get("resolved_agent_id"),
                 "resolved_agent_name": resolution.get("resolved_agent_name"),
+                "resolved_agent_avatar_url": resolution.get("resolved_agent_avatar_url"),
                 "resolution_source": resolution.get("resolution_source"),
                 "reason": resolution.get("reason"),
             }
@@ -17280,6 +17284,7 @@ def _serialize_agent_definition(agent: AgentDefinition) -> Dict[str, Any]:
         "id": str(agent.id),
         "slug": agent.slug,
         "name": agent.name,
+        "avatar_url": str(agent.avatar_url or "").strip(),
         "model_config_id": str(agent.model_config_id),
         "model_config": _serialize_model_config(agent.model_config),
         "override_prompt_text": agent.system_prompt_text or "",
@@ -17626,6 +17631,7 @@ def ai_agents_collection(request: HttpRequest) -> JsonResponse:
     agent = AgentDefinition.objects.create(
         slug=slug,
         name=name,
+        avatar_url=str(payload.get("avatar_url") or "").strip(),
         model_config=model_config,
         system_prompt_text=str(payload.get("override_prompt_text") or payload.get("system_prompt_text") or ""),
         context_pack_refs_json=[],
@@ -17678,6 +17684,8 @@ def ai_agent_detail(request: HttpRequest, agent_id: str) -> JsonResponse:
         agent.slug = next_slug
     if "name" in payload:
         agent.name = str(payload.get("name") or agent.name).strip()
+    if "avatar_url" in payload:
+        agent.avatar_url = str(payload.get("avatar_url") or "").strip()
     if "model_config_id" in payload:
         model_config = ModelConfig.objects.filter(id=payload.get("model_config_id")).first()
         if not model_config:
@@ -17701,6 +17709,7 @@ def ai_agent_detail(request: HttpRequest, agent_id: str) -> JsonResponse:
         update_fields=[
             "slug",
             "name",
+            "avatar_url",
             "model_config",
             "system_prompt_text",
             "context_pack_refs_json",
@@ -28709,6 +28718,47 @@ def _solution_change_session_selected_artifact_ids(session: SolutionChangeSessio
     return normalized
 
 
+_SOLUTION_WORKSTREAM_KEYS: set[str] = {
+    "ui",
+    "api",
+    "data",
+    "workflow",
+    "validation",
+    "behavior",
+}
+
+
+def _solution_change_session_confirmed_workstreams(session: SolutionChangeSession) -> List[str]:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    raw = metadata.get("confirmed_workstreams")
+    if not isinstance(raw, list):
+        return []
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        token = str(item or "").strip().lower()
+        if not token or token in seen or token not in _SOLUTION_WORKSTREAM_KEYS:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
+
+
+def _artifact_role_matches_workstreams(role: str, workstreams: List[str]) -> bool:
+    normalized_role = str(role or "").strip()
+    normalized_workstreams = [str(item or "").strip().lower() for item in workstreams if str(item or "").strip()]
+    if (
+        ("ui" in normalized_workstreams and normalized_role == "primary_ui")
+        or ("api" in normalized_workstreams and normalized_role in {"primary_api", "integration_adapter"})
+        or ("data" in normalized_workstreams and normalized_role in {"primary_api", "shared_library", "runtime_service"})
+        or ("workflow" in normalized_workstreams and normalized_role in {"worker", "runtime_service", "integration_adapter"})
+        or ("behavior" in normalized_workstreams and normalized_role in {"primary_ui", "primary_api"})
+        or ("validation" in normalized_workstreams and normalized_role in {"worker", "runtime_service", "integration_adapter", "primary_api"})
+    ):
+        return True
+    return False
+
+
 def _next_solution_planning_turn_sequence(session: SolutionChangeSession) -> int:
     current = (
         SolutionPlanningTurn.objects.filter(session=session)
@@ -29346,6 +29396,9 @@ def _record_solution_draft_plan(
             "request_text": str(session.request_text or ""),
             "user_refinements": user_refinements,
             "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+            "confirmed_workstreams": list(plan.get("confirmed_workstreams") or []),
+            "suggested_workstreams": list(plan.get("suggested_workstreams") or []),
+            "implementation_steps": list(plan.get("implementation_steps") or []),
             "shared_contracts": list(plan.get("shared_contracts") or []),
             "validation_plan": list(plan.get("validation_plan") or []),
         },
@@ -29516,6 +29569,35 @@ def _seed_solution_planning_state_on_create(
             )
 
 
+def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
+    lowered = str(request_text or "").strip().lower()
+    if not lowered:
+        return []
+    workstreams: List[str] = []
+
+    def _append_once(token: str) -> None:
+        if token not in workstreams:
+            workstreams.append(token)
+
+    ui_tokens = {"ui", "ux", "layout", "width", "header", "pane", "panel", "screen", "view", "style", "css", "input", "control", "presentation"}
+    api_tokens = {"api", "endpoint", "request", "response", "service", "contract", "schema"}
+    data_tokens = {"data", "model", "storage", "persist", "persistence", "database", "db", "table", "field"}
+    workflow_tokens = {"flow", "workflow", "session", "planner", "stage", "apply", "preview", "validate", "orchestration", "pipeline", "job"}
+    behavior_tokens = {"logic", "behavior", "rule", "validation", "condition"}
+
+    if any(token in lowered for token in ui_tokens):
+        _append_once("ui")
+    if any(token in lowered for token in api_tokens):
+        _append_once("api")
+    if any(token in lowered for token in data_tokens):
+        _append_once("data")
+    if any(token in lowered for token in workflow_tokens):
+        _append_once("workflow")
+    if any(token in lowered for token in behavior_tokens):
+        _append_once("behavior")
+    return workstreams
+
+
 def _analyze_solution_impacted_artifacts(
     *, application: Application, request_text: str, memberships: List[ApplicationArtifactMembership]
 ) -> Dict[str, Any]:
@@ -29586,12 +29668,38 @@ def _analyze_solution_impacted_artifacts(
                 }
             )
     suggested_artifact_ids = [str(row.get("artifact_id") or "") for row in impacted_rows if str(row.get("artifact_id") or "").strip()]
+    suggested_workstreams = _infer_solution_workstreams_from_request(request_text)
     return {
         "request_text": request_text,
         "token_count": len(tokens),
         "impacted_artifacts": impacted_rows,
         "suggested_artifact_ids": suggested_artifact_ids,
+        "suggested_workstreams": suggested_workstreams,
     }
+
+
+def _build_solution_impacted_analysis(
+    *,
+    application: Application,
+    request_text: str,
+    memberships: List[ApplicationArtifactMembership],
+) -> Dict[str, Any]:
+    analysis = _analyze_solution_impacted_artifacts(
+        application=application,
+        request_text=request_text,
+        memberships=memberships,
+    )
+    impacted_rows = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
+    suggested_workstreams = analysis.get("suggested_workstreams") if isinstance(analysis.get("suggested_workstreams"), list) else []
+    if impacted_rows:
+        analysis_status = "matched"
+    elif suggested_workstreams:
+        analysis_status = "suggested_only"
+    else:
+        analysis_status = "no_confident_matches"
+    analysis["analysis_status"] = analysis_status
+    analysis["analyzed_at"] = timezone.now().isoformat()
+    return analysis
 
 
 def _generate_solution_change_plan(
@@ -29855,12 +29963,157 @@ def _generate_solution_change_plan(
         if latest_draft_summary:
             planner_context_text += f"\nPrior draft summary: {latest_draft_summary}"
 
+    def _is_default_change_session_title(title: str) -> bool:
+        token = str(title or "").strip()
+        return bool(re.match(r"^Change Session \d{4}-\d{2}-\d{2} \d{2}:\d{2}$", token))
+
+    def _is_greenfield_initial_solution_plan() -> bool:
+        if memberships:
+            return False
+        if SolutionChangeSession.objects.filter(application_id=session.application_id).exclude(id=session.id).exists():
+            return False
+        if Goal.objects.filter(application_id=session.application_id).exists():
+            return False
+        return True
+
+    def _existing_solution_no_membership_plan(
+        *,
+        objective_text: str,
+        plan_title_value: str,
+        planner_objective_value: str,
+        planner_context_value: str,
+        suggested_workstreams: List[str],
+    ) -> Dict[str, Any]:
+        lowered = objective_text.lower()
+        focuses_ui = any(token in lowered for token in {"ui", "ux", "layout", "width", "header", "panel", "screen", "view"})
+        focuses_api = any(token in lowered for token in {"api", "endpoint", "contract", "schema", "backend", "service"})
+        focuses_data = any(token in lowered for token in {"data", "model", "schema", "storage", "db", "database", "persistence"})
+
+        implementation_steps: List[str] = []
+        validation_steps: List[str] = []
+
+        if focuses_ui:
+            implementation_steps.extend(
+                [
+                    "Identify the affected shell/workbench surface and component boundaries for the requested layout/behavior change.",
+                    "Update component/container layout constraints and styling to satisfy the requested UI behavior.",
+                ]
+            )
+            validation_steps.extend(
+                [
+                    "Validate the updated UI behavior in the target workbench view with representative workspace data.",
+                    "Verify desktop and narrow-width responsive behavior for the affected surface.",
+                ]
+            )
+        if focuses_api:
+            implementation_steps.extend(
+                [
+                    "Trace the API handlers/serializers touched by the request and scope contract-safe updates.",
+                    "Apply the narrow API/validation changes required by the request and preserve backward compatibility.",
+                ]
+            )
+            validation_steps.append("Run API-level regression checks for changed contracts and affected query paths.")
+        if focuses_data:
+            implementation_steps.extend(
+                [
+                    "Identify impacted persisted fields and data-shape assumptions for the requested behavior change.",
+                    "Apply minimal data-model/repository updates required for the change while preserving current invariants.",
+                ]
+            )
+            validation_steps.append("Validate read/write flows and migration safety for impacted data paths.")
+
+        if not implementation_steps:
+            implementation_steps.extend(
+                [
+                    "Locate the specific code paths that implement the requested behavior in the existing solution.",
+                    "Apply a focused change that addresses the request without broad scaffold or bootstrap rework.",
+                ]
+            )
+        if not validation_steps:
+            validation_steps.extend(
+                [
+                    "Validate the requested behavior change through the affected end-user flow in the active workspace.",
+                    "Run targeted regression checks around adjacent workflows touched by this change.",
+                ]
+            )
+
+        shared_contracts = [
+            "Plan against the current solution baseline; do not introduce greenfield/bootstrap assumptions.",
+            "Preserve existing cross-artifact contracts unless the request explicitly requires contract changes.",
+        ]
+        shared_contracts.extend(refinement_state["resolved_assumptions"])
+        shared_contracts.extend(refinement_state["constraints"])
+        shared_contracts.extend(refinement_state["additional_considerations"][:2])
+
+        return {
+            "session_id": str(session.id),
+            "application_id": str(session.application_id),
+            "title": plan_title_value,
+            "request_text": original_request,
+            "planner_objective_text": planner_objective_value,
+            "planner_context_text": planner_context_value,
+            "user_refinements": user_refinements,
+            "generated_at": timezone.now().isoformat(),
+            "selected_artifact_ids": [],
+            "confirmed_workstreams": confirmed_workstreams,
+            "suggested_workstreams": suggested_workstreams,
+            "per_artifact_work": [],
+            "shared_contracts": shared_contracts,
+            "validation_plan": validation_steps,
+            "preview_implications": [
+                "Use preview to verify the targeted behavior change against the existing solution baseline.",
+            ],
+            "implementation_steps": implementation_steps,
+        }
+
+    analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+    confirmed_workstreams = _solution_change_session_confirmed_workstreams(session)
+    suggested_workstreams = [
+        str(item or "").strip()
+        for item in (analysis.get("suggested_workstreams") if isinstance(analysis.get("suggested_workstreams"), list) else [])
+        if str(item or "").strip()
+    ] or _infer_solution_workstreams_from_request(original_request)
+    effective_workstreams = confirmed_workstreams or suggested_workstreams
+
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
+    if not selected_members and memberships:
+        inferred_rows = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
+        if not inferred_rows:
+            inferred = _analyze_solution_impacted_artifacts(
+                application=session.application,
+                request_text=original_request,
+                memberships=memberships,
+            )
+            inferred_rows = inferred.get("impacted_artifacts") if isinstance(inferred.get("impacted_artifacts"), list) else []
+        confident_ids: List[str] = []
+        for row in inferred_rows:
+            if not isinstance(row, dict):
+                continue
+            artifact_id = str(row.get("artifact_id") or "").strip()
+            score = int(row.get("score") or 0)
+            if artifact_id and score >= 3 and artifact_id not in confident_ids:
+                confident_ids.append(artifact_id)
+        if not confident_ids and effective_workstreams:
+            for member in memberships:
+                role = str(member.role or "")
+                if _artifact_role_matches_workstreams(role, effective_workstreams):
+                    artifact_id = str(member.artifact_id)
+                    if artifact_id not in confident_ids:
+                        confident_ids.append(artifact_id)
+        selected_members = [member for member in memberships if str(member.artifact_id) in set(confident_ids)]
+
+    fallback_title = _compact_objective(original_request)[:120] if _is_default_change_session_title(session.title) else session.title
+    plan_title = str(refinement_state.get("name") or fallback_title or "").strip() or fallback_title
     if not selected_members:
-        selected_members = memberships
-    plan_title = str(refinement_state.get("name") or session.title or "").strip() or session.title
-    if not selected_members:
+        if confirmed_workstreams or not _is_greenfield_initial_solution_plan():
+            return _existing_solution_no_membership_plan(
+                objective_text=_compact_objective(original_request),
+                plan_title_value=plan_title,
+                planner_objective_value=planner_objective_text,
+                planner_context_value=planner_context_text,
+                suggested_workstreams=effective_workstreams,
+            )
         objective_text = _compact_objective(original_request)
         first_focus = "Start by shaping the primary data model and first user-facing workflow."
         objective_lower = objective_text.lower()
@@ -29900,7 +30153,9 @@ def _generate_solution_change_plan(
             "planner_context_text": planner_context_text,
             "user_refinements": user_refinements,
             "generated_at": timezone.now().isoformat(),
-            "selected_artifact_ids": initial_workstreams,
+            "selected_artifact_ids": [],
+            "confirmed_workstreams": confirmed_workstreams,
+            "suggested_workstreams": effective_workstreams,
             "per_artifact_work": [],
             "shared_contracts": assumptions,
             "validation_plan": [
@@ -29986,6 +30241,8 @@ def _generate_solution_change_plan(
         "user_refinements": user_refinements,
         "generated_at": timezone.now().isoformat(),
         "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
+        "confirmed_workstreams": confirmed_workstreams,
+        "suggested_workstreams": effective_workstreams,
         "per_artifact_work": per_artifact,
         "shared_contracts": shared_contracts,
         "validation_plan": validation_plan,
@@ -30027,6 +30284,7 @@ def _serialize_solution_change_session(
         "created_by": str(session.created_by_id) if session.created_by_id else None,
         "analysis": session.analysis_json if isinstance(session.analysis_json, dict) else {},
         "selected_artifact_ids": selected_ids,
+        "confirmed_workstreams": _solution_change_session_confirmed_workstreams(session),
         "selected_artifacts": selected_artifacts,
         "plan": session.plan_json if isinstance(session.plan_json, dict) else {},
         "execution_status": session.execution_status or "not_started",
@@ -30046,7 +30304,10 @@ def _stage_solution_change_session(
     memberships: List[ApplicationArtifactMembership],
 ) -> Dict[str, Any]:
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    confirmed_workstreams = _solution_change_session_confirmed_workstreams(session)
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
+    if not selected_members and confirmed_workstreams:
+        selected_members = [member for member in memberships if _artifact_role_matches_workstreams(member.role, confirmed_workstreams)]
     if not selected_members:
         selected_members = memberships
     plan = session.plan_json if isinstance(session.plan_json, dict) else {}
@@ -30086,6 +30347,7 @@ def _stage_solution_change_session(
         "artifact_count": len(staged_artifacts),
         "artifact_states": staged_artifacts,
         "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
+        "confirmed_workstreams": confirmed_workstreams,
         "shared_contracts": plan.get("shared_contracts") if isinstance(plan.get("shared_contracts"), list) else [],
         "validation_plan": plan.get("validation_plan") if isinstance(plan.get("validation_plan"), list) else [],
         "preview_implications": plan.get("preview_implications") if isinstance(plan.get("preview_implications"), list) else [],
@@ -33373,7 +33635,7 @@ def application_solution_change_sessions_collection(
     if not request_text:
         return JsonResponse({"error": "request_text is required"}, status=400)
     title = str(payload.get("title") or "").strip() or f"Change Session {timezone.now().strftime('%Y-%m-%d %H:%M')}"
-    analysis = _analyze_solution_impacted_artifacts(
+    analysis = _build_solution_impacted_analysis(
         application=application,
         request_text=request_text,
         memberships=memberships,
@@ -33422,6 +33684,27 @@ def application_solution_change_session_detail(
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     if request.method == "GET":
         return JsonResponse(_serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id))
+    if request.method == "DELETE":
+        if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        execution_status = str(session.execution_status or "not_started").strip().lower() or "not_started"
+        has_execution_records = bool(session.staged_changes_json) or bool(session.preview_json) or bool(session.validation_json)
+        if execution_status != "not_started" or has_execution_records:
+            return JsonResponse(
+                {
+                    "code": "DELETE_BLOCKED",
+                    "message": "Change sessions can only be deleted before staged/preview/validation execution begins.",
+                },
+                status=409,
+            )
+        session.delete()
+        return JsonResponse(
+            {
+                "deleted": True,
+                "application_id": str(application.id),
+                "session_id": str(session_id),
+            }
+        )
     if request.method != "PATCH":
         return JsonResponse({"error": "method not allowed"}, status=405)
     if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
@@ -33446,6 +33729,41 @@ def application_solution_change_session_detail(
             if token and token in allowed_ids and token not in selected_ids:
                 selected_ids.append(token)
         session.selected_artifact_ids_json = selected_ids
+    if "confirmed_workstreams" in payload:
+        raw = payload.get("confirmed_workstreams")
+        if not isinstance(raw, list):
+            return JsonResponse({"error": "confirmed_workstreams must be a list"}, status=400)
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            token = str(item or "").strip().lower()
+            if not token or token in seen:
+                continue
+            if token not in _SOLUTION_WORKSTREAM_KEYS:
+                return JsonResponse({"error": f"invalid confirmed_workstream: {token}"}, status=400)
+            seen.add(token)
+            normalized.append(token)
+        analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+        suggested = [
+            str(item or "").strip().lower()
+            for item in (analysis.get("suggested_workstreams") if isinstance(analysis.get("suggested_workstreams"), list) else [])
+            if str(item or "").strip()
+        ]
+        if normalized and suggested:
+            invalid = [item for item in normalized if item not in suggested]
+            if invalid:
+                return JsonResponse(
+                    {"error": "confirmed_workstreams must be selected from suggested_workstreams"},
+                    status=400,
+                )
+        if normalized and not suggested:
+            return JsonResponse(
+                {"error": "confirmed_workstreams cannot be set before suggested workstreams are available"},
+                status=400,
+            )
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        metadata = {**metadata, "confirmed_workstreams": normalized}
+        session.metadata_json = metadata
     session.save()
     session.refresh_from_db()
     return JsonResponse(_serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id))
@@ -33721,6 +34039,12 @@ def application_solution_change_session_plan(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
+    session.analysis_json = _build_solution_impacted_analysis(
+        application=application,
+        request_text=str(session.request_text or ""),
+        memberships=memberships,
+    )
+    session.save(update_fields=["analysis_json", "updated_at"])
     planning_state = _solution_planning_state(session)
     if planning_state.get("pending_question"):
         return JsonResponse({"error": "planner clarification is pending; submit a reply before generating a draft plan"}, status=409)

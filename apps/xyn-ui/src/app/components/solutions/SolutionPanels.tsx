@@ -3,6 +3,7 @@ import type { ApplicationArtifactMembership, ApplicationDetail, ApplicationSumma
 import {
   applyApplicationPlan,
   createSolutionChangeSession,
+  deleteSolutionChangeSession,
   generateApplicationPlan,
   generateSolutionChangePlan,
   getApplication,
@@ -34,6 +35,20 @@ type OpenPanel = (
   params?: Record<string, unknown>,
   options?: { open_in?: "current_panel" | "new_panel" | "side_by_side"; return_to_panel_id?: string }
 ) => void;
+
+const WORKSTREAM_LABELS: Record<string, string> = {
+  ui: "UI / presentation",
+  api: "API / service",
+  data: "Data / storage",
+  workflow: "Workflow / orchestration",
+  validation: "Validation / verification",
+  behavior: "Behavior / interaction logic",
+};
+
+function workstreamLabel(value: string): string {
+  const token = String(value || "").trim().toLowerCase();
+  return WORKSTREAM_LABELS[token] || token;
+}
 
 export function SolutionListPanel({
   workspaceId,
@@ -269,20 +284,31 @@ export function SolutionDetailPanel({
   const [changeTitle, setChangeTitle] = useState<string>("");
   const [changeRequest, setChangeRequest] = useState<string>("");
   const [creatingSession, setCreatingSession] = useState<boolean>(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string>("");
+  const [selectedWorkstreams, setSelectedWorkstreams] = useState<string[]>([]);
   const [planningSession, setPlanningSession] = useState<boolean>(false);
   const [stagingSession, setStagingSession] = useState<boolean>(false);
   const [preparingPreview, setPreparingPreview] = useState<boolean>(false);
   const [validatingSession, setValidatingSession] = useState<boolean>(false);
 
-  async function refreshSessions() {
+  async function refreshSessions(preferredSessionId?: string | null) {
     if (!applicationId) return;
     const payload = await listSolutionChangeSessions(applicationId);
     const next = payload.sessions || [];
     setSessions(next);
-    if (!activeSessionId && next.length > 0) {
-      setActiveSessionId(next[0].id);
-      setSelectedArtifactIds(next[0].selected_artifact_ids || []);
+    if (!next.length) {
+      setActiveSessionId("");
+      setSelectedArtifactIds([]);
+      setSelectedWorkstreams([]);
+      return;
     }
+    const preferred =
+      (preferredSessionId ? next.find((item) => item.id === preferredSessionId) : null) ||
+      (activeSessionId ? next.find((item) => item.id === activeSessionId) : null) ||
+      next[0];
+    setActiveSessionId(preferred.id);
+    setSelectedArtifactIds(preferred.selected_artifact_ids || []);
+    setSelectedWorkstreams(preferred.confirmed_workstreams || []);
   }
 
   useEffect(() => {
@@ -325,6 +351,7 @@ export function SolutionDetailPanel({
         if (loadedSessions.length > 0) {
           setActiveSessionId(loadedSessions[0].id);
           setSelectedArtifactIds(loadedSessions[0].selected_artifact_ids || []);
+          setSelectedWorkstreams(loadedSessions[0].confirmed_workstreams || []);
         }
       } catch (err) {
         if (!ignore) {
@@ -417,13 +444,28 @@ export function SolutionDetailPanel({
       });
       setChangeTitle("");
       setChangeRequest("");
-      await refreshSessions();
-      setActiveSessionId(response.session.id);
-      setSelectedArtifactIds(response.session.selected_artifact_ids || []);
+      await refreshSessions(response.session.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create change session.");
     } finally {
       setCreatingSession(false);
+    }
+  }
+
+  async function handleDeleteSession(session: SolutionChangeSession) {
+    if (!applicationId) return;
+    const confirmed = window.confirm(`Delete change session "${session.title}"? This cannot be undone.`);
+    if (!confirmed) return;
+    setDeletingSessionId(session.id);
+    setError("");
+    try {
+      await deleteSolutionChangeSession(applicationId, session.id);
+      const nextPreferred = activeSessionId === session.id ? null : activeSessionId;
+      await refreshSessions(nextPreferred);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete change session.");
+    } finally {
+      setDeletingSessionId("");
     }
   }
 
@@ -437,8 +479,27 @@ export function SolutionDetailPanel({
       });
       await refreshSessions();
       setSelectedArtifactIds(updated.selected_artifact_ids || []);
+      setSelectedWorkstreams(updated.confirmed_workstreams || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update impacted artifacts.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleConfirmSuggestedFocus() {
+    if (!applicationId || !activeSessionId) return;
+    setSaving(true);
+    setError("");
+    try {
+      const updated = await updateSolutionChangeSession(applicationId, activeSessionId, {
+        confirmed_workstreams: selectedWorkstreams,
+      });
+      await refreshSessions();
+      setSelectedArtifactIds(updated.selected_artifact_ids || []);
+      setSelectedWorkstreams(updated.confirmed_workstreams || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to confirm suggested workstreams.");
     } finally {
       setSaving(false);
     }
@@ -453,6 +514,7 @@ export function SolutionDetailPanel({
       await refreshSessions();
       setActiveSessionId(response.session.id);
       setSelectedArtifactIds(response.session.selected_artifact_ids || []);
+      setSelectedWorkstreams(response.session.confirmed_workstreams || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate cross-artifact plan.");
     } finally {
@@ -509,7 +571,22 @@ export function SolutionDetailPanel({
     });
   }
 
-  const impactedRows = (activeSession?.analysis?.impacted_artifacts as Array<Record<string, unknown>> | undefined) || [];
+  function toggleWorkstreamSelection(workstream: string, checked: boolean) {
+    const token = String(workstream || "").trim().toLowerCase();
+    if (!token) return;
+    setSelectedWorkstreams((prev) => {
+      if (checked) return prev.includes(token) ? prev : [...prev, token];
+      return prev.filter((item) => item !== token);
+    });
+  }
+
+  const analysisState = (activeSession?.analysis as Record<string, unknown> | undefined) || {};
+  const impactedRows = (analysisState?.impacted_artifacts as Array<Record<string, unknown>> | undefined) || [];
+  const suggestedWorkstreams = (analysisState?.suggested_workstreams as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
+  const confirmedWorkstreams = (activeSession?.confirmed_workstreams || []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
+  const analysisStatus = String(analysisState?.analysis_status || "").toLowerCase();
+  const analysisRan = Boolean(analysisState?.analyzed_at) || analysisStatus === "no_confident_matches";
+  const analysisHasNoConfidentMatches = analysisRan && !impactedRows.length && !suggestedWorkstreams.length;
   const activePlan = (activeSession?.plan as Record<string, unknown> | undefined) || {};
   const stagedChanges = (activeSession?.staged_changes as Record<string, unknown> | undefined) || {};
   const stagedArtifacts = (stagedChanges?.artifact_states as Array<Record<string, unknown>> | undefined) || [];
@@ -525,6 +602,91 @@ export function SolutionDetailPanel({
   const reusedRuntime = !builtForSession;
   const validationState = (activeSession?.validation as Record<string, unknown> | undefined) || {};
   const validationChecks = (validationState?.checks as Array<Record<string, unknown>> | undefined) || [];
+  const hasImpactedAnalysis = impactedRows.length > 0 || suggestedWorkstreams.length > 0 || analysisHasNoConfidentMatches;
+  const hasSelectedArtifacts = selectedArtifactIds.length > 0;
+  const hasConfirmedWorkstreamFocus = confirmedWorkstreams.length > 0;
+  const hasReviewedArtifactFocus = hasSelectedArtifacts || hasConfirmedWorkstreamFocus || analysisHasNoConfidentMatches;
+  const hasPlan = Object.keys(activePlan).length > 0;
+  const executionStatus = String(activeSession?.execution_status || "").toLowerCase();
+  const hasStagedArtifacts = stagedArtifacts.length > 0 || ["staged", "preview_ready", "validated"].includes(executionStatus);
+  const hasPreviewEvidence = Object.keys(previewState).length > 0;
+  const hasValidationEvidence = validationChecks.length > 0 || executionStatus === "validated";
+  const planRequestText = String(activePlan.request_text || activeSession?.request_text || "—");
+  const planSharedContracts = (activePlan.shared_contracts as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
+  const planImplementationSteps = (activePlan.implementation_steps as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
+  const planValidationSteps = (activePlan.validation_plan as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
+
+  const planningState = (activeSession?.planning as Record<string, unknown> | undefined) || {};
+  const pendingCheckpoints = Array.isArray(planningState?.pending_checkpoints)
+    ? (planningState.pending_checkpoints as Array<Record<string, unknown>>)
+    : [];
+  const hasPendingApproval = pendingCheckpoints.some(
+    (checkpoint) =>
+      String(checkpoint?.status || "").toLowerCase() === "pending" &&
+      (String(checkpoint?.required_before || "").toLowerCase() === "stage" ||
+        String(checkpoint?.required_before || "").toLowerCase() === "apply" ||
+        String(checkpoint?.required_before || "").toLowerCase() === "dispatch")
+  );
+
+  type SessionStepKey = "analyze" | "save" | "plan" | "approve" | "stage" | "preview" | "validate" | "done";
+  const nextStep: SessionStepKey =
+    !activeSession ? "done" :
+    !hasImpactedAnalysis ? "analyze" :
+    !hasReviewedArtifactFocus ? "save" :
+    !hasPlan ? "plan" :
+    hasPendingApproval ? "approve" :
+    !hasStagedArtifacts ? "stage" :
+    !hasPreviewEvidence ? "preview" :
+    !hasValidationEvidence ? "validate" :
+    "done";
+
+  const stageRows: Array<{ key: SessionStepKey; label: string; complete: boolean }> = [
+    { key: "plan", label: "Plan ready", complete: hasPlan },
+    { key: "analyze", label: "Analyze impacted artifacts", complete: hasImpactedAnalysis },
+    { key: "save", label: "Review/save impacted focus", complete: hasReviewedArtifactFocus },
+    { key: "approve", label: "Review/approve plan", complete: hasPlan && !hasPendingApproval },
+    { key: "stage", label: "Stage apply", complete: hasStagedArtifacts },
+    { key: "preview", label: "Preview", complete: hasPreviewEvidence },
+    { key: "validate", label: "Validate", complete: hasValidationEvidence },
+  ];
+  const currentStageRow = stageRows.find((row) => row.key === nextStep);
+  const nextStepCopy =
+    nextStep === "analyze"
+      ? "Next step: analyze impacted artifacts for this change session."
+      : nextStep === "save"
+      ? impactedRows.length
+        ? "Next step: review and save impacted artifacts for planning."
+        : "Next step: confirm suggested workstream focus for planning."
+      : nextStep === "plan"
+      ? "Next step: generate the structured change plan."
+      : nextStep === "approve"
+      ? "Planning approval is still required before staging. Open this session in Composer to review and approve the plan."
+      : nextStep === "stage"
+      ? "Next step: stage coordinated apply for the approved plan."
+      : nextStep === "preview"
+      ? "Next step: prepare preview to verify the staged change."
+      : nextStep === "validate"
+      ? "Next step: run validation checks on the prepared preview."
+      : "Workflow complete: plan, stage, preview, and validation are all available.";
+
+  const canStageApply = hasPlan && (hasSelectedArtifacts || hasConfirmedWorkstreamFocus) && !hasPendingApproval;
+  const canPreparePreview = hasStagedArtifacts && !hasPendingApproval;
+  const canValidateSession = hasStagedArtifacts && hasPreviewEvidence && !hasPendingApproval;
+  const stageBlockedReason = hasPendingApproval
+    ? "Blocked: planning approval is still pending. Open this session in Composer to approve the plan first."
+    : !canStageApply
+    ? "Blocked: confirm impacted artifact focus before staging."
+    : "";
+  const previewBlockedReason = hasPendingApproval
+    ? "Blocked: planning approval is still pending."
+    : !canPreparePreview
+    ? "Blocked: stage coordinated apply first."
+    : "";
+  const validateBlockedReason = hasPendingApproval
+    ? "Blocked: planning approval is still pending."
+    : !canValidateSession
+    ? "Blocked: prepare preview before validation."
+    : "";
 
   return (
     <div className="solution-detail-layout" data-testid="solution-detail-panel">
@@ -623,16 +785,28 @@ export function SolutionDetailPanel({
                         <td>{session.status}</td>
                         <td className="solution-list-updated-cell">{session.updated_at ? new Date(session.updated_at).toLocaleString() : "—"}</td>
                         <td>
-                          <button
-                            className={`ghost sm ${activeSessionId === session.id ? "active" : ""}`}
-                            type="button"
-                            onClick={() => {
-                              setActiveSessionId(session.id);
-                              setSelectedArtifactIds(session.selected_artifact_ids || []);
-                            }}
-                          >
-                            {activeSessionId === session.id ? "Selected" : "Select"}
-                          </button>
+                          <div className="inline-action-row">
+                            <button
+                              className={`ghost sm ${activeSessionId === session.id ? "active" : ""}`}
+                              type="button"
+                              onClick={() => {
+                                setActiveSessionId(session.id);
+                                setSelectedArtifactIds(session.selected_artifact_ids || []);
+                                setSelectedWorkstreams(session.confirmed_workstreams || []);
+                              }}
+                            >
+                              {activeSessionId === session.id ? "Selected" : "Select"}
+                            </button>
+                            <button
+                              className="ghost sm"
+                              type="button"
+                              onClick={() => void handleDeleteSession(session)}
+                              disabled={deletingSessionId === session.id}
+                              aria-label={`Delete ${session.title}`}
+                            >
+                              {deletingSessionId === session.id ? "Deleting…" : "Delete"}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -647,71 +821,249 @@ export function SolutionDetailPanel({
           {activeSession ? (
             <section className="card stack solution-card-compact">
               <h4>Selected Session</h4>
-          <p className="muted">
-            <strong>{activeSession.title}</strong> · {activeSession.status}
-          </p>
-          <div className="field-label">Impacted Artifact Selection</div>
-          {impactedRows.length ? (
-            <div className="stack">
-              {impactedRows.map((row, index) => {
-                const artifactIdValue = String(row.artifact_id || "");
-                const checked = selectedArtifactIds.includes(artifactIdValue);
-                return (
-                  <label key={`${artifactIdValue}-${index}`} className="row" style={{ alignItems: "flex-start", gap: 8 }}>
-                    <input type="checkbox" checked={checked} onChange={(event) => toggleArtifactSelection(artifactIdValue, event.target.checked)} />
-                    <span>
-                      <strong>{String(row.artifact_title || artifactIdValue || "Artifact")}</strong> ({String(row.role || "supporting")}){" "}
-                      <span className="muted">score {String(row.score || "0")}</span>
-                      <br />
-                      <span className="muted">{Array.isArray(row.reasons) ? row.reasons.map((entry) => String(entry)).join("; ") : ""}</span>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="muted solution-empty-state">No impacted artifact analysis available yet.</p>
-          )}
-          <div className="inline-action-row">
-            <button className="ghost sm" type="button" onClick={() => void handleSaveImpactedArtifacts()} disabled={saving}>
-              {saving ? "Saving…" : "Save Impacted Artifacts"}
-            </button>
-            <button className="ghost sm" type="button" onClick={() => void handleGeneratePlan()} disabled={planningSession}>
-              {planningSession ? "Planning…" : "Generate Cross-Artifact Plan"}
-            </button>
-            <button className="ghost sm" type="button" onClick={() => void handleStageApply()} disabled={stagingSession}>
-              {stagingSession ? "Staging…" : "Stage Coordinated Apply"}
-            </button>
-            <button className="ghost sm" type="button" onClick={() => void handlePreparePreview()} disabled={preparingPreview}>
-              {preparingPreview ? "Preparing…" : "Prepare Preview Handoff"}
-            </button>
-            <button className="ghost sm" type="button" onClick={() => void handleValidateSession()} disabled={validatingSession}>
-              {validatingSession ? "Validating…" : "Run Validation"}
-            </button>
-            <button
-              className="ghost sm"
-              type="button"
-              onClick={() =>
-                onOpenPanel(
-                  "composer_detail",
-                  {
-                    workspace_id: workspaceId,
-                    application_id: applicationId,
-                    solution_change_session_id: activeSessionId,
-                  },
-                  { open_in: "new_panel" }
-                )}
-            >
-              Open Session In Composer
-            </button>
-          </div>
+              <p className="muted">
+                <strong>{activeSession.title}</strong> · {activeSession.status}
+              </p>
 
-          {Object.keys(activePlan).length > 0 ? (
-            <>
-              <h5>Structured Plan</h5>
-              <pre className="code-block">{JSON.stringify(activePlan, null, 2)}</pre>
-            </>
-          ) : null}
+              <div className="solution-stage-strip" role="list" aria-label="Session workflow stages">
+                {stageRows.map((row) => (
+                  <div
+                    key={row.key}
+                    role="listitem"
+                    className={[
+                      "solution-stage-pill",
+                      row.complete ? "is-complete" : "",
+                      currentStageRow?.key === row.key ? "is-current" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  >
+                    {row.label}
+                  </div>
+                ))}
+              </div>
+
+              <div className="solution-next-step-callout">
+                <div className="field-label">Workflow guidance</div>
+                <p className="solution-empty-state">{nextStepCopy}</p>
+              </div>
+
+              <div className="solution-actions-block">
+                <div className="inline-action-row">
+                  {nextStep === "analyze" ? (
+                    <button className="button sm" type="button" onClick={() => void handleGeneratePlan()} disabled={planningSession}>
+                      {planningSession ? "Analyzing…" : "Analyze Impacted Artifacts"}
+                    </button>
+                  ) : nextStep === "save" ? (
+                    impactedRows.length ? (
+                      <button className="button sm" type="button" onClick={() => void handleSaveImpactedArtifacts()} disabled={saving}>
+                        {saving ? "Saving…" : "Save Impacted Artifacts"}
+                      </button>
+                    ) : (
+                      <p className="solution-empty-state">Select suggested workstreams below and confirm focus to continue.</p>
+                    )
+                  ) : nextStep === "plan" ? (
+                    <button className="button sm" type="button" onClick={() => void handleGeneratePlan()} disabled={planningSession}>
+                      {planningSession ? "Planning…" : "Generate Cross-Artifact Plan"}
+                    </button>
+                  ) : nextStep === "approve" ? (
+                    <button
+                      className="button sm"
+                      type="button"
+                      onClick={() =>
+                        onOpenPanel(
+                          "composer_detail",
+                          {
+                            workspace_id: workspaceId,
+                            application_id: applicationId,
+                            solution_change_session_id: activeSessionId,
+                          },
+                          { open_in: "new_panel" }
+                        )}
+                    >
+                      Open Session in Composer
+                    </button>
+                  ) : nextStep === "stage" ? (
+                    <button className="button sm" type="button" onClick={() => void handleStageApply()} disabled={stagingSession || !canStageApply}>
+                      {stagingSession ? "Staging…" : "Stage Coordinated Apply"}
+                    </button>
+                  ) : nextStep === "preview" ? (
+                    <button className="button sm" type="button" onClick={() => void handlePreparePreview()} disabled={preparingPreview || !canPreparePreview}>
+                      {preparingPreview ? "Preparing…" : "Prepare Preview Handoff"}
+                    </button>
+                  ) : nextStep === "validate" ? (
+                    <button className="button sm" type="button" onClick={() => void handleValidateSession()} disabled={validatingSession || !canValidateSession}>
+                      {validatingSession ? "Validating…" : "Run Validation"}
+                    </button>
+                  ) : null}
+                </div>
+                <div className="inline-action-row">
+                  {impactedRows.length ? (
+                    <button className="ghost sm" type="button" onClick={() => void handleSaveImpactedArtifacts()} disabled={saving || !hasImpactedAnalysis}>
+                      {saving ? "Saving…" : "Save Impacted Artifacts"}
+                    </button>
+                  ) : null}
+                  <button className="ghost sm" type="button" onClick={() => void handleGeneratePlan()} disabled={planningSession}>
+                    {planningSession ? "Planning…" : "Generate Cross-Artifact Plan"}
+                  </button>
+                  <button
+                    className="ghost sm"
+                    type="button"
+                    onClick={() => void handleStageApply()}
+                    disabled={stagingSession || !canStageApply}
+                    title={stagingSession || canStageApply ? "" : stageBlockedReason}
+                  >
+                    {stagingSession ? "Staging…" : "Stage Coordinated Apply"}
+                  </button>
+                  <button
+                    className="ghost sm"
+                    type="button"
+                    onClick={() => void handlePreparePreview()}
+                    disabled={preparingPreview || !canPreparePreview}
+                    title={preparingPreview || canPreparePreview ? "" : previewBlockedReason}
+                  >
+                    {preparingPreview ? "Preparing…" : "Prepare Preview Handoff"}
+                  </button>
+                  <button
+                    className="ghost sm"
+                    type="button"
+                    onClick={() => void handleValidateSession()}
+                    disabled={validatingSession || !canValidateSession}
+                    title={validatingSession || canValidateSession ? "" : validateBlockedReason}
+                  >
+                    {validatingSession ? "Validating…" : "Run Validation"}
+                  </button>
+                  <button
+                    className="ghost sm"
+                    type="button"
+                    onClick={() =>
+                      onOpenPanel(
+                        "composer_detail",
+                        {
+                          workspace_id: workspaceId,
+                          application_id: applicationId,
+                          solution_change_session_id: activeSessionId,
+                        },
+                        { open_in: "new_panel" }
+                      )}
+                  >
+                    Open Session In Composer
+                  </button>
+                </div>
+              </div>
+
+              <div className="field-label">{impactedRows.length ? "Impacted Artifact Selection" : "Suggested Focus Areas"}</div>
+              {impactedRows.length ? (
+                <div className="stack">
+                  {impactedRows.map((row, index) => {
+                    const artifactIdValue = String(row.artifact_id || "");
+                    const checked = selectedArtifactIds.includes(artifactIdValue);
+                    return (
+                      <label key={`${artifactIdValue}-${index}`} className="row" style={{ alignItems: "flex-start", gap: 8 }}>
+                        <input type="checkbox" checked={checked} onChange={(event) => toggleArtifactSelection(artifactIdValue, event.target.checked)} />
+                        <span>
+                          <strong>{String(row.artifact_title || artifactIdValue || "Artifact")}</strong> ({String(row.role || "supporting")}){" "}
+                          <span className="muted">score {String(row.score || "0")}</span>
+                          <br />
+                          <span className="muted">{Array.isArray(row.reasons) ? row.reasons.map((entry) => String(entry)).join("; ") : ""}</span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : suggestedWorkstreams.length ? (
+                <div className="solution-next-step-callout">
+                  <p className="solution-empty-state">
+                    Analysis completed. No confident artifact IDs were resolved yet. Select and confirm suggested focus areas to continue:
+                  </p>
+                  <div className="stack">
+                    {suggestedWorkstreams.map((item) => {
+                      const token = String(item || "").trim().toLowerCase();
+                      const checked = selectedWorkstreams.includes(token);
+                      return (
+                        <label key={token} className="row" style={{ alignItems: "center", gap: 8 }}>
+                          <input type="checkbox" checked={checked} onChange={(event) => toggleWorkstreamSelection(token, event.target.checked)} />
+                          <span>{workstreamLabel(token)}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {confirmedWorkstreams.length ? (
+                    <p className="solution-empty-state">
+                      Confirmed workstream focus: {confirmedWorkstreams.map((item) => workstreamLabel(item)).join(", ")}
+                    </p>
+                  ) : null}
+                  <div className="inline-action-row">
+                    <button className="button sm" type="button" onClick={() => void handleConfirmSuggestedFocus()} disabled={saving || !selectedWorkstreams.length}>
+                      {saving ? "Saving…" : "Use Selected Workstreams"}
+                    </button>
+                  </div>
+                </div>
+              ) : analysisHasNoConfidentMatches ? (
+                <div className="solution-next-step-callout">
+                  <p className="solution-empty-state">
+                    Analysis completed, but no confident artifact matches were found for this request yet.
+                    Continue by generating a targeted plan or refining the request with more specific scope.
+                  </p>
+                </div>
+              ) : (
+                <div className="solution-next-step-callout">
+                  <p className="solution-empty-state">
+                    Impacted artifact analysis is not available yet. This is expected for a new or un-analyzed session.
+                    Run <strong>Analyze Impacted Artifacts</strong> to generate suggested artifact focus for this change request.
+                  </p>
+                </div>
+              )}
+
+              {hasPlan ? (
+                <section className="stack">
+                  <h5>Plan Summary</h5>
+                  <div className="solution-plan-summary-grid">
+                    <div>
+                      <span className="field-label">Title</span>
+                      <div className="field-value">{String(activePlan.title || activeSession.title || "—")}</div>
+                    </div>
+                    <div>
+                      <span className="field-label">Requested change</span>
+                      <div className="field-value">{planRequestText || "—"}</div>
+                    </div>
+                  </div>
+                  {planImplementationSteps.length ? (
+                    <div className="stack">
+                      <div className="field-label">Implementation steps</div>
+                      <ul className="solution-summary-list">
+                        {planImplementationSteps.map((step, index) => (
+                          <li key={`impl-${index}`}>{step}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {planValidationSteps.length ? (
+                    <div className="stack">
+                      <div className="field-label">Validation steps</div>
+                      <ul className="solution-summary-list">
+                        {planValidationSteps.map((step, index) => (
+                          <li key={`val-${index}`}>{step}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {planSharedContracts.length ? (
+                    <div className="stack">
+                      <div className="field-label">Shared contracts / assumptions</div>
+                      <ul className="solution-summary-list">
+                        {planSharedContracts.map((item, index) => (
+                          <li key={`shared-${index}`}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  <details>
+                    <summary>Raw plan (technical details)</summary>
+                    <pre className="code-block">{JSON.stringify(activePlan, null, 2)}</pre>
+                  </details>
+                </section>
+              ) : null}
 
           {stagedArtifacts.length ? (
             <>
