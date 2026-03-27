@@ -4627,6 +4627,7 @@ export async function updateSolutionChangeSession(
     title?: string;
     status?: "draft" | "planned" | "archived" | string;
     selected_artifact_ids?: string[];
+    confirmed_workstreams?: string[];
   }
 ): Promise<SolutionChangeSession> {
   const apiBaseUrl = resolveApiBaseUrl();

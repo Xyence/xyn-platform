@@ -390,8 +390,63 @@ describe("Solution panels", () => {
 
     render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
-    expect(screen.getByText("Analysis completed. No confident artifact IDs were resolved yet, but likely affected workstreams are:")).toBeInTheDocument();
-    expect(screen.getByText("ui")).toBeInTheDocument();
+    expect(screen.getByText("Analysis completed. No confident artifact IDs were resolved yet. Select and confirm suggested focus areas to continue:")).toBeInTheDocument();
+    expect(screen.getByText("UI / presentation")).toBeInTheDocument();
+  });
+
+  it("allows confirming suggested workstreams as focused scope", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({
+      sessions: [
+        {
+          id: "scs-1",
+          title: "Session 1",
+          status: "draft",
+          selected_artifact_ids: [],
+          confirmed_workstreams: [],
+          analysis: {
+            analysis_status: "suggested_only",
+            analyzed_at: "2026-03-27T00:00:00Z",
+            impacted_artifacts: [],
+            suggested_workstreams: ["ui", "api"],
+          },
+          plan: {},
+          staged_changes: {},
+          preview: {},
+          validation: {},
+        },
+      ],
+    });
+    apiMocks.updateSolutionChangeSession.mockResolvedValue({
+      id: "scs-1",
+      title: "Session 1",
+      status: "draft",
+      selected_artifact_ids: [],
+      confirmed_workstreams: ["ui"],
+      analysis: {
+        analysis_status: "suggested_only",
+        analyzed_at: "2026-03-27T00:00:00Z",
+        impacted_artifacts: [],
+        suggested_workstreams: ["ui", "api"],
+      },
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("checkbox", { name: "UI / presentation" }));
+    await userEvent.click(screen.getAllByRole("button", { name: "Use Selected Workstreams" })[1]);
+    await waitFor(() =>
+      expect(apiMocks.updateSolutionChangeSession).toHaveBeenCalledWith("app-1", "scs-1", {
+        confirmed_workstreams: ["ui"],
+      })
+    );
   });
 
   it("shows an unavailable state when a preserved solution detail does not exist in the current workspace", async () => {

@@ -28709,6 +28709,47 @@ def _solution_change_session_selected_artifact_ids(session: SolutionChangeSessio
     return normalized
 
 
+_SOLUTION_WORKSTREAM_KEYS: set[str] = {
+    "ui",
+    "api",
+    "data",
+    "workflow",
+    "validation",
+    "behavior",
+}
+
+
+def _solution_change_session_confirmed_workstreams(session: SolutionChangeSession) -> List[str]:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    raw = metadata.get("confirmed_workstreams")
+    if not isinstance(raw, list):
+        return []
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        token = str(item or "").strip().lower()
+        if not token or token in seen or token not in _SOLUTION_WORKSTREAM_KEYS:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
+
+
+def _artifact_role_matches_workstreams(role: str, workstreams: List[str]) -> bool:
+    normalized_role = str(role or "").strip()
+    normalized_workstreams = [str(item or "").strip().lower() for item in workstreams if str(item or "").strip()]
+    if (
+        ("ui" in normalized_workstreams and normalized_role == "primary_ui")
+        or ("api" in normalized_workstreams and normalized_role in {"primary_api", "integration_adapter"})
+        or ("data" in normalized_workstreams and normalized_role in {"primary_api", "shared_library", "runtime_service"})
+        or ("workflow" in normalized_workstreams and normalized_role in {"worker", "runtime_service", "integration_adapter"})
+        or ("behavior" in normalized_workstreams and normalized_role in {"primary_ui", "primary_api"})
+        or ("validation" in normalized_workstreams and normalized_role in {"worker", "runtime_service", "integration_adapter", "primary_api"})
+    ):
+        return True
+    return False
+
+
 def _next_solution_planning_turn_sequence(session: SolutionChangeSession) -> int:
     current = (
         SolutionPlanningTurn.objects.filter(session=session)
@@ -30004,6 +30045,7 @@ def _generate_solution_change_plan(
             "user_refinements": user_refinements,
             "generated_at": timezone.now().isoformat(),
             "selected_artifact_ids": [],
+            "confirmed_workstreams": confirmed_workstreams,
             "suggested_workstreams": suggested_workstreams,
             "per_artifact_work": [],
             "shared_contracts": shared_contracts,
@@ -30015,11 +30057,13 @@ def _generate_solution_change_plan(
         }
 
     analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+    confirmed_workstreams = _solution_change_session_confirmed_workstreams(session)
     suggested_workstreams = [
         str(item or "").strip()
         for item in (analysis.get("suggested_workstreams") if isinstance(analysis.get("suggested_workstreams"), list) else [])
         if str(item or "").strip()
     ] or _infer_solution_workstreams_from_request(original_request)
+    effective_workstreams = confirmed_workstreams or suggested_workstreams
 
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
@@ -30040,16 +30084,10 @@ def _generate_solution_change_plan(
             score = int(row.get("score") or 0)
             if artifact_id and score >= 3 and artifact_id not in confident_ids:
                 confident_ids.append(artifact_id)
-        if not confident_ids and suggested_workstreams:
+        if not confident_ids and effective_workstreams:
             for member in memberships:
                 role = str(member.role or "")
-                if (
-                    ("ui" in suggested_workstreams and role == "primary_ui")
-                    or ("api" in suggested_workstreams and role in {"primary_api", "integration_adapter"})
-                    or ("data" in suggested_workstreams and role in {"primary_api", "shared_library", "runtime_service"})
-                    or ("workflow" in suggested_workstreams and role in {"worker", "runtime_service", "integration_adapter"})
-                    or ("behavior" in suggested_workstreams and role in {"primary_ui", "primary_api"})
-                ):
+                if _artifact_role_matches_workstreams(role, effective_workstreams):
                     artifact_id = str(member.artifact_id)
                     if artifact_id not in confident_ids:
                         confident_ids.append(artifact_id)
@@ -30064,7 +30102,7 @@ def _generate_solution_change_plan(
                 plan_title_value=plan_title,
                 planner_objective_value=planner_objective_text,
                 planner_context_value=planner_context_text,
-                suggested_workstreams=suggested_workstreams,
+                suggested_workstreams=effective_workstreams,
             )
         objective_text = _compact_objective(original_request)
         first_focus = "Start by shaping the primary data model and first user-facing workflow."
@@ -30106,7 +30144,8 @@ def _generate_solution_change_plan(
             "user_refinements": user_refinements,
             "generated_at": timezone.now().isoformat(),
             "selected_artifact_ids": [],
-            "suggested_workstreams": suggested_workstreams,
+            "confirmed_workstreams": confirmed_workstreams,
+            "suggested_workstreams": effective_workstreams,
             "per_artifact_work": [],
             "shared_contracts": assumptions,
             "validation_plan": [
@@ -30192,7 +30231,8 @@ def _generate_solution_change_plan(
         "user_refinements": user_refinements,
         "generated_at": timezone.now().isoformat(),
         "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
-        "suggested_workstreams": suggested_workstreams,
+        "confirmed_workstreams": confirmed_workstreams,
+        "suggested_workstreams": effective_workstreams,
         "per_artifact_work": per_artifact,
         "shared_contracts": shared_contracts,
         "validation_plan": validation_plan,
@@ -30234,6 +30274,7 @@ def _serialize_solution_change_session(
         "created_by": str(session.created_by_id) if session.created_by_id else None,
         "analysis": session.analysis_json if isinstance(session.analysis_json, dict) else {},
         "selected_artifact_ids": selected_ids,
+        "confirmed_workstreams": _solution_change_session_confirmed_workstreams(session),
         "selected_artifacts": selected_artifacts,
         "plan": session.plan_json if isinstance(session.plan_json, dict) else {},
         "execution_status": session.execution_status or "not_started",
@@ -30253,7 +30294,10 @@ def _stage_solution_change_session(
     memberships: List[ApplicationArtifactMembership],
 ) -> Dict[str, Any]:
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    confirmed_workstreams = _solution_change_session_confirmed_workstreams(session)
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
+    if not selected_members and confirmed_workstreams:
+        selected_members = [member for member in memberships if _artifact_role_matches_workstreams(member.role, confirmed_workstreams)]
     if not selected_members:
         selected_members = memberships
     plan = session.plan_json if isinstance(session.plan_json, dict) else {}
@@ -30293,6 +30337,7 @@ def _stage_solution_change_session(
         "artifact_count": len(staged_artifacts),
         "artifact_states": staged_artifacts,
         "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
+        "confirmed_workstreams": confirmed_workstreams,
         "shared_contracts": plan.get("shared_contracts") if isinstance(plan.get("shared_contracts"), list) else [],
         "validation_plan": plan.get("validation_plan") if isinstance(plan.get("validation_plan"), list) else [],
         "preview_implications": plan.get("preview_implications") if isinstance(plan.get("preview_implications"), list) else [],
@@ -33674,6 +33719,41 @@ def application_solution_change_session_detail(
             if token and token in allowed_ids and token not in selected_ids:
                 selected_ids.append(token)
         session.selected_artifact_ids_json = selected_ids
+    if "confirmed_workstreams" in payload:
+        raw = payload.get("confirmed_workstreams")
+        if not isinstance(raw, list):
+            return JsonResponse({"error": "confirmed_workstreams must be a list"}, status=400)
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            token = str(item or "").strip().lower()
+            if not token or token in seen:
+                continue
+            if token not in _SOLUTION_WORKSTREAM_KEYS:
+                return JsonResponse({"error": f"invalid confirmed_workstream: {token}"}, status=400)
+            seen.add(token)
+            normalized.append(token)
+        analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+        suggested = [
+            str(item or "").strip().lower()
+            for item in (analysis.get("suggested_workstreams") if isinstance(analysis.get("suggested_workstreams"), list) else [])
+            if str(item or "").strip()
+        ]
+        if normalized and suggested:
+            invalid = [item for item in normalized if item not in suggested]
+            if invalid:
+                return JsonResponse(
+                    {"error": "confirmed_workstreams must be selected from suggested_workstreams"},
+                    status=400,
+                )
+        if normalized and not suggested:
+            return JsonResponse(
+                {"error": "confirmed_workstreams cannot be set before suggested workstreams are available"},
+                status=400,
+            )
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        metadata = {**metadata, "confirmed_workstreams": normalized}
+        session.metadata_json = metadata
     session.save()
     session.refresh_from_db()
     return JsonResponse(_serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id))

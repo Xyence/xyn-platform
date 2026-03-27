@@ -2871,6 +2871,7 @@ export type SolutionChangeSession = {
   created_by?: string | null;
   analysis?: Record<string, unknown>;
   selected_artifact_ids: string[];
+  confirmed_workstreams?: string[];
   selected_artifacts?: Array<{
     artifact_id: string;
     artifact_title: string;

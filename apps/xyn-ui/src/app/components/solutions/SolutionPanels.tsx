@@ -36,6 +36,20 @@ type OpenPanel = (
   options?: { open_in?: "current_panel" | "new_panel" | "side_by_side"; return_to_panel_id?: string }
 ) => void;
 
+const WORKSTREAM_LABELS: Record<string, string> = {
+  ui: "UI / presentation",
+  api: "API / service",
+  data: "Data / storage",
+  workflow: "Workflow / orchestration",
+  validation: "Validation / verification",
+  behavior: "Behavior / interaction logic",
+};
+
+function workstreamLabel(value: string): string {
+  const token = String(value || "").trim().toLowerCase();
+  return WORKSTREAM_LABELS[token] || token;
+}
+
 export function SolutionListPanel({
   workspaceId,
   workspaceName,
@@ -271,6 +285,7 @@ export function SolutionDetailPanel({
   const [changeRequest, setChangeRequest] = useState<string>("");
   const [creatingSession, setCreatingSession] = useState<boolean>(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string>("");
+  const [selectedWorkstreams, setSelectedWorkstreams] = useState<string[]>([]);
   const [planningSession, setPlanningSession] = useState<boolean>(false);
   const [stagingSession, setStagingSession] = useState<boolean>(false);
   const [preparingPreview, setPreparingPreview] = useState<boolean>(false);
@@ -284,6 +299,7 @@ export function SolutionDetailPanel({
     if (!next.length) {
       setActiveSessionId("");
       setSelectedArtifactIds([]);
+      setSelectedWorkstreams([]);
       return;
     }
     const preferred =
@@ -292,6 +308,7 @@ export function SolutionDetailPanel({
       next[0];
     setActiveSessionId(preferred.id);
     setSelectedArtifactIds(preferred.selected_artifact_ids || []);
+    setSelectedWorkstreams(preferred.confirmed_workstreams || []);
   }
 
   useEffect(() => {
@@ -334,6 +351,7 @@ export function SolutionDetailPanel({
         if (loadedSessions.length > 0) {
           setActiveSessionId(loadedSessions[0].id);
           setSelectedArtifactIds(loadedSessions[0].selected_artifact_ids || []);
+          setSelectedWorkstreams(loadedSessions[0].confirmed_workstreams || []);
         }
       } catch (err) {
         if (!ignore) {
@@ -461,8 +479,27 @@ export function SolutionDetailPanel({
       });
       await refreshSessions();
       setSelectedArtifactIds(updated.selected_artifact_ids || []);
+      setSelectedWorkstreams(updated.confirmed_workstreams || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update impacted artifacts.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleConfirmSuggestedFocus() {
+    if (!applicationId || !activeSessionId) return;
+    setSaving(true);
+    setError("");
+    try {
+      const updated = await updateSolutionChangeSession(applicationId, activeSessionId, {
+        confirmed_workstreams: selectedWorkstreams,
+      });
+      await refreshSessions();
+      setSelectedArtifactIds(updated.selected_artifact_ids || []);
+      setSelectedWorkstreams(updated.confirmed_workstreams || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to confirm suggested workstreams.");
     } finally {
       setSaving(false);
     }
@@ -477,6 +514,7 @@ export function SolutionDetailPanel({
       await refreshSessions();
       setActiveSessionId(response.session.id);
       setSelectedArtifactIds(response.session.selected_artifact_ids || []);
+      setSelectedWorkstreams(response.session.confirmed_workstreams || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate cross-artifact plan.");
     } finally {
@@ -533,9 +571,19 @@ export function SolutionDetailPanel({
     });
   }
 
+  function toggleWorkstreamSelection(workstream: string, checked: boolean) {
+    const token = String(workstream || "").trim().toLowerCase();
+    if (!token) return;
+    setSelectedWorkstreams((prev) => {
+      if (checked) return prev.includes(token) ? prev : [...prev, token];
+      return prev.filter((item) => item !== token);
+    });
+  }
+
   const analysisState = (activeSession?.analysis as Record<string, unknown> | undefined) || {};
   const impactedRows = (analysisState?.impacted_artifacts as Array<Record<string, unknown>> | undefined) || [];
   const suggestedWorkstreams = (analysisState?.suggested_workstreams as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
+  const confirmedWorkstreams = (activeSession?.confirmed_workstreams || []).map((item) => String(item || "").trim().toLowerCase()).filter(Boolean);
   const analysisStatus = String(analysisState?.analysis_status || "").toLowerCase();
   const analysisRan = Boolean(analysisState?.analyzed_at) || analysisStatus === "no_confident_matches";
   const analysisHasNoConfidentMatches = analysisRan && !impactedRows.length && !suggestedWorkstreams.length;
@@ -556,7 +604,8 @@ export function SolutionDetailPanel({
   const validationChecks = (validationState?.checks as Array<Record<string, unknown>> | undefined) || [];
   const hasImpactedAnalysis = impactedRows.length > 0 || suggestedWorkstreams.length > 0 || analysisHasNoConfidentMatches;
   const hasSelectedArtifacts = selectedArtifactIds.length > 0;
-  const hasReviewedArtifactFocus = hasSelectedArtifacts || suggestedWorkstreams.length > 0 || analysisHasNoConfidentMatches;
+  const hasConfirmedWorkstreamFocus = confirmedWorkstreams.length > 0;
+  const hasReviewedArtifactFocus = hasSelectedArtifacts || hasConfirmedWorkstreamFocus || analysisHasNoConfidentMatches;
   const hasPlan = Object.keys(activePlan).length > 0;
   const executionStatus = String(activeSession?.execution_status || "").toLowerCase();
   const hasStagedArtifacts = stagedArtifacts.length > 0 || ["staged", "preview_ready", "validated"].includes(executionStatus);
@@ -581,7 +630,7 @@ export function SolutionDetailPanel({
   const stageRows: Array<{ key: SessionStepKey; label: string; complete: boolean }> = [
     { key: "plan", label: "Plan ready", complete: hasPlan },
     { key: "analyze", label: "Analyze impacted artifacts", complete: hasImpactedAnalysis },
-    { key: "save", label: "Review/save impacted artifacts", complete: hasSelectedArtifacts },
+    { key: "save", label: "Review/save impacted focus", complete: hasReviewedArtifactFocus },
     { key: "stage", label: "Stage apply", complete: hasStagedArtifacts },
     { key: "preview", label: "Preview", complete: hasPreviewEvidence },
     { key: "validate", label: "Validate", complete: hasValidationEvidence },
@@ -591,7 +640,9 @@ export function SolutionDetailPanel({
     nextStep === "analyze"
       ? "Next step: analyze impacted artifacts for this change session."
       : nextStep === "save"
-      ? "Next step: review and save impacted artifacts for planning."
+      ? impactedRows.length
+        ? "Next step: review and save impacted artifacts for planning."
+        : "Next step: confirm suggested workstream focus for planning."
       : nextStep === "plan"
       ? "Next step: generate the structured change plan."
       : nextStep === "stage"
@@ -602,7 +653,7 @@ export function SolutionDetailPanel({
       ? "Next step: run validation checks on the prepared preview."
       : "Workflow complete: plan, stage, preview, and validation are all available.";
 
-  const canStageApply = hasPlan && hasSelectedArtifacts;
+  const canStageApply = hasPlan && (hasSelectedArtifacts || hasConfirmedWorkstreamFocus);
   const canPreparePreview = hasStagedArtifacts;
   const canValidateSession = hasStagedArtifacts && hasPreviewEvidence;
 
@@ -710,6 +761,7 @@ export function SolutionDetailPanel({
                               onClick={() => {
                                 setActiveSessionId(session.id);
                                 setSelectedArtifactIds(session.selected_artifact_ids || []);
+                                setSelectedWorkstreams(session.confirmed_workstreams || []);
                               }}
                             >
                               {activeSessionId === session.id ? "Selected" : "Select"}
@@ -772,9 +824,15 @@ export function SolutionDetailPanel({
                       {planningSession ? "Analyzing…" : "Analyze Impacted Artifacts"}
                     </button>
                   ) : nextStep === "save" ? (
-                    <button className="button sm" type="button" onClick={() => void handleSaveImpactedArtifacts()} disabled={saving}>
-                      {saving ? "Saving…" : "Save Impacted Artifacts"}
-                    </button>
+                    impactedRows.length ? (
+                      <button className="button sm" type="button" onClick={() => void handleSaveImpactedArtifacts()} disabled={saving}>
+                        {saving ? "Saving…" : "Save Impacted Artifacts"}
+                      </button>
+                    ) : (
+                      <button className="button sm" type="button" onClick={() => void handleConfirmSuggestedFocus()} disabled={saving || !selectedWorkstreams.length}>
+                        {saving ? "Saving…" : "Confirm Suggested Focus"}
+                      </button>
+                    )
                   ) : nextStep === "plan" ? (
                     <button className="button sm" type="button" onClick={() => void handleGeneratePlan()} disabled={planningSession}>
                       {planningSession ? "Planning…" : "Generate Cross-Artifact Plan"}
@@ -794,9 +852,15 @@ export function SolutionDetailPanel({
                   ) : null}
                 </div>
                 <div className="inline-action-row">
-                  <button className="ghost sm" type="button" onClick={() => void handleSaveImpactedArtifacts()} disabled={saving || !hasImpactedAnalysis}>
-                    {saving ? "Saving…" : "Save Impacted Artifacts"}
-                  </button>
+                  {impactedRows.length ? (
+                    <button className="ghost sm" type="button" onClick={() => void handleSaveImpactedArtifacts()} disabled={saving || !hasImpactedAnalysis}>
+                      {saving ? "Saving…" : "Save Impacted Artifacts"}
+                    </button>
+                  ) : (
+                    <button className="ghost sm" type="button" onClick={() => void handleConfirmSuggestedFocus()} disabled={saving || !selectedWorkstreams.length}>
+                      {saving ? "Saving…" : "Use Selected Workstreams"}
+                    </button>
+                  )}
                   <button className="ghost sm" type="button" onClick={() => void handleGeneratePlan()} disabled={planningSession}>
                     {planningSession ? "Planning…" : "Generate Cross-Artifact Plan"}
                   </button>
@@ -828,7 +892,7 @@ export function SolutionDetailPanel({
                 </div>
               </div>
 
-              <div className="field-label">Impacted Artifact Selection</div>
+              <div className="field-label">{impactedRows.length ? "Impacted Artifact Selection" : "Suggested Focus Areas"}</div>
               {impactedRows.length ? (
                 <div className="stack">
                   {impactedRows.map((row, index) => {
@@ -850,13 +914,30 @@ export function SolutionDetailPanel({
               ) : suggestedWorkstreams.length ? (
                 <div className="solution-next-step-callout">
                   <p className="solution-empty-state">
-                    Analysis completed. No confident artifact IDs were resolved yet, but likely affected workstreams are:
+                    Analysis completed. No confident artifact IDs were resolved yet. Select and confirm suggested focus areas to continue:
                   </p>
-                  <ul className="solution-summary-list">
-                    {suggestedWorkstreams.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
+                  <div className="stack">
+                    {suggestedWorkstreams.map((item) => {
+                      const token = String(item || "").trim().toLowerCase();
+                      const checked = selectedWorkstreams.includes(token);
+                      return (
+                        <label key={token} className="row" style={{ alignItems: "center", gap: 8 }}>
+                          <input type="checkbox" checked={checked} onChange={(event) => toggleWorkstreamSelection(token, event.target.checked)} />
+                          <span>{workstreamLabel(token)}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {confirmedWorkstreams.length ? (
+                    <p className="solution-empty-state">
+                      Confirmed workstream focus: {confirmedWorkstreams.map((item) => workstreamLabel(item)).join(", ")}
+                    </p>
+                  ) : null}
+                  <div className="inline-action-row">
+                    <button className="button sm" type="button" onClick={() => void handleConfirmSuggestedFocus()} disabled={saving || !selectedWorkstreams.length}>
+                      {saving ? "Saving…" : "Use Selected Workstreams"}
+                    </button>
+                  </div>
                 </div>
               ) : analysisHasNoConfidentMatches ? (
                 <div className="solution-next-step-callout">
