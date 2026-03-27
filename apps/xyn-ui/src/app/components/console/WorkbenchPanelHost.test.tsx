@@ -188,9 +188,19 @@ describe("WorkbenchPanelHost entity refresh", () => {
           id: "agent-default",
           slug: "default-assistant",
           name: "Bootstrap Default Agent",
+          avatar_url: "https://example.test/default-agent.png",
           model_config_id: "model-default",
           enabled: true,
           purposes: ["default", "planning", "coding"],
+        },
+        {
+          id: "agent-planning",
+          slug: "planning-assistant",
+          name: "Claude Planning Agent",
+          avatar_url: "https://example.test/planner-agent.png",
+          model_config_id: "model-planning",
+          enabled: true,
+          purposes: ["planning"],
         },
         {
           id: "agent-coding-alt",
@@ -861,6 +871,116 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByText("Execution Handoff")).toBeInTheDocument();
     expect(screen.getByText("No solution session selected")).toBeInTheDocument();
     expect(screen.queryByText("Application efforts")).not.toBeInTheDocument();
+  });
+
+  it("renders logged-in user and planning agent identities in composer turns and planning session", async () => {
+    const onOpenPanel = vi.fn();
+    const sessionPayload = {
+      id: "session-identity",
+      workspace_id: "ws-1",
+      application_id: "app-1",
+      title: "Identity Session",
+      request_text: "Adjust layout spacing",
+      status: "planned",
+      selected_artifact_ids: [],
+      planning: {
+        turns: [
+          {
+            id: "turn-request",
+            workspace_id: "ws-1",
+            session_id: "session-identity",
+            actor: "user",
+            kind: "request",
+            sequence: 1,
+            payload: { request_text: "Adjust layout spacing" },
+            created_at: "2026-03-20T10:00:00Z",
+            updated_at: "2026-03-20T10:00:00Z",
+          },
+          {
+            id: "turn-draft",
+            workspace_id: "ws-1",
+            session_id: "session-identity",
+            actor: "planner",
+            kind: "draft_plan",
+            sequence: 2,
+            payload: {
+              planner_agent_id: "agent-planning",
+              planner_agent_name: "Claude Planning Agent",
+              objective: "Adjust layout spacing",
+              selected_artifact_ids: [],
+              shared_contracts: [],
+              validation_plan: [],
+            },
+            created_at: "2026-03-20T10:02:00Z",
+            updated_at: "2026-03-20T10:02:00Z",
+          },
+        ],
+        checkpoints: [],
+        pending_question: null,
+        pending_option_set: null,
+        pending_checkpoints: [],
+        latest_draft_plan: null,
+      },
+      created_at: "2026-03-20T10:00:00Z",
+      updated_at: "2026-03-20T10:02:00Z",
+    };
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: "app-1",
+        goal_id: null,
+        thread_id: null,
+        solution_change_session_id: "session-identity",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      solution_change_sessions: [sessionPayload],
+      solution_change_session: sessionPayload,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          currentUser={{
+            subject: "user-123",
+            name: "Alice Builder",
+            picture: "https://example.test/alice.png",
+            email: "alice@example.test",
+          }}
+          panel={{
+            panel_id: "composer-identity",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-identity" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("Alice Builder")).toBeInTheDocument();
+    expect(screen.getAllByText("Claude Planning Agent").length).toBeGreaterThan(0);
+    await waitFor(() => {
+      const avatars = Array.from(document.querySelectorAll<HTMLImageElement>(".xyn-avatar img"));
+      const sources = avatars.map((node) => node.getAttribute("src"));
+      expect(sources).toContain("https://example.test/alice.png");
+      expect(sources).toContain("https://example.test/planner-agent.png");
+    });
   });
 
   it("keeps composer phase-gated and allows selecting pending planner options", async () => {

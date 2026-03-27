@@ -2486,6 +2486,7 @@ export async function listAiAgents(params?: { purpose?: string; enabled?: boolea
 export async function createAiAgent(payload: {
   slug: string;
   name: string;
+  avatar_url?: string;
   model_config_id: string;
   override_prompt_text?: string;
   default_context_pack_refs_json?: unknown[];
@@ -2511,6 +2512,7 @@ export async function updateAiAgent(
   payload: Partial<{
     slug: string;
     name: string;
+    avatar_url: string;
     model_config_id: string;
     override_prompt_text: string;
     default_context_pack_refs_json: unknown[];

@@ -24,9 +24,11 @@ export function shouldReuseExistingLayoutOnWorkspaceSwitch(input: {
 export default function WorkbenchPage({
   workspaceName = "",
   workspaceColor = "#6c7a89",
+  currentUser = null,
 }: {
   workspaceName?: string;
   workspaceColor?: string;
+  currentUser?: Record<string, unknown> | null;
 }) {
   const {
     setContext,
@@ -384,6 +386,7 @@ export default function WorkbenchPage({
         workspaceId={workspaceId}
         workspaceName={workspaceName}
         workspaceColor={workspaceColor}
+        currentUser={currentUser}
         onOpenPanel={(next) =>
           openPanel({
             key: next.key,

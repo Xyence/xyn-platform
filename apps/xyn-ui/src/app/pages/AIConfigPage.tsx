@@ -62,6 +62,7 @@ type AgentEditForm = {
   id: string;
   slug: string;
   name: string;
+  avatar_url: string;
   model_config_id: string;
   override_prompt_text: string;
   default_context_pack_refs_json: Array<{ id: string }>;
@@ -146,6 +147,7 @@ export default function AIConfigPage() {
   const [createAgentForm, setCreateAgentForm] = useState({
     name: "",
     slug: "",
+    avatar_url: "",
     model_config_id: "",
     purposes: [] as string[],
     default_context_pack_refs_json: [] as Array<{ id: string }>,
@@ -294,6 +296,7 @@ export default function AIConfigPage() {
       id: selected.id,
       slug: selected.slug,
       name: selected.name,
+      avatar_url: selected.avatar_url || "",
       model_config_id: selected.model_config_id,
       override_prompt_text: selected.override_prompt_text || selected.system_prompt_text || "",
       default_context_pack_refs_json: (
@@ -405,6 +408,7 @@ export default function AIConfigPage() {
       const result = await createAiAgent({
         slug: createAgentForm.slug.trim(),
         name: createAgentForm.name.trim(),
+        avatar_url: createAgentForm.avatar_url.trim(),
         model_config_id: createAgentForm.model_config_id,
         purposes: createAgentForm.purposes,
         default_context_pack_refs_json: createAgentForm.default_context_pack_refs_json,
@@ -418,6 +422,7 @@ export default function AIConfigPage() {
         ...prev,
         name: "",
         slug: "",
+        avatar_url: "",
         override_prompt_text: "",
         default_context_pack_refs_json: [],
       }));
@@ -626,6 +631,14 @@ export default function AIConfigPage() {
               <label>Name
                 <input className="input" value={agentEdit.name} onChange={(event) => setAgentEdit({ ...agentEdit, name: event.target.value })} />
               </label>
+              <label>Profile image URL (optional)
+                <input
+                  className="input"
+                  value={agentEdit.avatar_url}
+                  onChange={(event) => setAgentEdit({ ...agentEdit, avatar_url: event.target.value })}
+                  placeholder="https://..."
+                />
+              </label>
               <label>Model config
                 <select value={agentEdit.model_config_id} onChange={(event) => setAgentEdit({ ...agentEdit, model_config_id: event.target.value })}>
                   {modelConfigs.map((item) => (
@@ -706,6 +719,7 @@ export default function AIConfigPage() {
               <button className="primary" onClick={async () => {
                 await updateAiAgent(agentEdit.id, {
                   name: agentEdit.name.trim(),
+                  avatar_url: agentEdit.avatar_url.trim(),
                   model_config_id: agentEdit.model_config_id,
                   override_prompt_text: agentEdit.override_prompt_text,
                   default_context_pack_refs_json: agentEdit.default_context_pack_refs_json,
@@ -936,6 +950,14 @@ export default function AIConfigPage() {
                   </label>
                   <label>Slug
                     <input className="input" value={createAgentForm.slug} onChange={(event) => { setAgentSlugEdited(true); setCreateAgentForm((prev) => ({ ...prev, slug: slugifyAgent(event.target.value) })); }} />
+                  </label>
+                  <label>Profile image URL (optional)
+                    <input
+                      className="input"
+                      value={createAgentForm.avatar_url}
+                      onChange={(event) => setCreateAgentForm((prev) => ({ ...prev, avatar_url: event.target.value }))}
+                      placeholder="https://..."
+                    />
                   </label>
                   <label>Model config
                     <select value={createAgentForm.model_config_id} onChange={(event) => setCreateAgentForm((prev) => ({ ...prev, model_config_id: event.target.value }))}>

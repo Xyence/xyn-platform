@@ -17025,6 +17025,9 @@ def _serialize_ai_routing_status() -> Dict[str, Any]:
         purpose_routing["explicit_agent_name"] = (
             str(explicit_assignment.agent_definition.name or "") if explicit_assignment else None
         )
+        purpose_routing["explicit_agent_avatar_url"] = (
+            str(explicit_assignment.agent_definition.avatar_url or "").strip() if explicit_assignment else None
+        )
         routing.append(purpose_routing)
 
     recent: List[Dict[str, Any]] = []
@@ -17045,6 +17048,7 @@ def _serialize_ai_routing_status() -> Dict[str, Any]:
                 "purpose": str(resolution.get("purpose") or ""),
                 "resolved_agent_id": resolution.get("resolved_agent_id"),
                 "resolved_agent_name": resolution.get("resolved_agent_name"),
+                "resolved_agent_avatar_url": resolution.get("resolved_agent_avatar_url"),
                 "resolution_source": resolution.get("resolution_source"),
                 "reason": resolution.get("reason"),
             }
@@ -17280,6 +17284,7 @@ def _serialize_agent_definition(agent: AgentDefinition) -> Dict[str, Any]:
         "id": str(agent.id),
         "slug": agent.slug,
         "name": agent.name,
+        "avatar_url": str(agent.avatar_url or "").strip(),
         "model_config_id": str(agent.model_config_id),
         "model_config": _serialize_model_config(agent.model_config),
         "override_prompt_text": agent.system_prompt_text or "",
@@ -17626,6 +17631,7 @@ def ai_agents_collection(request: HttpRequest) -> JsonResponse:
     agent = AgentDefinition.objects.create(
         slug=slug,
         name=name,
+        avatar_url=str(payload.get("avatar_url") or "").strip(),
         model_config=model_config,
         system_prompt_text=str(payload.get("override_prompt_text") or payload.get("system_prompt_text") or ""),
         context_pack_refs_json=[],
@@ -17678,6 +17684,8 @@ def ai_agent_detail(request: HttpRequest, agent_id: str) -> JsonResponse:
         agent.slug = next_slug
     if "name" in payload:
         agent.name = str(payload.get("name") or agent.name).strip()
+    if "avatar_url" in payload:
+        agent.avatar_url = str(payload.get("avatar_url") or "").strip()
     if "model_config_id" in payload:
         model_config = ModelConfig.objects.filter(id=payload.get("model_config_id")).first()
         if not model_config:
@@ -17701,6 +17709,7 @@ def ai_agent_detail(request: HttpRequest, agent_id: str) -> JsonResponse:
         update_fields=[
             "slug",
             "name",
+            "avatar_url",
             "model_config",
             "system_prompt_text",
             "context_pack_refs_json",

@@ -94,6 +94,7 @@ class AiConfigApiTests(TestCase):
                 {
                     "slug": "docs-default",
                     "name": "Docs Default",
+                    "avatar_url": "https://example.test/docs-agent.png",
                     "model_config_id": model_config["id"],
                     "system_prompt_text": "You are docs.",
                     "purposes": ["documentation"],
@@ -103,6 +104,7 @@ class AiConfigApiTests(TestCase):
             content_type="application/json",
         )
         self.assertEqual(agent_response.status_code, 200)
+        self.assertEqual(agent_response.json()["agent"].get("avatar_url"), "https://example.test/docs-agent.png")
 
         docs_agents = self.client.get("/xyn/api/ai/agents?purpose=documentation")
         self.assertEqual(docs_agents.status_code, 200)
@@ -283,6 +285,37 @@ class AiConfigApiTests(TestCase):
         defaults = AgentDefinitionPurpose.objects.filter(purpose__slug="coding", is_default_for_purpose=True)
         self.assertEqual(defaults.count(), 1)
         self.assertEqual(str(defaults.first().agent_definition_id), second_agent_id)
+
+    def test_agent_avatar_url_round_trips_on_create_and_update(self):
+        self._set_identity(self.admin_identity)
+        provider = self._ensure_provider()
+        model_config = ModelConfig.objects.create(provider=provider, model_name="gpt-4o-mini", enabled=True)
+
+        create_response = self.client.post(
+            "/xyn/api/ai/agents",
+            data=json.dumps(
+                {
+                    "slug": "avatar-agent",
+                    "name": "Avatar Agent",
+                    "avatar_url": "https://example.test/agent-a.png",
+                    "model_config_id": str(model_config.id),
+                    "purposes": ["planning"],
+                    "enabled": True,
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(create_response.status_code, 200)
+        agent_payload = create_response.json()["agent"]
+        self.assertEqual(agent_payload.get("avatar_url"), "https://example.test/agent-a.png")
+
+        patch_response = self.client.patch(
+            f"/xyn/api/ai/agents/{agent_payload['id']}",
+            data=json.dumps({"avatar_url": "https://example.test/agent-b.png"}),
+            content_type="application/json",
+        )
+        self.assertEqual(patch_response.status_code, 200)
+        self.assertEqual(patch_response.json()["agent"].get("avatar_url"), "https://example.test/agent-b.png")
 
     def test_non_admin_cannot_patch_ai_routing(self):
         self._set_identity(self.user_identity)
