@@ -1256,12 +1256,62 @@ class GoalPlanningTests(TestCase):
         planning = ((payload.get("session") or {}).get("planning") or {})
         latest_draft = planning.get("latest_draft_plan") or {}
         self.assertEqual(str(latest_draft.get("kind") or ""), "draft_plan")
-        self.assertTrue((latest_draft.get("payload") or {}).get("selected_artifact_ids"))
+        self.assertEqual((latest_draft.get("payload") or {}).get("selected_artifact_ids"), [])
         self.assertIsNone(planning.get("pending_question"))
         self.assertIsNone(planning.get("pending_option_set"))
         pending_checkpoints = planning.get("pending_checkpoints") or []
         self.assertEqual(len(pending_checkpoints), 1)
         self.assertEqual(str((pending_checkpoints[0] or {}).get("status") or ""), "pending")
+
+    def test_existing_solution_change_session_without_memberships_generates_targeted_plan_not_bootstrap_scaffold(self):
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Workbench UI",
+            summary="Workbench ui polish",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Improve workbench usability",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            initial_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Initial plan",
+                        "request_text": "Create a personal knowledgebase application that tracks notes and searchable information.",
+                    }
+                ),
+            )
+            initial_response = application_solution_change_sessions_collection(initial_request, str(application.id))
+            self.assertEqual(initial_response.status_code, 201)
+
+            targeted_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Header selector width",
+                        "request_text": "Narrow the workspace selector width and align it to the right of the logo in the header.",
+                    }
+                ),
+            )
+            targeted_response = application_solution_change_sessions_collection(targeted_request, str(application.id))
+        self.assertEqual(targeted_response.status_code, 201)
+        targeted_payload = json.loads(targeted_response.content)
+        session = (targeted_payload.get("session") or {})
+        planning = (session.get("planning") or {})
+        latest_draft = planning.get("latest_draft_plan") or {}
+        draft_payload = latest_draft.get("payload") if isinstance(latest_draft.get("payload"), dict) else {}
+        self.assertEqual(draft_payload.get("selected_artifact_ids"), [])
+        shared_contracts_text = " ".join(str(item) for item in (draft_payload.get("shared_contracts") or [])).lower()
+        self.assertNotIn("single-user or multi-user", shared_contracts_text)
+        self.assertNotIn("external integrations required in v1", shared_contracts_text)
+        validation_plan_text = " ".join(str(item) for item in (draft_payload.get("validation_plan") or [])).lower()
+        self.assertIn("ui behavior", validation_plan_text)
+        self.assertIn("responsive behavior", validation_plan_text)
 
     def test_solution_change_session_create_without_memberships_asks_plain_language_clarification_when_ambiguous(self):
         application = Application.objects.create(

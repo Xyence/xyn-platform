@@ -29855,12 +29855,120 @@ def _generate_solution_change_plan(
         if latest_draft_summary:
             planner_context_text += f"\nPrior draft summary: {latest_draft_summary}"
 
+    def _is_default_change_session_title(title: str) -> bool:
+        token = str(title or "").strip()
+        return bool(re.match(r"^Change Session \d{4}-\d{2}-\d{2} \d{2}:\d{2}$", token))
+
+    def _is_greenfield_initial_solution_plan() -> bool:
+        if memberships:
+            return False
+        if SolutionChangeSession.objects.filter(application_id=session.application_id).exclude(id=session.id).exists():
+            return False
+        if Goal.objects.filter(application_id=session.application_id).exists():
+            return False
+        return True
+
+    def _existing_solution_no_membership_plan(
+        *,
+        objective_text: str,
+        plan_title_value: str,
+        planner_objective_value: str,
+        planner_context_value: str,
+    ) -> Dict[str, Any]:
+        lowered = objective_text.lower()
+        focuses_ui = any(token in lowered for token in {"ui", "ux", "layout", "width", "header", "panel", "screen", "view"})
+        focuses_api = any(token in lowered for token in {"api", "endpoint", "contract", "schema", "backend", "service"})
+        focuses_data = any(token in lowered for token in {"data", "model", "schema", "storage", "db", "database", "persistence"})
+
+        implementation_steps: List[str] = []
+        validation_steps: List[str] = []
+
+        if focuses_ui:
+            implementation_steps.extend(
+                [
+                    "Identify the affected shell/workbench surface and component boundaries for the requested layout/behavior change.",
+                    "Update component/container layout constraints and styling to satisfy the requested UI behavior.",
+                ]
+            )
+            validation_steps.extend(
+                [
+                    "Validate the updated UI behavior in the target workbench view with representative workspace data.",
+                    "Verify desktop and narrow-width responsive behavior for the affected surface.",
+                ]
+            )
+        if focuses_api:
+            implementation_steps.extend(
+                [
+                    "Trace the API handlers/serializers touched by the request and scope contract-safe updates.",
+                    "Apply the narrow API/validation changes required by the request and preserve backward compatibility.",
+                ]
+            )
+            validation_steps.append("Run API-level regression checks for changed contracts and affected query paths.")
+        if focuses_data:
+            implementation_steps.extend(
+                [
+                    "Identify impacted persisted fields and data-shape assumptions for the requested behavior change.",
+                    "Apply minimal data-model/repository updates required for the change while preserving current invariants.",
+                ]
+            )
+            validation_steps.append("Validate read/write flows and migration safety for impacted data paths.")
+
+        if not implementation_steps:
+            implementation_steps.extend(
+                [
+                    "Locate the specific code paths that implement the requested behavior in the existing solution.",
+                    "Apply a focused change that addresses the request without broad scaffold or bootstrap rework.",
+                ]
+            )
+        if not validation_steps:
+            validation_steps.extend(
+                [
+                    "Validate the requested behavior change through the affected end-user flow in the active workspace.",
+                    "Run targeted regression checks around adjacent workflows touched by this change.",
+                ]
+            )
+
+        shared_contracts = [
+            "Plan against the current solution baseline; do not introduce greenfield/bootstrap assumptions.",
+            "Preserve existing cross-artifact contracts unless the request explicitly requires contract changes.",
+        ]
+        shared_contracts.extend(refinement_state["resolved_assumptions"])
+        shared_contracts.extend(refinement_state["constraints"])
+        shared_contracts.extend(refinement_state["additional_considerations"][:2])
+
+        return {
+            "session_id": str(session.id),
+            "application_id": str(session.application_id),
+            "title": plan_title_value,
+            "request_text": original_request,
+            "planner_objective_text": planner_objective_value,
+            "planner_context_text": planner_context_value,
+            "user_refinements": user_refinements,
+            "generated_at": timezone.now().isoformat(),
+            "selected_artifact_ids": [],
+            "per_artifact_work": [],
+            "shared_contracts": shared_contracts,
+            "validation_plan": validation_steps,
+            "preview_implications": [
+                "Use preview to verify the targeted behavior change against the existing solution baseline.",
+            ],
+            "implementation_steps": implementation_steps,
+        }
+
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
     if not selected_members:
         selected_members = memberships
-    plan_title = str(refinement_state.get("name") or session.title or "").strip() or session.title
+    fallback_title = _compact_objective(original_request)[:120] if _is_default_change_session_title(session.title) else session.title
+    plan_title = str(refinement_state.get("name") or fallback_title or "").strip() or fallback_title
     if not selected_members:
+        if not _is_greenfield_initial_solution_plan():
+            return _existing_solution_no_membership_plan(
+                objective_text=_compact_objective(original_request),
+                plan_title_value=plan_title,
+                planner_objective_value=planner_objective_text,
+                planner_context_value=planner_context_text,
+            )
         objective_text = _compact_objective(original_request)
         first_focus = "Start by shaping the primary data model and first user-facing workflow."
         objective_lower = objective_text.lower()
@@ -29900,7 +30008,7 @@ def _generate_solution_change_plan(
             "planner_context_text": planner_context_text,
             "user_refinements": user_refinements,
             "generated_at": timezone.now().isoformat(),
-            "selected_artifact_ids": initial_workstreams,
+            "selected_artifact_ids": [],
             "per_artifact_work": [],
             "shared_contracts": assumptions,
             "validation_plan": [
