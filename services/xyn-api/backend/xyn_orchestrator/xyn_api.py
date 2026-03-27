@@ -8195,6 +8195,14 @@ DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS: tuple[tuple[str, str, str, str], ...] = (
     ),
 )
 
+DEFAULT_XYN_SOLUTION_NAME = "Xyn"
+DEFAULT_XYN_SOLUTION_KEY = "xyn-platform-default"
+DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES: tuple[tuple[str, str, str, int], ...] = (
+    ("core.workbench", "primary_ui", "Default shell/workbench surface.", 10),
+    ("xyn-ui", "runtime_service", "Default UI runtime artifact.", 20),
+    ("xyn-api", "runtime_service", "Default API runtime artifact.", 30),
+)
+
 
 def _default_dev_workspace_slug() -> str:
     raw = str(os.getenv("XYN_WORKSPACE_SLUG", "development") or "").strip().lower()
@@ -8205,6 +8213,125 @@ def _default_dev_workspace_slug() -> str:
 def _workspace_title_from_slug(slug: str) -> str:
     value = str(slug or "").strip().replace("-", " ")
     return value.title() if value else "Development"
+
+
+def _default_xyn_solution_workspace_slug() -> str:
+    configured = slugify(str(os.getenv("XYN_DEFAULT_XYN_SOLUTION_WORKSPACE_SLUG", "") or "").strip().lower())
+    if configured:
+        return configured
+    if _auth_mode() == "dev":
+        return _default_dev_workspace_slug()
+    return ""
+
+
+def _workspace_matches_default_xyn_solution_target(workspace: Workspace) -> bool:
+    target_slug = _default_xyn_solution_workspace_slug()
+    if not target_slug:
+        return False
+    return str(getattr(workspace, "slug", "") or "").strip().lower() == target_slug
+
+
+def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optional[Application]:
+    if workspace is None or not _workspace_is_visible(workspace, include_system=False):
+        return None
+    if not _workspace_matches_default_xyn_solution_target(workspace):
+        return None
+    application = (
+        Application.objects.filter(workspace=workspace, metadata_json__system_solution_key=DEFAULT_XYN_SOLUTION_KEY)
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+    if application is None:
+        application = (
+            Application.objects.filter(workspace=workspace, source_factory_key="xyn_platform_default")
+            .order_by("-updated_at", "-created_at")
+            .first()
+        )
+    if application is None:
+        application = Application.objects.create(
+            workspace=workspace,
+            name=DEFAULT_XYN_SOLUTION_NAME,
+            summary="Default Xyn platform solution workspace.",
+            source_factory_key="xyn_platform_default",
+            source_conversation_id="",
+            status="active",
+            request_objective="",
+            metadata_json={"system_solution_key": DEFAULT_XYN_SOLUTION_KEY, "origin": "bootstrap_default"},
+        )
+    else:
+        metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
+        metadata_changed = False
+        if metadata.get("system_solution_key") != DEFAULT_XYN_SOLUTION_KEY:
+            metadata = dict(metadata)
+            metadata["system_solution_key"] = DEFAULT_XYN_SOLUTION_KEY
+            metadata_changed = True
+        if metadata.get("origin") != "bootstrap_default":
+            metadata = dict(metadata)
+            metadata["origin"] = "bootstrap_default"
+            metadata_changed = True
+        update_fields: List[str] = []
+        if application.source_factory_key != "xyn_platform_default":
+            application.source_factory_key = "xyn_platform_default"
+            update_fields.append("source_factory_key")
+        if application.name != DEFAULT_XYN_SOLUTION_NAME:
+            application.name = DEFAULT_XYN_SOLUTION_NAME
+            update_fields.append("name")
+        if metadata_changed:
+            application.metadata_json = metadata
+            update_fields.append("metadata_json")
+        if update_fields:
+            update_fields.append("updated_at")
+            application.save(update_fields=update_fields)
+
+    artifact_by_slug: Dict[str, Artifact] = {}
+    bindings = (
+        WorkspaceArtifactBinding.objects.filter(
+            workspace=workspace,
+            artifact__slug__in=[slug for slug, _role, _summary, _order in DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES],
+        )
+        .select_related("artifact", "artifact__type")
+        .order_by("artifact__slug", "-updated_at", "-created_at")
+    )
+    for binding in bindings:
+        slug = str(getattr(binding.artifact, "slug", "") or "").strip().lower()
+        if slug and slug not in artifact_by_slug:
+            artifact_by_slug[slug] = binding.artifact
+
+    for slug, role, responsibility_summary, sort_order in DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES:
+        artifact = artifact_by_slug.get(slug)
+        if artifact is None:
+            artifact = (
+                Artifact.objects.filter(workspace=workspace, slug=slug)
+                .select_related("type")
+                .order_by("-updated_at", "-created_at")
+                .first()
+            )
+        if artifact is None:
+            continue
+        if artifact.workspace_id != workspace.id:
+            continue
+        ApplicationArtifactMembership.objects.update_or_create(
+            application=application,
+            artifact=artifact,
+            defaults={
+                "workspace": workspace,
+                "role": role,
+                "responsibility_summary": responsibility_summary,
+                "metadata_json": {"origin": "bootstrap_default_xyn_solution"},
+                "sort_order": sort_order,
+            },
+        )
+    return application
+
+
+def _ensure_default_xyn_solution() -> Optional[Application]:
+    target_slug = _default_xyn_solution_workspace_slug()
+    if not target_slug:
+        return None
+    workspace = Workspace.objects.filter(slug=target_slug).first()
+    if workspace is None:
+        return None
+    return _ensure_default_xyn_solution_for_workspace(workspace=workspace)
 
 
 def _runtime_artifact_host_workspace(fallback_workspace: Workspace) -> Workspace:
@@ -8242,6 +8369,7 @@ def _ensure_default_workspace_artifact_bindings(workspace: Workspace) -> None:
         if update_fields:
             update_fields.append("updated_at")
             binding.save(update_fields=update_fields)
+    _ensure_default_xyn_solution_for_workspace(workspace=workspace)
 
 
 def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspace]:
@@ -8275,6 +8403,7 @@ def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspac
         defaults={"role": "admin", "termination_authority": True},
     )
     _ensure_default_workspace_artifact_bindings(workspace)
+    _ensure_default_xyn_solution_for_workspace(workspace=workspace)
     return workspace
 
 
@@ -8359,6 +8488,7 @@ def api_me(request: HttpRequest) -> JsonResponse:
     include_system = str(request.GET.get("include_system") or "").strip().lower() in {"1", "true", "yes"}
     roles = _get_roles(identity)
     bootstrap_workspace = _ensure_dev_bootstrap_workspace(identity)
+    _ensure_default_xyn_solution()
     if _is_platform_admin(identity):
         rows = Workspace.objects.all().order_by("name")
         if not include_system:
@@ -28641,6 +28771,463 @@ def _append_solution_planning_turn(
     return turn
 
 
+_HYBRID_REFINEMENT_RESULT_TYPES = {
+    "answer_resolution",
+    "plan_revision",
+    "clarification_request",
+    "cannot_interpret",
+}
+_HYBRID_REFINEMENT_THEME_VALUES = {"light", "dark"}
+_HYBRID_REFINEMENT_ALLOWED_TOP_LEVEL = {
+    "mode",
+    "result_type",
+    "confidence",
+    "normalized_updates",
+    "planner_message",
+    "warnings",
+}
+_HYBRID_REFINEMENT_ALLOWED_UPDATE_KEYS = {
+    "name",
+    "ui_preferences",
+    "features_add",
+    "constraints_add",
+    "resolved_answers",
+    "open_questions_remaining",
+    "additional_considerations_add",
+}
+_HYBRID_REFINEMENT_ALLOWED_QUESTION_KEYS = {
+    "integration_v1",
+    "collaboration_model",
+    "rich_text_required",
+    "app_name",
+    "ui_theme",
+}
+
+
+def _refinement_default_result(
+    *,
+    mode: str,
+    result_type: str,
+    confidence: float = 0.0,
+    planner_message: str = "",
+    warnings: Optional[List[str]] = None,
+    normalized_updates: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "mode": mode,
+        "result_type": result_type,
+        "confidence": float(max(0.0, min(1.0, confidence))),
+        "normalized_updates": normalized_updates if isinstance(normalized_updates, dict) else {},
+        "planner_message": str(planner_message or "").strip(),
+        "warnings": [str(item).strip() for item in (warnings or []) if str(item).strip()],
+    }
+
+
+def _clean_refinement_value(value: str) -> str:
+    cleaned = str(value or "").strip().strip("\"'").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned.rstrip(".,;:").strip()
+
+
+def _append_unique_lowered(target: List[str], value: str) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    lowered = text.lower()
+    if any(str(existing or "").strip().lower() == lowered for existing in target):
+        return
+    target.append(text)
+
+
+def _normalize_question_key(value: Any) -> str:
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "external_integrations_v1": "integration_v1",
+        "integrations_v1": "integration_v1",
+        "integration": "integration_v1",
+        "collaboration": "collaboration_model",
+        "collaboration_mode": "collaboration_model",
+        "name": "app_name",
+        "application_name": "app_name",
+        "theme": "ui_theme",
+        "ui_preferences_theme": "ui_theme",
+        "rich_text": "rich_text_required",
+    }
+    token = aliases.get(token, token)
+    return token if token in _HYBRID_REFINEMENT_ALLOWED_QUESTION_KEYS else ""
+
+
+def _deterministic_refinement_interpretation(reply_text: str) -> Dict[str, Any]:
+    text = str(reply_text or "").strip()
+    lowered = text.lower()
+    normalized_updates: Dict[str, Any] = {
+        "features_add": [],
+        "constraints_add": [],
+        "resolved_answers": [],
+        "open_questions_remaining": [],
+        "additional_considerations_add": [],
+    }
+    warnings: List[str] = []
+    recognized = 0
+
+    name_match = re.search(r"\bname\s+the\s+application\s+(.+)$", text, re.IGNORECASE)
+    if not name_match:
+        name_match = re.search(r"\bcall\s+it\s+(.+)$", text, re.IGNORECASE)
+    if name_match:
+        candidate_name = _clean_refinement_value(name_match.group(1))[:120]
+        if candidate_name:
+            normalized_updates["name"] = candidate_name
+            recognized += 1
+
+    wants_light = any(token in lowered for token in {"default theme to light", "use light theme", "use light mode"})
+    wants_dark = any(token in lowered for token in {"default theme to dark", "use dark theme", "use dark mode"})
+    if wants_light and wants_dark:
+        warnings.append("Conflicting theme preferences were provided.")
+    elif wants_light:
+        normalized_updates["ui_preferences"] = {"theme": "light"}
+        normalized_updates["resolved_answers"].append({"question_key": "ui_theme", "value": "light"})
+        recognized += 1
+    elif wants_dark:
+        normalized_updates["ui_preferences"] = {"theme": "dark"}
+        normalized_updates["resolved_answers"].append({"question_key": "ui_theme", "value": "dark"})
+        recognized += 1
+
+    no_integrations = any(
+        token in lowered
+        for token in {
+            "no external integration",
+            "no external integrations",
+            "without external integration",
+            "without external integrations",
+        }
+    )
+    yes_integrations = (not no_integrations) and (
+        ("external integration" in lowered) or ("external integrations" in lowered)
+    )
+    if no_integrations and yes_integrations:
+        warnings.append("Conflicting integration requirements were provided.")
+    elif no_integrations:
+        normalized_updates["resolved_answers"].append({"question_key": "integration_v1", "value": False})
+        recognized += 1
+    elif yes_integrations:
+        normalized_updates["resolved_answers"].append({"question_key": "integration_v1", "value": True})
+        recognized += 1
+
+    single_collab = ("single-user" in lowered) or ("single user" in lowered)
+    multi_collab = any(
+        token in lowered
+        for token in {
+            "multi-user",
+            "multi user",
+            "editor/reader",
+            "editor and reader",
+            "editor role",
+            "reader role",
+            "collaboration",
+        }
+    )
+    if single_collab and multi_collab:
+        warnings.append("Conflicting collaboration preferences were provided.")
+    elif single_collab:
+        normalized_updates["resolved_answers"].append({"question_key": "collaboration_model", "value": "single"})
+        recognized += 1
+    elif multi_collab:
+        normalized_updates["resolved_answers"].append({"question_key": "collaboration_model", "value": "multi"})
+        recognized += 1
+
+    if ("rich text" in lowered) or ("wysiwyg" in lowered) or ("editor support" in lowered):
+        normalized_updates["resolved_answers"].append({"question_key": "rich_text_required", "value": True})
+        recognized += 1
+
+    feature_match = re.search(r"\b(?:add|include|support)\s+(.+)$", text, re.IGNORECASE)
+    if feature_match:
+        feature_candidate = _clean_refinement_value(feature_match.group(1))
+        feature_lower = feature_candidate.lower()
+        if feature_candidate:
+            if ("rich text" in feature_lower) or ("wysiwyg" in feature_lower):
+                normalized_updates["resolved_answers"].append({"question_key": "rich_text_required", "value": True})
+            else:
+                _append_unique_lowered(normalized_updates["features_add"], feature_candidate)
+            recognized += 1
+
+    if warnings:
+        return _refinement_default_result(
+            mode="deterministic",
+            result_type="clarification_request",
+            confidence=0.25,
+            planner_message="I found conflicting constraints in your refinement. Please clarify the intended direction.",
+            warnings=warnings,
+            normalized_updates=normalized_updates,
+        )
+    if recognized == 0:
+        normalized_updates["additional_considerations_add"] = [_clean_refinement_value(text)] if _clean_refinement_value(text) else []
+        return _refinement_default_result(
+            mode="deterministic",
+            result_type="cannot_interpret",
+            confidence=0.2,
+            planner_message="I could not confidently interpret that refinement. Please clarify or use planner interpretation.",
+            normalized_updates=normalized_updates,
+        )
+    return _refinement_default_result(
+        mode="deterministic",
+        result_type="answer_resolution" if recognized <= 2 else "plan_revision",
+        confidence=0.9,
+        normalized_updates=normalized_updates,
+    )
+
+
+def _extract_json_object_text(text: str) -> str:
+    payload = str(text or "").strip()
+    if not payload:
+        return ""
+    if payload.startswith("{") and payload.endswith("}"):
+        return payload
+    match = re.search(r"\{[\s\S]*\}", payload)
+    return str(match.group(0) if match else "").strip()
+
+
+def _validate_hybrid_refinement_envelope(candidate: Any) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    errors: List[str] = []
+    if not isinstance(candidate, dict):
+        return None, ["envelope must be an object"]
+    unknown_top = [key for key in candidate.keys() if key not in _HYBRID_REFINEMENT_ALLOWED_TOP_LEVEL]
+    if unknown_top:
+        errors.append(f"unknown top-level keys: {', '.join(sorted(unknown_top))}")
+    result_type = str(candidate.get("result_type") or "").strip()
+    if result_type not in _HYBRID_REFINEMENT_RESULT_TYPES:
+        errors.append("invalid result_type")
+    confidence_raw = candidate.get("confidence")
+    try:
+        confidence = float(confidence_raw if confidence_raw is not None else 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+        errors.append("invalid confidence")
+    confidence = max(0.0, min(1.0, confidence))
+    mode = str(candidate.get("mode") or "agent_fallback").strip().lower()
+    if mode not in {"deterministic", "agent_fallback"}:
+        errors.append("invalid mode")
+        mode = "agent_fallback"
+
+    normalized_raw = candidate.get("normalized_updates")
+    normalized = normalized_raw if isinstance(normalized_raw, dict) else {}
+    unknown_updates = [key for key in normalized.keys() if key not in _HYBRID_REFINEMENT_ALLOWED_UPDATE_KEYS]
+    if unknown_updates:
+        errors.append(f"unknown normalized_updates keys: {', '.join(sorted(unknown_updates))}")
+
+    safe_updates: Dict[str, Any] = {}
+    if "name" in normalized:
+        value = _clean_refinement_value(str(normalized.get("name") or ""))[:120]
+        if value:
+            safe_updates["name"] = value
+    if "ui_preferences" in normalized:
+        prefs = normalized.get("ui_preferences")
+        if isinstance(prefs, dict):
+            theme = str(prefs.get("theme") or "").strip().lower()
+            if theme in _HYBRID_REFINEMENT_THEME_VALUES:
+                safe_updates["ui_preferences"] = {"theme": theme}
+            elif theme:
+                errors.append("invalid ui_preferences.theme")
+        elif prefs is not None:
+            errors.append("ui_preferences must be an object")
+
+    def _clean_string_list(value: Any, *, limit: int = 6, item_limit: int = 140) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        cleaned: List[str] = []
+        for item in value[:limit]:
+            token = _clean_refinement_value(str(item or ""))[:item_limit]
+            if token:
+                _append_unique_lowered(cleaned, token)
+        return cleaned
+
+    features_add = _clean_string_list(normalized.get("features_add"))
+    if features_add:
+        safe_updates["features_add"] = features_add
+    constraints_add = _clean_string_list(normalized.get("constraints_add"), item_limit=180)
+    if constraints_add:
+        safe_updates["constraints_add"] = constraints_add
+    open_questions = []
+    if "open_questions_remaining" in normalized:
+        if isinstance(normalized.get("open_questions_remaining"), list):
+            for item in normalized.get("open_questions_remaining")[:8]:
+                key = _normalize_question_key(item)
+                if key:
+                    _append_unique_lowered(open_questions, key)
+                elif str(item or "").strip():
+                    errors.append(f"invalid open question key: {item}")
+            safe_updates["open_questions_remaining"] = open_questions
+        else:
+            errors.append("open_questions_remaining must be a list")
+
+    resolved_answers: List[Dict[str, Any]] = []
+    raw_answers = normalized.get("resolved_answers")
+    if raw_answers is not None:
+        if not isinstance(raw_answers, list):
+            errors.append("resolved_answers must be a list")
+        else:
+            for row in raw_answers[:10]:
+                if not isinstance(row, dict):
+                    errors.append("resolved_answers rows must be objects")
+                    continue
+                key = _normalize_question_key(row.get("question_key"))
+                if not key:
+                    errors.append("invalid resolved_answers.question_key")
+                    continue
+                value = row.get("value")
+                if key == "integration_v1":
+                    if isinstance(value, bool):
+                        normalized_value: Any = value
+                    elif str(value).strip().lower() in {"yes", "true", "required", "include"}:
+                        normalized_value = True
+                    elif str(value).strip().lower() in {"no", "false", "none", "exclude"}:
+                        normalized_value = False
+                    else:
+                        errors.append("invalid integration_v1 value")
+                        continue
+                elif key == "collaboration_model":
+                    token = str(value or "").strip().lower()
+                    if token in {"single", "single_user", "single-user"}:
+                        normalized_value = "single"
+                    elif token in {"multi", "multi_user", "multi-user"}:
+                        normalized_value = "multi"
+                    else:
+                        errors.append("invalid collaboration_model value")
+                        continue
+                elif key == "rich_text_required":
+                    if isinstance(value, bool):
+                        normalized_value = value
+                    elif str(value).strip().lower() in {"yes", "true", "required"}:
+                        normalized_value = True
+                    elif str(value).strip().lower() in {"no", "false", "not_required"}:
+                        normalized_value = False
+                    else:
+                        errors.append("invalid rich_text_required value")
+                        continue
+                elif key == "ui_theme":
+                    token = str(value or "").strip().lower()
+                    if token in _HYBRID_REFINEMENT_THEME_VALUES:
+                        normalized_value = token
+                    else:
+                        errors.append("invalid ui_theme value")
+                        continue
+                else:
+                    normalized_value = _clean_refinement_value(str(value or ""))[:120]
+                    if not normalized_value:
+                        errors.append("invalid app_name value")
+                        continue
+                resolved_answers.append({"question_key": key, "value": normalized_value})
+    if resolved_answers:
+        safe_updates["resolved_answers"] = resolved_answers
+
+    additional = _clean_string_list(normalized.get("additional_considerations_add"), limit=4, item_limit=180)
+    if additional:
+        safe_updates["additional_considerations_add"] = additional
+
+    warnings = _clean_string_list(candidate.get("warnings"), limit=6, item_limit=160)
+    planner_message = _clean_refinement_value(str(candidate.get("planner_message") or ""))[:320]
+
+    if errors:
+        return None, errors
+    return {
+        "mode": mode,
+        "result_type": result_type,
+        "confidence": confidence,
+        "normalized_updates": safe_updates,
+        "planner_message": planner_message,
+        "warnings": warnings,
+    }, []
+
+
+def _invoke_planner_refinement_fallback(
+    *,
+    session: SolutionChangeSession,
+    reply_text: str,
+    deterministic: Dict[str, Any],
+) -> Dict[str, Any]:
+    resolved = resolve_ai_config(purpose_slug="planning")
+    deterministic_updates = deterministic.get("normalized_updates") if isinstance(deterministic.get("normalized_updates"), dict) else {}
+    prompt = (
+        "You are a refinement interpreter. Return ONLY JSON with keys: "
+        "mode,result_type,confidence,normalized_updates,planner_message,warnings.\n"
+        "Allowed result_type: answer_resolution,plan_revision,clarification_request,cannot_interpret.\n"
+        "Allowed normalized_updates keys: name,ui_preferences,features_add,constraints_add,resolved_answers,"
+        "open_questions_remaining,additional_considerations_add.\n"
+        "Do not include any other keys.\n"
+        "Question keys allowed: integration_v1,collaboration_model,rich_text_required,app_name,ui_theme.\n\n"
+        f"Session request: {str(session.request_text or '').strip()}\n"
+        f"User refinement: {str(reply_text or '').strip()}\n"
+        f"Deterministic baseline: {json.dumps(deterministic_updates, ensure_ascii=True)}\n"
+    )
+    result = invoke_model(
+        resolved_config=resolved,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    raw_text = str(result.get("content") or "")
+    json_text = _extract_json_object_text(raw_text)
+    if not json_text:
+        return _refinement_default_result(
+            mode="agent_fallback",
+            result_type="cannot_interpret",
+            confidence=0.0,
+            planner_message="Planner fallback did not return structured interpretation output.",
+            warnings=["fallback returned no parseable JSON"],
+        )
+    try:
+        parsed = json.loads(json_text)
+    except json.JSONDecodeError:
+        return _refinement_default_result(
+            mode="agent_fallback",
+            result_type="cannot_interpret",
+            confidence=0.0,
+            planner_message="Planner fallback returned invalid JSON.",
+            warnings=["fallback JSON decode failure"],
+        )
+    safe, errors = _validate_hybrid_refinement_envelope(parsed)
+    if safe is None:
+        return _refinement_default_result(
+            mode="agent_fallback",
+            result_type="cannot_interpret",
+            confidence=0.0,
+            planner_message="Planner interpretation could not be safely applied.",
+            warnings=[f"validation error: {err}" for err in errors],
+        )
+    safe["mode"] = "agent_fallback"
+    return safe
+
+
+def _interpret_solution_refinement(
+    *,
+    session: SolutionChangeSession,
+    reply_text: str,
+    force_planner_fallback: bool = False,
+) -> Dict[str, Any]:
+    deterministic = _deterministic_refinement_interpretation(reply_text)
+    deterministic_type = str(deterministic.get("result_type") or "")
+    should_fallback = bool(force_planner_fallback) or deterministic_type in {"cannot_interpret", "clarification_request"}
+    if not should_fallback:
+        return deterministic
+    try:
+        fallback = _invoke_planner_refinement_fallback(
+            session=session,
+            reply_text=reply_text,
+            deterministic=deterministic,
+        )
+    except Exception as exc:
+        if deterministic_type in {"answer_resolution", "plan_revision"} and not force_planner_fallback:
+            deterministic_warnings = list(deterministic.get("warnings") or [])
+            deterministic_warnings.append(f"planner fallback unavailable: {exc}")
+            deterministic["warnings"] = deterministic_warnings
+            return deterministic
+        return _refinement_default_result(
+            mode="agent_fallback",
+            result_type="cannot_interpret",
+            confidence=0.0,
+            planner_message="Planner fallback is unavailable right now. Please refine your response with clearer constraints.",
+            warnings=[f"fallback error: {exc}"],
+        )
+    return fallback
+
+
 def _ensure_solution_stage_checkpoint(
     *,
     session: SolutionChangeSession,
@@ -28678,10 +29265,28 @@ def _solution_option_rows(
     return options
 
 
+def _has_meaningful_solution_memberships(memberships: List[ApplicationArtifactMembership]) -> bool:
+    meaningful_roles = {
+        "primary_ui",
+        "primary_api",
+        "integration_adapter",
+        "worker",
+        "runtime_service",
+        "shared_library",
+    }
+    return any(str(member.role or "") in meaningful_roles for member in memberships)
+
+
+def _request_requires_initial_clarification(request_text: str) -> bool:
+    tokens = [token for token in re.findall(r"[a-z0-9_]+", str(request_text or "").lower()) if len(token) >= 2]
+    return len(tokens) <= 4
+
+
 def _maybe_emit_solution_checkpoint_turn(
     *,
     session: SolutionChangeSession,
     checkpoint: SolutionPlanningCheckpoint,
+    force_emit: bool = False,
 ) -> None:
     latest_checkpoint_turn = (
         SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="checkpoint")
@@ -28690,7 +29295,8 @@ def _maybe_emit_solution_checkpoint_turn(
     )
     latest_payload = latest_checkpoint_turn.payload_json if isinstance(getattr(latest_checkpoint_turn, "payload_json", None), dict) else {}
     if (
-        latest_checkpoint_turn is not None
+        not force_emit
+        and latest_checkpoint_turn is not None
         and str(latest_payload.get("checkpoint_id") or "") == str(checkpoint.id)
         and str(latest_payload.get("status") or "") == str(checkpoint.status or "")
     ):
@@ -28709,6 +29315,54 @@ def _maybe_emit_solution_checkpoint_turn(
     )
 
 
+def _record_solution_draft_plan(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+    summary: str,
+) -> Dict[str, Any]:
+    plan = _generate_solution_change_plan(session=session, memberships=memberships)
+    objective_summary = str(
+        plan.get("planner_objective_text")
+        or plan.get("request_text")
+        or session.request_text
+        or ""
+    )
+    user_refinements = (
+        [str(item).strip() for item in plan.get("user_refinements", []) if str(item).strip()]
+        if isinstance(plan.get("user_refinements"), list)
+        else []
+    )
+    session.plan_json = plan
+    session.status = "planned"
+    session.save(update_fields=["plan_json", "status", "updated_at"])
+    _append_solution_planning_turn(
+        session=session,
+        actor="planner",
+        kind="draft_plan",
+        payload={
+            "summary": summary,
+            "objective": objective_summary,
+            "request_text": str(session.request_text or ""),
+            "user_refinements": user_refinements,
+            "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+            "shared_contracts": list(plan.get("shared_contracts") or []),
+            "validation_plan": list(plan.get("validation_plan") or []),
+        },
+    )
+    return plan
+
+
+def _reset_solution_stage_checkpoint(*, session: SolutionChangeSession) -> SolutionPlanningCheckpoint:
+    checkpoint = _ensure_solution_stage_checkpoint(session=session)
+    if str(checkpoint.status or "") != "pending":
+        checkpoint.status = "pending"
+        checkpoint.decided_by = None
+        checkpoint.decided_at = None
+        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+    return checkpoint
+
+
 def _advance_solution_planning_after_user_response(
     *,
     session: SolutionChangeSession,
@@ -28717,30 +29371,22 @@ def _advance_solution_planning_after_user_response(
     planning_state = _solution_planning_state(session)
     if planning_state.get("pending_question") or planning_state.get("pending_option_set"):
         return
-    if not isinstance(session.plan_json, dict) or not session.plan_json:
-        plan = _generate_solution_change_plan(session=session, memberships=memberships)
-        session.plan_json = plan
-        session.status = "planned"
-        session.save(update_fields=["plan_json", "status", "updated_at"])
-        _append_solution_planning_turn(
-            session=session,
-            actor="planner",
-            kind="draft_plan",
-            payload={
-                "summary": "Generated structured cross-artifact draft plan.",
-                "objective": str(session.request_text or ""),
-                "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
-                "shared_contracts": list(plan.get("shared_contracts") or []),
-                "validation_plan": list(plan.get("validation_plan") or []),
-            },
-        )
-    checkpoint = _ensure_solution_stage_checkpoint(session=session)
-    if str(checkpoint.status or "") != "pending":
-        checkpoint.status = "pending"
-        checkpoint.decided_by = None
-        checkpoint.decided_at = None
-        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
-    _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+    has_existing_plan = isinstance(session.plan_json, dict) and bool(session.plan_json)
+    _record_solution_draft_plan(
+        session=session,
+        memberships=memberships,
+        summary=(
+            "Generated structured cross-artifact draft plan."
+            if not has_existing_plan
+            else "Revised draft plan using your latest planning response."
+        ),
+    )
+    checkpoint = _reset_solution_stage_checkpoint(session=session)
+    _maybe_emit_solution_checkpoint_turn(
+        session=session,
+        checkpoint=checkpoint,
+        force_emit=has_existing_plan,
+    )
 
 
 def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
@@ -28811,6 +29457,31 @@ def _seed_solution_planning_state_on_create(
         )
 
     token_count = len([token for token in re.findall(r"[a-z0-9_]+", request_text.lower()) if len(token) >= 2])
+    has_meaningful_memberships = _has_meaningful_solution_memberships(memberships)
+    if request_text and not has_meaningful_memberships:
+        if _request_requires_initial_clarification(request_text):
+            _append_solution_planning_turn(
+                session=session,
+                actor="planner",
+                kind="question",
+                payload={
+                    "question": (
+                        "Before I draft the first plan: should this start as a single-user or multi-user app, "
+                        "and should we prioritize data modeling or UI first?"
+                    ),
+                    "reason": "initial_scope_clarification",
+                },
+            )
+            return
+        _record_solution_draft_plan(
+            session=session,
+            memberships=memberships,
+            summary="Generated an initial draft plan from your request.",
+        )
+        checkpoint = _reset_solution_stage_checkpoint(session=session)
+        _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+        return
+
     if token_count <= 6:
         _append_solution_planning_turn(
             session=session,
@@ -28928,10 +29599,318 @@ def _generate_solution_change_plan(
     session: SolutionChangeSession,
     memberships: List[ApplicationArtifactMembership],
 ) -> Dict[str, Any]:
+    planning_turns = list(
+        SolutionPlanningTurn.objects.filter(session=session)
+        .order_by("sequence", "created_at")
+    )
+    original_request = str(session.request_text or "").strip()
+    response_records: List[Dict[str, Any]] = []
+    user_refinements: List[str] = []
+    for turn in planning_turns:
+        if str(turn.actor or "") != "user" or str(turn.kind or "") != "response":
+            continue
+        payload = turn.payload_json if isinstance(turn.payload_json, dict) else {}
+        if str(payload.get("response_kind") or "response") != "response":
+            continue
+        reply_text = str(payload.get("reply_text") or "").strip()
+        if reply_text:
+            user_refinements.append(reply_text)
+        response_records.append(
+            {
+                "reply_text": reply_text,
+                "interpretation": payload.get("interpretation") if isinstance(payload.get("interpretation"), dict) else None,
+            }
+        )
+
+    def _compact_objective(text: str) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return "Deliver the requested solution scope with a validated first iteration."
+        first_line = re.split(r"[\n\.]", value, maxsplit=1)[0].strip()
+        compact = first_line or value
+        return compact[:220].rstrip()
+
+    def _refinement_state(
+        records: List[Dict[str, Any]],
+        refinements: List[str],
+    ) -> Dict[str, Any]:
+        state: Dict[str, Any] = {
+            "integration_v1": None,  # True/False/None
+            "collaboration": None,  # "single" | "multi" | None
+            "rich_text": False,
+            "name": None,  # Optional display name override
+            "ui_preferences": {},
+            "features": [],
+            "additional_considerations": [],
+            "manual_constraints": [],
+            "open_questions_remaining": set(),
+            "has_explicit_open_questions": False,
+            "resolved_assumptions": [],
+            "constraints": [],
+        }
+        def _apply_normalized_updates(normalized: Dict[str, Any]) -> None:
+            if not isinstance(normalized, dict):
+                return
+            if str(normalized.get("name") or "").strip():
+                state["name"] = _clean_refinement_value(str(normalized.get("name") or ""))[:120]
+            ui_prefs = normalized.get("ui_preferences") if isinstance(normalized.get("ui_preferences"), dict) else {}
+            theme = str(ui_prefs.get("theme") or "").strip().lower()
+            if theme in _HYBRID_REFINEMENT_THEME_VALUES:
+                state["ui_preferences"]["theme"] = theme
+            for item in normalized.get("features_add") if isinstance(normalized.get("features_add"), list) else []:
+                feature_candidate = _clean_refinement_value(str(item or ""))
+                if not feature_candidate:
+                    continue
+                feature_lower = feature_candidate.lower()
+                if ("rich text" in feature_lower) or ("wysiwyg" in feature_lower):
+                    state["rich_text"] = True
+                else:
+                    _append_unique_lowered(state["features"], feature_candidate)
+            for item in normalized.get("constraints_add") if isinstance(normalized.get("constraints_add"), list) else []:
+                _append_unique_lowered(state["manual_constraints"], _clean_refinement_value(str(item or "")))
+            for item in normalized.get("additional_considerations_add") if isinstance(normalized.get("additional_considerations_add"), list) else []:
+                _append_unique_lowered(state["additional_considerations"], _clean_refinement_value(str(item or "")))
+            for row in normalized.get("resolved_answers") if isinstance(normalized.get("resolved_answers"), list) else []:
+                if not isinstance(row, dict):
+                    continue
+                question_key = _normalize_question_key(row.get("question_key"))
+                value = row.get("value")
+                if question_key == "integration_v1":
+                    if isinstance(value, bool):
+                        state["integration_v1"] = value
+                elif question_key == "collaboration_model":
+                    token = str(value or "").strip().lower()
+                    if token in {"single", "single_user", "single-user"}:
+                        state["collaboration"] = "single"
+                    elif token in {"multi", "multi_user", "multi-user"}:
+                        state["collaboration"] = "multi"
+                elif question_key == "rich_text_required":
+                    if isinstance(value, bool):
+                        state["rich_text"] = value
+                elif question_key == "app_name":
+                    candidate = _clean_refinement_value(str(value or ""))
+                    if candidate:
+                        state["name"] = candidate[:120]
+                elif question_key == "ui_theme":
+                    token = str(value or "").strip().lower()
+                    if token in _HYBRID_REFINEMENT_THEME_VALUES:
+                        state["ui_preferences"]["theme"] = token
+            if "open_questions_remaining" in normalized and isinstance(normalized.get("open_questions_remaining"), list):
+                state["has_explicit_open_questions"] = True
+                state["open_questions_remaining"] = {
+                    _normalize_question_key(item)
+                    for item in normalized.get("open_questions_remaining")
+                    if _normalize_question_key(item)
+                }
+
+        parsed_from_records = False
+        for record in records:
+            interpretation = record.get("interpretation")
+            if isinstance(interpretation, dict):
+                safe_interp, _errors = _validate_hybrid_refinement_envelope(interpretation)
+                if safe_interp is not None:
+                    _apply_normalized_updates(safe_interp.get("normalized_updates") if isinstance(safe_interp.get("normalized_updates"), dict) else {})
+                    parsed_from_records = True
+                    continue
+            refinement = str(record.get("reply_text") or "").strip()
+            if not refinement:
+                continue
+            parsed_from_records = True
+            text = str(refinement or "").strip()
+            lowered = text.lower()
+            if not lowered:
+                continue
+            recognized = False
+
+            name_match = re.search(r"\bname\s+the\s+application\s+(.+)$", text, re.IGNORECASE)
+            if not name_match:
+                name_match = re.search(r"\bcall\s+it\s+(.+)$", text, re.IGNORECASE)
+            if name_match:
+                candidate_name = _clean_refinement_value(name_match.group(1))
+                if candidate_name:
+                    state["name"] = candidate_name[:120]
+                    recognized = True
+
+            if (
+                ("default theme to light" in lowered)
+                or ("use light theme" in lowered)
+                or ("use light mode" in lowered)
+            ):
+                state["ui_preferences"]["theme"] = "light"
+                recognized = True
+            elif (
+                ("default theme to dark" in lowered)
+                or ("use dark theme" in lowered)
+                or ("use dark mode" in lowered)
+            ):
+                state["ui_preferences"]["theme"] = "dark"
+                recognized = True
+
+            if (
+                ("no external integration" in lowered)
+                or ("no external integrations" in lowered)
+                or ("without external integration" in lowered)
+                or ("without external integrations" in lowered)
+            ):
+                state["integration_v1"] = False
+                recognized = True
+            elif ("external integration" in lowered) or ("external integrations" in lowered):
+                state["integration_v1"] = True
+                recognized = True
+
+            if ("single-user" in lowered) or ("single user" in lowered):
+                state["collaboration"] = "single"
+                recognized = True
+            if (
+                ("multi-user" in lowered)
+                or ("multi user" in lowered)
+                or ("collaboration" in lowered)
+                or ("editor/reader" in lowered)
+                or ("editor and reader" in lowered)
+                or ("editor role" in lowered and "reader role" in lowered)
+            ):
+                state["collaboration"] = "multi"
+                recognized = True
+
+            if ("rich text" in lowered) or ("wysiwyg" in lowered) or ("editor support" in lowered):
+                state["rich_text"] = True
+                recognized = True
+
+            feature_match = re.search(r"\b(?:add|include|support)\s+(.+)$", text, re.IGNORECASE)
+            if feature_match:
+                feature_candidate = _clean_refinement_value(feature_match.group(1))
+                feature_lower = feature_candidate.lower()
+                if feature_candidate:
+                    if ("rich text" in feature_lower) or ("wysiwyg" in feature_lower):
+                        state["rich_text"] = True
+                        recognized = True
+                    else:
+                        _append_unique_lowered(state["features"], feature_candidate)
+                        recognized = True
+
+            if not recognized:
+                _append_unique_lowered(state["additional_considerations"], _clean_refinement_value(text))
+
+        if not parsed_from_records:
+            for refinement in refinements:
+                deterministic = _deterministic_refinement_interpretation(refinement)
+                updates = deterministic.get("normalized_updates") if isinstance(deterministic.get("normalized_updates"), dict) else {}
+                _apply_normalized_updates(updates)
+
+        resolved_assumptions: List[str] = []
+        constraints: List[str] = []
+        additional_considerations: List[str] = []
+        if state["integration_v1"] is False:
+            resolved_assumptions.append("Resolved: v1 excludes external integrations.")
+            constraints.append("Scope constraint: keep v1 self-contained with no external integrations.")
+        elif state["integration_v1"] is True:
+            resolved_assumptions.append("Resolved: v1 requires at least one external integration seam.")
+            constraints.append("Scope constraint: define integration boundaries for v1.")
+
+        if state["collaboration"] == "single":
+            resolved_assumptions.append("Resolved: v1 targets a single-user workflow.")
+            constraints.append("Design around single-user editing and retrieval flows.")
+        elif state["collaboration"] == "multi":
+            resolved_assumptions.append("Resolved: v1 supports multi-user collaboration with role boundaries.")
+            constraints.append("Include role-aware collaboration (editor/reader) in the first iteration.")
+
+        if state["rich_text"]:
+            resolved_assumptions.append("Resolved: rich text editing is required in the first iteration.")
+            constraints.append("Include rich text editor capabilities in the initial build slice.")
+
+        if str((state.get("ui_preferences") or {}).get("theme") or "") in {"light", "dark"}:
+            theme = str(state["ui_preferences"]["theme"])
+            resolved_assumptions.append(f"Resolved UI default: use {theme} theme.")
+
+        for feature in state["features"]:
+            constraints.append(f"Feature scope: include {feature} in the initial plan.")
+        for item in state["manual_constraints"]:
+            constraints.append(f"Scope constraint: {item}")
+        for item in state["additional_considerations"]:
+            additional_considerations.append(f"Additional consideration: {item}")
+
+        state["resolved_assumptions"] = resolved_assumptions
+        state["constraints"] = constraints
+        state["additional_considerations"] = additional_considerations
+        return state
+
+    refinement_state = _refinement_state(response_records, user_refinements)
+    latest_draft_summary = ""
+    for turn in reversed(planning_turns):
+        if str(turn.actor or "") == "planner" and str(turn.kind or "") == "draft_plan":
+            payload = turn.payload_json if isinstance(turn.payload_json, dict) else {}
+            latest_draft_summary = str(payload.get("summary") or "").strip()
+            if not latest_draft_summary:
+                latest_draft_summary = str(payload.get("objective") or "").strip()
+            break
+    planner_objective_text = _compact_objective(original_request)
+    planner_context_text = planner_objective_text
+    if user_refinements:
+        planner_context_text = (
+            "User is refining a solution plan.\n"
+            f"Original request: {original_request or 'n/a'}\n"
+            + ("Resolved assumptions:\n" + "\n".join(f"- {item}" for item in refinement_state["resolved_assumptions"]) + "\n" if refinement_state["resolved_assumptions"] else "")
+            + ("Refinement constraints:\n" + "\n".join(f"- {item}" for item in refinement_state["constraints"]) + "\n" if refinement_state["constraints"] else "")
+        )
+        if latest_draft_summary:
+            planner_context_text += f"\nPrior draft summary: {latest_draft_summary}"
+
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
     if not selected_members:
         selected_members = memberships
+    plan_title = str(refinement_state.get("name") or session.title or "").strip() or session.title
+    if not selected_members:
+        objective_text = _compact_objective(original_request)
+        first_focus = "Start by shaping the primary data model and first user-facing workflow."
+        objective_lower = objective_text.lower()
+        if any(token in objective_lower for token in {"api", "integration", "sync", "pipeline", "import"}):
+            first_focus = "Start by defining backend contracts and integration seams for the first vertical slice."
+        elif any(token in objective_lower for token in {"ui", "ux", "screen", "dashboard", "workflow"}):
+            first_focus = "Start by designing the first end-to-end user workflow and its supporting API contract."
+        initial_workstreams = [
+            "Core domain model and storage",
+            "Primary user workflow surface",
+            "Basic API/service contract",
+        ]
+        if refinement_state["rich_text"]:
+            initial_workstreams[1] = "Primary user workflow surface with rich text editing"
+        assumptions: List[str] = [
+            "Assumption: initial release targets internal authenticated users.",
+        ]
+        assumptions.extend(refinement_state["resolved_assumptions"])
+        if refinement_state.get("has_explicit_open_questions"):
+            if "collaboration_model" in refinement_state.get("open_questions_remaining", set()):
+                assumptions.append("Open question: should v1 support a single-user or multi-user collaboration model?")
+            if "integration_v1" in refinement_state.get("open_questions_remaining", set()):
+                assumptions.append("Open question: which external integrations are required in v1 versus later phases?")
+        else:
+            if not refinement_state["collaboration"]:
+                assumptions.append("Open question: should v1 support a single-user or multi-user collaboration model?")
+            if refinement_state["integration_v1"] is None:
+                assumptions.append("Open question: which external integrations are required in v1 versus later phases?")
+        assumptions.extend(refinement_state["constraints"][:2])
+        assumptions.extend(refinement_state["additional_considerations"][:2])
+        return {
+            "session_id": str(session.id),
+            "application_id": str(session.application_id),
+            "title": plan_title,
+            "request_text": original_request,
+            "planner_objective_text": planner_objective_text,
+            "planner_context_text": planner_context_text,
+            "user_refinements": user_refinements,
+            "generated_at": timezone.now().isoformat(),
+            "selected_artifact_ids": initial_workstreams,
+            "per_artifact_work": [],
+            "shared_contracts": assumptions,
+            "validation_plan": [
+                first_focus,
+                "Validate the first vertical slice end-to-end before broadening scope.",
+            ],
+            "preview_implications": [
+                "Use preview to validate the first vertical slice with representative data.",
+            ],
+        }
     per_artifact: List[Dict[str, Any]] = []
     for member in selected_members:
         artifact = member.artifact
@@ -28958,24 +29937,58 @@ def _generate_solution_change_plan(
                 ],
             }
         )
+        if refinement_state["rich_text"] and role == "primary_ui":
+            per_artifact[-1]["planned_work"].append("support rich text editing workflows in the first user-facing slice")
+        if refinement_state["integration_v1"] is False:
+            per_artifact[-1]["planned_work"].append("defer external integrations from v1 implementation scope")
+        if refinement_state["collaboration"] == "multi":
+            per_artifact[-1]["planned_work"].append("introduce role-aware collaboration semantics (editor/reader)")
+        if refinement_state["collaboration"] == "single":
+            per_artifact[-1]["planned_work"].append("optimize flows for single-user v1 operation")
+        theme = str((refinement_state.get("ui_preferences") or {}).get("theme") or "").strip()
+        if theme and role == "primary_ui":
+            per_artifact[-1]["planned_work"].append(f"set default UI theme to {theme}")
+        for feature in refinement_state.get("features") or []:
+            per_artifact[-1]["planned_work"].append(f"add support for {feature}")
+    shared_contracts = [
+        "Cross-artifact API/schema compatibility",
+        "Event/payload shape compatibility where artifacts exchange runtime data",
+        "Generated surface/action metadata consistency for shell navigation",
+    ]
+    validation_plan = [
+        "Run artifact-local unit tests for each changed artifact",
+        "Run integration tests covering cross-artifact contract seams",
+        "Run shell/workbench smoke route checks for affected user paths",
+    ]
+    shared_contracts.extend(refinement_state["resolved_assumptions"])
+    if refinement_state.get("has_explicit_open_questions"):
+        remaining = refinement_state.get("open_questions_remaining", set())
+        if "collaboration_model" in remaining:
+            shared_contracts.append("Open question: should v1 collaboration be single-user or multi-user?")
+        if "integration_v1" in remaining:
+            shared_contracts.append("Open question: are external integrations required in v1?")
+    else:
+        if refinement_state["collaboration"] is None:
+            shared_contracts.append("Open question: should v1 collaboration be single-user or multi-user?")
+        if refinement_state["integration_v1"] is None:
+            shared_contracts.append("Open question: are external integrations required in v1?")
+    shared_contracts.extend(refinement_state["constraints"])
+    shared_contracts.extend(refinement_state["additional_considerations"][:2])
+    if refinement_state["constraints"]:
+        validation_plan.insert(0, "Validate that revision constraints are reflected in scope and acceptance checks.")
     return {
         "session_id": str(session.id),
         "application_id": str(session.application_id),
-        "title": session.title,
-        "request_text": session.request_text or "",
+        "title": plan_title,
+        "request_text": original_request,
+        "planner_objective_text": planner_objective_text,
+        "planner_context_text": planner_context_text,
+        "user_refinements": user_refinements,
         "generated_at": timezone.now().isoformat(),
         "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
         "per_artifact_work": per_artifact,
-        "shared_contracts": [
-            "Cross-artifact API/schema compatibility",
-            "Event/payload shape compatibility where artifacts exchange runtime data",
-            "Generated surface/action metadata consistency for shell navigation",
-        ],
-        "validation_plan": [
-            "Run artifact-local unit tests for each changed artifact",
-            "Run integration tests covering cross-artifact contract seams",
-            "Run shell/workbench smoke route checks for affected user paths",
-        ],
+        "shared_contracts": shared_contracts,
+        "validation_plan": validation_plan,
         "preview_implications": [
             "Preview instance should include all changed artifacts in one sibling deploy set",
             "Cross-artifact regression checks are required before promotion",
@@ -32458,6 +33471,13 @@ def application_solution_change_session_reply(
     reply_text = str(payload.get("reply_text") or payload.get("text") or "").strip()
     if not reply_text:
         return JsonResponse({"error": "reply_text is required"}, status=400)
+    force_planner_fallback = bool(payload.get("use_planner_interpretation"))
+    interpretation = _interpret_solution_refinement(
+        session=session,
+        reply_text=reply_text,
+        force_planner_fallback=force_planner_fallback,
+    )
+    interpretation_type = str(interpretation.get("result_type") or "cannot_interpret")
     _append_solution_planning_turn(
         session=session,
         actor="user",
@@ -32466,6 +33486,8 @@ def application_solution_change_session_reply(
             "reply_text": reply_text,
             "response_kind": "response",
             "source_turn_id": str(payload.get("source_turn_id") or "").strip() or None,
+            "interpretation": interpretation,
+            "use_planner_interpretation": force_planner_fallback,
         },
         created_by=identity,
     )
@@ -32474,7 +33496,26 @@ def application_solution_change_session_reply(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
-    _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+    if interpretation_type in {"clarification_request", "cannot_interpret"}:
+        planner_question = str(interpretation.get("planner_message") or "").strip()
+        if not planner_question:
+            planner_question = (
+                "I could not safely interpret that refinement. Please clarify the request or provide a more specific constraint."
+                if interpretation_type == "cannot_interpret"
+                else "I need one clarification before I can revise the draft plan."
+            )
+        _append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="question",
+            payload={
+                "question": planner_question,
+                "reason": "cannot_interpret" if interpretation_type == "cannot_interpret" else "clarification_request",
+                "interpretation": interpretation,
+            },
+        )
+    else:
+        _advance_solution_planning_after_user_response(session=session, memberships=memberships)
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {
@@ -32685,28 +33726,12 @@ def application_solution_change_session_plan(
         return JsonResponse({"error": "planner clarification is pending; submit a reply before generating a draft plan"}, status=409)
     if planning_state.get("pending_option_set"):
         return JsonResponse({"error": "planner option selection is pending; select an option before generating a draft plan"}, status=409)
-    plan = _generate_solution_change_plan(session=session, memberships=memberships)
-    session.plan_json = plan
-    session.status = "planned"
-    session.save(update_fields=["plan_json", "status", "updated_at"])
-    _append_solution_planning_turn(
+    _record_solution_draft_plan(
         session=session,
-        actor="planner",
-        kind="draft_plan",
-        payload={
-            "summary": "Generated structured cross-artifact draft plan.",
-            "objective": str(session.request_text or ""),
-            "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
-            "shared_contracts": list(plan.get("shared_contracts") or []),
-            "validation_plan": list(plan.get("validation_plan") or []),
-        },
+        memberships=memberships,
+        summary="Generated structured cross-artifact draft plan.",
     )
-    checkpoint = _ensure_solution_stage_checkpoint(session=session)
-    if str(checkpoint.status or "") != "pending":
-        checkpoint.status = "pending"
-        checkpoint.decided_by = None
-        checkpoint.decided_at = None
-        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+    checkpoint = _reset_solution_stage_checkpoint(session=session)
     _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(

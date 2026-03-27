@@ -4,7 +4,17 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from xyn_orchestrator.models import RoleBinding, UserIdentity, Workspace, WorkspaceMembership
+from xyn_orchestrator.models import (
+    Application,
+    ApplicationArtifactMembership,
+    Artifact,
+    ArtifactType,
+    RoleBinding,
+    UserIdentity,
+    Workspace,
+    WorkspaceArtifactBinding,
+    WorkspaceMembership,
+)
 
 
 class PlatformBootstrapTests(TestCase):
@@ -48,6 +58,12 @@ class PlatformBootstrapTests(TestCase):
         self.assertIsNotNone(membership)
         self.assertEqual(membership.role, "admin")
         self.assertTrue(membership.termination_authority)
+        xyn_solution = Application.objects.filter(
+            workspace=workspace,
+            metadata_json__system_solution_key="xyn-platform-default",
+        ).first()
+        self.assertIsNotNone(xyn_solution)
+        self.assertEqual(xyn_solution.source_factory_key, "xyn_platform_default")
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
     def test_dev_me_prefers_development_when_system_workspaces_exist(self):
@@ -66,6 +82,26 @@ class PlatformBootstrapTests(TestCase):
         self.assertEqual(len(workspaces), 1)
         self.assertEqual(workspaces[0]["slug"], "development")
         self.assertEqual(payload.get("preferred_workspace_id"), workspaces[0]["id"])
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_dev_bootstrap_xyn_solution_memberships_are_idempotent(self):
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        workspace = Workspace.objects.get(slug="development")
+        xyn_solution = Application.objects.get(
+            workspace=workspace,
+            metadata_json__system_solution_key="xyn-platform-default",
+        )
+        initial_memberships = ApplicationArtifactMembership.objects.filter(application=xyn_solution).count()
+
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        restored_count = ApplicationArtifactMembership.objects.filter(application=xyn_solution).count()
+        self.assertEqual(restored_count, initial_memberships)
+
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ApplicationArtifactMembership.objects.filter(application=xyn_solution).count(), restored_count)
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev", "XYN_WORKSPACE_SLUG": "local-dev"}, clear=False)
     def test_dev_me_uses_configured_workspace_slug(self):
@@ -100,3 +136,43 @@ class PlatformBootstrapTests(TestCase):
         self.assertIsNotNone(membership)
         self.assertEqual(membership.role, "admin")
         self.assertTrue(membership.termination_authority)
+        self.assertFalse(Workspace.objects.filter(slug="development").exists())
+
+    @mock.patch.dict(
+        "os.environ",
+        {
+            "XYN_AUTH_MODE": "oidc",
+            "XYN_DEFAULT_XYN_SOLUTION_WORKSPACE_SLUG": "company",
+        },
+        clear=False,
+    )
+    def test_non_dev_can_seed_default_xyn_solution_for_configured_workspace(self):
+        workspace = Workspace.objects.create(slug="company", name="Company", metadata_json={})
+        module_type, _ = ArtifactType.objects.get_or_create(
+            slug="module",
+            defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
+        )
+        for slug in ("core.workbench", "xyn-ui", "xyn-api"):
+            artifact = Artifact.objects.create(
+                workspace=workspace,
+                type=module_type,
+                title=slug,
+                slug=slug,
+                status="published",
+            )
+            WorkspaceArtifactBinding.objects.create(
+                workspace=workspace,
+                artifact=artifact,
+                enabled=True,
+                installed_state="installed",
+            )
+
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        xyn_solution = Application.objects.filter(
+            workspace=workspace,
+            metadata_json__system_solution_key="xyn-platform-default",
+        ).first()
+        self.assertIsNotNone(xyn_solution)
+        self.assertEqual(ApplicationArtifactMembership.objects.filter(application=xyn_solution).count(), 3)
+        self.assertFalse(Workspace.objects.filter(slug="development").exists())
