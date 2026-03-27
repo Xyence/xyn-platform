@@ -8195,6 +8195,14 @@ DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS: tuple[tuple[str, str, str, str], ...] = (
     ),
 )
 
+DEFAULT_XYN_SOLUTION_NAME = "Xyn"
+DEFAULT_XYN_SOLUTION_KEY = "xyn-platform-default"
+DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES: tuple[tuple[str, str, str, int], ...] = (
+    ("core.workbench", "primary_ui", "Default shell/workbench surface.", 10),
+    ("xyn-ui", "runtime_service", "Default UI runtime artifact.", 20),
+    ("xyn-api", "runtime_service", "Default API runtime artifact.", 30),
+)
+
 
 def _default_dev_workspace_slug() -> str:
     raw = str(os.getenv("XYN_WORKSPACE_SLUG", "development") or "").strip().lower()
@@ -8205,6 +8213,123 @@ def _default_dev_workspace_slug() -> str:
 def _workspace_title_from_slug(slug: str) -> str:
     value = str(slug or "").strip().replace("-", " ")
     return value.title() if value else "Development"
+
+
+def _default_xyn_solution_workspace_slug() -> str:
+    configured = slugify(str(os.getenv("XYN_DEFAULT_XYN_SOLUTION_WORKSPACE_SLUG", "") or "").strip().lower())
+    if configured:
+        return configured
+    if _auth_mode() == "dev":
+        return _default_dev_workspace_slug()
+    return ""
+
+
+def _workspace_matches_default_xyn_solution_target(workspace: Workspace) -> bool:
+    target_slug = _default_xyn_solution_workspace_slug()
+    if not target_slug:
+        return False
+    return str(getattr(workspace, "slug", "") or "").strip().lower() == target_slug
+
+
+def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optional[Application]:
+    if workspace is None or not _workspace_is_visible(workspace, include_system=False):
+        return None
+    if not _workspace_matches_default_xyn_solution_target(workspace):
+        return None
+    application = (
+        Application.objects.filter(workspace=workspace, metadata_json__system_solution_key=DEFAULT_XYN_SOLUTION_KEY)
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+    if application is None:
+        application = (
+            Application.objects.filter(workspace=workspace, source_factory_key="xyn_platform_default")
+            .order_by("-updated_at", "-created_at")
+            .first()
+        )
+    if application is None:
+        application = Application.objects.create(
+            workspace=workspace,
+            name=DEFAULT_XYN_SOLUTION_NAME,
+            summary="Default Xyn platform solution workspace.",
+            source_factory_key="xyn_platform_default",
+            source_conversation_id="",
+            status="active",
+            request_objective="",
+            metadata_json={"system_solution_key": DEFAULT_XYN_SOLUTION_KEY, "origin": "bootstrap_default"},
+        )
+    else:
+        metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
+        metadata_changed = False
+        if metadata.get("system_solution_key") != DEFAULT_XYN_SOLUTION_KEY:
+            metadata = dict(metadata)
+            metadata["system_solution_key"] = DEFAULT_XYN_SOLUTION_KEY
+            metadata_changed = True
+        if metadata.get("origin") != "bootstrap_default":
+            metadata = dict(metadata)
+            metadata["origin"] = "bootstrap_default"
+            metadata_changed = True
+        update_fields: List[str] = []
+        if application.source_factory_key != "xyn_platform_default":
+            application.source_factory_key = "xyn_platform_default"
+            update_fields.append("source_factory_key")
+        if application.name != DEFAULT_XYN_SOLUTION_NAME:
+            application.name = DEFAULT_XYN_SOLUTION_NAME
+            update_fields.append("name")
+        if metadata_changed:
+            application.metadata_json = metadata
+            update_fields.append("metadata_json")
+        if update_fields:
+            update_fields.append("updated_at")
+            application.save(update_fields=update_fields)
+
+    artifact_by_slug: Dict[str, Artifact] = {}
+    bindings = (
+        WorkspaceArtifactBinding.objects.filter(
+            workspace=workspace,
+            artifact__slug__in=[slug for slug, _role, _summary, _order in DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES],
+        )
+        .select_related("artifact", "artifact__type")
+        .order_by("artifact__slug", "-updated_at", "-created_at")
+    )
+    for binding in bindings:
+        slug = str(getattr(binding.artifact, "slug", "") or "").strip().lower()
+        if slug and slug not in artifact_by_slug:
+            artifact_by_slug[slug] = binding.artifact
+
+    for slug, role, responsibility_summary, sort_order in DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES:
+        artifact = artifact_by_slug.get(slug)
+        if artifact is None:
+            artifact = (
+                Artifact.objects.filter(workspace=workspace, slug=slug)
+                .select_related("type")
+                .order_by("-updated_at", "-created_at")
+                .first()
+            )
+        if artifact is None:
+            continue
+        ApplicationArtifactMembership.objects.update_or_create(
+            application=application,
+            artifact=artifact,
+            defaults={
+                "workspace": workspace,
+                "role": role,
+                "responsibility_summary": responsibility_summary,
+                "metadata_json": {"origin": "bootstrap_default_xyn_solution"},
+                "sort_order": sort_order,
+            },
+        )
+    return application
+
+
+def _ensure_default_xyn_solution() -> Optional[Application]:
+    target_slug = _default_xyn_solution_workspace_slug()
+    if not target_slug:
+        return None
+    workspace = Workspace.objects.filter(slug=target_slug).first()
+    if workspace is None:
+        return None
+    return _ensure_default_xyn_solution_for_workspace(workspace=workspace)
 
 
 def _runtime_artifact_host_workspace(fallback_workspace: Workspace) -> Workspace:
@@ -8242,6 +8367,7 @@ def _ensure_default_workspace_artifact_bindings(workspace: Workspace) -> None:
         if update_fields:
             update_fields.append("updated_at")
             binding.save(update_fields=update_fields)
+    _ensure_default_xyn_solution_for_workspace(workspace=workspace)
 
 
 def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspace]:
@@ -8275,6 +8401,7 @@ def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspac
         defaults={"role": "admin", "termination_authority": True},
     )
     _ensure_default_workspace_artifact_bindings(workspace)
+    _ensure_default_xyn_solution_for_workspace(workspace=workspace)
     return workspace
 
 
@@ -8359,6 +8486,7 @@ def api_me(request: HttpRequest) -> JsonResponse:
     include_system = str(request.GET.get("include_system") or "").strip().lower() in {"1", "true", "yes"}
     roles = _get_roles(identity)
     bootstrap_workspace = _ensure_dev_bootstrap_workspace(identity)
+    _ensure_default_xyn_solution()
     if _is_platform_admin(identity):
         rows = Workspace.objects.all().order_by("name")
         if not include_system:
