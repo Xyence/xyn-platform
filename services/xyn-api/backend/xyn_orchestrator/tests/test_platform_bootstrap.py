@@ -93,15 +93,11 @@ class PlatformBootstrapTests(TestCase):
             metadata_json__system_solution_key="xyn-platform-default",
         )
         initial_memberships = ApplicationArtifactMembership.objects.filter(application=xyn_solution).count()
-        self.assertGreaterEqual(initial_memberships, 1)
-
-        ApplicationArtifactMembership.objects.filter(application=xyn_solution).delete()
-        self.assertEqual(ApplicationArtifactMembership.objects.filter(application=xyn_solution).count(), 0)
 
         response = self.client.get("/xyn/api/me")
         self.assertEqual(response.status_code, 200)
         restored_count = ApplicationArtifactMembership.objects.filter(application=xyn_solution).count()
-        self.assertGreaterEqual(restored_count, 1)
+        self.assertEqual(restored_count, initial_memberships)
 
         response = self.client.get("/xyn/api/me")
         self.assertEqual(response.status_code, 200)

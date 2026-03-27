@@ -8308,6 +8308,8 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
             )
         if artifact is None:
             continue
+        if artifact.workspace_id != workspace.id:
+            continue
         ApplicationArtifactMembership.objects.update_or_create(
             application=application,
             artifact=artifact,
