@@ -29544,8 +29544,6 @@ def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
         _append_once("workflow")
     if any(token in lowered for token in behavior_tokens):
         _append_once("behavior")
-    if not workstreams:
-        _append_once("validation")
     return workstreams
 
 
@@ -29627,6 +29625,30 @@ def _analyze_solution_impacted_artifacts(
         "suggested_artifact_ids": suggested_artifact_ids,
         "suggested_workstreams": suggested_workstreams,
     }
+
+
+def _build_solution_impacted_analysis(
+    *,
+    application: Application,
+    request_text: str,
+    memberships: List[ApplicationArtifactMembership],
+) -> Dict[str, Any]:
+    analysis = _analyze_solution_impacted_artifacts(
+        application=application,
+        request_text=request_text,
+        memberships=memberships,
+    )
+    impacted_rows = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
+    suggested_workstreams = analysis.get("suggested_workstreams") if isinstance(analysis.get("suggested_workstreams"), list) else []
+    if impacted_rows:
+        analysis_status = "matched"
+    elif suggested_workstreams:
+        analysis_status = "suggested_only"
+    else:
+        analysis_status = "no_confident_matches"
+    analysis["analysis_status"] = analysis_status
+    analysis["analyzed_at"] = timezone.now().isoformat()
+    return analysis
 
 
 def _generate_solution_change_plan(
@@ -33558,7 +33580,7 @@ def application_solution_change_sessions_collection(
     if not request_text:
         return JsonResponse({"error": "request_text is required"}, status=400)
     title = str(payload.get("title") or "").strip() or f"Change Session {timezone.now().strftime('%Y-%m-%d %H:%M')}"
-    analysis = _analyze_solution_impacted_artifacts(
+    analysis = _build_solution_impacted_analysis(
         application=application,
         request_text=request_text,
         memberships=memberships,
@@ -33607,6 +33629,27 @@ def application_solution_change_session_detail(
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     if request.method == "GET":
         return JsonResponse(_serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id))
+    if request.method == "DELETE":
+        if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        execution_status = str(session.execution_status or "not_started").strip().lower() or "not_started"
+        has_execution_records = bool(session.staged_changes_json) or bool(session.preview_json) or bool(session.validation_json)
+        if execution_status != "not_started" or has_execution_records:
+            return JsonResponse(
+                {
+                    "code": "DELETE_BLOCKED",
+                    "message": "Change sessions can only be deleted before staged/preview/validation execution begins.",
+                },
+                status=409,
+            )
+        session.delete()
+        return JsonResponse(
+            {
+                "deleted": True,
+                "application_id": str(application.id),
+                "session_id": str(session_id),
+            }
+        )
     if request.method != "PATCH":
         return JsonResponse({"error": "method not allowed"}, status=405)
     if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
@@ -33906,6 +33949,12 @@ def application_solution_change_session_plan(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
+    session.analysis_json = _build_solution_impacted_analysis(
+        application=application,
+        request_text=str(session.request_text or ""),
+        memberships=memberships,
+    )
+    session.save(update_fields=["analysis_json", "updated_at"])
     planning_state = _solution_planning_state(session)
     if planning_state.get("pending_question"):
         return JsonResponse({"error": "planner clarification is pending; submit a reply before generating a draft plan"}, status=409)

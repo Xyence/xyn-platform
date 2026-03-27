@@ -13,6 +13,7 @@ const apiMocks = vi.hoisted(() => ({
   listArtifacts: vi.fn(),
   listSolutionChangeSessions: vi.fn(),
   createSolutionChangeSession: vi.fn(),
+  deleteSolutionChangeSession: vi.fn(),
   updateSolutionChangeSession: vi.fn(),
   generateSolutionChangePlan: vi.fn(),
   stageSolutionChangeApply: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("../../../api/xyn", () => ({
   listArtifacts: apiMocks.listArtifacts,
   listSolutionChangeSessions: apiMocks.listSolutionChangeSessions,
   createSolutionChangeSession: apiMocks.createSolutionChangeSession,
+  deleteSolutionChangeSession: apiMocks.deleteSolutionChangeSession,
   updateSolutionChangeSession: apiMocks.updateSolutionChangeSession,
   generateSolutionChangePlan: apiMocks.generateSolutionChangePlan,
   stageSolutionChangeApply: apiMocks.stageSolutionChangeApply,
@@ -320,6 +322,76 @@ describe("Solution panels", () => {
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     expect(screen.getByText("Next step: analyze impacted artifacts for this change session.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Analyze Impacted Artifacts" })).toBeInTheDocument();
+  });
+
+  it("deletes a change session with confirmation and reseats selection", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions
+      .mockResolvedValueOnce({
+        sessions: [
+          { id: "scs-1", title: "Session 1", status: "draft", selected_artifact_ids: [], analysis: {}, plan: {}, staged_changes: {}, preview: {}, validation: {} },
+          { id: "scs-2", title: "Session 2", status: "draft", selected_artifact_ids: [], analysis: {}, plan: {}, staged_changes: {}, preview: {}, validation: {} },
+        ],
+      })
+      .mockResolvedValueOnce({
+        sessions: [{ id: "scs-2", title: "Session 2", status: "draft", selected_artifact_ids: [], analysis: {}, plan: {}, staged_changes: {}, preview: {}, validation: {} }],
+      });
+    apiMocks.deleteSolutionChangeSession.mockResolvedValue({ deleted: true, application_id: "app-1", session_id: "scs-1" });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Delete Session 1" }));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    await waitFor(() => expect(apiMocks.deleteSolutionChangeSession).toHaveBeenCalledWith("app-1", "scs-1"));
+    await waitFor(() => expect(apiMocks.listSolutionChangeSessions).toHaveBeenCalledTimes(2));
+    expect(screen.getByText((_content, element) => element?.tagName === "STRONG" && element.textContent === "Session 2")).toBeInTheDocument();
+    confirmSpy.mockRestore();
+  });
+
+  it("shows suggested workstreams when analysis runs without confident artifact ids", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({
+      sessions: [
+        {
+          id: "scs-1",
+          title: "Session 1",
+          status: "planned",
+          selected_artifact_ids: [],
+          analysis: {
+            analysis_status: "suggested_only",
+            analyzed_at: "2026-03-27T00:00:00Z",
+            impacted_artifacts: [],
+            suggested_workstreams: ["ui"],
+          },
+          plan: {},
+          staged_changes: {},
+          preview: {},
+          validation: {},
+        },
+      ],
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    expect(screen.getByText("Analysis completed. No confident artifact IDs were resolved yet, but likely affected workstreams are:")).toBeInTheDocument();
+    expect(screen.getByText("ui")).toBeInTheDocument();
   });
 
   it("shows an unavailable state when a preserved solution detail does not exist in the current workspace", async () => {

@@ -3,6 +3,7 @@ import type { ApplicationArtifactMembership, ApplicationDetail, ApplicationSumma
 import {
   applyApplicationPlan,
   createSolutionChangeSession,
+  deleteSolutionChangeSession,
   generateApplicationPlan,
   generateSolutionChangePlan,
   getApplication,
@@ -269,20 +270,28 @@ export function SolutionDetailPanel({
   const [changeTitle, setChangeTitle] = useState<string>("");
   const [changeRequest, setChangeRequest] = useState<string>("");
   const [creatingSession, setCreatingSession] = useState<boolean>(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string>("");
   const [planningSession, setPlanningSession] = useState<boolean>(false);
   const [stagingSession, setStagingSession] = useState<boolean>(false);
   const [preparingPreview, setPreparingPreview] = useState<boolean>(false);
   const [validatingSession, setValidatingSession] = useState<boolean>(false);
 
-  async function refreshSessions() {
+  async function refreshSessions(preferredSessionId?: string | null) {
     if (!applicationId) return;
     const payload = await listSolutionChangeSessions(applicationId);
     const next = payload.sessions || [];
     setSessions(next);
-    if (!activeSessionId && next.length > 0) {
-      setActiveSessionId(next[0].id);
-      setSelectedArtifactIds(next[0].selected_artifact_ids || []);
+    if (!next.length) {
+      setActiveSessionId("");
+      setSelectedArtifactIds([]);
+      return;
     }
+    const preferred =
+      (preferredSessionId ? next.find((item) => item.id === preferredSessionId) : null) ||
+      (activeSessionId ? next.find((item) => item.id === activeSessionId) : null) ||
+      next[0];
+    setActiveSessionId(preferred.id);
+    setSelectedArtifactIds(preferred.selected_artifact_ids || []);
   }
 
   useEffect(() => {
@@ -417,13 +426,28 @@ export function SolutionDetailPanel({
       });
       setChangeTitle("");
       setChangeRequest("");
-      await refreshSessions();
-      setActiveSessionId(response.session.id);
-      setSelectedArtifactIds(response.session.selected_artifact_ids || []);
+      await refreshSessions(response.session.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create change session.");
     } finally {
       setCreatingSession(false);
+    }
+  }
+
+  async function handleDeleteSession(session: SolutionChangeSession) {
+    if (!applicationId) return;
+    const confirmed = window.confirm(`Delete change session "${session.title}"? This cannot be undone.`);
+    if (!confirmed) return;
+    setDeletingSessionId(session.id);
+    setError("");
+    try {
+      await deleteSolutionChangeSession(applicationId, session.id);
+      const nextPreferred = activeSessionId === session.id ? null : activeSessionId;
+      await refreshSessions(nextPreferred);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete change session.");
+    } finally {
+      setDeletingSessionId("");
     }
   }
 
@@ -509,7 +533,12 @@ export function SolutionDetailPanel({
     });
   }
 
-  const impactedRows = (activeSession?.analysis?.impacted_artifacts as Array<Record<string, unknown>> | undefined) || [];
+  const analysisState = (activeSession?.analysis as Record<string, unknown> | undefined) || {};
+  const impactedRows = (analysisState?.impacted_artifacts as Array<Record<string, unknown>> | undefined) || [];
+  const suggestedWorkstreams = (analysisState?.suggested_workstreams as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
+  const analysisStatus = String(analysisState?.analysis_status || "").toLowerCase();
+  const analysisRan = Boolean(analysisState?.analyzed_at) || analysisStatus === "no_confident_matches";
+  const analysisHasNoConfidentMatches = analysisRan && !impactedRows.length && !suggestedWorkstreams.length;
   const activePlan = (activeSession?.plan as Record<string, unknown> | undefined) || {};
   const stagedChanges = (activeSession?.staged_changes as Record<string, unknown> | undefined) || {};
   const stagedArtifacts = (stagedChanges?.artifact_states as Array<Record<string, unknown>> | undefined) || [];
@@ -525,8 +554,9 @@ export function SolutionDetailPanel({
   const reusedRuntime = !builtForSession;
   const validationState = (activeSession?.validation as Record<string, unknown> | undefined) || {};
   const validationChecks = (validationState?.checks as Array<Record<string, unknown>> | undefined) || [];
-  const hasImpactedAnalysis = impactedRows.length > 0;
+  const hasImpactedAnalysis = impactedRows.length > 0 || suggestedWorkstreams.length > 0 || analysisHasNoConfidentMatches;
   const hasSelectedArtifacts = selectedArtifactIds.length > 0;
+  const hasReviewedArtifactFocus = hasSelectedArtifacts || suggestedWorkstreams.length > 0 || analysisHasNoConfidentMatches;
   const hasPlan = Object.keys(activePlan).length > 0;
   const executionStatus = String(activeSession?.execution_status || "").toLowerCase();
   const hasStagedArtifacts = stagedArtifacts.length > 0 || ["staged", "preview_ready", "validated"].includes(executionStatus);
@@ -541,7 +571,7 @@ export function SolutionDetailPanel({
   const nextStep: SessionStepKey =
     !activeSession ? "done" :
     !hasImpactedAnalysis ? "analyze" :
-    !hasSelectedArtifacts ? "save" :
+    !hasReviewedArtifactFocus ? "save" :
     !hasPlan ? "plan" :
     !hasStagedArtifacts ? "stage" :
     !hasPreviewEvidence ? "preview" :
@@ -673,16 +703,27 @@ export function SolutionDetailPanel({
                         <td>{session.status}</td>
                         <td className="solution-list-updated-cell">{session.updated_at ? new Date(session.updated_at).toLocaleString() : "—"}</td>
                         <td>
-                          <button
-                            className={`ghost sm ${activeSessionId === session.id ? "active" : ""}`}
-                            type="button"
-                            onClick={() => {
-                              setActiveSessionId(session.id);
-                              setSelectedArtifactIds(session.selected_artifact_ids || []);
-                            }}
-                          >
-                            {activeSessionId === session.id ? "Selected" : "Select"}
-                          </button>
+                          <div className="inline-action-row">
+                            <button
+                              className={`ghost sm ${activeSessionId === session.id ? "active" : ""}`}
+                              type="button"
+                              onClick={() => {
+                                setActiveSessionId(session.id);
+                                setSelectedArtifactIds(session.selected_artifact_ids || []);
+                              }}
+                            >
+                              {activeSessionId === session.id ? "Selected" : "Select"}
+                            </button>
+                            <button
+                              className="ghost sm"
+                              type="button"
+                              onClick={() => void handleDeleteSession(session)}
+                              disabled={deletingSessionId === session.id}
+                              aria-label={`Delete ${session.title}`}
+                            >
+                              {deletingSessionId === session.id ? "Deleting…" : "Delete"}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -805,6 +846,24 @@ export function SolutionDetailPanel({
                       </label>
                     );
                   })}
+                </div>
+              ) : suggestedWorkstreams.length ? (
+                <div className="solution-next-step-callout">
+                  <p className="solution-empty-state">
+                    Analysis completed. No confident artifact IDs were resolved yet, but likely affected workstreams are:
+                  </p>
+                  <ul className="solution-summary-list">
+                    {suggestedWorkstreams.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : analysisHasNoConfidentMatches ? (
+                <div className="solution-next-step-callout">
+                  <p className="solution-empty-state">
+                    Analysis completed, but no confident artifact matches were found for this request yet.
+                    Continue by generating a targeted plan or refining the request with more specific scope.
+                  </p>
                 </div>
               ) : (
                 <div className="solution-next-step-callout">

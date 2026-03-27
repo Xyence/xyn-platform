@@ -4639,6 +4639,19 @@ export async function updateSolutionChangeSession(
   return handle<SolutionChangeSession>(response);
 }
 
+export async function deleteSolutionChangeSession(
+  applicationId: string,
+  sessionId: string
+): Promise<{ deleted: boolean; application_id: string; session_id: string }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}`, {
+    method: "DELETE",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ deleted: boolean; application_id: string; session_id: string }>(response);
+}
+
 export async function generateSolutionChangePlan(
   applicationId: string,
   sessionId: string
