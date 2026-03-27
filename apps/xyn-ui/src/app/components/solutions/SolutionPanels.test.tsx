@@ -441,12 +441,122 @@ describe("Solution panels", () => {
     render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     await userEvent.click(screen.getByRole("checkbox", { name: "UI / presentation" }));
-    await userEvent.click(screen.getAllByRole("button", { name: "Use Selected Workstreams" })[1]);
+    expect(screen.getAllByRole("button", { name: "Use Selected Workstreams" })).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: "Use Selected Workstreams" }));
     await waitFor(() =>
       expect(apiMocks.updateSolutionChangeSession).toHaveBeenCalledWith("app-1", "scs-1", {
         confirmed_workstreams: ["ui"],
       })
     );
+  });
+
+  it("guides users to composer approval before staging when checkpoint is pending", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({
+      sessions: [
+        {
+          id: "scs-approve",
+          title: "Session approval",
+          status: "planned",
+          selected_artifact_ids: [],
+          confirmed_workstreams: ["ui"],
+          analysis: {
+            analysis_status: "suggested_only",
+            analyzed_at: "2026-03-27T00:00:00Z",
+            impacted_artifacts: [],
+            suggested_workstreams: ["ui"],
+          },
+          plan: { title: "Plan title", implementation_steps: ["Adjust field width"] },
+          planning: {
+            pending_checkpoints: [
+              {
+                checkpoint_key: "approve_plan",
+                status: "pending",
+                required_before: "stage",
+              },
+            ],
+          },
+          staged_changes: {},
+          preview: {},
+          validation: {},
+        },
+      ],
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={onOpenPanel} />);
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+
+    expect(
+      screen.getByText("Planning approval is still required before staging. Open this session in Composer to review and approve the plan.")
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Open Session in Composer" }));
+    expect(onOpenPanel).toHaveBeenCalledWith(
+      "composer_detail",
+      expect.objectContaining({
+        workspace_id: "ws-1",
+        application_id: "app-1",
+        solution_change_session_id: "scs-approve",
+      }),
+      { open_in: "new_panel" }
+    );
+  });
+
+  it("keeps stage action blocked while checkpoint approval is pending", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({
+      sessions: [
+        {
+          id: "scs-approve",
+          title: "Session approval",
+          status: "planned",
+          selected_artifact_ids: ["artifact-1"],
+          analysis: {
+            analysis_status: "resolved",
+            analyzed_at: "2026-03-27T00:00:00Z",
+            impacted_artifacts: [{ artifact_id: "artifact-1", artifact_title: "Artifact 1", role: "primary_ui", score: 8, reasons: ["ui"] }],
+          },
+          plan: { title: "Plan title" },
+          planning: {
+            pending_checkpoints: [
+              {
+                checkpoint_key: "approve_plan",
+                status: "pending",
+                required_before: "stage",
+              },
+            ],
+          },
+          staged_changes: {},
+          preview: {},
+          validation: {},
+        },
+      ],
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    const stageButtons = screen.getAllByRole("button", { name: "Stage Coordinated Apply" });
+    expect(stageButtons).toHaveLength(1);
+    expect(stageButtons[0]).toBeDisabled();
+    expect(stageButtons[0]).toHaveAttribute(
+      "title",
+      "Blocked: planning approval is still pending. Open this session in Composer to approve the plan first."
+    );
+    expect(apiMocks.stageSolutionChangeApply).not.toHaveBeenCalled();
   });
 
   it("shows an unavailable state when a preserved solution detail does not exist in the current workspace", async () => {

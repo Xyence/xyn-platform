@@ -616,12 +616,25 @@ export function SolutionDetailPanel({
   const planImplementationSteps = (activePlan.implementation_steps as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
   const planValidationSteps = (activePlan.validation_plan as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
 
-  type SessionStepKey = "analyze" | "save" | "plan" | "stage" | "preview" | "validate" | "done";
+  const planningState = (activeSession?.planning as Record<string, unknown> | undefined) || {};
+  const pendingCheckpoints = Array.isArray(planningState?.pending_checkpoints)
+    ? (planningState.pending_checkpoints as Array<Record<string, unknown>>)
+    : [];
+  const hasPendingApproval = pendingCheckpoints.some(
+    (checkpoint) =>
+      String(checkpoint?.status || "").toLowerCase() === "pending" &&
+      (String(checkpoint?.required_before || "").toLowerCase() === "stage" ||
+        String(checkpoint?.required_before || "").toLowerCase() === "apply" ||
+        String(checkpoint?.required_before || "").toLowerCase() === "dispatch")
+  );
+
+  type SessionStepKey = "analyze" | "save" | "plan" | "approve" | "stage" | "preview" | "validate" | "done";
   const nextStep: SessionStepKey =
     !activeSession ? "done" :
     !hasImpactedAnalysis ? "analyze" :
     !hasReviewedArtifactFocus ? "save" :
     !hasPlan ? "plan" :
+    hasPendingApproval ? "approve" :
     !hasStagedArtifacts ? "stage" :
     !hasPreviewEvidence ? "preview" :
     !hasValidationEvidence ? "validate" :
@@ -631,6 +644,7 @@ export function SolutionDetailPanel({
     { key: "plan", label: "Plan ready", complete: hasPlan },
     { key: "analyze", label: "Analyze impacted artifacts", complete: hasImpactedAnalysis },
     { key: "save", label: "Review/save impacted focus", complete: hasReviewedArtifactFocus },
+    { key: "approve", label: "Review/approve plan", complete: hasPlan && !hasPendingApproval },
     { key: "stage", label: "Stage apply", complete: hasStagedArtifacts },
     { key: "preview", label: "Preview", complete: hasPreviewEvidence },
     { key: "validate", label: "Validate", complete: hasValidationEvidence },
@@ -645,6 +659,8 @@ export function SolutionDetailPanel({
         : "Next step: confirm suggested workstream focus for planning."
       : nextStep === "plan"
       ? "Next step: generate the structured change plan."
+      : nextStep === "approve"
+      ? "Planning approval is still required before staging. Open this session in Composer to review and approve the plan."
       : nextStep === "stage"
       ? "Next step: stage coordinated apply for the approved plan."
       : nextStep === "preview"
@@ -653,9 +669,24 @@ export function SolutionDetailPanel({
       ? "Next step: run validation checks on the prepared preview."
       : "Workflow complete: plan, stage, preview, and validation are all available.";
 
-  const canStageApply = hasPlan && (hasSelectedArtifacts || hasConfirmedWorkstreamFocus);
-  const canPreparePreview = hasStagedArtifacts;
-  const canValidateSession = hasStagedArtifacts && hasPreviewEvidence;
+  const canStageApply = hasPlan && (hasSelectedArtifacts || hasConfirmedWorkstreamFocus) && !hasPendingApproval;
+  const canPreparePreview = hasStagedArtifacts && !hasPendingApproval;
+  const canValidateSession = hasStagedArtifacts && hasPreviewEvidence && !hasPendingApproval;
+  const stageBlockedReason = hasPendingApproval
+    ? "Blocked: planning approval is still pending. Open this session in Composer to approve the plan first."
+    : !canStageApply
+    ? "Blocked: confirm impacted artifact focus before staging."
+    : "";
+  const previewBlockedReason = hasPendingApproval
+    ? "Blocked: planning approval is still pending."
+    : !canPreparePreview
+    ? "Blocked: stage coordinated apply first."
+    : "";
+  const validateBlockedReason = hasPendingApproval
+    ? "Blocked: planning approval is still pending."
+    : !canValidateSession
+    ? "Blocked: prepare preview before validation."
+    : "";
 
   return (
     <div className="solution-detail-layout" data-testid="solution-detail-panel">
@@ -829,13 +860,28 @@ export function SolutionDetailPanel({
                         {saving ? "Saving…" : "Save Impacted Artifacts"}
                       </button>
                     ) : (
-                      <button className="button sm" type="button" onClick={() => void handleConfirmSuggestedFocus()} disabled={saving || !selectedWorkstreams.length}>
-                        {saving ? "Saving…" : "Confirm Suggested Focus"}
-                      </button>
+                      <p className="solution-empty-state">Select suggested workstreams below and confirm focus to continue.</p>
                     )
                   ) : nextStep === "plan" ? (
                     <button className="button sm" type="button" onClick={() => void handleGeneratePlan()} disabled={planningSession}>
                       {planningSession ? "Planning…" : "Generate Cross-Artifact Plan"}
+                    </button>
+                  ) : nextStep === "approve" ? (
+                    <button
+                      className="button sm"
+                      type="button"
+                      onClick={() =>
+                        onOpenPanel(
+                          "composer_detail",
+                          {
+                            workspace_id: workspaceId,
+                            application_id: applicationId,
+                            solution_change_session_id: activeSessionId,
+                          },
+                          { open_in: "new_panel" }
+                        )}
+                    >
+                      Open Session in Composer
                     </button>
                   ) : nextStep === "stage" ? (
                     <button className="button sm" type="button" onClick={() => void handleStageApply()} disabled={stagingSession || !canStageApply}>
@@ -856,21 +902,35 @@ export function SolutionDetailPanel({
                     <button className="ghost sm" type="button" onClick={() => void handleSaveImpactedArtifacts()} disabled={saving || !hasImpactedAnalysis}>
                       {saving ? "Saving…" : "Save Impacted Artifacts"}
                     </button>
-                  ) : (
-                    <button className="ghost sm" type="button" onClick={() => void handleConfirmSuggestedFocus()} disabled={saving || !selectedWorkstreams.length}>
-                      {saving ? "Saving…" : "Use Selected Workstreams"}
-                    </button>
-                  )}
+                  ) : null}
                   <button className="ghost sm" type="button" onClick={() => void handleGeneratePlan()} disabled={planningSession}>
                     {planningSession ? "Planning…" : "Generate Cross-Artifact Plan"}
                   </button>
-                  <button className="ghost sm" type="button" onClick={() => void handleStageApply()} disabled={stagingSession || !canStageApply}>
+                  <button
+                    className="ghost sm"
+                    type="button"
+                    onClick={() => void handleStageApply()}
+                    disabled={stagingSession || !canStageApply}
+                    title={stagingSession || canStageApply ? "" : stageBlockedReason}
+                  >
                     {stagingSession ? "Staging…" : "Stage Coordinated Apply"}
                   </button>
-                  <button className="ghost sm" type="button" onClick={() => void handlePreparePreview()} disabled={preparingPreview || !canPreparePreview}>
+                  <button
+                    className="ghost sm"
+                    type="button"
+                    onClick={() => void handlePreparePreview()}
+                    disabled={preparingPreview || !canPreparePreview}
+                    title={preparingPreview || canPreparePreview ? "" : previewBlockedReason}
+                  >
                     {preparingPreview ? "Preparing…" : "Prepare Preview Handoff"}
                   </button>
-                  <button className="ghost sm" type="button" onClick={() => void handleValidateSession()} disabled={validatingSession || !canValidateSession}>
+                  <button
+                    className="ghost sm"
+                    type="button"
+                    onClick={() => void handleValidateSession()}
+                    disabled={validatingSession || !canValidateSession}
+                    title={validatingSession || canValidateSession ? "" : validateBlockedReason}
+                  >
                     {validatingSession ? "Validating…" : "Run Validation"}
                   </button>
                   <button
