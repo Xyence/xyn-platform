@@ -29346,6 +29346,8 @@ def _record_solution_draft_plan(
             "request_text": str(session.request_text or ""),
             "user_refinements": user_refinements,
             "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+            "suggested_workstreams": list(plan.get("suggested_workstreams") or []),
+            "implementation_steps": list(plan.get("implementation_steps") or []),
             "shared_contracts": list(plan.get("shared_contracts") or []),
             "validation_plan": list(plan.get("validation_plan") or []),
         },
@@ -29516,6 +29518,37 @@ def _seed_solution_planning_state_on_create(
             )
 
 
+def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
+    lowered = str(request_text or "").strip().lower()
+    if not lowered:
+        return []
+    workstreams: List[str] = []
+
+    def _append_once(token: str) -> None:
+        if token not in workstreams:
+            workstreams.append(token)
+
+    ui_tokens = {"ui", "ux", "layout", "width", "header", "pane", "panel", "screen", "view", "style", "css", "input", "control", "presentation"}
+    api_tokens = {"api", "endpoint", "request", "response", "service", "contract", "schema"}
+    data_tokens = {"data", "model", "storage", "persist", "persistence", "database", "db", "table", "field"}
+    workflow_tokens = {"flow", "workflow", "session", "planner", "stage", "apply", "preview", "validate", "orchestration", "pipeline", "job"}
+    behavior_tokens = {"logic", "behavior", "rule", "validation", "condition"}
+
+    if any(token in lowered for token in ui_tokens):
+        _append_once("ui")
+    if any(token in lowered for token in api_tokens):
+        _append_once("api")
+    if any(token in lowered for token in data_tokens):
+        _append_once("data")
+    if any(token in lowered for token in workflow_tokens):
+        _append_once("workflow")
+    if any(token in lowered for token in behavior_tokens):
+        _append_once("behavior")
+    if not workstreams:
+        _append_once("validation")
+    return workstreams
+
+
 def _analyze_solution_impacted_artifacts(
     *, application: Application, request_text: str, memberships: List[ApplicationArtifactMembership]
 ) -> Dict[str, Any]:
@@ -29586,11 +29619,13 @@ def _analyze_solution_impacted_artifacts(
                 }
             )
     suggested_artifact_ids = [str(row.get("artifact_id") or "") for row in impacted_rows if str(row.get("artifact_id") or "").strip()]
+    suggested_workstreams = _infer_solution_workstreams_from_request(request_text)
     return {
         "request_text": request_text,
         "token_count": len(tokens),
         "impacted_artifacts": impacted_rows,
         "suggested_artifact_ids": suggested_artifact_ids,
+        "suggested_workstreams": suggested_workstreams,
     }
 
 
@@ -29874,6 +29909,7 @@ def _generate_solution_change_plan(
         plan_title_value: str,
         planner_objective_value: str,
         planner_context_value: str,
+        suggested_workstreams: List[str],
     ) -> Dict[str, Any]:
         lowered = objective_text.lower()
         focuses_ui = any(token in lowered for token in {"ui", "ux", "layout", "width", "header", "panel", "screen", "view"})
@@ -29946,6 +29982,7 @@ def _generate_solution_change_plan(
             "user_refinements": user_refinements,
             "generated_at": timezone.now().isoformat(),
             "selected_artifact_ids": [],
+            "suggested_workstreams": suggested_workstreams,
             "per_artifact_work": [],
             "shared_contracts": shared_contracts,
             "validation_plan": validation_steps,
@@ -29955,10 +29992,47 @@ def _generate_solution_change_plan(
             "implementation_steps": implementation_steps,
         }
 
+    analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+    suggested_workstreams = [
+        str(item or "").strip()
+        for item in (analysis.get("suggested_workstreams") if isinstance(analysis.get("suggested_workstreams"), list) else [])
+        if str(item or "").strip()
+    ] or _infer_solution_workstreams_from_request(original_request)
+
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
     selected_members = [member for member in memberships if str(member.artifact_id) in selected_ids]
-    if not selected_members:
-        selected_members = memberships
+    if not selected_members and memberships:
+        inferred_rows = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
+        if not inferred_rows:
+            inferred = _analyze_solution_impacted_artifacts(
+                application=session.application,
+                request_text=original_request,
+                memberships=memberships,
+            )
+            inferred_rows = inferred.get("impacted_artifacts") if isinstance(inferred.get("impacted_artifacts"), list) else []
+        confident_ids: List[str] = []
+        for row in inferred_rows:
+            if not isinstance(row, dict):
+                continue
+            artifact_id = str(row.get("artifact_id") or "").strip()
+            score = int(row.get("score") or 0)
+            if artifact_id and score >= 3 and artifact_id not in confident_ids:
+                confident_ids.append(artifact_id)
+        if not confident_ids and suggested_workstreams:
+            for member in memberships:
+                role = str(member.role or "")
+                if (
+                    ("ui" in suggested_workstreams and role == "primary_ui")
+                    or ("api" in suggested_workstreams and role in {"primary_api", "integration_adapter"})
+                    or ("data" in suggested_workstreams and role in {"primary_api", "shared_library", "runtime_service"})
+                    or ("workflow" in suggested_workstreams and role in {"worker", "runtime_service", "integration_adapter"})
+                    or ("behavior" in suggested_workstreams and role in {"primary_ui", "primary_api"})
+                ):
+                    artifact_id = str(member.artifact_id)
+                    if artifact_id not in confident_ids:
+                        confident_ids.append(artifact_id)
+        selected_members = [member for member in memberships if str(member.artifact_id) in set(confident_ids)]
+
     fallback_title = _compact_objective(original_request)[:120] if _is_default_change_session_title(session.title) else session.title
     plan_title = str(refinement_state.get("name") or fallback_title or "").strip() or fallback_title
     if not selected_members:
@@ -29968,6 +30042,7 @@ def _generate_solution_change_plan(
                 plan_title_value=plan_title,
                 planner_objective_value=planner_objective_text,
                 planner_context_value=planner_context_text,
+                suggested_workstreams=suggested_workstreams,
             )
         objective_text = _compact_objective(original_request)
         first_focus = "Start by shaping the primary data model and first user-facing workflow."
@@ -30009,6 +30084,7 @@ def _generate_solution_change_plan(
             "user_refinements": user_refinements,
             "generated_at": timezone.now().isoformat(),
             "selected_artifact_ids": [],
+            "suggested_workstreams": suggested_workstreams,
             "per_artifact_work": [],
             "shared_contracts": assumptions,
             "validation_plan": [
@@ -30094,6 +30170,7 @@ def _generate_solution_change_plan(
         "user_refinements": user_refinements,
         "generated_at": timezone.now().isoformat(),
         "selected_artifact_ids": [str(member.artifact_id) for member in selected_members],
+        "suggested_workstreams": suggested_workstreams,
         "per_artifact_work": per_artifact,
         "shared_contracts": shared_contracts,
         "validation_plan": validation_plan,

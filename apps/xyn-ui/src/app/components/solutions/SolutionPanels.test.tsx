@@ -162,9 +162,9 @@ describe("Solution panels", () => {
           id: "scs-1",
           title: "Session 1",
           status: "planned",
-          selected_artifact_ids: [],
-          analysis: {},
-          plan: {},
+          selected_artifact_ids: ["artifact-1"],
+          analysis: { impacted_artifacts: [{ artifact_id: "artifact-1", artifact_title: "Artifact One", role: "primary_ui", score: 5, reasons: ["ui request match"] }] },
+          plan: { title: "Session 1 Plan", validation_plan: ["Validate UI behavior"] },
           staged_changes: {},
           preview: {},
           validation: {},
@@ -177,7 +177,8 @@ describe("Solution panels", () => {
 
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     expect(apiMocks.listArtifacts).toHaveBeenCalledWith({ limit: 200, scope: "solution" });
-    await userEvent.click(screen.getByRole("button", { name: "Stage Coordinated Apply" }));
+    const stageButtons = screen.getAllByRole("button", { name: "Stage Coordinated Apply" });
+    await userEvent.click(stageButtons[0]);
     await waitFor(() => expect(apiMocks.stageSolutionChangeApply).toHaveBeenCalledWith("app-1", "scs-1"));
     await waitFor(() => expect(apiMocks.listSolutionChangeSessions).toHaveBeenCalledTimes(2));
 
@@ -287,6 +288,38 @@ describe("Solution panels", () => {
     await waitFor(() => expect(apiMocks.listArtifacts).toHaveBeenCalledWith({ limit: 200, scope: "solution" }));
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "Candidate scope" }), "all");
     await waitFor(() => expect(apiMocks.listArtifacts).toHaveBeenLastCalledWith({ limit: 200 }));
+  });
+
+  it("shows guided next-step callout when impacted artifact analysis is missing", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({
+      sessions: [
+        {
+          id: "scs-1",
+          title: "Session 1",
+          status: "draft",
+          selected_artifact_ids: [],
+          analysis: {},
+          plan: {},
+          staged_changes: {},
+          preview: {},
+          validation: {},
+        },
+      ],
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    expect(screen.getByText("Next step: analyze impacted artifacts for this change session.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Analyze Impacted Artifacts" })).toBeInTheDocument();
   });
 
   it("shows an unavailable state when a preserved solution detail does not exist in the current workspace", async () => {
