@@ -11,6 +11,7 @@ import { useNotifications } from "../state/notificationsStore";
 import { useXynConsole } from "../state/xynConsoleStore";
 import { getAppDraftViewDescriptor } from "../drafts/appDraftView";
 import { deriveBuildToastEventKey } from "../drafts/buildToastEvents";
+import { extractCapabilityEntry, resolveCapabilityOpenTarget } from "../drafts/capabilityEntry";
 import { resolveDraftActions, type DraftActionId, type DraftPageOverallState, type DraftResolvedAction } from "../drafts/draftActionResolver";
 import { emitCapabilityEvent } from "../events/emitCapabilityEvent";
 
@@ -763,6 +764,16 @@ export default function DraftDetailPage({
     }
     return { appUrl, siblingUiUrl, siblingApiUrl };
   }, [relatedJobs]);
+  const capabilityEntry = useMemo(() => extractCapabilityEntry(relatedJobs), [relatedJobs]);
+  const capabilityOpenTarget = useMemo(
+    () =>
+      resolveCapabilityOpenTarget({
+        workspaceId,
+        capabilityEntry,
+        deploymentUrls,
+      }),
+    [capabilityEntry, deploymentUrls, workspaceId],
+  );
   const installedCapability = useMemo(() => extractInstalledCapability(relatedJobs), [relatedJobs]);
   const siblingInstalledArtifact = useMemo(() => extractSiblingInstalledArtifact(relatedJobs), [relatedJobs]);
   const applicationDefinition = useMemo(() => extractApplicationDefinition(relatedJobs), [relatedJobs]);
@@ -819,7 +830,7 @@ export default function DraftDetailPage({
         currentStep: viewModel.currentStep,
         hasDraft: Boolean(draft),
         hasRelatedJobs: relatedJobs.length > 0,
-        hasDeploymentEnvironment: Boolean(deploymentUrls.siblingUiUrl || deploymentUrls.appUrl),
+        hasDeploymentEnvironment: Boolean(capabilityOpenTarget),
         hasThreadContext: Boolean(composerThreadId),
         hasApplicationWorkspaceRoute: Boolean(applicationId),
         workspaceRoutingConfirmed: viewModel.workspaceRoutingLabel === "Confirmed",
@@ -830,9 +841,8 @@ export default function DraftDetailPage({
     [
       applicationId,
       applicationWorkspaceReason,
+      capabilityOpenTarget,
       composerThreadId,
-      deploymentUrls.appUrl,
-      deploymentUrls.siblingUiUrl,
       draft,
       relatedJobs.length,
       saving,
@@ -874,10 +884,10 @@ export default function DraftDetailPage({
   }, [draftId]);
 
   const openGeneratedEnvironment = useCallback(() => {
-    const target = deploymentUrls.siblingUiUrl || deploymentUrls.appUrl;
+    const target = capabilityOpenTarget;
     if (!target) return;
     window.open(target, "_blank", "noopener,noreferrer");
-  }, [deploymentUrls.appUrl, deploymentUrls.siblingUiUrl]);
+  }, [capabilityOpenTarget]);
 
   const reviewFailureSummary = useCallback(() => {
     setMessage(null);
@@ -1061,8 +1071,8 @@ export default function DraftDetailPage({
       entityType: "run",
       entityId: latestJobId || draftId,
       status: viewModel.overallState === "ready" ? "succeeded" : "failed",
-      href: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl || undefined,
-      ctaLabel: deploymentUrls.siblingUiUrl || deploymentUrls.appUrl ? "Open" : undefined,
+      href: capabilityOpenTarget || undefined,
+      ctaLabel: capabilityOpenTarget ? "Open" : undefined,
       dedupeKey: `app-build:${draftId}:${buildToastEventKey}`,
     });
     announcedBuildToastRef.current = buildToastEventKey;
@@ -1075,8 +1085,7 @@ export default function DraftDetailPage({
     }
   }, [
     buildToastEventKey,
-    deploymentUrls.appUrl,
-    deploymentUrls.siblingUiUrl,
+    capabilityOpenTarget,
     draft?.title,
     draftId,
     latestFailedJob?.logs_text,
