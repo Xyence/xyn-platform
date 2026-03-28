@@ -10788,6 +10788,7 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
 
     try:
         manifest = _load_artifact_manifest(artifact)
+        source_policy_bundle, source_policy_ref = _resolve_source_policy_bundle_for_activation(artifact)
         activation = build_activation_payload(
             workspace_id=str(workspace.id),
             workspace_slug=str(workspace.slug or ""),
@@ -10796,6 +10797,8 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
             artifact_title=str(artifact.title or ""),
             artifact_package_version=str(artifact.package_version or ""),
             manifest=manifest,
+            policy_bundle=source_policy_bundle,
+            policy_artifact_ref=source_policy_ref,
         )
     except (ValueError, ArtifactActivationError) as exc:
         return JsonResponse({"error": str(exc)}, status=400)
@@ -10824,6 +10827,10 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
                     "fqdn": str(getattr(runtime_instance, "fqdn", "") or "").strip(),
                     "status": str(getattr(runtime_instance, "status", "") or "").strip(),
                 },
+                "policy_source": str(activation.get("policy_source") or "reconstructed"),
+                "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+                "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+                "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
             }
         )
 
@@ -10847,6 +10854,10 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
                 },
                 "in_flight": in_flight,
                 "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
+                "policy_source": str(activation.get("policy_source") or "reconstructed"),
+                "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+                "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+                "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
             },
             status=202,
         )
@@ -10870,9 +10881,99 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
             "revision_anchor": activation.get("revision_anchor"),
             "activation": queued,
             "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
+            "policy_source": str(activation.get("policy_source") or "reconstructed"),
+            "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+            "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+            "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
         },
         status=202,
     )
+
+
+def _resolve_source_policy_bundle_for_activation(artifact: Artifact) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    if not artifact or not artifact.workspace_id:
+        return {}, {}
+    app_slug = str(_artifact_slug(artifact) or "").strip()
+    preferred_policy_slug = _policy_slug_for_app_slug(app_slug) if app_slug else ""
+    app_memberships = list(
+        ApplicationArtifactMembership.objects.filter(artifact=artifact)
+        .select_related("application")
+        .order_by("sort_order", "created_at")
+    )
+    if not app_memberships:
+        return {}, {}
+    application_ids = [row.application_id for row in app_memberships if row.application_id]
+    if not application_ids:
+        return {}, {}
+    candidate_memberships = list(
+        ApplicationArtifactMembership.objects.filter(
+            application_id__in=application_ids,
+            workspace_id=artifact.workspace_id,
+            artifact__type__slug="policy_bundle",
+        )
+        .exclude(artifact_id=artifact.id)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    if not candidate_memberships:
+        return {}, {}
+    if preferred_policy_slug:
+        matching_slug = [
+            row for row in candidate_memberships if str(_artifact_slug(row.artifact) or "").strip() == preferred_policy_slug
+        ]
+        if matching_slug:
+            candidate_memberships = matching_slug + [row for row in candidate_memberships if row not in matching_slug]
+    for member in candidate_memberships:
+        policy_artifact = member.artifact
+        if not policy_artifact:
+            continue
+        bundle = _policy_bundle_from_artifact(policy_artifact)
+        if not isinstance(bundle, dict) or str(bundle.get("schema_version") or "").strip() != "xyn.policy_bundle.v0":
+            continue
+        return (
+            copy.deepcopy(bundle),
+            {
+                "artifact_id": str(policy_artifact.id),
+                "artifact_slug": str(_artifact_slug(policy_artifact) or ""),
+                "artifact_version": str(policy_artifact.package_version or ""),
+            },
+        )
+    return {}, {}
+
+
+@csrf_exempt
+@login_required
+def application_activate(request: HttpRequest, application_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    workspace = application.workspace
+    if not _workspace_membership(identity, str(workspace.id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _workspace_has_role(identity, str(workspace.id), "contributor"):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    app_memberships = [
+        row
+        for row in memberships
+        if row.artifact
+        and (
+            str(getattr(row.artifact.type, "slug", "") or "").strip() == "application"
+            or str(_artifact_slug(row.artifact) or "").strip().startswith("app.")
+        )
+    ]
+    if not app_memberships:
+        return JsonResponse({"error": "solution has no application artifact membership"}, status=400)
+    preferred_roles = ("primary_ui", "primary_api")
+    selected = next((row for role in preferred_roles for row in app_memberships if row.role == role), app_memberships[0])
+    return artifact_activate(request, str(selected.artifact_id))
 
 
 @csrf_exempt

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from typing import Any, Callable, Dict
 
 
@@ -20,6 +22,49 @@ def _normalize_unique_strings(values: list[Any]) -> list[str]:
     return result
 
 
+def _app_spec_signature(app_spec: Dict[str, Any]) -> str:
+    signature_source: Dict[str, Any] = {}
+    for key in (
+        "app_slug",
+        "entities",
+        "entity_contracts",
+        "reports",
+        "requested_visuals",
+        "requires_primitives",
+        "workflow_definitions",
+        "platform_primitive_composition",
+        "ui_surfaces",
+        "domain_model",
+        "structured_plan",
+    ):
+        if key in app_spec:
+            signature_source[key] = copy.deepcopy(app_spec.get(key))
+    return hashlib.sha256(
+        json.dumps(signature_source, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _policy_compatibility(
+    *,
+    app_spec: Dict[str, Any],
+    policy_bundle: Dict[str, Any] | None,
+) -> tuple[str, str]:
+    if not isinstance(policy_bundle, dict) or not policy_bundle:
+        return "unknown", "policy_artifact_unavailable"
+    derivation = policy_bundle.get("derivation") if isinstance(policy_bundle.get("derivation"), dict) else {}
+    expected_signature = str(derivation.get("app_spec_signature") or "").strip()
+    if not expected_signature:
+        return "unknown", "missing_derivation_signature"
+    app_slug = str(app_spec.get("app_slug") or "").strip()
+    policy_app_slug = str(policy_bundle.get("app_slug") or derivation.get("app_slug") or "").strip()
+    if app_slug and policy_app_slug and app_slug != policy_app_slug:
+        return "mismatch", "app_slug_mismatch"
+    actual_signature = _app_spec_signature(app_spec)
+    if actual_signature != expected_signature:
+        return "mismatch", "app_spec_signature_mismatch"
+    return "match", ""
+
+
 def build_activation_payload(
     *,
     workspace_id: str,
@@ -30,6 +75,8 @@ def build_activation_payload(
     artifact_package_version: str,
     manifest: Dict[str, Any],
     runtime_instance_id: str = "",
+    policy_bundle: Dict[str, Any] | None = None,
+    policy_artifact_ref: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     content = manifest.get("content") if isinstance(manifest.get("content"), dict) else {}
     app_spec = content.get("app_spec") if isinstance(content.get("app_spec"), dict) else {}
@@ -85,27 +132,48 @@ def build_activation_payload(
         "app_spec_artifact_id": str(runtime_config.get("app_spec_artifact_id") or ""),
     }
 
+    source_policy_bundle = policy_bundle if isinstance(policy_bundle, dict) else {}
+    source_policy_artifact_ref = policy_artifact_ref if isinstance(policy_artifact_ref, dict) else {}
+    policy_source = "artifact" if source_policy_bundle else "reconstructed"
+    policy_compatibility, policy_compatibility_reason = _policy_compatibility(
+        app_spec=app_spec,
+        policy_bundle=source_policy_bundle if source_policy_bundle else None,
+    )
+
+    content_json: Dict[str, Any] = {
+        "raw_prompt": f"Activate existing generated app artifact {artifact_slug} in sibling runtime for validation.",
+        "initial_intent": {
+            "app_kind": "custom_app",
+            "requested_entities": entities,
+            "phase_1_scope": phase_1_scope,
+            "requested_visuals": visuals,
+            "workspace_scoped": True,
+            "evolution_mode": "modify_installed_generated_app",
+        },
+        "revision_anchor": revision_anchor,
+        "current_app_summary": current_app_summary,
+        "current_app_spec": copy.deepcopy(app_spec),
+        "latest_appspec_ref": latest_appspec_ref,
+    }
+    if source_policy_bundle:
+        content_json["policy_bundle_override"] = copy.deepcopy(source_policy_bundle)
+    if source_policy_artifact_ref:
+        content_json["policy_artifact_ref"] = copy.deepcopy(source_policy_artifact_ref)
+    content_json["policy_source"] = policy_source
+    content_json["policy_compatibility"] = policy_compatibility
+    content_json["policy_compatibility_reason"] = policy_compatibility_reason
+
     return {
         "app_slug": app_slug,
+        "policy_source": policy_source,
+        "policy_compatibility": policy_compatibility,
+        "policy_compatibility_reason": policy_compatibility_reason,
+        "policy_artifact_ref": copy.deepcopy(source_policy_artifact_ref) if source_policy_artifact_ref else {},
         "draft_payload": {
             "type": "app_intent",
             "title": str(artifact_title or current_app_summary["title"]).strip() or current_app_summary["title"],
             "status": "ready",
-            "content_json": {
-                "raw_prompt": f"Activate existing generated app artifact {artifact_slug} in sibling runtime for validation.",
-                "initial_intent": {
-                    "app_kind": "custom_app",
-                    "requested_entities": entities,
-                    "phase_1_scope": phase_1_scope,
-                    "requested_visuals": visuals,
-                    "workspace_scoped": True,
-                    "evolution_mode": "modify_installed_generated_app",
-                },
-                "revision_anchor": revision_anchor,
-                "current_app_summary": current_app_summary,
-                "current_app_spec": copy.deepcopy(app_spec),
-                "latest_appspec_ref": latest_appspec_ref,
-            },
+            "content_json": content_json,
         },
         "revision_anchor": revision_anchor,
     }

@@ -1,5 +1,6 @@
 from xyn_orchestrator.xyn_api import (
     application_factories_collection,
+    application_activate,
     application_plans_collection,
     application_plan_detail,
     application_plan_apply,
@@ -21,6 +22,7 @@ from xyn_orchestrator.xyn_api import (
 
 __all__ = [
     "application_factories_collection",
+    "application_activate",
     "application_plans_collection",
     "application_plan_detail",
     "application_plan_apply",

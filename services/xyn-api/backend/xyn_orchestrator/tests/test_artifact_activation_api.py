@@ -8,6 +8,8 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, TestCase
 
 from xyn_orchestrator.models import (
+    Application,
+    ApplicationArtifactMembership,
     Artifact,
     ArtifactType,
     UserIdentity,
@@ -15,7 +17,7 @@ from xyn_orchestrator.models import (
     WorkspaceAppInstance,
     WorkspaceMembership,
 )
-from xyn_orchestrator.xyn_api import artifact_activate
+from xyn_orchestrator.xyn_api import application_activate, artifact_activate
 
 
 def _mock_json_response(status_code: int, payload: dict) -> mock.Mock:
@@ -71,10 +73,67 @@ class ArtifactActivationApiTests(TestCase):
                 }
             },
         )
+        self.policy_type, _ = ArtifactType.objects.get_or_create(slug="policy_bundle", defaults={"name": "Policy Bundle"})
+        self.policy_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=self.policy_type,
+            title="Real Estate Deal Finder Policy Bundle",
+            slug="policy.real-estate-deal-finder",
+            package_version="0.0.1-dev",
+        )
+        self.application = Application.objects.create(
+            workspace=self.workspace,
+            name="Real Estate Deal Finder",
+            source_factory_key="manual",
+            requested_by=self.identity,
+            status="active",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            artifact=self.artifact,
+            role="primary_ui",
+            sort_order=0,
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            artifact=self.policy_artifact,
+            role="supporting",
+            sort_order=10,
+        )
+        from xyn_orchestrator.models import ArtifactRevision  # local import to avoid test import churn
+
+        ArtifactRevision.objects.create(
+            artifact=self.policy_artifact,
+            revision_number=1,
+            content_json={
+                "content": {
+                    "policy_bundle": {
+                        "schema_version": "xyn.policy_bundle.v0",
+                        "bundle_id": "policy.real-estate-deal-finder",
+                        "app_slug": "real-estate-deal-finder",
+                        "workspace_id": str(self.workspace.id),
+                        "title": "Deal Finder Policy Bundle",
+                        "policies": {"validation_policies": [{"id": "deal-001", "family": "validation_policies"}]},
+                    }
+                }
+            },
+            created_by=None,
+        )
 
     def _request(self, *, method: str = "post") -> object:
         request = getattr(self.factory, method.lower())(
             f"/xyn/api/artifacts/{self.artifact.id}/activate",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        request.user = self.user
+        return request
+
+    def _application_request(self, *, method: str = "post") -> object:
+        request = getattr(self.factory, method.lower())(
+            f"/xyn/api/applications/{self.application.id}/activate",
             data=json.dumps({}),
             content_type="application/json",
         )
@@ -116,6 +175,41 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(revision_anchor.get("artifact_slug"), "app.real-estate-deal-finder")
         self.assertEqual(revision_anchor.get("workspace_id"), str(self.workspace.id))
         self.assertGreaterEqual(seed_mock.call_count, 3)
+
+    def test_activation_includes_source_policy_bundle_when_membership_exists(self) -> None:
+        captured_draft_payload = {}
+
+        def _seed_capture(*, method: str, path: str, **kwargs):
+            nonlocal captured_draft_payload
+            if method.upper() == "GET" and path == "/api/v1/jobs":
+                return _mock_json_response(200, [])
+            if method.upper() == "POST" and path == "/api/v1/drafts":
+                captured_draft_payload = kwargs.get("payload") or {}
+                return _mock_json_response(201, {"id": "draft-123"})
+            if method.upper() == "POST" and path == "/api/v1/drafts/draft-123/submit":
+                return _mock_json_response(200, {"job_id": "job-123"})
+            raise AssertionError(f"Unexpected seed call method={method} path={path} kwargs={kwargs}")
+
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch("xyn_orchestrator.xyn_api._seed_api_request", side_effect=_seed_capture):
+                response = artifact_activate(self._request(method="post"), str(self.artifact.id))
+
+        self.assertEqual(response.status_code, 202)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("status"), "queued")
+        self.assertEqual(payload.get("policy_source"), "artifact")
+        self.assertEqual(payload.get("policy_compatibility"), "unknown")
+        self.assertEqual(payload.get("policy_compatibility_reason"), "missing_derivation_signature")
+        self.assertEqual((payload.get("policy_artifact_ref") or {}).get("artifact_slug"), "policy.real-estate-deal-finder")
+        content = (captured_draft_payload.get("content_json") if isinstance(captured_draft_payload, dict) else {}) or {}
+        self.assertEqual(content.get("policy_source"), "artifact")
+        self.assertEqual(content.get("policy_compatibility"), "unknown")
+        self.assertEqual(content.get("policy_compatibility_reason"), "missing_derivation_signature")
+        self.assertEqual((content.get("policy_artifact_ref") or {}).get("artifact_slug"), "policy.real-estate-deal-finder")
+        self.assertEqual(
+            str(((content.get("policy_bundle_override") or {}).get("schema_version") or "")),
+            "xyn.policy_bundle.v0",
+        )
 
     def test_activation_reuses_persisted_runtime_target_and_skips_seed_queue(self) -> None:
         WorkspaceAppInstance.objects.create(
@@ -345,3 +439,14 @@ class ArtifactActivationApiTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(payload.get("status"), "queued")
         self.assertEqual((payload.get("activation") or {}).get("job_id"), "job-new")
+
+    def test_solution_activation_delegates_to_primary_app_artifact_activation(self) -> None:
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._seed_api_request",
+                side_effect=self._seed_side_effect(jobs=[]),
+            ):
+                response = application_activate(self._application_request(method="post"), str(self.application.id))
+        self.assertEqual(response.status_code, 202)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("artifact_slug"), "app.real-estate-deal-finder")

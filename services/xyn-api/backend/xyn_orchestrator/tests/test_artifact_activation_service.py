@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest import TestCase, mock
 
 from xyn_orchestrator.artifact_activation import (
+    _app_spec_signature,
     ArtifactActivationError,
     build_activation_payload,
     find_inflight_activation,
@@ -42,6 +43,146 @@ class ArtifactActivationServiceTests(TestCase):
         self.assertEqual(revision_anchor["workspace_id"], "ws-1")
         self.assertEqual(revision_anchor["artifact_slug"], "app.real-estate-deal-finder")
         self.assertEqual(revision_anchor["app_slug"], "real-estate-deal-finder")
+        self.assertEqual(payload.get("policy_source"), "reconstructed")
+
+    def test_build_activation_payload_includes_policy_override_when_provided(self) -> None:
+        manifest = {
+            "artifact": {"id": "app.real-estate-deal-finder"},
+            "content": {
+                "app_spec": {
+                    "app_slug": "real-estate-deal-finder",
+                    "title": "Real Estate Deal Finder",
+                    "entities": ["deals"],
+                    "requested_visuals": [],
+                },
+                "runtime_config": {},
+            },
+        }
+        policy_bundle = {
+            "schema_version": "xyn.policy_bundle.v0",
+            "bundle_id": "policy.real-estate-deal-finder",
+            "app_slug": "real-estate-deal-finder",
+            "workspace_id": "ws-1",
+            "title": "Deal Finder Policy Bundle",
+            "policies": {},
+        }
+        payload = build_activation_payload(
+            workspace_id="ws-1",
+            workspace_slug="development",
+            artifact_id="art-1",
+            artifact_slug="app.real-estate-deal-finder",
+            artifact_title="Real Estate Deal Finder",
+            artifact_package_version="0.0.1-dev",
+            manifest=manifest,
+            policy_bundle=policy_bundle,
+            policy_artifact_ref={"artifact_id": "policy-art", "artifact_slug": "policy.real-estate-deal-finder"},
+        )
+        content = payload.get("draft_payload", {}).get("content_json", {})
+        self.assertEqual(payload.get("policy_source"), "artifact")
+        self.assertEqual(content.get("policy_source"), "artifact")
+        self.assertEqual(content.get("policy_bundle_override"), policy_bundle)
+        self.assertEqual(content.get("policy_artifact_ref", {}).get("artifact_slug"), "policy.real-estate-deal-finder")
+
+    def test_policy_compatibility_match_when_derivation_signature_matches(self) -> None:
+        app_spec = {
+            "app_slug": "real-estate-deal-finder",
+            "title": "Real Estate Deal Finder",
+            "entities": ["deals"],
+            "entity_contracts": [],
+            "requested_visuals": [],
+        }
+        manifest = {
+            "artifact": {"id": "app.real-estate-deal-finder"},
+            "content": {"app_spec": app_spec, "runtime_config": {}},
+        }
+        policy_bundle = {
+            "schema_version": "xyn.policy_bundle.v0",
+            "bundle_id": "policy.real-estate-deal-finder",
+            "app_slug": "real-estate-deal-finder",
+            "workspace_id": "ws-1",
+            "title": "Deal Finder Policy Bundle",
+            "policies": {},
+            "derivation": {"app_spec_signature": _app_spec_signature(app_spec)},
+        }
+        payload = build_activation_payload(
+            workspace_id="ws-1",
+            workspace_slug="development",
+            artifact_id="art-1",
+            artifact_slug="app.real-estate-deal-finder",
+            artifact_title="Real Estate Deal Finder",
+            artifact_package_version="0.0.1-dev",
+            manifest=manifest,
+            policy_bundle=policy_bundle,
+        )
+        self.assertEqual(payload.get("policy_compatibility"), "match")
+        self.assertEqual(payload.get("policy_compatibility_reason"), "")
+
+    def test_policy_compatibility_mismatch_when_derivation_signature_differs(self) -> None:
+        app_spec = {
+            "app_slug": "real-estate-deal-finder",
+            "title": "Real Estate Deal Finder",
+            "entities": ["deals", "properties"],
+            "entity_contracts": [],
+            "requested_visuals": [],
+        }
+        manifest = {
+            "artifact": {"id": "app.real-estate-deal-finder"},
+            "content": {"app_spec": app_spec, "runtime_config": {}},
+        }
+        policy_bundle = {
+            "schema_version": "xyn.policy_bundle.v0",
+            "bundle_id": "policy.real-estate-deal-finder",
+            "app_slug": "real-estate-deal-finder",
+            "workspace_id": "ws-1",
+            "title": "Deal Finder Policy Bundle",
+            "policies": {},
+            "derivation": {"app_spec_signature": "deadbeef"},
+        }
+        payload = build_activation_payload(
+            workspace_id="ws-1",
+            workspace_slug="development",
+            artifact_id="art-1",
+            artifact_slug="app.real-estate-deal-finder",
+            artifact_title="Real Estate Deal Finder",
+            artifact_package_version="0.0.1-dev",
+            manifest=manifest,
+            policy_bundle=policy_bundle,
+        )
+        self.assertEqual(payload.get("policy_compatibility"), "mismatch")
+        self.assertEqual(payload.get("policy_compatibility_reason"), "app_spec_signature_mismatch")
+
+    def test_policy_compatibility_unknown_when_derivation_missing(self) -> None:
+        app_spec = {
+            "app_slug": "real-estate-deal-finder",
+            "title": "Real Estate Deal Finder",
+            "entities": ["deals"],
+            "entity_contracts": [],
+            "requested_visuals": [],
+        }
+        manifest = {
+            "artifact": {"id": "app.real-estate-deal-finder"},
+            "content": {"app_spec": app_spec, "runtime_config": {}},
+        }
+        policy_bundle = {
+            "schema_version": "xyn.policy_bundle.v0",
+            "bundle_id": "policy.real-estate-deal-finder",
+            "app_slug": "real-estate-deal-finder",
+            "workspace_id": "ws-1",
+            "title": "Deal Finder Policy Bundle",
+            "policies": {},
+        }
+        payload = build_activation_payload(
+            workspace_id="ws-1",
+            workspace_slug="development",
+            artifact_id="art-1",
+            artifact_slug="app.real-estate-deal-finder",
+            artifact_title="Real Estate Deal Finder",
+            artifact_package_version="0.0.1-dev",
+            manifest=manifest,
+            policy_bundle=policy_bundle,
+        )
+        self.assertEqual(payload.get("policy_compatibility"), "unknown")
+        self.assertEqual(payload.get("policy_compatibility_reason"), "missing_derivation_signature")
 
     def test_build_activation_payload_rejects_missing_app_spec(self) -> None:
         with self.assertRaises(ArtifactActivationError):
