@@ -20,6 +20,7 @@ from xyn_orchestrator.models import (
     Application,
     ApplicationArtifactMembership,
     ApplicationPlan,
+    ContextPack,
     SolutionChangeSession,
     SolutionPlanningTurn,
     SolutionPlanningCheckpoint,
@@ -37,6 +38,7 @@ from xyn_orchestrator.models import (
     WorkspaceAppInstance,
     WorkspaceMembership,
 )
+import xyn_orchestrator.xyn_api as xyn_api
 from xyn_orchestrator.xyn_api import (
     application_artifact_membership_detail,
     application_artifact_memberships_collection,
@@ -2775,6 +2777,184 @@ class GoalPlanningTests(TestCase):
             shared_contracts = " ".join(str(item) for item in (plan.get("shared_contracts") or [])).lower()
             self.assertIn("resolved ui default: use dark theme", shared_contracts)
             self.assertNotIn("resolved ui default: use light theme", shared_contracts)
+
+    def test_deterministic_theme_phrase_does_not_invoke_fallback_unless_forced(self):
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=Application.objects.create(
+                workspace=self.workspace,
+                name="KB",
+                summary="KB",
+                source_factory_key="generic_application_mvp",
+                requested_by=self.identity,
+                status="active",
+                plan_fingerprint=f"app-{uuid.uuid4().hex}",
+                request_objective="Build KB",
+            ),
+            title="Theme update",
+            request_text="Adjust theme",
+            created_by=self.identity,
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._invoke_planner_refinement_fallback") as fallback_mock:
+            result = xyn_api._interpret_solution_refinement(
+                session=session,
+                reply_text="Use light theme as the default",
+                force_planner_fallback=False,
+            )
+        fallback_mock.assert_not_called()
+        self.assertEqual(result.get("mode"), "deterministic")
+        self.assertEqual(result.get("result_type"), "answer_resolution")
+        self.assertEqual(((result.get("normalized_updates") or {}).get("ui_preferences") or {}).get("theme"), "light")
+
+    def test_fallback_applies_context_pack_content_to_model_request(self):
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=Application.objects.create(
+                workspace=self.workspace,
+                name="KB",
+                summary="KB",
+                source_factory_key="generic_application_mvp",
+                requested_by=self.identity,
+                status="active",
+                plan_fingerprint=f"app-{uuid.uuid4().hex}",
+                request_objective="Build KB",
+            ),
+            title="Theme update",
+            request_text="Adjust theme",
+            created_by=self.identity,
+        )
+        pack = ContextPack.objects.create(
+            name=f"planner-pack-{uuid.uuid4().hex[:6]}",
+            purpose="planner",
+            scope="global",
+            namespace="",
+            project_key="",
+            version="1.0.0",
+            is_active=True,
+            is_default=True,
+            content_markdown="CONTEXT PACK STRICT JSON CONTRACT",
+            applies_to_json={},
+        )
+        captured = {}
+
+        def _fake_invoke(*, resolved_config, messages):
+            captured["system_prompt"] = resolved_config.get("system_prompt")
+            captured["messages"] = messages
+            return {
+                "content": json.dumps(
+                    {
+                        "mode": "agent_fallback",
+                        "result_type": "plan_revision",
+                        "confidence": 0.91,
+                        "normalized_updates": {"ui_preferences": {"theme": "light"}},
+                        "planner_message": "",
+                        "warnings": [],
+                    }
+                )
+            }
+
+        with mock.patch(
+            "xyn_orchestrator.xyn_api.resolve_ai_config",
+            return_value={
+                "provider": "openai",
+                "model_name": "gpt-5-mini",
+                "api_key": "test-key",
+                "system_prompt": "BASE SYSTEM",
+                "purpose_default_context_pack_refs_json": [{"id": str(pack.id)}],
+                "agent_context_pack_refs_json": [],
+            },
+        ):
+            with mock.patch("xyn_orchestrator.xyn_api.invoke_model", side_effect=_fake_invoke):
+                result = xyn_api._invoke_planner_refinement_fallback(
+                    session=session,
+                    reply_text="Use light theme as the default",
+                    deterministic={"normalized_updates": {}},
+                    force_planner_fallback=True,
+                )
+        self.assertEqual(result.get("result_type"), "plan_revision")
+        self.assertIn("CONTEXT PACK STRICT JSON CONTRACT", str(captured.get("system_prompt") or ""))
+
+    def test_fallback_noncompliant_output_rejected_with_precise_reason(self):
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=Application.objects.create(
+                workspace=self.workspace,
+                name="KB",
+                summary="KB",
+                source_factory_key="generic_application_mvp",
+                requested_by=self.identity,
+                status="active",
+                plan_fingerprint=f"app-{uuid.uuid4().hex}",
+                request_objective="Build KB",
+            ),
+            title="Theme update",
+            request_text="Adjust theme",
+            created_by=self.identity,
+        )
+        with mock.patch(
+            "xyn_orchestrator.xyn_api.resolve_ai_config",
+            return_value={"provider": "openai", "model_name": "gpt-5-mini", "api_key": "test-key"},
+        ):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api.invoke_model",
+                return_value={"content": '{"mode":"agent_fallback","result_type":"plan_revision","confidence":0.8,"normalized_updates":{},"planner_message":"","warnings":[],"extra":"x"}'},
+            ):
+                result = xyn_api._invoke_planner_refinement_fallback(
+                    session=session,
+                    reply_text="Use light theme as the default",
+                    deterministic={"normalized_updates": {}},
+                    force_planner_fallback=True,
+                )
+        self.assertEqual(result.get("result_type"), "cannot_interpret")
+        self.assertTrue(
+            any("unknown top-level keys" in str(item) for item in (result.get("warnings") or [])),
+            msg=str(result.get("warnings")),
+        )
+
+    def test_forced_fallback_theme_phrase_yields_valid_light_theme_update(self):
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=Application.objects.create(
+                workspace=self.workspace,
+                name="KB",
+                summary="KB",
+                source_factory_key="generic_application_mvp",
+                requested_by=self.identity,
+                status="active",
+                plan_fingerprint=f"app-{uuid.uuid4().hex}",
+                request_objective="Build KB",
+            ),
+            title="Theme update",
+            request_text="Adjust theme",
+            created_by=self.identity,
+        )
+        with mock.patch(
+            "xyn_orchestrator.xyn_api.resolve_ai_config",
+            return_value={"provider": "openai", "model_name": "gpt-5-mini", "api_key": "test-key"},
+        ):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api.invoke_model",
+                return_value={
+                    "content": json.dumps(
+                        {
+                            "mode": "agent_fallback",
+                            "result_type": "plan_revision",
+                            "confidence": 0.88,
+                            "normalized_updates": {"ui_preferences": {"theme": "light"}},
+                            "planner_message": "Applied.",
+                            "warnings": [],
+                        }
+                    )
+                },
+            ):
+                result = xyn_api._interpret_solution_refinement(
+                    session=session,
+                    reply_text="Use light theme as the default",
+                    force_planner_fallback=True,
+                )
+        self.assertEqual(result.get("mode"), "agent_fallback")
+        self.assertEqual(result.get("result_type"), "plan_revision")
+        self.assertEqual(((result.get("normalized_updates") or {}).get("ui_preferences") or {}).get("theme"), "light")
 
     def test_solution_change_session_update_and_plan_generation(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
