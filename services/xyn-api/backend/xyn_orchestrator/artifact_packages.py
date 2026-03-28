@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from django.db import connection, transaction
 from django.utils import timezone as dj_timezone
+from django.utils.dateparse import parse_datetime
 
 from .models import (
     Artifact,
@@ -68,6 +69,23 @@ class ArtifactPackageInstallError(ArtifactPackageError):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        token = str(value or "").strip()
+        if not token:
+            return None
+        parsed = parse_datetime(token)
+        if parsed is None:
+            return None
+    if dj_timezone.is_naive(parsed):
+        parsed = dj_timezone.make_aware(parsed, timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -711,6 +729,23 @@ def install_package(
                     content_obj = payload_json
 
                 type_row = _ensure_artifact_type(item_type)
+                source_created_at = (
+                    _normalize_datetime(item.get("source_created_at"))
+                    or _normalize_datetime(
+                        (
+                            artifact_json.get("artifact")
+                            if isinstance(artifact_json.get("artifact"), dict)
+                            else {}
+                        ).get("source_created_at")
+                    )
+                    or _normalize_datetime(
+                        (
+                            artifact_json.get("metadata")
+                            if isinstance(artifact_json.get("metadata"), dict)
+                            else {}
+                        ).get("source_created_at")
+                    )
+                )
                 existing = Artifact.objects.filter(type=type_row, slug=item_slug).first()
                 if existing and str(existing.package_version or "") == item_version and str(existing.content_hash or "") == item_hash:
                     operations.append(
@@ -766,6 +801,8 @@ def install_package(
                     existing.content_hash = item_hash
                     existing.artifact_state = "canonical"
                     existing.scope_json = imported_scope
+                    if source_created_at is not None:
+                        existing.source_created_at = source_created_at
                     existing.save(
                         update_fields=[
                             "title",
@@ -779,6 +816,7 @@ def install_package(
                             "content_hash",
                             "artifact_state",
                             "scope_json",
+                            "source_created_at",
                             "updated_at",
                         ]
                     )
@@ -810,6 +848,7 @@ def install_package(
                         source_ref_id=package_source_ref,
                         visibility="private",
                         scope_json=imported_scope,
+                        source_created_at=source_created_at,
                     )
 
                 next_rev = (
@@ -985,6 +1024,13 @@ def export_artifact_package(*, root_artifact: Artifact, package_name: str, packa
             "slug": artifact.slug,
             "version": artifact_version,
             "artifact_id": str(artifact.id),
+            "source_created_at": _now_iso()
+            if artifact.source_created_at is None and artifact.created_at is None
+            else (
+                (artifact.source_created_at or artifact.created_at).astimezone(timezone.utc).isoformat()
+                if (artifact.source_created_at or artifact.created_at)
+                else None
+            ),
             "artifact_hash": str(artifact.content_hash or ""),
             "dependencies": artifact.dependencies if isinstance(artifact.dependencies, list) else [],
             "bindings": artifact.bindings if isinstance(artifact.bindings, list) else [],
@@ -1000,6 +1046,7 @@ def export_artifact_package(*, root_artifact: Artifact, package_name: str, packa
                 "slug": entry["slug"],
                 "version": entry["version"],
                 "artifact_id": entry["artifact_id"],
+                "source_created_at": entry.get("source_created_at"),
                 "title": entry["title"],
                 "description": entry["description"],
                 "schema_version": artifact.schema_version,
@@ -1009,6 +1056,7 @@ def export_artifact_package(*, root_artifact: Artifact, package_name: str, packa
             "content": content.get("content") if isinstance(content.get("content"), dict) else content,
             "metadata": {
                 "exported_at": _now_iso(),
+                "source_created_at": entry.get("source_created_at"),
                 "content_ref": artifact.content_ref if isinstance(artifact.content_ref, dict) else {},
             },
         }

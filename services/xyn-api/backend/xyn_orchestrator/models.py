@@ -1023,6 +1023,9 @@ class Artifact(models.Model):
         on_delete=models.SET_NULL,
         related_name="+",
     )
+    # Optional source/origin timestamp when known (for example exported/imported
+    # artifacts). `created_at` remains the local row creation timestamp.
+    source_created_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

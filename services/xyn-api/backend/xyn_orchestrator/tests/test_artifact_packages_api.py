@@ -2,10 +2,12 @@ import io
 import json
 import zipfile
 import uuid
+import datetime as dt
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from django.utils import timezone
 
 from xyn_orchestrator import xyn_api
 from xyn_orchestrator.models import (
@@ -16,6 +18,7 @@ from xyn_orchestrator.models import (
     ArtifactBindingValue,
     ArtifactInstallReceipt,
     ArtifactPackage,
+    ArtifactRevision,
     PlatformConfigDocument,
     ArtifactRuntimeRole,
     ArtifactSurface,
@@ -841,6 +844,53 @@ class ArtifactPackagesApiTests(TestCase):
         nav_labels = [str(item.get("nav_label") or "") for item in nav_rows if isinstance(item, dict)]
         self.assertIn("Campaigns", nav_labels)
         self.assertIn("Create Campaign", nav_labels)
+
+    def test_export_import_preserves_source_created_at_when_known(self):
+        self._grant_debug_view()
+        artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        source_created_at = timezone.now() - timezone.timedelta(days=14)
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Portable Source Created App",
+            slug=f"app.source-created-{uuid.uuid4().hex[:8]}",
+            status="active",
+            visibility="private",
+            package_version="0.2.0",
+            source_created_at=source_created_at,
+        )
+
+        ArtifactRevision.objects.create(
+            artifact=artifact,
+            revision_number=1,
+            content_json={"content": {"artifact": {"id": artifact.slug}}},
+            created_by=None,
+        )
+
+        export_response = self.client.post(
+            f"/xyn/api/artifacts/{artifact.id}/export-package",
+            data=json.dumps({"package_name": f"{artifact.slug}-bundle", "package_version": "0.2.0"}),
+            content_type="application/json",
+        )
+        self.assertEqual(export_response.status_code, 200)
+
+        imported = self._import_package(export_response.content)
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+        package_id = imported.json()["package"]["id"]
+
+        install = self.client.post(
+            f"/xyn/api/artifacts/packages/{package_id}/install",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(install.status_code, 200, install.content.decode())
+
+        installed = Artifact.objects.get(type=artifact_type, slug=artifact.slug)
+        self.assertIsNotNone(installed.source_created_at)
+        self.assertEqual(
+            installed.source_created_at.astimezone(dt.timezone.utc).isoformat(),
+            source_created_at.astimezone(dt.timezone.utc).isoformat(),
+        )
 
     def test_surface_resolve_endpoint_matches_declared_route(self):
         self._grant_debug_view()

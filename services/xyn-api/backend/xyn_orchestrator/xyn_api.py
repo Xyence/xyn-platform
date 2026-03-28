@@ -9482,6 +9482,7 @@ def _serialize_unified_artifact(artifact: Artifact, source_record: Any = None) -
         "parent_artifact_id": str(artifact.parent_artifact_id) if artifact.parent_artifact_id else None,
         "lineage_root_id": str(artifact.lineage_root_id) if artifact.lineage_root_id else None,
         "tags": artifact.tags_json or [],
+        "source_created_at": artifact.source_created_at,
         "created_at": artifact.created_at,
         "updated_at": artifact.updated_at,
     }
@@ -9681,6 +9682,8 @@ def _artifact_table_row(artifact: Artifact, *, workspace_id: Optional[str], inst
     manage = surfaces.get("manage") if isinstance(surfaces.get("manage"), list) else []
     docs = surfaces.get("docs") if isinstance(surfaces.get("docs"), list) else []
     roles = manifest_summary.get("roles") if isinstance(manifest_summary.get("roles"), list) else []
+    source_created_at = artifact.source_created_at if isinstance(artifact.source_created_at, dt.datetime) else None
+    created_value = source_created_at or artifact.created_at
     return {
         "slug": slug,
         "namespace": _artifact_namespace_from_slug(slug),
@@ -9692,7 +9695,7 @@ def _artifact_table_row(artifact: Artifact, *, workspace_id: Optional[str], inst
         "surfaces_count": len(nav) + len(manage) + len(docs),
         "installed": str(artifact.id) in installed_ids,
         "updated_at": _iso_utc(artifact.updated_at),
-        "created_at": _iso_utc(artifact.created_at),
+        "created_at": _iso_utc(created_value),
     }
 
 
@@ -29272,8 +29275,46 @@ def _invoke_planner_refinement_fallback(
     session: SolutionChangeSession,
     reply_text: str,
     deterministic: Dict[str, Any],
+    force_planner_fallback: bool = False,
 ) -> Dict[str, Any]:
     resolved = resolve_ai_config(purpose_slug="planning")
+    fallback_diagnostics: Dict[str, Any] = {
+        "forced": bool(force_planner_fallback),
+        "context_pack_applied": False,
+        "context_pack_ref_count": 0,
+        "context_pack_hash": "",
+        "raw_response_present": False,
+        "raw_response_length": 0,
+        "json_extracted": False,
+        "validation_errors": [],
+    }
+    raw_context_refs: List[Any] = []
+    for key in ("purpose_default_context_pack_refs_json", "agent_context_pack_refs_json"):
+        refs = resolved.get(key)
+        if isinstance(refs, list):
+            raw_context_refs.extend(refs)
+    resolved_packs: List[ContextPack] = []
+    seen_pack_ids: Set[str] = set()
+    for ref in raw_context_refs:
+        pack = _resolve_context_pack_ref(ref)
+        if not pack:
+            continue
+        pack_id = str(pack.id)
+        if pack_id in seen_pack_ids:
+            continue
+        seen_pack_ids.add(pack_id)
+        resolved_packs.append(pack)
+    fallback_diagnostics["context_pack_ref_count"] = len(resolved_packs)
+    if resolved_packs:
+        resolved_context = _resolve_context_pack_list(resolved_packs)
+        context_text = str(resolved_context.get("effective_context") or "").strip()
+        fallback_diagnostics["context_pack_hash"] = str(resolved_context.get("hash") or "")
+        if context_text:
+            base_system_prompt = str(resolved.get("system_prompt") or "").strip()
+            resolved["system_prompt"] = (
+                f"{base_system_prompt}\n\n{context_text}".strip() if base_system_prompt else context_text
+            )
+            fallback_diagnostics["context_pack_applied"] = True
     deterministic_updates = deterministic.get("normalized_updates") if isinstance(deterministic.get("normalized_updates"), dict) else {}
     schema_example = {
         "mode": "agent_fallback",
@@ -29293,11 +29334,15 @@ def _invoke_planner_refinement_fallback(
     }
     prompt = (
         "You are a refinement interpreter.\n"
-        "Return ONLY a single top-level JSON object.\n"
+        "Return ONLY one strict JSON object that matches the required envelope.\n"
+        "Do not output markdown.\n"
+        "Do not output backticks.\n"
+        "Do not output prose.\n"
+        "Do not output any text before or after the JSON object.\n"
         "Do not include markdown fences, explanations, or any prose before/after JSON.\n"
         "Unknown keys are forbidden at every level.\n"
         "Top-level keys allowed exactly: mode,result_type,confidence,normalized_updates,planner_message,warnings.\n"
-        "Allowed mode values: deterministic,agent_fallback.\n"
+        "Set mode to agent_fallback.\n"
         "Allowed result_type values: answer_resolution,plan_revision,clarification_request,cannot_interpret.\n"
         "Allowed normalized_updates keys: name,ui_preferences,features_add,constraints_add,resolved_answers,"
         "open_questions_remaining,additional_considerations_add.\n"
@@ -29313,7 +29358,14 @@ def _invoke_planner_refinement_fallback(
         messages=[{"role": "user", "content": prompt}],
     )
     raw_text = str(result.get("content") or "")
+    fallback_diagnostics["raw_response_present"] = bool(raw_text.strip())
+    fallback_diagnostics["raw_response_length"] = len(raw_text)
     json_text = _extract_json_object_text(raw_text)
+    fallback_diagnostics["json_extracted"] = bool(json_text)
+    logger.info(
+        "planning_refinement_fallback diagnostics=%s",
+        json.dumps(fallback_diagnostics, sort_keys=True),
+    )
     if not json_text:
         return _refinement_default_result(
             mode="agent_fallback",
@@ -29340,6 +29392,11 @@ def _invoke_planner_refinement_fallback(
         )
     safe, errors = _validate_hybrid_refinement_envelope(parsed)
     if safe is None:
+        fallback_diagnostics["validation_errors"] = list(errors)
+        logger.warning(
+            "planning_refinement_fallback validation_failed diagnostics=%s",
+            json.dumps(fallback_diagnostics, sort_keys=True),
+        )
         return _refinement_default_result(
             mode="agent_fallback",
             result_type="cannot_interpret",
@@ -29370,6 +29427,7 @@ def _interpret_solution_refinement(
             session=session,
             reply_text=reply_text,
             deterministic=deterministic,
+            force_planner_fallback=force_planner_fallback,
         )
     except Exception as exc:
         if deterministic_type in {"answer_resolution", "plan_revision"} and not force_planner_fallback:

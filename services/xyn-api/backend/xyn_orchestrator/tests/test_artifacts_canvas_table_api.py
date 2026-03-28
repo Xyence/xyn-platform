@@ -1,9 +1,11 @@
 import json
 import uuid
+import datetime as dt
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from xyn_orchestrator.models import Artifact, ArtifactType, Workspace, WorkspaceArtifactBinding
 
@@ -125,3 +127,47 @@ class ArtifactsCanvasTableApiTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].get("slug"), duplicate_slug)
         self.assertEqual(rows[0].get("installed"), True)
+
+    def test_structured_canvas_created_prefers_source_created_at_when_present(self):
+        artifact = self._create_artifact(slug="core.created-source", title="Created Source Module", kind="module")
+        source_created_at = timezone.now() - timezone.timedelta(days=10)
+        Artifact.objects.filter(id=artifact.id).update(
+            source_created_at=source_created_at,
+            created_at=timezone.now(),
+        )
+
+        response = self.client.get(
+            "/xyn/api/artifacts",
+            {
+                "entity": "artifacts",
+                "filters": json.dumps([{"field": "slug", "op": "contains", "value": "core.created-source"}]),
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        rows = ((response.json() or {}).get("dataset") or {}).get("rows") or []
+        self.assertEqual(len(rows), 1)
+        parsed = parse_datetime(str(rows[0].get("created_at") or ""))
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.isoformat(), source_created_at.astimezone(dt.timezone.utc).isoformat())
+
+    def test_structured_canvas_created_falls_back_to_row_created_at_when_source_unknown(self):
+        artifact = self._create_artifact(slug="core.created-fallback", title="Created Fallback Module", kind="module")
+        created_at = timezone.now() - timezone.timedelta(days=2)
+        Artifact.objects.filter(id=artifact.id).update(
+            source_created_at=None,
+            created_at=created_at,
+        )
+
+        response = self.client.get(
+            "/xyn/api/artifacts",
+            {
+                "entity": "artifacts",
+                "filters": json.dumps([{"field": "slug", "op": "contains", "value": "core.created-fallback"}]),
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        rows = ((response.json() or {}).get("dataset") or {}).get("rows") or []
+        self.assertEqual(len(rows), 1)
+        parsed = parse_datetime(str(rows[0].get("created_at") or ""))
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.isoformat(), created_at.astimezone(dt.timezone.utc).isoformat())
