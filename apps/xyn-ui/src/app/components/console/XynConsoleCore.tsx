@@ -610,6 +610,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
 
   const directPanel = resolvePanelCommand(prompt);
   if (directPanel) {
+    let handledDirectPanel = false;
     const dataset =
       directPanel.panelKey === "workspaces"
         ? "workspaces"
@@ -631,6 +632,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
                         ? "ems_registrations_timeseries"
                         : "";
     if (dataset) {
+      handledDirectPanel = true;
       const paramsWithQuery =
         directPanel.params && typeof directPanel.params === "object" && "query" in directPanel.params
           ? (directPanel.params as { query?: Record<string, unknown> })
@@ -656,6 +658,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
       };
     }
     if (directPanel.panelKey === "artifact_detail" && directPanel.params.slug) {
+      handledDirectPanel = true;
       return {
         type: "ui.action",
         action: {
@@ -670,6 +673,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
       };
     }
     if (directPanel.panelKey === "run_detail" && directPanel.params.run_id) {
+      handledDirectPanel = true;
       return {
         type: "ui.action",
         action: {
@@ -682,6 +686,12 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
           },
         },
       };
+    }
+    if (!handledDirectPanel) {
+      // Preserve direct panel intent precedence. If we recognized a direct
+      // panel command but do not map it to a local canvas action here, return
+      // null so submitPrompt can execute the direct panel-open path.
+      return null;
     }
   }
 
