@@ -361,6 +361,13 @@ from .instance_drivers import (
     SshDockerComposeInstanceDriver,
     compute_base_urls,
 )
+from .artifact_activation import (
+    ArtifactActivationError,
+    build_activation_payload,
+    find_inflight_activation,
+    runtime_record_matches_revision_anchor,
+    submit_artifact_activation,
+)
 from .ai_runtime import (
     AiConfigError,
     AiInvokeError,
@@ -10762,6 +10769,114 @@ def artifact_detail(request: HttpRequest, artifact_id: str) -> JsonResponse:
 
 @csrf_exempt
 @login_required
+def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    artifact = get_object_or_404(
+        Artifact.objects.select_related("workspace", "type"),
+        id=artifact_id,
+    )
+    workspace = artifact.workspace
+    if not _workspace_membership(identity, str(workspace.id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _workspace_has_role(identity, str(workspace.id), "contributor"):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    try:
+        manifest = _load_artifact_manifest(artifact)
+        activation = build_activation_payload(
+            workspace_id=str(workspace.id),
+            workspace_slug=str(workspace.slug or ""),
+            artifact_id=str(artifact.id),
+            artifact_slug=str(_artifact_slug(artifact) or ""),
+            artifact_title=str(artifact.title or ""),
+            artifact_package_version=str(artifact.package_version or ""),
+            manifest=manifest,
+        )
+    except (ValueError, ArtifactActivationError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    app_slug = str(activation.get("app_slug") or "").strip()
+    runtime_record = _workspace_runtime_target(workspace, app_slug)
+    can_reuse, reuse_reason = runtime_record_matches_revision_anchor(
+        runtime_record=runtime_record,
+        revision_anchor=activation.get("revision_anchor") if isinstance(activation.get("revision_anchor"), dict) else {},
+    )
+    if can_reuse and isinstance(runtime_record, dict):
+        runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record.get("runtime_target"), dict) else {}
+        runtime_instance = runtime_record.get("instance")
+        return JsonResponse(
+            {
+                "status": "reused",
+                "workspace_id": str(workspace.id),
+                "artifact_id": str(artifact.id),
+                "artifact_slug": str(_artifact_slug(artifact) or ""),
+                "app_slug": app_slug,
+                "revision_anchor": activation.get("revision_anchor"),
+                "runtime_target": runtime_target,
+                "runtime_instance": {
+                    "id": str(getattr(runtime_instance, "id", "") or "").strip(),
+                    "app_slug": str(getattr(runtime_instance, "app_slug", "") or "").strip(),
+                    "fqdn": str(getattr(runtime_instance, "fqdn", "") or "").strip(),
+                    "status": str(getattr(runtime_instance, "status", "") or "").strip(),
+                },
+            }
+        )
+
+    in_flight = find_inflight_activation(
+        workspace_slug=str(workspace.slug or ""),
+        revision_anchor=activation.get("revision_anchor") if isinstance(activation.get("revision_anchor"), dict) else {},
+        seed_api_request=_seed_api_request,
+    )
+    if isinstance(in_flight, dict):
+        return JsonResponse(
+            {
+                "status": "queued_existing",
+                "workspace_id": str(workspace.id),
+                "artifact_id": str(artifact.id),
+                "artifact_slug": str(_artifact_slug(artifact) or ""),
+                "app_slug": app_slug,
+                "revision_anchor": activation.get("revision_anchor"),
+                "activation": {
+                    "draft_id": str(in_flight.get("draft_id") or ""),
+                    "job_id": str(in_flight.get("job_id") or ""),
+                },
+                "in_flight": in_flight,
+                "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
+            },
+            status=202,
+        )
+
+    try:
+        queued = submit_artifact_activation(
+            workspace_slug=str(workspace.slug or ""),
+            draft_payload=activation["draft_payload"],
+            seed_api_request=_seed_api_request,
+        )
+    except ArtifactActivationError as exc:
+        return JsonResponse({"error": str(exc)}, status=502)
+
+    return JsonResponse(
+        {
+            "status": "queued",
+            "workspace_id": str(workspace.id),
+            "artifact_id": str(artifact.id),
+            "artifact_slug": str(_artifact_slug(artifact) or ""),
+            "app_slug": app_slug,
+            "revision_anchor": activation.get("revision_anchor"),
+            "activation": queued,
+            "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
+        },
+        status=202,
+    )
+
+
+@csrf_exempt
+@login_required
 def artifact_activity(request: HttpRequest, artifact_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -19257,11 +19372,12 @@ def _seed_api_request(
     workspace_id: str = "",
     workspace_slug: str = "",
     payload: Optional[Dict[str, Any]] = None,
+    query: Optional[Dict[str, str]] = None,
     timeout: int = 20,
 ) -> requests.Response:
     base_url = _seed_api_base_url()
     url = f"{base_url}{path}"
-    params: Dict[str, str] = {}
+    params: Dict[str, str] = dict(query or {})
     if workspace_id:
         params["workspace_id"] = workspace_id
     if workspace_slug:

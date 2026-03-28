@@ -4261,6 +4261,33 @@ export type ArtifactConsoleFilesResponse = {
   files: ArtifactConsoleFileRow[];
 };
 
+export type ArtifactActivationResponse = {
+  status: "reused" | "queued" | "queued_existing";
+  workspace_id: string;
+  artifact_id: string;
+  artifact_slug: string;
+  app_slug: string;
+  revision_anchor?: Record<string, unknown>;
+  runtime_target?: Record<string, unknown>;
+  runtime_instance?: {
+    id?: string;
+    app_slug?: string;
+    fqdn?: string;
+    status?: string;
+  };
+  activation?: {
+    draft_id?: string;
+    job_id?: string;
+  };
+  in_flight?: {
+    draft_id?: string;
+    job_id?: string;
+    status?: string;
+    type?: string;
+  };
+  reuse_blocked_reason?: string;
+};
+
 export type RuleBrowserBundle = {
   bundle_id: string;
   title: string;

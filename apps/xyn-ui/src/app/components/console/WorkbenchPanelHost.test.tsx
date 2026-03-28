@@ -6,6 +6,7 @@ import WorkbenchPanelHost from "./WorkbenchPanelHost";
 import { emitEntityChange } from "../../utils/entityChangeEvents";
 
 const apiMocks = vi.hoisted(() => ({
+  activateArtifact: vi.fn(),
   executeAppPalettePrompt: vi.fn(),
   listGoals: vi.fn(),
   getGoal: vi.fn(),
@@ -74,6 +75,7 @@ vi.mock("../../../api/xyn", async () => {
   const actual = await vi.importActual<typeof import("../../../api/xyn")>("../../../api/xyn");
   return {
     ...actual,
+    activateArtifact: apiMocks.activateArtifact,
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
@@ -5117,6 +5119,129 @@ describe("WorkbenchPanelHost entity refresh", () => {
       screen.getByRole("button", { name: "Open Threads" }).click();
     });
     expect(onOpenPanel).toHaveBeenCalledWith(expect.objectContaining({ key: "thread_list" }));
+  });
+
+  it("activates artifact detail into reusable dev sibling and opens runtime for reused status", async () => {
+    const onOpenPanel = vi.fn();
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    apiMocks.getArtifactConsoleDetailBySlug.mockResolvedValue({
+      artifact: {
+        id: "artifact-1",
+        slug: "app.demo",
+        title: "Demo App",
+        kind: "application",
+        version: "1",
+      },
+      manifest: {},
+      manifest_summary: { roles: [], surfaces: { manage: [], docs: [] } },
+      raw_artifact_json: {},
+      files: [],
+      surfaces: [],
+      runtime_roles: [],
+    });
+    apiMocks.activateArtifact.mockResolvedValue({
+      status: "reused",
+      workspace_id: "ws-2",
+      artifact_id: "artifact-1",
+      artifact_slug: "app.demo",
+      app_slug: "demo",
+      runtime_instance: { fqdn: "demo.local.test" },
+      runtime_target: { installed_artifact_slug: "app.demo" },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/w/ws-2/workbench"]}>
+        <Routes>
+          <Route
+            path="/w/:workspaceId/workbench"
+            element={
+              <WorkbenchPanelHost
+                workspaceId="ws-2"
+                panel={{ panel_id: "artifact-detail", panel_type: "detail", instance_key: "artifact:app.demo", key: "artifact_detail", params: { slug: "app.demo" } }}
+                onOpenPanel={onOpenPanel}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open in Dev Sibling" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Open in Dev Sibling" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.activateArtifact).toHaveBeenCalledWith("artifact-1"));
+    expect(openSpy).toHaveBeenCalledWith("https://demo.local.test", "_blank", "noopener,noreferrer");
+    expect(screen.getByText("Opened existing dev sibling runtime.")).toBeInTheDocument();
+    openSpy.mockRestore();
+  });
+
+  it("shows activation in-progress and queued feedback from backend statuses", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getArtifactConsoleDetailBySlug.mockResolvedValue({
+      artifact: {
+        id: "artifact-1",
+        slug: "app.demo",
+        title: "Demo App",
+        kind: "application",
+        version: "1",
+      },
+      manifest: {},
+      manifest_summary: { roles: [], surfaces: { manage: [], docs: [] } },
+      raw_artifact_json: {},
+      files: [],
+      surfaces: [],
+      runtime_roles: [],
+    });
+    apiMocks.activateArtifact
+      .mockResolvedValueOnce({
+        status: "queued_existing",
+        workspace_id: "ws-2",
+        artifact_id: "artifact-1",
+        artifact_slug: "app.demo",
+        app_slug: "demo",
+        activation: { draft_id: "draft-1", job_id: "job-1" },
+        in_flight: { draft_id: "draft-1", job_id: "job-1", status: "running", type: "deploy_app_local" },
+      })
+      .mockResolvedValueOnce({
+        status: "queued",
+        workspace_id: "ws-2",
+        artifact_id: "artifact-1",
+        artifact_slug: "app.demo",
+        app_slug: "demo",
+        activation: { draft_id: "draft-2", job_id: "job-2" },
+      });
+
+    render(
+      <MemoryRouter initialEntries={["/w/ws-2/workbench"]}>
+        <Routes>
+          <Route
+            path="/w/:workspaceId/workbench"
+            element={
+              <WorkbenchPanelHost
+                workspaceId="ws-2"
+                panel={{ panel_id: "artifact-detail", panel_type: "detail", instance_key: "artifact:app.demo", key: "artifact_detail", params: { slug: "app.demo" } }}
+                onOpenPanel={onOpenPanel}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open in Dev Sibling" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Open in Dev Sibling" }).click();
+    });
+    await waitFor(() => expect(screen.getByText("Activation is already in progress.")).toBeInTheDocument());
+    expect(screen.getByText("Draft draft-1 · Job job-1")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Open in Dev Sibling" }).click();
+    });
+    await waitFor(() => expect(screen.getByText("Activation queued for dev sibling.")).toBeInTheDocument());
+    expect(screen.getByText("Draft draft-2 · Job job-2")).toBeInTheDocument();
   });
 
   it("shows a safe unavailable state for preserved artifact detail panels", async () => {

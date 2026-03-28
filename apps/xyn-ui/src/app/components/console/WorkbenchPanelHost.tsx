@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  activateArtifact,
   applyApplicationPlan,
   createCampaign,
   executeAppPalettePrompt,
@@ -66,6 +67,7 @@ import type {
   ArtifactCanvasTableResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFileRow,
+  ArtifactActivationResponse,
   ArtifactStructuredQuery,
   CanvasTableResponse,
   ComposerState,
@@ -3713,6 +3715,8 @@ function ArtifactDetailPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [unavailableReason, setUnavailableReason] = useState<"not_found" | "access_denied" | null>(null);
+  const [activationBusy, setActivationBusy] = useState(false);
+  const [activationFeedback, setActivationFeedback] = useState<{ tone: "info" | "warn" | "error"; title: string; body?: string } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -3799,6 +3803,63 @@ function ArtifactDetailPanel({
     navigate(target);
   };
 
+  const resolveRuntimeTargetUrl = (response: ArtifactActivationResponse): string => {
+    const runtimeTarget = response.runtime_target && typeof response.runtime_target === "object" ? response.runtime_target : {};
+    const runtimeInstance = response.runtime_instance && typeof response.runtime_instance === "object" ? response.runtime_instance : {};
+    const candidates = [
+      String((runtimeTarget as Record<string, unknown>).runtime_url || "").trim(),
+      String((runtimeTarget as Record<string, unknown>).app_url || "").trim(),
+      String((runtimeTarget as Record<string, unknown>).url || "").trim(),
+      String((runtimeTarget as Record<string, unknown>).fqdn || "").trim(),
+      String((runtimeInstance as Record<string, unknown>).fqdn || "").trim(),
+    ].filter(Boolean);
+    const first = candidates[0] || "";
+    if (!first) return "";
+    if (/^https?:\/\//i.test(first)) return first;
+    if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(first)) return `https://${first}`;
+    return "";
+  };
+
+  const handleActivateInSibling = async () => {
+    if (!payload?.artifact?.id || activationBusy) return;
+    setActivationBusy(true);
+    setActivationFeedback(null);
+    try {
+      const response = await activateArtifact(payload.artifact.id);
+      if (response.status === "reused") {
+        const target = resolveRuntimeTargetUrl(response);
+        if (target) {
+          window.open(target, "_blank", "noopener,noreferrer");
+          setActivationFeedback({ tone: "info", title: "Opened existing dev sibling runtime.", body: `Target: ${target}` });
+        } else {
+          setActivationFeedback({
+            tone: "info",
+            title: "Reused existing dev sibling runtime.",
+            body: "Runtime target is active, but no openable URL was returned.",
+          });
+        }
+        return;
+      }
+      if (response.status === "queued_existing") {
+        const draftId = String(response.activation?.draft_id || response.in_flight?.draft_id || "").trim();
+        const jobId = String(response.activation?.job_id || response.in_flight?.job_id || "").trim();
+        setActivationFeedback({ tone: "info", title: "Activation is already in progress.", body: `Draft ${draftId || "—"} · Job ${jobId || "—"}` });
+        return;
+      }
+      const draftId = String(response.activation?.draft_id || "").trim();
+      const jobId = String(response.activation?.job_id || "").trim();
+      setActivationFeedback({ tone: "info", title: "Activation queued for dev sibling.", body: `Draft ${draftId || "—"} · Job ${jobId || "—"}` });
+    } catch (err) {
+      setActivationFeedback({
+        tone: "error",
+        title: "Failed to activate artifact in dev sibling.",
+        body: err instanceof Error ? err.message : "Request failed",
+      });
+    } finally {
+      setActivationBusy(false);
+    }
+  };
+
   return (
     <div className="ems-panel-body">
       <p className="muted">
@@ -3806,6 +3867,9 @@ function ArtifactDetailPanel({
       </p>
       <p className="muted small">Roles: {(payload.manifest_summary?.roles || []).join(", ") || "none"}</p>
       <div className="inline-actions">
+        <button type="button" className="primary sm" onClick={() => void handleActivateInSibling()} disabled={activationBusy}>
+          {activationBusy ? "Activating…" : "Open in Dev Sibling"}
+        </button>
         <button type="button" className="ghost sm" onClick={() => onOpenPanel("artifact_raw_json", { slug: payload.artifact.slug })}>
           Open Raw JSON
         </button>
@@ -3816,6 +3880,7 @@ function ArtifactDetailPanel({
           Browse Rules
         </button>
       </div>
+      {activationFeedback ? <InlineMessage tone={activationFeedback.tone} title={activationFeedback.title} body={activationFeedback.body} /> : null}
       {manage.length ? (
         <div>
           <p className="small muted">Manage surfaces</p>

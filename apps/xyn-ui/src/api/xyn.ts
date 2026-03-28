@@ -192,6 +192,7 @@ import type {
   ArtifactConsoleListResponse,
   ArtifactConsoleDetailResponse,
   ArtifactConsoleFilesResponse,
+  ArtifactActivationResponse,
   RuleBrowserResponse,
   LocalProvisionResponse,
   AppIntentDraft,
@@ -1118,6 +1119,16 @@ export async function getArtifact(artifactId: string): Promise<UnifiedArtifact> 
     credentials: "include",
   });
   return handle<UnifiedArtifact>(response);
+}
+
+export async function activateArtifact(artifactId: string): Promise<ArtifactActivationResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/artifacts/${encodeURIComponent(artifactId)}/activate`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildHeaders(),
+  });
+  return handle<ArtifactActivationResponse>(response);
 }
 
 export async function listArtifactSurfaces(artifactId: string): Promise<{ artifact_id: string; surfaces: ArtifactSurface[] }> {
