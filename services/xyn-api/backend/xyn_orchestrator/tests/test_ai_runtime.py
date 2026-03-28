@@ -153,6 +153,37 @@ class AiRuntimeTests(TestCase):
         self.assertEqual(ContextPack.objects.filter(name="xyn-planner-canon", purpose="planner").count(), 1)
         self.assertEqual(ContextPack.objects.filter(name="xyn-coder-canon", purpose="coder").count(), 1)
 
+    def test_bootstrap_prunes_unused_duplicate_bootstrap_model_configs(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-dup-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+            canonical = AgentDefinition.objects.get(slug="default-assistant").model_config
+            provider = canonical.provider
+            duplicate_credential = ProviderCredential.objects.create(
+                provider=provider,
+                name="openai-bootstrap-dup00000",
+                auth_type="env_ref",
+                env_var_name="XYN_OPENAI_API_KEY",
+                enabled=True,
+            )
+            ModelConfig.objects.create(provider=provider, model_name="gpt-5-mini", credential=duplicate_credential, enabled=True)
+            ModelConfig.objects.create(provider=provider, model_name="gpt-5-mini", credential=None, enabled=True)
+
+            ensure_default_ai_seeds()
+
+        self.assertEqual(
+            ModelConfig.objects.filter(provider__slug="openai", model_name="gpt-5-mini", enabled=True).count(),
+            1,
+        )
+        self.assertFalse(ModelConfig.objects.filter(credential_id=duplicate_credential.id).exists())
+
     def test_bootstrap_preserves_explicit_custom_purpose_default_assignments(self):
         with patch.dict(
             os.environ,

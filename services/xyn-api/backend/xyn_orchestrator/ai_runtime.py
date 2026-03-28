@@ -301,10 +301,26 @@ def _ensure_bootstrap_credential(
     credential_cache: Dict[tuple[str, str], ProviderCredential],
 ) -> ProviderCredential:
     fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    bootstrap_name = f"{provider.slug}-bootstrap-{fingerprint[:8]}"
     cache_key = (str(provider.id), fingerprint)
     cached = credential_cache.get(cache_key)
     if cached:
         return cached
+
+    # Prefer deterministic bootstrap-name matches first. This keeps bootstrap idempotent
+    # even when secret-ref lookups are temporarily unavailable.
+    same_name = list(
+        ProviderCredential.objects.filter(provider=provider, name=bootstrap_name).order_by("-updated_at", "-created_at")
+    )
+    if same_name:
+        canonical = same_name[0]
+        for duplicate in same_name[1:]:
+            if duplicate.id == canonical.id:
+                continue
+            ModelConfig.objects.filter(credential_id=duplicate.id).update(credential=canonical)
+            duplicate.delete()
+        credential_cache[cache_key] = canonical
+        return canonical
 
     for credential in ProviderCredential.objects.filter(provider=provider, enabled=True).order_by("-is_default", "name", "-updated_at"):
         if _credential_api_key(credential, provider.slug) == api_key:
@@ -315,7 +331,7 @@ def _ensure_bootstrap_credential(
     if not store:
         credential = ProviderCredential.objects.create(
             provider=provider,
-            name=f"{provider.slug}-bootstrap-{fingerprint[:8]}",
+            name=bootstrap_name,
             auth_type="api_key",
             api_key_encrypted=encrypt_api_key(api_key),
             is_default=False,
@@ -352,7 +368,7 @@ def _ensure_bootstrap_credential(
         secret_ref.save(update_fields=["external_ref", "metadata_json", "updated_at"])
         credential = ProviderCredential.objects.create(
             provider=provider,
-            name=f"{provider.slug}-bootstrap-{fingerprint[:8]}",
+            name=bootstrap_name,
             auth_type="api_key",
             secret_ref=secret_ref,
             is_default=False,
@@ -361,7 +377,7 @@ def _ensure_bootstrap_credential(
     except Exception:
         credential = ProviderCredential.objects.create(
             provider=provider,
-            name=f"{provider.slug}-bootstrap-{fingerprint[:8]}",
+            name=bootstrap_name,
             auth_type="env_ref",
             env_var_name=PROVIDER_ENV_API_KEY.get(provider.slug, [""])[0] or "",
             is_default=False,
@@ -369,6 +385,32 @@ def _ensure_bootstrap_credential(
         )
     credential_cache[cache_key] = credential
     return credential
+
+
+def _prune_unused_bootstrap_model_config_duplicates(role_models: Dict[str, ModelConfig]) -> None:
+    canonical_by_provider_model: Dict[tuple[str, str], ModelConfig] = {}
+    for config in role_models.values():
+        canonical_by_provider_model[(str(config.provider_id), str(config.model_name or "").strip())] = config
+
+    for (provider_id, model_name), canonical in canonical_by_provider_model.items():
+        duplicates = (
+            ModelConfig.objects.select_related("credential", "provider")
+            .filter(provider_id=provider_id, model_name=model_name, enabled=True)
+            .exclude(id=canonical.id)
+        )
+        for duplicate in duplicates:
+            in_use = (
+                AgentDefinition.objects.filter(model_config_id=duplicate.id).exists()
+                or AgentPurpose.objects.filter(model_config_id=duplicate.id).exists()
+            )
+            if in_use:
+                continue
+            credential_name = str(getattr(duplicate.credential, "name", "") or "").strip().lower()
+            is_bootstrap_credential = credential_name.startswith(f"{canonical.provider.slug}-bootstrap-")
+            # Keep this narrowly scoped to bootstrap cleanup: only drop clearly bootstrap/empty
+            # duplicates that are currently unused.
+            if duplicate.credential_id is None or is_bootstrap_credential:
+                duplicate.delete()
 
 
 def _ensure_bootstrap_model_config(*, provider: ModelProvider, model_name: str, credential: ProviderCredential) -> ModelConfig:
@@ -992,6 +1034,9 @@ def ensure_default_ai_seeds() -> None:
             credential=credential,
         )
         role_models[role] = model_config
+
+    if role_models:
+        _prune_unused_bootstrap_model_config_duplicates(role_models)
 
     default_model = role_models.get("default")
 
