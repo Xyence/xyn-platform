@@ -1,25 +1,17 @@
 from django.apps import AppConfig
-from django.db import connection
 import os
 import sys
 import logging
+
+from .bootstrap_guard import DEFAULT_BOOTSTRAP_REQUIRED_TABLES, schema_bootstrap_readiness
 
 
 logger = logging.getLogger(__name__)
 
 
 def _bootstrap_db_ready() -> bool:
-    try:
-        connection.ensure_connection()
-        tables = set(connection.introspection.table_names())
-    except Exception:
-        return False
-    required_tables = {
-        "xyn_orchestrator_workspace",
-        "xyn_orchestrator_seedpack",
-        "xyn_orchestrator_provisionedinstance",
-    }
-    return required_tables.issubset(tables)
+    readiness = schema_bootstrap_readiness(required_tables=DEFAULT_BOOTSTRAP_REQUIRED_TABLES)
+    return readiness.ready
 
 
 class XynOrchestratorConfig(AppConfig):

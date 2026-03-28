@@ -218,6 +218,7 @@ from .orchestration.schedule_policy import supported_schedule_kinds, unsupported
 from .orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
 from .orchestration.lifecycle import OrchestrationLifecycleService
 from .jurisdiction import require_canonical_jurisdiction
+from .bootstrap_guard import DEFAULT_BOOTSTRAP_REQUIRED_TABLES, schema_bootstrap_readiness
 from .xco import (
     THREAD_PRIORITY_ORDER,
     active_run_count,
@@ -8205,17 +8206,10 @@ DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES: tuple[tuple[str, str, str, int], ...] = (
 
 
 def _bootstrap_runtime_db_ready() -> bool:
-    try:
-        connection.ensure_connection()
-        tables = set(connection.introspection.table_names())
-    except Exception:
-        return False
-    required_tables = {
-        "xyn_orchestrator_workspace",
-        "xyn_orchestrator_seedpack",
-        "xyn_orchestrator_provisionedinstance",
-    }
-    return required_tables.issubset(tables)
+    readiness = schema_bootstrap_readiness(required_tables=DEFAULT_BOOTSTRAP_REQUIRED_TABLES)
+    if not readiness.ready:
+        logger.info("Runtime bootstrap readiness check deferred: %s", readiness.reason)
+    return readiness.ready
 
 
 def _run_runtime_bootstrap(*, reason: str) -> None:

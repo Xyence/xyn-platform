@@ -4,6 +4,7 @@ from unittest import mock
 from django.test import TestCase
 
 from xyn_orchestrator.instances import bootstrap
+from xyn_orchestrator.bootstrap_guard import BootstrapReadiness
 
 
 class InstanceBootstrapTests(TestCase):
@@ -120,8 +121,8 @@ class InstanceBootstrapTests(TestCase):
 
     def test_bootstrap_registration_defers_when_schema_not_ready(self) -> None:
         with mock.patch("xyn_orchestrator.instances.bootstrap.get_instance_metadata") as metadata_mock, mock.patch(
-            "django.db.connection.introspection.table_names",
-            return_value=[],
+            "xyn_orchestrator.instances.bootstrap.schema_bootstrap_readiness",
+            return_value=BootstrapReadiness(ready=False, reason="pending_migrations"),
         ):
             bootstrap.bootstrap_instance_registration()
             self.assertFalse(bootstrap._BOOTSTRAP_DONE)

@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from xyn_orchestrator.bootstrap_guard import schema_bootstrap_readiness
+
 
 logger = logging.getLogger(__name__)
 
@@ -237,14 +239,13 @@ def bootstrap_instance_registration() -> None:
         lock_key = "xyn:instance-bootstrap"
         lock_acquired = False
         try:
-            from django.db import connection
             from django.core.cache import cache as django_cache
             from xyn_orchestrator.models import ProvisionedInstance
 
             cache = django_cache
-            connection.ensure_connection()
-            if "xyn_orchestrator_provisionedinstance" not in set(connection.introspection.table_names()):
-                logger.info("Instance bootstrap deferred until provisioned-instance table exists.")
+            readiness = schema_bootstrap_readiness(required_tables={"xyn_orchestrator_provisionedinstance"})
+            if not readiness.ready:
+                logger.info("Instance bootstrap deferred until schema is ready (%s).", readiness.reason)
                 return
 
             if cache and not cache.add(lock_key, "1", timeout=120):
