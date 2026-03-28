@@ -26,7 +26,7 @@ from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.validators import validate_email
 from django.core.paginator import Paginator
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, connection, models, transaction
 from django.db.models import Count, Q
 from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -8204,6 +8204,40 @@ DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES: tuple[tuple[str, str, str, int], ...] = (
 )
 
 
+def _bootstrap_runtime_db_ready() -> bool:
+    try:
+        connection.ensure_connection()
+        tables = set(connection.introspection.table_names())
+    except Exception:
+        return False
+    required_tables = {
+        "xyn_orchestrator_workspace",
+        "xyn_orchestrator_seedpack",
+        "xyn_orchestrator_provisionedinstance",
+    }
+    return required_tables.issubset(tables)
+
+
+def _run_runtime_bootstrap(*, reason: str) -> None:
+    if str(os.environ.get("XYENCE_BOOTSTRAP_DISABLE") or "").strip() == "1":
+        return
+    if not _bootstrap_runtime_db_ready():
+        logger.info("Skipping runtime bootstrap (%s): DB/schema not ready.", reason)
+        return
+    try:
+        ensure_default_ai_seeds()
+    except Exception as exc:
+        logger.warning("Runtime bootstrap (%s) AI seed step failed: %s", reason, exc)
+    try:
+        bootstrap_instance_registration()
+    except Exception as exc:
+        logger.warning("Runtime bootstrap (%s) instance registration step failed: %s", reason, exc)
+    try:
+        auto_apply_core_seed_packs()
+    except Exception as exc:
+        logger.warning("Runtime bootstrap (%s) core seed-pack step failed: %s", reason, exc)
+
+
 def _default_dev_workspace_slug() -> str:
     raw = str(os.getenv("XYN_WORKSPACE_SLUG", "development") or "").strip().lower()
     slug = slugify(raw)
@@ -8236,52 +8270,54 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
         return None
     if not _workspace_matches_default_xyn_solution_target(workspace):
         return None
-    application = (
-        Application.objects.filter(workspace=workspace, metadata_json__system_solution_key=DEFAULT_XYN_SOLUTION_KEY)
-        .order_by("-updated_at", "-created_at")
-        .first()
-    )
-    if application is None:
+    with transaction.atomic():
+        locked_workspace = Workspace.objects.select_for_update().get(id=workspace.id)
         application = (
-            Application.objects.filter(workspace=workspace, source_factory_key="xyn_platform_default")
+            Application.objects.filter(workspace=locked_workspace, metadata_json__system_solution_key=DEFAULT_XYN_SOLUTION_KEY)
             .order_by("-updated_at", "-created_at")
             .first()
         )
-    if application is None:
-        application = Application.objects.create(
-            workspace=workspace,
-            name=DEFAULT_XYN_SOLUTION_NAME,
-            summary="Default Xyn platform solution workspace.",
-            source_factory_key="xyn_platform_default",
-            source_conversation_id="",
-            status="active",
-            request_objective="",
-            metadata_json={"system_solution_key": DEFAULT_XYN_SOLUTION_KEY, "origin": "bootstrap_default"},
-        )
-    else:
-        metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
-        metadata_changed = False
-        if metadata.get("system_solution_key") != DEFAULT_XYN_SOLUTION_KEY:
-            metadata = dict(metadata)
-            metadata["system_solution_key"] = DEFAULT_XYN_SOLUTION_KEY
-            metadata_changed = True
-        if metadata.get("origin") != "bootstrap_default":
-            metadata = dict(metadata)
-            metadata["origin"] = "bootstrap_default"
-            metadata_changed = True
-        update_fields: List[str] = []
-        if application.source_factory_key != "xyn_platform_default":
-            application.source_factory_key = "xyn_platform_default"
-            update_fields.append("source_factory_key")
-        if application.name != DEFAULT_XYN_SOLUTION_NAME:
-            application.name = DEFAULT_XYN_SOLUTION_NAME
-            update_fields.append("name")
-        if metadata_changed:
-            application.metadata_json = metadata
-            update_fields.append("metadata_json")
-        if update_fields:
-            update_fields.append("updated_at")
-            application.save(update_fields=update_fields)
+        if application is None:
+            application = (
+                Application.objects.filter(workspace=locked_workspace, source_factory_key="xyn_platform_default")
+                .order_by("-updated_at", "-created_at")
+                .first()
+            )
+        if application is None:
+            application = Application.objects.create(
+                workspace=locked_workspace,
+                name=DEFAULT_XYN_SOLUTION_NAME,
+                summary="Default Xyn platform solution workspace.",
+                source_factory_key="xyn_platform_default",
+                source_conversation_id="",
+                status="active",
+                request_objective="",
+                metadata_json={"system_solution_key": DEFAULT_XYN_SOLUTION_KEY, "origin": "bootstrap_default"},
+            )
+        else:
+            metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
+            metadata_changed = False
+            if metadata.get("system_solution_key") != DEFAULT_XYN_SOLUTION_KEY:
+                metadata = dict(metadata)
+                metadata["system_solution_key"] = DEFAULT_XYN_SOLUTION_KEY
+                metadata_changed = True
+            if metadata.get("origin") != "bootstrap_default":
+                metadata = dict(metadata)
+                metadata["origin"] = "bootstrap_default"
+                metadata_changed = True
+            update_fields: List[str] = []
+            if application.source_factory_key != "xyn_platform_default":
+                application.source_factory_key = "xyn_platform_default"
+                update_fields.append("source_factory_key")
+            if application.name != DEFAULT_XYN_SOLUTION_NAME:
+                application.name = DEFAULT_XYN_SOLUTION_NAME
+                update_fields.append("name")
+            if metadata_changed:
+                application.metadata_json = metadata
+                update_fields.append("metadata_json")
+            if update_fields:
+                update_fields.append("updated_at")
+                application.save(update_fields=update_fields)
 
     artifact_by_slug: Dict[str, Artifact] = {}
     bindings = (
@@ -8321,6 +8357,13 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
                 "sort_order": sort_order,
             },
         )
+    solution_count = Application.objects.filter(workspace=workspace, metadata_json__system_solution_key=DEFAULT_XYN_SOLUTION_KEY).count()
+    if solution_count != 1:
+        logger.warning(
+            "Default Xyn solution bootstrap expected exactly one system solution for workspace=%s but found=%s",
+            workspace.slug,
+            solution_count,
+        )
     return application
 
 
@@ -8338,9 +8381,6 @@ def _runtime_artifact_host_workspace(fallback_workspace: Workspace) -> Workspace
     host_workspace = Workspace.objects.filter(slug="platform-builder").first()
     if host_workspace is not None:
         return host_workspace
-    first_workspace = Workspace.objects.order_by("created_at").first()
-    if first_workspace is not None:
-        return first_workspace
     return fallback_workspace
 
 
@@ -8378,32 +8418,37 @@ def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspac
     if not _is_platform_admin(identity):
         return None
     workspace_slug = _default_dev_workspace_slug()
-    workspace, _ = Workspace.objects.get_or_create(
-        slug=workspace_slug,
-        defaults={
-            "name": _workspace_title_from_slug(workspace_slug),
-            "org_name": _workspace_title_from_slug(workspace_slug),
-            "description": f"Default {workspace_slug} workspace for local bootstrap.",
-            "status": "active",
-            "kind": "internal",
-            "lifecycle_stage": "internal",
-            "auth_mode": "local",
-            "metadata_json": {"bootstrap": "dev_default"},
-        },
-    )
-    metadata = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
-    if metadata.get("xyn_system_workspace") is True:
-        metadata = dict(metadata)
-        metadata.pop("xyn_system_workspace", None)
-        workspace.metadata_json = metadata
-        workspace.save(update_fields=["metadata_json", "updated_at"])
-    WorkspaceMembership.objects.update_or_create(
-        workspace=workspace,
-        user_identity=identity,
-        defaults={"role": "admin", "termination_authority": True},
-    )
-    _ensure_default_workspace_artifact_bindings(workspace)
-    _ensure_default_xyn_solution_for_workspace(workspace=workspace)
+    with transaction.atomic():
+        workspace, _ = Workspace.objects.get_or_create(
+            slug=workspace_slug,
+            defaults={
+                "name": _workspace_title_from_slug(workspace_slug),
+                "org_name": _workspace_title_from_slug(workspace_slug),
+                "description": f"Default {workspace_slug} workspace for local bootstrap.",
+                "status": "active",
+                "kind": "internal",
+                "lifecycle_stage": "internal",
+                "auth_mode": "local",
+                "metadata_json": {"bootstrap": "dev_default"},
+            },
+        )
+        workspace = Workspace.objects.select_for_update().get(id=workspace.id)
+        metadata = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
+        if metadata.get("xyn_system_workspace") is True:
+            metadata = dict(metadata)
+            metadata.pop("xyn_system_workspace", None)
+            workspace.metadata_json = metadata
+            workspace.save(update_fields=["metadata_json", "updated_at"])
+        WorkspaceMembership.objects.update_or_create(
+            workspace=workspace,
+            user_identity=identity,
+            defaults={"role": "admin", "termination_authority": True},
+        )
+        _ensure_default_workspace_artifact_bindings(workspace)
+        _ensure_default_xyn_solution_for_workspace(workspace=workspace)
+    workspace_rows = Workspace.objects.filter(slug=workspace_slug).count()
+    if workspace_rows != 1:
+        logger.warning("Dev bootstrap expected exactly one workspace for slug=%s but found=%s", workspace_slug, workspace_rows)
     return workspace
 
 
@@ -8486,6 +8531,7 @@ def api_me(request: HttpRequest) -> JsonResponse:
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     include_system = str(request.GET.get("include_system") or "").strip().lower() in {"1", "true", "yes"}
+    _run_runtime_bootstrap(reason="api_me")
     roles = _get_roles(identity)
     bootstrap_workspace = _ensure_dev_bootstrap_workspace(identity)
     _ensure_default_xyn_solution()
@@ -21353,7 +21399,7 @@ def _ensure_runtime_artifact(
         slug="module",
         defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
     )
-    artifact = Artifact.objects.filter(slug=slug).order_by("-updated_at", "-created_at").first()
+    artifact = Artifact.objects.filter(workspace=workspace, slug=slug).order_by("-updated_at", "-created_at").first()
     if artifact is None:
         artifact = Artifact.objects.create(
             workspace=workspace,

@@ -102,6 +102,33 @@ class PlatformBootstrapTests(TestCase):
         response = self.client.get("/xyn/api/me")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(ApplicationArtifactMembership.objects.filter(application=xyn_solution).count(), restored_count)
+        self.assertEqual(Workspace.objects.filter(slug="development").count(), 1)
+        self.assertEqual(
+            Application.objects.filter(
+                workspace=workspace,
+                metadata_json__system_solution_key="xyn-platform-default",
+            ).count(),
+            1,
+        )
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_dev_bootstrap_recovers_cleanly_after_partial_failure(self):
+        with mock.patch(
+            "xyn_orchestrator.xyn_api._ensure_default_workspace_artifact_bindings",
+            side_effect=[RuntimeError("transient bootstrap failure"), None],
+        ):
+            failed = self.client.get("/xyn/api/me")
+            self.assertEqual(failed.status_code, 500)
+
+            recovered = self.client.get("/xyn/api/me")
+            self.assertEqual(recovered.status_code, 200)
+
+        workspace = Workspace.objects.get(slug="development")
+        self.assertEqual(Workspace.objects.filter(slug="development").count(), 1)
+        self.assertEqual(
+            WorkspaceMembership.objects.filter(workspace=workspace, user_identity=self.identity).count(),
+            1,
+        )
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev", "XYN_WORKSPACE_SLUG": "local-dev"}, clear=False)
     def test_dev_me_uses_configured_workspace_slug(self):
