@@ -2294,6 +2294,199 @@ class GoalPlanningTests(TestCase):
             self.assertIn("set default ui theme to light", flattened_work)
             self.assertIn("add support for offline sync", flattened_work)
 
+    def test_solution_change_session_refinement_fallback_accepts_markdown_fenced_json(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Knowledgebase UI",
+            slug=f"kb-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Knowledgebase",
+            summary="Personal knowledgebase app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Create a personal knowledgebase application",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Knowledgebase Initial Plan",
+                        "request_text": "Create a personal knowledgebase application for notes, search, tagging, and quick capture workflows.",
+                    }
+                ),
+            )
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            create_payload = json.loads(create_response.content)
+            session_id = str((create_payload.get("session") or {}).get("id") or "")
+            session = SolutionChangeSession.objects.get(id=session_id)
+
+            option_turn = (
+                SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="option_set")
+                .order_by("-sequence")
+                .first()
+            )
+            self.assertIsNotNone(option_turn)
+            option_payload = option_turn.payload_json if isinstance(option_turn.payload_json, dict) else {}
+            options = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+            self.assertTrue(options)
+            option_id = str((options[0] if isinstance(options[0], dict) else {}).get("id") or "")
+            select_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/select-option",
+                method="post",
+                data=json.dumps({"source_turn_id": str(option_turn.id), "option_id": option_id}),
+            )
+            select_response = application_solution_change_session_select_option(select_request, str(application.id), str(session.id))
+            self.assertEqual(select_response.status_code, 200)
+
+            fenced_payload = "```json\n" + json.dumps(
+                {
+                    "mode": "agent_fallback",
+                    "result_type": "plan_revision",
+                    "confidence": 0.9,
+                    "normalized_updates": {
+                        "ui_preferences": {"theme": "light"},
+                        "resolved_answers": [{"question_key": "ui_theme", "value": "light"}],
+                    },
+                    "warnings": [],
+                }
+            ) + "\n```"
+            with mock.patch("xyn_orchestrator.xyn_api.resolve_ai_config", return_value={"provider": "openai", "model_name": "gpt-5-mini", "api_key": "test-key"}):
+                with mock.patch("xyn_orchestrator.xyn_api.invoke_model", return_value={"content": fenced_payload}):
+                    refinement_request = self._request(
+                        f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/reply",
+                        method="post",
+                        data=json.dumps({"reply_text": "use light theme as the default"}),
+                    )
+                    refinement_response = application_solution_change_session_reply(
+                        refinement_request,
+                        str(application.id),
+                        str(session.id),
+                    )
+                    self.assertEqual(refinement_response.status_code, 200)
+
+            refinement_payload = json.loads(refinement_response.content)
+            plan = ((refinement_payload.get("session") or {}).get("plan") or {})
+            shared_contracts = " ".join(str(item) for item in (plan.get("shared_contracts") or [])).lower()
+            self.assertIn("resolved ui default: use light theme", shared_contracts)
+
+    def test_solution_change_session_refinement_fallback_extracts_json_with_surrounding_prose(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Knowledgebase UI",
+            slug=f"kb-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Knowledgebase",
+            summary="Personal knowledgebase app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Create a personal knowledgebase application",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Knowledgebase Initial Plan",
+                        "request_text": "Create a personal knowledgebase application for notes, search, tagging, and quick capture workflows.",
+                    }
+                ),
+            )
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            create_payload = json.loads(create_response.content)
+            session_id = str((create_payload.get("session") or {}).get("id") or "")
+            session = SolutionChangeSession.objects.get(id=session_id)
+
+            option_turn = (
+                SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="option_set")
+                .order_by("-sequence")
+                .first()
+            )
+            self.assertIsNotNone(option_turn)
+            option_payload = option_turn.payload_json if isinstance(option_turn.payload_json, dict) else {}
+            options = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+            self.assertTrue(options)
+            option_id = str((options[0] if isinstance(options[0], dict) else {}).get("id") or "")
+            select_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/select-option",
+                method="post",
+                data=json.dumps({"source_turn_id": str(option_turn.id), "option_id": option_id}),
+            )
+            select_response = application_solution_change_session_select_option(select_request, str(application.id), str(session.id))
+            self.assertEqual(select_response.status_code, 200)
+
+            noisy_payload = (
+                "Here is the interpretation result:\n"
+                + json.dumps(
+                    {
+                        "mode": "agent_fallback",
+                        "result_type": "plan_revision",
+                        "confidence": 0.88,
+                        "normalized_updates": {"features_add": ["rich text editor"]},
+                        "warnings": [],
+                    }
+                )
+                + "\nApplied."
+            )
+            with mock.patch("xyn_orchestrator.xyn_api.resolve_ai_config", return_value={"provider": "openai", "model_name": "gpt-5-mini", "api_key": "test-key"}):
+                with mock.patch("xyn_orchestrator.xyn_api.invoke_model", return_value={"content": noisy_payload}):
+                    refinement_request = self._request(
+                        f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/reply",
+                        method="post",
+                        data=json.dumps({"reply_text": "add rich text editor support"}),
+                    )
+                    refinement_response = application_solution_change_session_reply(
+                        refinement_request,
+                        str(application.id),
+                        str(session.id),
+                    )
+                    self.assertEqual(refinement_response.status_code, 200)
+
+            refinement_payload = json.loads(refinement_response.content)
+            plan = ((refinement_payload.get("session") or {}).get("plan") or {})
+            per_artifact = plan.get("per_artifact_work") if isinstance(plan.get("per_artifact_work"), list) else []
+            flattened_work = " ".join(
+                str(item)
+                for row in per_artifact
+                if isinstance(row, dict)
+                for item in (row.get("planned_work") if isinstance(row.get("planned_work"), list) else [])
+            ).lower()
+            self.assertIn("rich text", flattened_work)
+
     def test_solution_change_session_refinement_invalid_fallback_payload_becomes_cannot_interpret(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
@@ -2392,6 +2585,94 @@ class GoalPlanningTests(TestCase):
             self.assertEqual(interpretation.get("result_type"), "cannot_interpret")
             warnings_text = " ".join(str(item) for item in (interpretation.get("warnings") or [])).lower()
             self.assertIn("unknown top-level keys", warnings_text)
+            self.assertNotIn("invalid json", str(interpretation.get("planner_message") or "").lower())
+            planner_question_text = str((pending_question_payload.get("question") or "")).lower()
+            self.assertIn("could not safely interpret", planner_question_text)
+
+    def test_solution_change_session_refinement_malformed_fallback_output_becomes_cannot_interpret(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Knowledgebase UI",
+            slug=f"kb-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Knowledgebase",
+            summary="Personal knowledgebase app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Create a personal knowledgebase application",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Knowledgebase Initial Plan",
+                        "request_text": "Create a personal knowledgebase application for notes, search, tagging, and quick capture workflows.",
+                    }
+                ),
+            )
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            create_payload = json.loads(create_response.content)
+            session_id = str((create_payload.get("session") or {}).get("id") or "")
+            session = SolutionChangeSession.objects.get(id=session_id)
+
+            option_turn = (
+                SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="option_set")
+                .order_by("-sequence")
+                .first()
+            )
+            self.assertIsNotNone(option_turn)
+            option_payload = option_turn.payload_json if isinstance(option_turn.payload_json, dict) else {}
+            options = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+            self.assertTrue(options)
+            option_id = str((options[0] if isinstance(options[0], dict) else {}).get("id") or "")
+            select_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/select-option",
+                method="post",
+                data=json.dumps({"source_turn_id": str(option_turn.id), "option_id": option_id}),
+            )
+            select_response = application_solution_change_session_select_option(select_request, str(application.id), str(session.id))
+            self.assertEqual(select_response.status_code, 200)
+
+            with mock.patch("xyn_orchestrator.xyn_api.resolve_ai_config", return_value={"provider": "openai", "model_name": "gpt-5-mini", "api_key": "test-key"}):
+                with mock.patch("xyn_orchestrator.xyn_api.invoke_model", return_value={"content": "not-json-response"}):
+                    refinement_request = self._request(
+                        f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/reply",
+                        method="post",
+                        data=json.dumps({"reply_text": "use light theme as the default", "use_planner_interpretation": True}),
+                    )
+                    refinement_response = application_solution_change_session_reply(
+                        refinement_request,
+                        str(application.id),
+                        str(session.id),
+                    )
+                    self.assertEqual(refinement_response.status_code, 200)
+
+            refinement_payload = json.loads(refinement_response.content)
+            planning = ((refinement_payload.get("session") or {}).get("planning") or {})
+            pending_question = planning.get("pending_question") or {}
+            self.assertTrue(pending_question)
+            pending_question_payload = pending_question.get("payload") if isinstance(pending_question.get("payload"), dict) else {}
+            interpretation = pending_question_payload.get("interpretation") if isinstance(pending_question_payload.get("interpretation"), dict) else {}
+            self.assertEqual(interpretation.get("result_type"), "cannot_interpret")
+            self.assertNotIn("invalid json", str(interpretation.get("planner_message") or "").lower())
 
     def test_solution_change_session_refinement_explicit_override_forces_fallback(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")

@@ -29070,10 +29070,49 @@ def _extract_json_object_text(text: str) -> str:
     payload = str(text or "").strip()
     if not payload:
         return ""
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", payload, re.IGNORECASE)
+    if fence_match:
+        fenced = str(fence_match.group(1) or "").strip()
+        if fenced:
+            payload = fenced
     if payload.startswith("{") and payload.endswith("}"):
         return payload
-    match = re.search(r"\{[\s\S]*\}", payload)
-    return str(match.group(0) if match else "").strip()
+
+    in_string = False
+    escape = False
+    depth = 0
+    start_index: Optional[int] = None
+    for idx, ch in enumerate(payload):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start_index = idx
+            depth += 1
+        elif ch == "}":
+            if depth == 0:
+                continue
+            depth -= 1
+            if depth == 0 and start_index is not None:
+                candidate = payload[start_index : idx + 1].strip()
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    start_index = None
+                    continue
+                if isinstance(parsed, dict):
+                    return candidate
+                start_index = None
+    return ""
 
 
 def _validate_hybrid_refinement_envelope(candidate: Any) -> Tuple[Optional[Dict[str, Any]], List[str]]:
@@ -29236,14 +29275,35 @@ def _invoke_planner_refinement_fallback(
 ) -> Dict[str, Any]:
     resolved = resolve_ai_config(purpose_slug="planning")
     deterministic_updates = deterministic.get("normalized_updates") if isinstance(deterministic.get("normalized_updates"), dict) else {}
+    schema_example = {
+        "mode": "agent_fallback",
+        "result_type": "plan_revision",
+        "confidence": 0.78,
+        "normalized_updates": {
+            "name": "My Knowledge",
+            "ui_preferences": {"theme": "light"},
+            "features_add": ["offline sync"],
+            "constraints_add": ["no external integrations in v1"],
+            "resolved_answers": [{"question_key": "integration_v1", "value": False}],
+            "open_questions_remaining": ["collaboration_model"],
+            "additional_considerations_add": ["prioritize fast capture flow"],
+        },
+        "planner_message": "Applied the refinement with one remaining clarification.",
+        "warnings": [],
+    }
     prompt = (
-        "You are a refinement interpreter. Return ONLY JSON with keys: "
-        "mode,result_type,confidence,normalized_updates,planner_message,warnings.\n"
-        "Allowed result_type: answer_resolution,plan_revision,clarification_request,cannot_interpret.\n"
+        "You are a refinement interpreter.\n"
+        "Return ONLY a single top-level JSON object.\n"
+        "Do not include markdown fences, explanations, or any prose before/after JSON.\n"
+        "Unknown keys are forbidden at every level.\n"
+        "Top-level keys allowed exactly: mode,result_type,confidence,normalized_updates,planner_message,warnings.\n"
+        "Allowed mode values: deterministic,agent_fallback.\n"
+        "Allowed result_type values: answer_resolution,plan_revision,clarification_request,cannot_interpret.\n"
         "Allowed normalized_updates keys: name,ui_preferences,features_add,constraints_add,resolved_answers,"
         "open_questions_remaining,additional_considerations_add.\n"
-        "Do not include any other keys.\n"
-        "Question keys allowed: integration_v1,collaboration_model,rich_text_required,app_name,ui_theme.\n\n"
+        "Allowed question_key values: integration_v1,collaboration_model,rich_text_required,app_name,ui_theme.\n"
+        "If you cannot safely interpret, return result_type cannot_interpret with minimal safe updates.\n"
+        f"Schema example (JSON object shape): {json.dumps(schema_example, ensure_ascii=True)}\n\n"
         f"Session request: {str(session.request_text or '').strip()}\n"
         f"User refinement: {str(reply_text or '').strip()}\n"
         f"Deterministic baseline: {json.dumps(deterministic_updates, ensure_ascii=True)}\n"
@@ -29259,7 +29319,10 @@ def _invoke_planner_refinement_fallback(
             mode="agent_fallback",
             result_type="cannot_interpret",
             confidence=0.0,
-            planner_message="Planner fallback did not return structured interpretation output.",
+            planner_message=(
+                "I could not safely interpret that refinement. Please restate it in a more specific way, "
+                "or retry with planner interpretation."
+            ),
             warnings=["fallback returned no parseable JSON"],
         )
     try:
@@ -29269,7 +29332,10 @@ def _invoke_planner_refinement_fallback(
             mode="agent_fallback",
             result_type="cannot_interpret",
             confidence=0.0,
-            planner_message="Planner fallback returned invalid JSON.",
+            planner_message=(
+                "I could not safely interpret that refinement. Please restate it in a more specific way, "
+                "or retry with planner interpretation."
+            ),
             warnings=["fallback JSON decode failure"],
         )
     safe, errors = _validate_hybrid_refinement_envelope(parsed)
@@ -29278,7 +29344,10 @@ def _invoke_planner_refinement_fallback(
             mode="agent_fallback",
             result_type="cannot_interpret",
             confidence=0.0,
-            planner_message="Planner interpretation could not be safely applied.",
+            planner_message=(
+                "I could not safely interpret that refinement. Please restate it in a more specific way, "
+                "or retry with planner interpretation."
+            ),
             warnings=[f"validation error: {err}" for err in errors],
         )
     safe["mode"] = "agent_fallback"
