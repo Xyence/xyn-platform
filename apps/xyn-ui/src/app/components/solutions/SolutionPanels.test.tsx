@@ -6,6 +6,7 @@ import { SolutionDetailPanel, SolutionListPanel } from "./SolutionPanels";
 
 const apiMocks = vi.hoisted(() => ({
   listApplications: vi.fn(),
+  activateApplication: vi.fn(),
   generateApplicationPlan: vi.fn(),
   applyApplicationPlan: vi.fn(),
   getApplication: vi.fn(),
@@ -24,6 +25,7 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("../../../api/xyn", () => ({
   listApplications: apiMocks.listApplications,
+  activateApplication: apiMocks.activateApplication,
   generateApplicationPlan: apiMocks.generateApplicationPlan,
   applyApplicationPlan: apiMocks.applyApplicationPlan,
   getApplication: apiMocks.getApplication,
@@ -43,6 +45,76 @@ vi.mock("../../../api/xyn", () => ({
 describe("Solution panels", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("opens solution in dev sibling via solution activation endpoint and shows composed mode", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+      runtime_binding: { activation_mode: "composed", freshness: "unknown" },
+      activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+    apiMocks.activateApplication.mockResolvedValue({
+      status: "reused",
+      runtime_target: { public_app_url: "https://deal-finder.local.test" },
+      solution_runtime_binding: { activation_mode: "composed", freshness: "current" },
+      solution_activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
+    expect(openSpy).toHaveBeenCalledWith("https://deal-finder.local.test", "_blank", "noopener,noreferrer");
+    expect(screen.getByText(/Opened existing dev sibling runtime \(composed\)\./)).toBeInTheDocument();
+    openSpy.mockRestore();
+  });
+
+  it("shows queued-existing solution activation feedback with reconstructed mode", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+      runtime_binding: { activation_mode: "reconstructed", freshness: "unknown" },
+      activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "" },
+      },
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+    apiMocks.activateApplication.mockResolvedValue({
+      status: "queued_existing",
+      activation: { draft_id: "draft-1", job_id: "job-1" },
+      solution_runtime_binding: { activation_mode: "reconstructed", freshness: "unknown" },
+      solution_activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "" },
+      },
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
+    expect(screen.getByText(/Solution activation already in progress \(reconstructed\)\./)).toBeInTheDocument();
+    expect(screen.getByText(/Draft draft-1 · Job job-1/)).toBeInTheDocument();
   });
 
   it("renders solution list in panel and opens solution detail panel", async () => {

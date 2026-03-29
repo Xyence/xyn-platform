@@ -2822,6 +2822,42 @@ export type ApplicationDetail = ApplicationSummary & {
   goals: GoalSummary[];
   portfolio_state?: GoalPortfolioState;
   artifact_memberships?: ApplicationArtifactMembership[];
+  runtime_binding?: SolutionRuntimeBindingView | null;
+  activation_composition?: SolutionActivationComposition | null;
+};
+
+export type SolutionArtifactRef = {
+  artifact_id?: string;
+  artifact_slug?: string;
+  artifact_version?: string;
+};
+
+export type SolutionActivationComposition = {
+  primary_app_artifact_ref?: SolutionArtifactRef;
+  policy_artifact_ref?: SolutionArtifactRef;
+};
+
+export type SolutionRuntimeBindingView = {
+  id?: string;
+  workspace_id?: string;
+  application_id?: string;
+  status?: string;
+  activation_mode?: "composed" | "reconstructed" | string;
+  freshness?: "current" | "stale_composition" | "stale_runtime" | "unknown" | string;
+  freshness_reason?: string;
+  primary_app_artifact_ref?: SolutionArtifactRef;
+  policy_artifact_ref?: SolutionArtifactRef;
+  runtime_instance?: {
+    id?: string;
+    app_slug?: string;
+    fqdn?: string;
+    status?: string;
+  } | null;
+  runtime_target?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  last_activation?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type ApplicationArtifactMembership = {
@@ -4286,6 +4322,20 @@ export type ArtifactActivationResponse = {
     type?: string;
   };
   reuse_blocked_reason?: string;
+};
+
+export type SolutionActivationResponse = ArtifactActivationResponse & {
+  solution_runtime_binding?: SolutionRuntimeBindingView;
+  solution_activation_composition?: SolutionActivationComposition;
+  solution_activation?: {
+    application_id?: string;
+    workspace_id?: string;
+    interaction_rule?: string;
+  };
+  policy_source?: "artifact" | "reconstructed" | string;
+  policy_compatibility?: "match" | "mismatch" | "unknown" | string;
+  policy_compatibility_reason?: string;
+  policy_artifact_ref?: SolutionArtifactRef;
 };
 
 export type RuleBrowserBundle = {
