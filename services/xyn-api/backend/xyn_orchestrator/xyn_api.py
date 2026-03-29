@@ -40151,6 +40151,7 @@ def _article_docs_surface_path(artifact: Artifact, workspace_id: Optional[str]) 
 def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[str] = None) -> Dict[str, Any]:
     manifest = _load_artifact_manifest(artifact)
     payload = _manifest_payload(manifest)
+    capability_source = payload if isinstance(payload.get("capability"), dict) else manifest
     suggestion_payload = payload
     if not isinstance(suggestion_payload.get("suggestions"), list) and isinstance(manifest.get("suggestions"), list):
         suggestion_payload = manifest
@@ -40179,7 +40180,7 @@ def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[st
     summary = {
         "roles": unique_roles,
         "ui_mount_scope": _manifest_ui_mount_scope(payload),
-        "capability": _manifest_capability(payload),
+        "capability": _manifest_capability(capability_source),
         "suggestions": suggestions,
         "entities": [] if contract_issue else _resolved_manifest_entities(resolved),
         "surfaces": surfaces,

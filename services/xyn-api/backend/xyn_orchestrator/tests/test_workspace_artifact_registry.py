@@ -396,6 +396,49 @@ class WorkspaceArtifactRegistryTests(TestCase):
         self.assertEqual(len((visible.get("suggestions") or [])), 1)
         self.assertEqual(str((visible.get("suggestions") or [])[0].get("prompt") or ""), "Show unregistered devices")
 
+    def test_manifest_capability_prefers_content_payload_when_present(self):
+        WorkspaceMembership.objects.create(workspace=self.workspace, user_identity=self.admin_identity, role="contributor")
+        self._set_identity(self.admin_identity)
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manifest_path = Path(tmpdir) / "content-capability.manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "artifact": {"id": "content-capability", "name": "Content Capability", "version": "1.0.0"},
+                        "capability": {"visibility": "hidden", "label": "Top Level Hidden"},
+                        "content": {
+                            "capability": {"visibility": "capabilities", "label": "Content Visible", "order": 50},
+                        },
+                        "roles": [{"role": "ui_mount", "mount_path": "/apps/content-capability"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            artifact = Artifact.objects.create(
+                workspace=self.workspace,
+                type=module_type,
+                title="Content Capability",
+                slug="content-capability",
+                status="published",
+                visibility="team",
+                scope_json={"manifest_ref": str(manifest_path), "slug": "content-capability"},
+            )
+            WorkspaceArtifactBinding.objects.create(
+                workspace=self.workspace,
+                artifact=artifact,
+                enabled=True,
+                installed_state="installed",
+            )
+            response = self.client.get(f"/xyn/api/workspaces/{self.workspace.id}/artifacts")
+
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        rows = response.json().get("artifacts", [])
+        match = next((row for row in rows if row.get("slug") == "content-capability"), None)
+        self.assertIsNotNone(match)
+        self.assertEqual((match.get("capability") or {}).get("visibility"), "capabilities")
+        self.assertEqual(str((match.get("capability") or {}).get("label") or ""), "Content Visible")
+
     def test_blueprint_routes_disabled_by_default(self):
         self._set_identity(self.admin_identity)
         api_response = self.client.get("/xyn/api/blueprints")

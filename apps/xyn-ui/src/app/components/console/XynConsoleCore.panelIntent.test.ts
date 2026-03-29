@@ -161,9 +161,18 @@ describe("resolvePanelCommand", () => {
       panelKey: "solution_list",
       params: { create_solution_objective: "stabilize watcher evaluation" },
     });
-    expect(resolvePanelCommand("campaigns")).toBeNull();
-    expect(resolvePanelCommand("show campaigns")).toBeNull();
-    expect(resolvePanelCommand("open campaigns")).toBeNull();
+    expect(resolvePanelCommand("campaigns")).toEqual({
+      panelKey: "campaign_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("show campaigns")).toEqual({
+      panelKey: "campaign_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("open campaigns")).toEqual({
+      panelKey: "campaign_list",
+      params: {},
+    });
     expect(resolvePanelCommand("new campaign")).toBeNull();
     expect(resolvePanelCommand("create campaign")).toBeNull();
 
@@ -307,6 +316,7 @@ describe("resolvePanelCommand", () => {
     // should return null so submitPrompt can execute the direct panel branch.
     expect(buildUiActionFromPrompt("open solutions", artifactTableContext)).toBeNull();
     expect(buildUiActionFromPrompt("open composer", artifactTableContext)).toBeNull();
+    expect(buildUiActionFromPrompt("open campaigns", artifactTableContext)).toBeNull();
 
     // Nearby direct panel commands that are intentionally mapped to table opens
     // should continue producing deterministic ui.action envelopes.

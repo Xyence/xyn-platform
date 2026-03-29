@@ -215,6 +215,9 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
   if (/^(show|list|open)\s+solutions?$/.test(normalized)) {
     return { panelKey: "solution_list", params: {} };
   }
+  if (/^(show|list|open)\s+campaigns?$/.test(normalized) || /^campaigns?$/.test(normalized)) {
+    return { panelKey: "campaign_list", params: {} };
+  }
   match = normalized.match(/^(create|build)\s+solution\s+(.+)$/);
   if (match && match[2]) {
     return {
@@ -1574,6 +1577,14 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
           });
         }
       })();
+      return;
+    }
+    const preSurfaceDirectPanel = resolvePanelCommand(prompt);
+    if (preSurfaceDirectPanel?.panelKey === "campaign_list" && onOpenPanel) {
+      onOpenPanel(preSurfaceDirectPanel.panelKey, resolveDirectPanelOpenParams(preSurfaceDirectPanel, workspaceIdFromPath));
+      setInputText("");
+      clearSessionResolution();
+      if (isOverlay) setOpen(false);
       return;
     }
     // Resolve canonical core prompt surfaces without relying on surface API fetches.
