@@ -330,6 +330,8 @@ def find_inflight_activation(
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            if str(row.get("status") or "").strip().lower() not in {"queued", "running"}:
+                continue
             candidate_anchor = _job_revision_anchor(row)
             if _anchors_match(revision_anchor, candidate_anchor):
                 input_json = row.get("input_json") if isinstance(row.get("input_json"), dict) else {}

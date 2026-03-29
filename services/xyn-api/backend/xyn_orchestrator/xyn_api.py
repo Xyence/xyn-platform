@@ -11278,6 +11278,10 @@ def _policy_bundle_from_artifact(artifact: Artifact) -> Optional[Dict[str, Any]]
     nested = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
     if str(nested.get("schema_version") or "").strip() == "xyn.policy_bundle.v0":
         return nested
+    content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+    nested_content_bundle = content.get("policy_bundle") if isinstance(content.get("policy_bundle"), dict) else {}
+    if str(nested_content_bundle.get("schema_version") or "").strip() == "xyn.policy_bundle.v0":
+        return nested_content_bundle
     return None
 
 
