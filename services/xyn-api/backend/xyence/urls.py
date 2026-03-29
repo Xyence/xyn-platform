@@ -202,6 +202,7 @@ from xyn_orchestrator.api.appspec import (
 from xyn_orchestrator.api.solutions import (
     application_factories_collection,
     application_activate,
+    application_runtime_binding_detail,
     application_plans_collection,
     application_plan_detail,
     application_plan_apply,
@@ -810,6 +811,7 @@ urlpatterns = [
     path("xyn/api/applications", applications_collection),
     path("xyn/api/applications/<uuid:application_id>", application_detail),
     path("xyn/api/applications/<uuid:application_id>/activate", application_activate),
+    path("xyn/api/applications/<uuid:application_id>/runtime-binding", application_runtime_binding_detail),
     path("xyn/api/applications/<uuid:application_id>/artifacts", application_artifact_memberships_collection),
     path("xyn/api/applications/<uuid:application_id>/artifacts/<uuid:membership_id>", application_artifact_membership_detail),
     path("xyn/api/applications/<uuid:application_id>/change-sessions", application_solution_change_sessions_collection),

@@ -12,12 +12,19 @@ from xyn_orchestrator.models import (
     ApplicationArtifactMembership,
     Artifact,
     ArtifactType,
+    SolutionRuntimeBinding,
     UserIdentity,
     Workspace,
     WorkspaceAppInstance,
     WorkspaceMembership,
 )
-from xyn_orchestrator.xyn_api import application_activate, artifact_activate
+from xyn_orchestrator.xyn_api import (
+    _solution_runtime_binding_composition,
+    _solution_runtime_binding_composition_fingerprint,
+    application_activate,
+    application_runtime_binding_detail,
+    artifact_activate,
+)
 
 
 def _mock_json_response(status_code: int, payload: dict) -> mock.Mock:
@@ -135,6 +142,15 @@ class ArtifactActivationApiTests(TestCase):
         request = getattr(self.factory, method.lower())(
             f"/xyn/api/applications/{self.application.id}/activate",
             data=json.dumps({}),
+            content_type="application/json",
+        )
+        request.user = self.user
+        return request
+
+    def _application_runtime_binding_request(self, *, method: str = "get") -> object:
+        request = getattr(self.factory, method.lower())(
+            f"/xyn/api/applications/{self.application.id}/runtime-binding",
+            data=json.dumps({}) if method.lower() != "get" else None,
             content_type="application/json",
         )
         request.user = self.user
@@ -450,3 +466,193 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(response.status_code, 202)
         payload = json.loads(response.content)
         self.assertEqual(payload.get("artifact_slug"), "app.real-estate-deal-finder")
+
+    def test_solution_activation_records_composed_runtime_binding(self) -> None:
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._seed_api_request",
+                side_effect=self._seed_side_effect(jobs=[]),
+            ):
+                response = application_activate(self._application_request(method="post"), str(self.application.id))
+        self.assertEqual(response.status_code, 202)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("status"), "queued")
+        binding = SolutionRuntimeBinding.objects.get(application=self.application, workspace=self.workspace)
+        self.assertEqual(binding.status, "pending")
+        self.assertEqual(binding.activation_mode, "composed")
+        self.assertEqual(str(binding.primary_app_artifact_id), str(self.artifact.id))
+        self.assertEqual(str(binding.policy_artifact_id), str(self.policy_artifact.id))
+        self.assertEqual((payload.get("solution_runtime_binding") or {}).get("activation_mode"), "composed")
+
+    def test_solution_activation_records_reconstructed_mode_without_policy_artifact(self) -> None:
+        ApplicationArtifactMembership.objects.filter(
+            application=self.application,
+            artifact=self.policy_artifact,
+        ).delete()
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._seed_api_request",
+                side_effect=self._seed_side_effect(jobs=[]),
+            ):
+                response = application_activate(self._application_request(method="post"), str(self.application.id))
+        self.assertEqual(response.status_code, 202)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("status"), "queued")
+        binding = SolutionRuntimeBinding.objects.get(application=self.application, workspace=self.workspace)
+        self.assertEqual(binding.activation_mode, "reconstructed")
+        self.assertIsNone(binding.policy_artifact_id)
+        self.assertEqual((payload.get("solution_runtime_binding") or {}).get("activation_mode"), "reconstructed")
+
+    def test_repeated_solution_activation_reuses_same_runtime_instance_and_binding(self) -> None:
+        runtime_instance = WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=self.artifact,
+            app_slug="real-estate-deal-finder",
+            fqdn="real-estate-deal-finder.internal",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://real-estate-deal-finder-api:8080",
+                    "public_app_url": "http://real-estate-deal-finder.localhost",
+                    "compose_project": "xyn-real-estate-deal-finder",
+                    "app_slug": "real-estate-deal-finder",
+                    "installed_artifact_slug": "app.real-estate-deal-finder",
+                }
+            },
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as seed_mock:
+                first = application_activate(self._application_request(method="post"), str(self.application.id))
+                second = application_activate(self._application_request(method="post"), str(self.application.id))
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        first_payload = json.loads(first.content)
+        second_payload = json.loads(second.content)
+        self.assertEqual(first_payload.get("status"), "reused")
+        self.assertEqual(second_payload.get("status"), "reused")
+        self.assertEqual(
+            (first_payload.get("solution_runtime_binding") or {}).get("runtime_instance", {}).get("id"),
+            str(runtime_instance.id),
+        )
+        self.assertEqual(
+            (second_payload.get("solution_runtime_binding") or {}).get("runtime_instance", {}).get("id"),
+            str(runtime_instance.id),
+        )
+        seed_mock.assert_not_called()
+        binding = SolutionRuntimeBinding.objects.get(application=self.application, workspace=self.workspace)
+        self.assertEqual(binding.status, "active")
+        self.assertEqual(str(binding.runtime_instance_id), str(runtime_instance.id))
+        self.assertEqual((second_payload.get("solution_runtime_binding") or {}).get("freshness"), "current")
+
+    def test_solution_runtime_binding_endpoint_returns_composition_and_binding(self) -> None:
+        SolutionRuntimeBinding.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            primary_app_artifact=self.artifact,
+            policy_artifact=self.policy_artifact,
+            activation_mode="composed",
+            status="pending",
+            runtime_target_json={},
+            last_activation_json={"status": "queued"},
+            metadata_json={"policy_source": "artifact"},
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_runtime_binding_detail(
+                self._application_runtime_binding_request(method="get"),
+                str(self.application.id),
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual((payload.get("composition") or {}).get("primary_app_artifact_ref", {}).get("artifact_slug"), "app.real-estate-deal-finder")
+        self.assertEqual((payload.get("composition") or {}).get("policy_artifact_ref", {}).get("artifact_slug"), "policy.real-estate-deal-finder")
+        self.assertEqual((payload.get("runtime_binding") or {}).get("activation_mode"), "composed")
+
+    def test_runtime_binding_freshness_stale_composition_after_policy_change(self) -> None:
+        alt_policy = Artifact.objects.create(
+            workspace=self.workspace,
+            type=self.policy_type,
+            title="Alternate Policy",
+            slug="policy.real-estate-deal-finder.v2",
+            package_version="0.0.2-dev",
+        )
+        binding = SolutionRuntimeBinding.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            primary_app_artifact=self.artifact,
+            policy_artifact=self.policy_artifact,
+            activation_mode="composed",
+            status="pending",
+            runtime_target_json={},
+            last_activation_json={"status": "queued"},
+            metadata_json={
+                "composition_fingerprint": "legacy-fingerprint",
+            },
+        )
+        ApplicationArtifactMembership.objects.filter(
+            application=self.application,
+            artifact=self.policy_artifact,
+        ).delete()
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            artifact=alt_policy,
+            role="supporting",
+            sort_order=10,
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_runtime_binding_detail(
+                self._application_runtime_binding_request(method="get"),
+                str(self.application.id),
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        runtime_binding = payload.get("runtime_binding") or {}
+        self.assertEqual(runtime_binding.get("id"), str(binding.id))
+        self.assertEqual(runtime_binding.get("freshness"), "stale_composition")
+        self.assertEqual(runtime_binding.get("freshness_reason"), "composition_fingerprint_mismatch")
+
+    def test_runtime_binding_freshness_stale_runtime_when_target_missing(self) -> None:
+        composition = _solution_runtime_binding_composition(
+            ApplicationArtifactMembership(application=self.application, artifact=self.artifact),
+            ApplicationArtifactMembership(application=self.application, artifact=self.policy_artifact),
+        )
+        fingerprint = _solution_runtime_binding_composition_fingerprint(composition)
+        runtime_instance = WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=self.artifact,
+            app_slug="real-estate-deal-finder",
+            fqdn="real-estate-deal-finder.internal",
+            status="active",
+            dns_config_json={},
+        )
+        SolutionRuntimeBinding.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            runtime_instance=runtime_instance,
+            primary_app_artifact=self.artifact,
+            policy_artifact=self.policy_artifact,
+            activation_mode="composed",
+            status="active",
+            runtime_target_json={
+                "runtime_owner": "sibling",
+                "runtime_base_url": "http://real-estate-deal-finder-api:8080",
+                "app_slug": "real-estate-deal-finder",
+                "installed_artifact_slug": "app.real-estate-deal-finder",
+            },
+            last_activation_json={"status": "reused"},
+            metadata_json={
+                "composition_fingerprint": fingerprint,
+            },
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_runtime_binding_detail(
+                self._application_runtime_binding_request(method="get"),
+                str(self.application.id),
+            )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        runtime_binding = payload.get("runtime_binding") or {}
+        # fingerprint above intentionally matches current composition for this fixture
+        self.assertEqual(runtime_binding.get("freshness"), "stale_runtime")
+        self.assertEqual(runtime_binding.get("freshness_reason"), "runtime_target_missing")

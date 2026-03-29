@@ -93,6 +93,7 @@ from .models import (
     Goal,
     Application,
     ApplicationArtifactMembership,
+    SolutionRuntimeBinding,
     SolutionChangeSession,
     SolutionPlanningTurn,
     SolutionPlanningCheckpoint,
@@ -10955,25 +10956,46 @@ def application_activate(request: HttpRequest, application_id: str) -> JsonRespo
         return JsonResponse({"error": "forbidden"}, status=403)
     if not _workspace_has_role(identity, str(workspace.id), "contributor"):
         return JsonResponse({"error": "forbidden"}, status=403)
-    memberships = list(
-        ApplicationArtifactMembership.objects.filter(application=application)
-        .select_related("artifact", "artifact__type")
-        .order_by("sort_order", "created_at")
-    )
-    app_memberships = [
-        row
-        for row in memberships
-        if row.artifact
-        and (
-            str(getattr(row.artifact.type, "slug", "") or "").strip() == "application"
-            or str(_artifact_slug(row.artifact) or "").strip().startswith("app.")
-        )
-    ]
-    if not app_memberships:
+    selected_app_member, _selected_policy_member = _solution_activation_memberships(application)
+    if not selected_app_member or not selected_app_member.artifact:
         return JsonResponse({"error": "solution has no application artifact membership"}, status=400)
-    preferred_roles = ("primary_ui", "primary_api")
-    selected = next((row for role in preferred_roles for row in app_memberships if row.role == role), app_memberships[0])
-    return artifact_activate(request, str(selected.artifact_id))
+    response = artifact_activate(request, str(selected_app_member.artifact_id))
+    try:
+        payload = json.loads(response.content.decode("utf-8"))
+    except Exception:
+        payload = {}
+    if response.status_code in (200, 202) and isinstance(payload, dict):
+        _record_solution_runtime_binding_from_activation(
+            application=application,
+            selected_app_artifact=selected_app_member.artifact,
+            activation_payload=payload,
+        )
+        binding_payload = _application_runtime_binding_payload(application)
+        payload["solution_runtime_binding"] = binding_payload.get("runtime_binding")
+        payload["solution_activation_composition"] = binding_payload.get("composition")
+        payload["solution_activation"] = {
+            "application_id": str(application.id),
+            "workspace_id": str(application.workspace_id),
+            # Keep artifact activation independent; solution activation records the
+            # binding so subsequent solution activations remain stable and reusable.
+            "interaction_rule": "solution_activation_records_binding; artifact_activation_remains_independent",
+        }
+        return JsonResponse(payload, status=response.status_code)
+    return response
+
+
+@csrf_exempt
+@login_required
+def application_runtime_binding_detail(request: HttpRequest, application_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse(_application_runtime_binding_payload(application))
 
 
 @csrf_exempt
@@ -31100,13 +31122,272 @@ def _serialize_application_detail(application: Application) -> Dict[str, Any]:
     goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
     factory_definition = get_application_factory(application.source_factory_key)
     members = list(application.artifact_memberships.select_related("artifact", "artifact__type").order_by("sort_order", "created_at"))
+    runtime_binding_payload = _application_runtime_binding_payload(application)
     return {
         **_serialize_application_summary(application),
         "factory": _serialize_application_factory_summary(factory_definition) if factory_definition else None,
         "goals": [_serialize_goal_summary(goal) for goal in goals],
         "artifact_memberships": [_serialize_application_artifact_membership(member) for member in members],
         "metadata": application.metadata_json if isinstance(application.metadata_json, dict) else {},
+        "runtime_binding": runtime_binding_payload.get("runtime_binding"),
+        "activation_composition": runtime_binding_payload.get("composition"),
     }
+
+
+def _solution_activation_memberships(
+    application: Application,
+) -> tuple[Optional[ApplicationArtifactMembership], Optional[ApplicationArtifactMembership]]:
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    app_memberships = [
+        row
+        for row in memberships
+        if row.artifact
+        and (
+            str(getattr(row.artifact.type, "slug", "") or "").strip() == "application"
+            or str(_artifact_slug(row.artifact) or "").strip().startswith("app.")
+        )
+    ]
+    if not app_memberships:
+        return None, None
+    preferred_roles = ("primary_ui", "primary_api")
+    selected_app = next((row for role in preferred_roles for row in app_memberships if row.role == role), app_memberships[0])
+    policy_member = next(
+        (
+            row
+            for row in memberships
+            if row.artifact
+            and row.artifact_id != selected_app.artifact_id
+            and str(getattr(row.artifact.type, "slug", "") or "").strip() == "policy_bundle"
+        ),
+        None,
+    )
+    return selected_app, policy_member
+
+
+def _application_runtime_binding(application: Application) -> Optional[SolutionRuntimeBinding]:
+    return (
+        SolutionRuntimeBinding.objects.filter(application=application, workspace_id=application.workspace_id)
+        .select_related("runtime_instance", "primary_app_artifact", "policy_artifact")
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+
+
+def _solution_runtime_binding_composition(
+    selected_app_member: Optional[ApplicationArtifactMembership],
+    selected_policy_member: Optional[ApplicationArtifactMembership],
+) -> Dict[str, Any]:
+    return {
+        "primary_app_artifact_ref": {
+            "artifact_id": str(getattr(selected_app_member, "artifact_id", "") or ""),
+            "artifact_slug": str(_artifact_slug(selected_app_member.artifact) or "") if selected_app_member and selected_app_member.artifact else "",
+            "artifact_version": str(getattr(selected_app_member.artifact, "package_version", "") or "") if selected_app_member and selected_app_member.artifact else "",
+        },
+        "policy_artifact_ref": {
+            "artifact_id": str(getattr(selected_policy_member, "artifact_id", "") or ""),
+            "artifact_slug": str(_artifact_slug(selected_policy_member.artifact) or "") if selected_policy_member and selected_policy_member.artifact else "",
+            "artifact_version": str(getattr(selected_policy_member.artifact, "package_version", "") or "") if selected_policy_member and selected_policy_member.artifact else "",
+        },
+    }
+
+
+def _solution_runtime_binding_composition_fingerprint(composition: Dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(composition, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _solution_runtime_binding_freshness(
+    *,
+    application: Application,
+    binding: SolutionRuntimeBinding,
+    composition: Dict[str, Any],
+) -> tuple[str, str]:
+    metadata = binding.metadata_json if isinstance(binding.metadata_json, dict) else {}
+    expected_fingerprint = _solution_runtime_binding_composition_fingerprint(composition)
+    recorded_fingerprint = str(metadata.get("composition_fingerprint") or "").strip()
+    if not recorded_fingerprint:
+        return "unknown", "missing_composition_fingerprint"
+    if recorded_fingerprint != expected_fingerprint:
+        return "stale_composition", "composition_fingerprint_mismatch"
+    if str(binding.status or "").strip() == "active":
+        runtime_instance = binding.runtime_instance
+        if not runtime_instance or str(runtime_instance.status or "").strip().lower() != "active":
+            return "stale_runtime", "runtime_instance_missing_or_inactive"
+        expected_app_slug = str(runtime_instance.app_slug or "").strip()
+        if not expected_app_slug:
+            return "stale_runtime", "runtime_instance_missing_app_slug"
+        runtime_record = _workspace_runtime_target(application.workspace, expected_app_slug)
+        if not isinstance(runtime_record, dict):
+            return "stale_runtime", "runtime_target_missing"
+        active_instance = runtime_record.get("instance")
+        if not active_instance or str(getattr(active_instance, "id", "") or "") != str(runtime_instance.id):
+            return "stale_runtime", "runtime_instance_mismatch"
+        runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record.get("runtime_target"), dict) else {}
+        expected_artifact_slug = str((composition.get("primary_app_artifact_ref") or {}).get("artifact_slug") or "").strip()
+        installed_artifact_slug = str(runtime_target.get("installed_artifact_slug") or "").strip()
+        if expected_artifact_slug and installed_artifact_slug and expected_artifact_slug != installed_artifact_slug:
+            return "stale_runtime", "runtime_target_artifact_mismatch"
+        return "current", ""
+    if str(binding.status or "").strip() in {"pending", "error"}:
+        return "unknown", f"binding_status_{str(binding.status or '').strip().lower()}"
+    return "unknown", "binding_status_unknown"
+
+
+def _serialize_solution_runtime_binding(
+    binding: SolutionRuntimeBinding,
+    *,
+    freshness: str = "unknown",
+    freshness_reason: str = "",
+) -> Dict[str, Any]:
+    runtime_instance = binding.runtime_instance
+    runtime_target = binding.runtime_target_json if isinstance(binding.runtime_target_json, dict) else {}
+    return {
+        "id": str(binding.id),
+        "workspace_id": str(binding.workspace_id),
+        "application_id": str(binding.application_id),
+        "status": str(binding.status or ""),
+        "activation_mode": str(binding.activation_mode or ""),
+        "freshness": freshness,
+        "freshness_reason": freshness_reason,
+        "primary_app_artifact_ref": {
+            "artifact_id": str(binding.primary_app_artifact_id or ""),
+            "artifact_slug": str(_artifact_slug(binding.primary_app_artifact) or "") if binding.primary_app_artifact else "",
+            "artifact_version": str(getattr(binding.primary_app_artifact, "package_version", "") or "") if binding.primary_app_artifact else "",
+        },
+        "policy_artifact_ref": {
+            "artifact_id": str(binding.policy_artifact_id or ""),
+            "artifact_slug": str(_artifact_slug(binding.policy_artifact) or "") if binding.policy_artifact else "",
+            "artifact_version": str(getattr(binding.policy_artifact, "package_version", "") or "") if binding.policy_artifact else "",
+        },
+        "runtime_instance": {
+            "id": str(getattr(runtime_instance, "id", "") or ""),
+            "app_slug": str(getattr(runtime_instance, "app_slug", "") or ""),
+            "fqdn": str(getattr(runtime_instance, "fqdn", "") or ""),
+            "status": str(getattr(runtime_instance, "status", "") or ""),
+        }
+        if runtime_instance
+        else None,
+        "runtime_target": runtime_target,
+        "metadata": binding.metadata_json if isinstance(binding.metadata_json, dict) else {},
+        "last_activation": binding.last_activation_json if isinstance(binding.last_activation_json, dict) else {},
+        "created_at": binding.created_at,
+        "updated_at": binding.updated_at,
+    }
+
+
+def _application_runtime_binding_payload(application: Application) -> Dict[str, Any]:
+    selected_app_member, selected_policy_member = _solution_activation_memberships(application)
+    binding = _application_runtime_binding(application)
+    composition = _solution_runtime_binding_composition(selected_app_member, selected_policy_member)
+    freshness = "unknown"
+    freshness_reason = ""
+    if binding:
+        freshness, freshness_reason = _solution_runtime_binding_freshness(
+            application=application,
+            binding=binding,
+            composition=composition,
+        )
+    return {
+        "application_id": str(application.id),
+        "workspace_id": str(application.workspace_id),
+        "composition": composition,
+        "runtime_binding": _serialize_solution_runtime_binding(
+            binding,
+            freshness=freshness,
+            freshness_reason=freshness_reason,
+        )
+        if binding
+        else None,
+    }
+
+
+def _record_solution_runtime_binding_from_activation(
+    *,
+    application: Application,
+    selected_app_artifact: Artifact,
+    activation_payload: Dict[str, Any],
+) -> SolutionRuntimeBinding:
+    status_value = str(activation_payload.get("status") or "").strip().lower()
+    runtime_status = "active" if status_value == "reused" else "pending"
+    activation_mode = "composed" if str(activation_payload.get("policy_source") or "") == "artifact" else "reconstructed"
+    runtime_instance_payload = (
+        activation_payload.get("runtime_instance")
+        if isinstance(activation_payload.get("runtime_instance"), dict)
+        else {}
+    )
+    runtime_instance_id = str(runtime_instance_payload.get("id") or "").strip()
+    runtime_instance = None
+    if runtime_instance_id:
+        runtime_instance = WorkspaceAppInstance.objects.filter(
+            id=runtime_instance_id,
+            workspace_id=application.workspace_id,
+        ).first()
+    policy_artifact_ref = (
+        activation_payload.get("policy_artifact_ref")
+        if isinstance(activation_payload.get("policy_artifact_ref"), dict)
+        else {}
+    )
+    policy_artifact = None
+    policy_artifact_id = str(policy_artifact_ref.get("artifact_id") or "").strip()
+    if policy_artifact_id:
+        policy_artifact = Artifact.objects.filter(id=policy_artifact_id, workspace_id=application.workspace_id).first()
+    runtime_target = activation_payload.get("runtime_target")
+    if not isinstance(runtime_target, dict):
+        runtime_target = {}
+    selected_app_member = ApplicationArtifactMembership(
+        application=application,
+        artifact=selected_app_artifact,
+    )
+    selected_policy_member = (
+        ApplicationArtifactMembership(
+            application=application,
+            artifact=policy_artifact,
+        )
+        if policy_artifact
+        else None
+    )
+    composition = _solution_runtime_binding_composition(selected_app_member, selected_policy_member)
+    composition_fingerprint = _solution_runtime_binding_composition_fingerprint(composition)
+    activation_metadata = {
+        "policy_source": str(activation_payload.get("policy_source") or "reconstructed"),
+        "policy_compatibility": str(activation_payload.get("policy_compatibility") or "unknown"),
+        "policy_compatibility_reason": str(activation_payload.get("policy_compatibility_reason") or ""),
+        "composition_fingerprint": composition_fingerprint,
+        "primary_app_artifact_ref": composition.get("primary_app_artifact_ref"),
+        "policy_artifact_ref": composition.get("policy_artifact_ref"),
+        "runtime_health_snapshot": {
+            "runtime_instance_present": bool(runtime_instance),
+            "runtime_target_present": bool(runtime_target),
+        },
+    }
+    if status_value == "reused":
+        activation_metadata["last_successful_activation_at"] = timezone.now().isoformat()
+    binding, _created = SolutionRuntimeBinding.objects.update_or_create(
+        workspace_id=application.workspace_id,
+        application=application,
+        defaults={
+            "runtime_instance": runtime_instance,
+            "primary_app_artifact": selected_app_artifact,
+            "policy_artifact": policy_artifact,
+            "activation_mode": activation_mode,
+            "status": runtime_status,
+            "runtime_target_json": runtime_target,
+            "last_activation_json": {
+                "status": status_value,
+                "activation": activation_payload.get("activation") if isinstance(activation_payload.get("activation"), dict) else {},
+                "policy_source": str(activation_payload.get("policy_source") or "reconstructed"),
+                "policy_compatibility": str(activation_payload.get("policy_compatibility") or "unknown"),
+                "policy_compatibility_reason": str(activation_payload.get("policy_compatibility_reason") or ""),
+            },
+            "metadata_json": activation_metadata,
+        },
+    )
+    return binding
 
 
 def _composer_stage_for_context(

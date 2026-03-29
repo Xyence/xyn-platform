@@ -4813,6 +4813,78 @@ class ApplicationArtifactMembership(models.Model):
         return f"{self.application_id}:{self.artifact_id}:{self.role}"
 
 
+class SolutionRuntimeBinding(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("active", "Active"),
+        ("error", "Error"),
+    ]
+    ACTIVATION_MODE_CHOICES = [
+        ("composed", "Composed"),
+        ("reconstructed", "Reconstructed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_runtime_bindings")
+    application = models.ForeignKey("Application", on_delete=models.CASCADE, related_name="runtime_bindings")
+    runtime_instance = models.ForeignKey(
+        "WorkspaceAppInstance",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="solution_runtime_bindings",
+    )
+    primary_app_artifact = models.ForeignKey(
+        "Artifact",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="solution_runtime_bindings_as_primary",
+    )
+    policy_artifact = models.ForeignKey(
+        "Artifact",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="solution_runtime_bindings_as_policy",
+    )
+    activation_mode = models.CharField(max_length=20, choices=ACTIVATION_MODE_CHOICES, default="reconstructed")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    runtime_target_json = models.JSONField(default=dict, blank=True)
+    last_activation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "application"],
+                name="uniq_solution_runtime_binding_per_application",
+            )
+        ]
+
+    def clean(self):
+        if self.application_id and self.workspace_id and self.application.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match application workspace")
+        if self.runtime_instance_id and self.workspace_id and self.runtime_instance.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match runtime instance workspace")
+        if self.primary_app_artifact_id and self.workspace_id and self.primary_app_artifact.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match primary app artifact workspace")
+        if self.policy_artifact_id and self.workspace_id and self.policy_artifact.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match policy artifact workspace")
+
+    def save(self, *args, **kwargs):
+        if self.application_id and not self.workspace_id:
+            self.workspace_id = self.application.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.application_id}:{self.status}"
+
+
 class SolutionChangeSession(models.Model):
     STATUS_CHOICES = [
         ("draft", "Draft"),
