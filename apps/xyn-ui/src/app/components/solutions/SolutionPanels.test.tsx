@@ -12,6 +12,7 @@ const apiMocks = vi.hoisted(() => ({
   getApplication: vi.fn(),
   listApplicationArtifactMemberships: vi.fn(),
   listArtifacts: vi.fn(),
+  listArtifactSurfaces: vi.fn(),
   listSolutionChangeSessions: vi.fn(),
   createSolutionChangeSession: vi.fn(),
   deleteSolutionChangeSession: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("../../../api/xyn", () => ({
   getApplication: apiMocks.getApplication,
   listApplicationArtifactMemberships: apiMocks.listApplicationArtifactMemberships,
   listArtifacts: apiMocks.listArtifacts,
+  listArtifactSurfaces: apiMocks.listArtifactSurfaces,
   listSolutionChangeSessions: apiMocks.listSolutionChangeSessions,
   createSolutionChangeSession: apiMocks.createSolutionChangeSession,
   deleteSolutionChangeSession: apiMocks.deleteSolutionChangeSession,
@@ -62,9 +64,16 @@ describe("Solution panels", () => {
     });
     apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
     apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listArtifactSurfaces.mockResolvedValue({
+      artifact_id: "artifact-1",
+      surfaces: [
+        { id: "s1", artifact_id: "artifact-1", key: "home", title: "Home", route: "/app", nav_visibility: "always", surface_kind: "dashboard" },
+      ],
+    });
     apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
     apiMocks.activateApplication.mockResolvedValue({
       status: "reused",
+      artifact_id: "artifact-1",
       runtime_target: { public_app_url: "https://deal-finder.local.test" },
       solution_runtime_binding: { activation_mode: "composed", freshness: "current" },
       solution_activation_composition: {
@@ -78,8 +87,47 @@ describe("Solution panels", () => {
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
     await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
-    expect(openSpy).toHaveBeenCalledWith("https://deal-finder.local.test", "_blank", "noopener,noreferrer");
+    await waitFor(() => expect(apiMocks.listArtifactSurfaces).toHaveBeenCalledWith("artifact-1"));
+    expect(openSpy).toHaveBeenCalledWith("/w/ws-1/a", "_blank", "noopener,noreferrer");
     expect(screen.getByText(/Opened existing dev sibling runtime \(composed\)\./)).toBeInTheDocument();
+    openSpy.mockRestore();
+  });
+
+  it("falls back to raw runtime URL when shell surface target cannot be resolved", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+      runtime_binding: { activation_mode: "composed", freshness: "unknown" },
+      activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listArtifactSurfaces.mockRejectedValue(new Error("surface lookup failed"));
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+    apiMocks.activateApplication.mockResolvedValue({
+      status: "reused",
+      artifact_id: "artifact-1",
+      runtime_target: { public_app_url: "https://deal-finder.local.test" },
+      solution_runtime_binding: { activation_mode: "composed", freshness: "current" },
+      solution_activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
+    await waitFor(() => expect(apiMocks.listArtifactSurfaces).toHaveBeenCalledWith("artifact-1"));
+    expect(openSpy).toHaveBeenCalledWith("https://deal-finder.local.test", "_blank", "noopener,noreferrer");
     openSpy.mockRestore();
   });
 
@@ -97,6 +145,7 @@ describe("Solution panels", () => {
     });
     apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
     apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listArtifactSurfaces.mockResolvedValue({ artifact_id: "artifact-1", surfaces: [] });
     apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
     apiMocks.activateApplication.mockResolvedValue({
       status: "queued_existing",
@@ -132,6 +181,7 @@ describe("Solution panels", () => {
     });
     apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
     apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listArtifactSurfaces.mockResolvedValue({ artifact_id: "artifact-1", surfaces: [] });
     apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
     apiMocks.activateApplication.mockResolvedValue({
       status: "queued",

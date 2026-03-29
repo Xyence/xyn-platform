@@ -11,6 +11,7 @@ import {
   listApplications,
   listArtifacts,
   listApplicationArtifactMemberships,
+  listArtifactSurfaces,
   listSolutionChangeSessions,
   prepareSolutionChangePreview,
   stageSolutionChangeApply,
@@ -20,6 +21,7 @@ import {
 } from "../../../api/xyn";
 import type { ConsolePanelKey } from "../console/WorkbenchPanelHost";
 import WorkspaceUnavailableState, { classifyWorkspaceUnavailableReason } from "../common/WorkspaceUnavailableState";
+import { toWorkspacePath } from "../../routing/workspaceRouting";
 
 const ROLE_OPTIONS: ApplicationArtifactMembership["role"][] = [
   "primary_ui",
@@ -583,6 +585,42 @@ export function SolutionDetailPanel({
     return "";
   }
 
+  function toWorkspaceArtifactSurfacePath(workspaceIdValue: string, appRoute: string): string {
+    const workspaceToken = String(workspaceIdValue || "").trim();
+    const route = String(appRoute || "").trim();
+    if (!workspaceToken || !route) return "";
+    if (route === "/app") return toWorkspacePath(workspaceToken, "a");
+    if (route.startsWith("/app/")) {
+      const suffix = route.replace(/^\/app\//, "");
+      if (suffix) return toWorkspacePath(workspaceToken, `a/${suffix}`);
+    }
+    return "";
+  }
+
+  async function resolvePreferredShellOpenTarget(
+    workspaceIdValue: string,
+    artifactIdValue: string,
+  ): Promise<string> {
+    const workspaceToken = String(workspaceIdValue || "").trim();
+    const artifactIdToken = String(artifactIdValue || "").trim();
+    if (!workspaceToken || !artifactIdToken) return "";
+    try {
+      const payload = await listArtifactSurfaces(artifactIdToken);
+      const surfaces = Array.isArray(payload?.surfaces) ? payload.surfaces : [];
+      const appSurfaces = surfaces
+        .filter((row) => row && typeof row === "object")
+        .filter((row) => String(row.route || "").startsWith("/app"))
+        .sort((left, right) => Number(left.sort_order || 0) - Number(right.sort_order || 0));
+      const preferred =
+        appSurfaces.find((row) => String(row.route || "").trim() === "/app")
+        || appSurfaces.find((row) => String(row.nav_visibility || "").trim().toLowerCase() === "always")
+        || appSurfaces[0];
+      return toWorkspaceArtifactSurfacePath(workspaceToken, String(preferred?.route || "").trim());
+    } catch {
+      return "";
+    }
+  }
+
   async function handleActivateSolution() {
     if (!applicationId || activationBusy) return;
     setActivationBusy(true);
@@ -606,10 +644,16 @@ export function SolutionDetailPanel({
       const compositionLabel = `Primary ${primarySlug || "—"} · Policy ${policySlug || "none"} · Mode ${modeLabel}`;
 
       if (response.status === "reused") {
+        const shellTarget = await resolvePreferredShellOpenTarget(workspaceId, String(response.artifact_id || ""));
         const target = resolveRuntimeTargetUrl(runtimeTarget as Record<string, unknown>, runtimeInstance as Record<string, unknown>);
-        if (target) {
-          window.open(target, "_blank", "noopener,noreferrer");
-          setActivationFeedback({ tone: "info", title: `Opened existing dev sibling runtime (${modeLabel}).`, body: `${compositionLabel} · ${target}` });
+        const openTarget = shellTarget || target;
+        if (openTarget) {
+          window.open(openTarget, "_blank", "noopener,noreferrer");
+          setActivationFeedback({
+            tone: "info",
+            title: `Opened existing dev sibling runtime (${modeLabel}).`,
+            body: `${compositionLabel} · ${shellTarget ? `Shell ${shellTarget}` : target}`,
+          });
         } else {
           setActivationFeedback({
             tone: "info",
