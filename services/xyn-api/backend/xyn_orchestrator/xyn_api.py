@@ -365,6 +365,7 @@ from .instance_drivers import (
 from .artifact_activation import (
     ArtifactActivationError,
     build_activation_payload,
+    find_completed_activation,
     find_inflight_activation,
     runtime_record_matches_revision_anchor,
     submit_artifact_activation,
@@ -10812,6 +10813,9 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
     )
     if can_reuse and isinstance(runtime_record, dict):
         runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record.get("runtime_target"), dict) else {}
+        if runtime_target.get("public_app_url") and not runtime_target.get("runtime_url"):
+            runtime_target = dict(runtime_target)
+            runtime_target["runtime_url"] = runtime_target.get("public_app_url")
         runtime_instance = runtime_record.get("instance")
         return JsonResponse(
             {
@@ -10828,6 +10832,43 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
                     "fqdn": str(getattr(runtime_instance, "fqdn", "") or "").strip(),
                     "status": str(getattr(runtime_instance, "status", "") or "").strip(),
                 },
+                "policy_source": str(activation.get("policy_source") or "reconstructed"),
+                "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+                "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+                "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
+            }
+        )
+
+    completed = find_completed_activation(
+        workspace_slug=str(workspace.slug or ""),
+        revision_anchor=activation.get("revision_anchor") if isinstance(activation.get("revision_anchor"), dict) else {},
+        seed_api_request=_seed_api_request,
+    )
+    if isinstance(completed, dict):
+        runtime_target = completed.get("runtime_target") if isinstance(completed.get("runtime_target"), dict) else {}
+        if runtime_target.get("public_app_url") and not runtime_target.get("runtime_url"):
+            runtime_target = dict(runtime_target)
+            runtime_target["runtime_url"] = runtime_target.get("public_app_url")
+        runtime_instance = completed.get("runtime_instance") if isinstance(completed.get("runtime_instance"), dict) else {}
+        return JsonResponse(
+            {
+                "status": "reused",
+                "workspace_id": str(workspace.id),
+                "artifact_id": str(artifact.id),
+                "artifact_slug": str(_artifact_slug(artifact) or ""),
+                "app_slug": app_slug,
+                "revision_anchor": activation.get("revision_anchor"),
+                "runtime_target": runtime_target,
+                "runtime_instance": {
+                    "id": str(runtime_instance.get("id") or "").strip(),
+                    "app_slug": str(runtime_instance.get("app_slug") or "").strip(),
+                    "fqdn": str(runtime_instance.get("fqdn") or "").strip(),
+                    "status": str(runtime_instance.get("status") or "").strip(),
+                },
+                "activation": {
+                    "job_id": str(completed.get("job_id") or "").strip(),
+                },
+                "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
                 "policy_source": str(activation.get("policy_source") or "reconstructed"),
                 "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
                 "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
@@ -10865,6 +10906,7 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
 
     try:
         queued = submit_artifact_activation(
+            workspace_id=str(workspace.id),
             workspace_slug=str(workspace.slug or ""),
             draft_payload=activation["draft_payload"],
             seed_api_request=_seed_api_request,
@@ -10965,6 +11007,9 @@ def application_activate(request: HttpRequest, application_id: str) -> JsonRespo
     except Exception:
         payload = {}
     if response.status_code in (200, 202) and isinstance(payload, dict):
+        runtime_target_payload = payload.get("runtime_target")
+        if isinstance(runtime_target_payload, dict):
+            payload["runtime_target"] = _refresh_runtime_target_localhost_url(runtime_target_payload)
         _record_solution_runtime_binding_from_activation(
             application=application,
             selected_app_artifact=selected_app_member.artifact,
@@ -20137,6 +20182,62 @@ def _workspace_runtime_target(workspace: Workspace, app_slug: str) -> Optional[D
         "runtime_target": runtime_target,
         "runtime_base_url": base_url,
     }
+
+
+def _docker_container_published_port(container_name: str, container_port: str = "8080/tcp") -> str:
+    name = str(container_name or "").strip()
+    if not name:
+        return ""
+    port_key = str(container_port or "8080/tcp").strip() or "8080/tcp"
+    format_expr = f"{{{{with (index .NetworkSettings.Ports \"{port_key}\")}}}}{{{{(index . 0).HostPort}}}}{{{{end}}}}"
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "--format", format_expr, name],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=6,
+        )
+    except Exception:
+        return ""
+    if int(proc.returncode or 1) != 0:
+        return ""
+    value = str(proc.stdout or "").strip()
+    if value.isdigit():
+        return value
+    return ""
+
+
+def _refresh_runtime_target_localhost_url(runtime_target: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(runtime_target, dict):
+        return {}
+    refreshed = dict(runtime_target)
+    container_name = str(refreshed.get("app_container_name") or "").strip()
+    if not container_name:
+        return refreshed
+    localhost_fields: List[str] = []
+    for field in ("runtime_url", "public_app_url", "app_url"):
+        raw = str(refreshed.get(field) or "").strip()
+        if not raw:
+            continue
+        parsed = urlsplit(raw)
+        if str(parsed.hostname or "").strip().lower() == "localhost":
+            localhost_fields.append(field)
+    if not localhost_fields:
+        return refreshed
+    published_port = _docker_container_published_port(container_name)
+    if not published_port:
+        return refreshed
+    resolved_url = f"http://localhost:{published_port}"
+    for field in localhost_fields:
+        if field == "app_url" and not str(refreshed.get(field) or "").strip().startswith("http://localhost:"):
+            continue
+        refreshed[field] = resolved_url
+    if not str(refreshed.get("runtime_url") or "").strip():
+        public_app_url = str(refreshed.get("public_app_url") or "").strip()
+        if public_app_url.startswith("http://localhost:"):
+            refreshed["runtime_url"] = public_app_url
+    return refreshed
 
 
 def _installed_generated_artifact(workspace: Workspace, app_slug: str) -> Optional[Artifact]:
@@ -31250,6 +31351,7 @@ def _serialize_solution_runtime_binding(
 ) -> Dict[str, Any]:
     runtime_instance = binding.runtime_instance
     runtime_target = binding.runtime_target_json if isinstance(binding.runtime_target_json, dict) else {}
+    runtime_target = _refresh_runtime_target_localhost_url(runtime_target)
     return {
         "id": str(binding.id),
         "workspace_id": str(binding.workspace_id),
@@ -31343,6 +31445,7 @@ def _record_solution_runtime_binding_from_activation(
     runtime_target = activation_payload.get("runtime_target")
     if not isinstance(runtime_target, dict):
         runtime_target = {}
+    runtime_target = _refresh_runtime_target_localhost_url(runtime_target)
     selected_app_member = ApplicationArtifactMembership(
         application=application,
         artifact=selected_app_artifact,

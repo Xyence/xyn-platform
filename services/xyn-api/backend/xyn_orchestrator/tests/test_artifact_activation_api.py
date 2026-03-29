@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import uuid
 from unittest import mock
 
@@ -254,6 +255,7 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(payload.get("status"), "reused")
         runtime_target = payload.get("runtime_target") or {}
         self.assertEqual(runtime_target.get("compose_project"), "xyn-real-estate-deal-finder")
+        self.assertEqual(runtime_target.get("runtime_url"), "https://deal-finder.local")
         seed_mock.assert_not_called()
 
     def test_second_activation_reuses_same_runtime_instance_without_duplicates(self) -> None:
@@ -420,6 +422,65 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(payload.get("status"), "queued")
         self.assertEqual((payload.get("activation") or {}).get("job_id"), "job-new")
 
+    def test_completed_provision_job_for_same_anchor_returns_reused_with_runtime_target(self) -> None:
+        completed_jobs = [
+            {
+                "id": "job-provision-1",
+                "type": "provision_sibling_xyn",
+                "status": "succeeded",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:10Z",
+                "input_json": {
+                    "deployment": {
+                        "app_spec": {
+                            "revision_anchor": {
+                                "workspace_id": str(self.workspace.id),
+                                "artifact_slug": "app.real-estate-deal-finder",
+                                "app_slug": "real-estate-deal-finder",
+                            }
+                        }
+                    }
+                },
+                "output_json": {
+                    "ui_url": "http://smoke-real-estate-deal-finder.localhost",
+                    "api_url": "http://api.smoke-real-estate-deal-finder.localhost",
+                    "runtime_registration": {
+                        "runtime_target": {
+                            "public_app_url": "http://localhost:32799",
+                            "runtime_base_url": "http://xyn-sibling-real-estate-deal-finder-api:8080",
+                            "app_url": "http://localhost:32799",
+                        }
+                    },
+                    "installed_artifact": {
+                        "artifact_slug": "app.real-estate-deal-finder",
+                    },
+                    "sibling_instance": {
+                        "instance_id": "inst-1",
+                        "app_slug": "real-estate-deal-finder",
+                        "fqdn": "smoke-real-estate-deal-finder.localhost",
+                        "status": "active",
+                    },
+                },
+            }
+        ]
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._seed_api_request",
+                side_effect=self._seed_side_effect(jobs=completed_jobs, create_draft_id="draft-new", submit_job_id="job-new"),
+            ) as seed_mock:
+                response = artifact_activate(self._request(method="post"), str(self.artifact.id))
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("status"), "reused")
+        self.assertEqual((payload.get("activation") or {}).get("job_id"), "job-provision-1")
+        runtime_target = payload.get("runtime_target") or {}
+        self.assertEqual(runtime_target.get("public_app_url"), "http://localhost:32799")
+        self.assertEqual(runtime_target.get("runtime_url"), "http://localhost:32799")
+        self.assertEqual(runtime_target.get("app_url"), "http://localhost:32799")
+        self.assertEqual(runtime_target.get("installed_artifact_slug"), "app.real-estate-deal-finder")
+        seed_mock.assert_called()
+
     def test_inflight_job_for_different_artifact_same_app_slug_does_not_dedupe(self) -> None:
         inflight_other_artifact = [
             {
@@ -544,6 +605,49 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(binding.status, "active")
         self.assertEqual(str(binding.runtime_instance_id), str(runtime_instance.id))
         self.assertEqual((second_payload.get("solution_runtime_binding") or {}).get("freshness"), "current")
+
+    def test_solution_activation_refreshes_stale_localhost_runtime_port_from_container(self) -> None:
+        runtime_instance = WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=self.artifact,
+            app_slug="real-estate-deal-finder",
+            fqdn="real-estate-deal-finder.internal",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://real-estate-deal-finder-api:8080",
+                    "public_app_url": "http://localhost:32799",
+                    "runtime_url": "http://localhost:32799",
+                    "compose_project": "xyn-real-estate-deal-finder",
+                    "app_container_name": "xyn-real-estate-deal-finder-api",
+                    "app_slug": "real-estate-deal-finder",
+                    "installed_artifact_slug": "app.real-estate-deal-finder",
+                }
+            },
+        )
+        inspect_completed = subprocess.CompletedProcess(
+            args=["docker", "inspect"],
+            returncode=0,
+            stdout="32878\n",
+            stderr="",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as seed_mock:
+                with mock.patch("xyn_orchestrator.xyn_api.subprocess.run", return_value=inspect_completed) as run_mock:
+                    response = application_activate(self._application_request(method="post"), str(self.application.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("status"), "reused")
+        runtime_target = payload.get("runtime_target") or {}
+        self.assertEqual(runtime_target.get("public_app_url"), "http://localhost:32878")
+        self.assertEqual(runtime_target.get("runtime_url"), "http://localhost:32878")
+        seed_mock.assert_not_called()
+        run_mock.assert_called()
+        binding = SolutionRuntimeBinding.objects.get(application=self.application, workspace=self.workspace)
+        self.assertEqual(str(binding.runtime_instance_id), str(runtime_instance.id))
+        self.assertEqual((binding.runtime_target_json or {}).get("public_app_url"), "http://localhost:32878")
+        self.assertEqual((binding.runtime_target_json or {}).get("runtime_url"), "http://localhost:32878")
 
     def test_solution_runtime_binding_endpoint_returns_composition_and_binding(self) -> None:
         SolutionRuntimeBinding.objects.create(
