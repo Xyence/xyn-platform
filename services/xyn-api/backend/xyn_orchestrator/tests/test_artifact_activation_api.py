@@ -5,8 +5,9 @@ import subprocess
 import uuid
 from unittest import mock
 
+import requests
 from django.contrib.auth import get_user_model
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase
 
 from xyn_orchestrator.models import (
     Application,
@@ -20,6 +21,8 @@ from xyn_orchestrator.models import (
     WorkspaceMembership,
 )
 from xyn_orchestrator.xyn_api import (
+    _activation_runtime_target_is_live,
+    _runtime_target_probe_base_urls,
     _solution_runtime_binding_composition,
     _solution_runtime_binding_composition_fingerprint,
     application_activate,
@@ -227,6 +230,7 @@ class ArtifactActivationApiTests(TestCase):
             str(((content.get("policy_bundle_override") or {}).get("schema_version") or "")),
             "xyn.policy_bundle.v0",
         )
+
 
     def test_activation_reuses_persisted_runtime_target_and_skips_seed_queue(self) -> None:
         WorkspaceAppInstance.objects.create(
@@ -857,3 +861,64 @@ class ArtifactActivationApiTests(TestCase):
         # fingerprint above intentionally matches current composition for this fixture
         self.assertEqual(runtime_binding.get("freshness"), "stale_runtime")
         self.assertEqual(runtime_binding.get("freshness_reason"), "runtime_target_missing")
+
+
+class RuntimeTargetProbeNormalizationTests(SimpleTestCase):
+    def test_localhost_probe_candidates_non_container_unchanged(self) -> None:
+        runtime_target = {"runtime_url": "http://localhost:32900"}
+        with mock.patch("xyn_orchestrator.xyn_api._containerized_local_probe_mode", return_value=False):
+            candidates = _runtime_target_probe_base_urls(runtime_target)
+        self.assertEqual(candidates, ["http://localhost:32900"])
+
+    def test_localhost_probe_candidates_containerized_add_host_gateway(self) -> None:
+        runtime_target = {"runtime_url": "http://localhost:32900"}
+        with mock.patch("xyn_orchestrator.xyn_api._containerized_local_probe_mode", return_value=True):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._containerized_local_probe_hosts",
+                return_value=["host.docker.internal", "172.21.0.1"],
+            ):
+                candidates = _runtime_target_probe_base_urls(runtime_target)
+        self.assertEqual(
+            candidates,
+            [
+                "http://localhost:32900",
+                "http://host.docker.internal:32900",
+                "http://172.21.0.1:32900",
+            ],
+        )
+
+    def test_activation_live_uses_normalized_probe_but_keeps_localhost_runtime_url(self) -> None:
+        runtime_target = {"runtime_url": "http://localhost:32900"}
+
+        def _probe_side_effect(*, base_url: str, method: str, path: str, timeout: int = 3):
+            response = mock.Mock()
+            if base_url == "http://172.21.0.1:32900" and path == "/health":
+                response.status_code = 200
+                return response
+            raise requests.RequestException("unreachable")
+
+        with mock.patch("xyn_orchestrator.xyn_api._containerized_local_probe_mode", return_value=True):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._containerized_local_probe_hosts",
+                return_value=["172.21.0.1"],
+            ):
+                with mock.patch("xyn_orchestrator.xyn_api._runtime_target_request", side_effect=_probe_side_effect):
+                    is_live, reason, refreshed = _activation_runtime_target_is_live(runtime_target, None)
+
+        self.assertTrue(is_live)
+        self.assertEqual(reason, "runtime_live")
+        self.assertEqual(refreshed.get("runtime_url"), "http://localhost:32900")
+
+    def test_activation_live_fails_when_localhost_probe_normalization_unavailable(self) -> None:
+        runtime_target = {"runtime_url": "http://localhost:32900"}
+
+        with mock.patch("xyn_orchestrator.xyn_api._containerized_local_probe_mode", return_value=True):
+            with mock.patch("xyn_orchestrator.xyn_api._containerized_local_probe_hosts", return_value=[]):
+                with mock.patch(
+                    "xyn_orchestrator.xyn_api._runtime_target_request",
+                    side_effect=requests.RequestException("unreachable"),
+                ):
+                    is_live, reason, _refreshed = _activation_runtime_target_is_live(runtime_target, None)
+
+        self.assertFalse(is_live)
+        self.assertEqual(reason, "runtime_not_live")

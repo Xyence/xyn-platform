@@ -20268,15 +20268,108 @@ def _runtime_target_probe_base_urls(runtime_target: Dict[str, Any]) -> List[str]
         base = urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
         if base:
             candidates.append(base)
+    expanded: List[str] = []
+    for item in candidates:
+        expanded.extend(_runtime_target_probe_candidates(item))
     deduped: List[str] = []
     seen: Set[str] = set()
-    for item in candidates:
+    for item in expanded:
         token = str(item or "").strip()
         if not token or token in seen:
             continue
         seen.add(token)
         deduped.append(token)
     return deduped
+
+
+def _runtime_target_probe_candidates(base_url: str) -> List[str]:
+    token = str(base_url or "").strip().rstrip("/")
+    if not token:
+        return []
+    parsed = urlsplit(token)
+    host = str(parsed.hostname or "").strip().lower()
+    if host not in {"localhost", "127.0.0.1"}:
+        return [token]
+    if not _containerized_local_probe_mode():
+        return [token]
+    probe_hosts = _containerized_local_probe_hosts()
+    if not probe_hosts:
+        return [token]
+    scheme = str(parsed.scheme or "http").strip() or "http"
+    expanded = [token]
+    for probe_host in probe_hosts:
+        host_token = str(probe_host or "").strip()
+        if not host_token:
+            continue
+        if str(host_token).strip().lower() in {"localhost", "127.0.0.1"}:
+            continue
+        netloc = host_token
+        if parsed.port:
+            netloc = f"{host_token}:{parsed.port}"
+        candidate = urlunsplit((scheme, netloc, "", "", "")).rstrip("/")
+        if candidate:
+            expanded.append(candidate)
+    return expanded
+
+
+def _containerized_local_probe_mode() -> bool:
+    if not os.path.exists("/.dockerenv"):
+        return False
+    env_mode = str(os.environ.get("XYN_ENV") or "").strip().lower()
+    return env_mode in {"local", "dev", ""}
+
+
+def _containerized_local_probe_hosts() -> List[str]:
+    hosts: List[str] = []
+    configured = str(
+        os.environ.get("XYN_LOCALHOST_PROBE_HOSTS")
+        or os.environ.get("XYN_HOST_GATEWAY")
+        or ""
+    ).strip()
+    if configured:
+        for token in configured.split(","):
+            value = str(token or "").strip()
+            if value:
+                hosts.append(value)
+    hosts.append("host.docker.internal")
+    gateway_ip = _container_default_gateway_ip()
+    if gateway_ip:
+        hosts.append(gateway_ip)
+    deduped: List[str] = []
+    seen: Set[str] = set()
+    for host in hosts:
+        token = str(host or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped
+
+
+def _container_default_gateway_ip() -> str:
+    route_path = Path("/proc/net/route")
+    if not route_path.exists():
+        return ""
+    try:
+        for line in route_path.read_text(encoding="utf-8").splitlines()[1:]:
+            parts = [part for part in line.strip().split("\t") if part]
+            if len(parts) < 4:
+                continue
+            destination = str(parts[1] or "").strip().lower()
+            gateway_hex = str(parts[2] or "").strip()
+            try:
+                flags = int(str(parts[3] or "0"), 16)
+            except ValueError:
+                continue
+            if destination != "00000000" or not (flags & 0x2):
+                continue
+            if len(gateway_hex) != 8:
+                continue
+            octets = [str(int(gateway_hex[idx : idx + 2], 16)) for idx in range(0, 8, 2)]
+            return ".".join(reversed(octets))
+    except Exception:
+        return ""
+    return ""
 
 
 def _activation_runtime_target_is_live(
