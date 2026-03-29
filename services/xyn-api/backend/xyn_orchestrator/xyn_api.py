@@ -10818,6 +10818,12 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
         if not is_live:
             reuse_reason = live_reason
         else:
+            sibling_ui_url = str(runtime_target.get("sibling_ui_url") or "").strip()
+            sibling_api_url = str(runtime_target.get("sibling_api_url") or "").strip()
+            if not sibling_ui_url:
+                runtime_fqdn = str(getattr(runtime_instance, "fqdn", "") or "").strip()
+                if runtime_fqdn:
+                    sibling_ui_url = runtime_fqdn if runtime_fqdn.startswith(("http://", "https://")) else f"http://{runtime_fqdn}"
             if runtime_target.get("public_app_url") and not runtime_target.get("runtime_url"):
                 runtime_target = dict(runtime_target)
                 runtime_target["runtime_url"] = runtime_target.get("public_app_url")
@@ -10836,6 +10842,8 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
                         "fqdn": str(getattr(runtime_instance, "fqdn", "") or "").strip(),
                         "status": str(getattr(runtime_instance, "status", "") or "").strip(),
                     },
+                    "sibling_ui_url": sibling_ui_url,
+                    "sibling_api_url": sibling_api_url,
                     "policy_source": str(activation.get("policy_source") or "reconstructed"),
                     "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
                     "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
@@ -10851,6 +10859,12 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
     if isinstance(completed, dict):
         runtime_target = completed.get("runtime_target") if isinstance(completed.get("runtime_target"), dict) else {}
         runtime_instance = completed.get("runtime_instance") if isinstance(completed.get("runtime_instance"), dict) else {}
+        sibling_ui_url = str(completed.get("sibling_ui_url") or runtime_target.get("sibling_ui_url") or "").strip()
+        sibling_api_url = str(completed.get("sibling_api_url") or runtime_target.get("sibling_api_url") or "").strip()
+        if not sibling_ui_url:
+            runtime_fqdn = str(runtime_instance.get("fqdn") or "").strip()
+            if runtime_fqdn:
+                sibling_ui_url = runtime_fqdn if runtime_fqdn.startswith(("http://", "https://")) else f"http://{runtime_fqdn}"
         is_live, live_reason, runtime_target = _activation_runtime_target_is_live(runtime_target, runtime_instance)
         if not is_live:
             reuse_reason = live_reason
@@ -10873,6 +10887,8 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
                         "fqdn": str(runtime_instance.get("fqdn") or "").strip(),
                         "status": str(runtime_instance.get("status") or "").strip(),
                     },
+                    "sibling_ui_url": sibling_ui_url,
+                    "sibling_api_url": sibling_api_url,
                     "activation": {
                         "job_id": str(completed.get("job_id") or "").strip(),
                     },
@@ -13351,6 +13367,8 @@ def workspace_app_runtime_targets_collection(request: HttpRequest, workspace_id:
     runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip().rstrip("/")
     public_app_url = str(runtime_target.get("app_url") or runtime_target.get("public_app_url") or "").strip()
     compose_project = str(runtime_target.get("compose_project") or "").strip()
+    sibling_ui_url = str(payload.get("sibling_ui_url") or runtime_target.get("sibling_ui_url") or "").strip()
+    sibling_api_url = str(payload.get("sibling_api_url") or runtime_target.get("sibling_api_url") or "").strip()
     if not runtime_base_url:
         return JsonResponse({"error": "runtime_target.runtime_base_url is required"}, status=400)
     if not compose_project:
@@ -13376,6 +13394,8 @@ def workspace_app_runtime_targets_collection(request: HttpRequest, workspace_id:
         "source_build_job_id": str(runtime_target.get("source_build_job_id") or "").strip(),
         "source_workspace_id": str(runtime_target.get("source_workspace_id") or "").strip(),
         "installed_artifact_slug": artifact_slug,
+        "sibling_ui_url": sibling_ui_url,
+        "sibling_api_url": sibling_api_url,
     }
     fqdn = str(runtime_target.get("network_alias") or f"{compose_project}.internal").strip()
     desired_dns = {"runtime_target": runtime_payload}

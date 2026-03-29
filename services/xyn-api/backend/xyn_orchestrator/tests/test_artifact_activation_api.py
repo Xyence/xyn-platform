@@ -247,6 +247,7 @@ class ArtifactActivationApiTests(TestCase):
                     "compose_project": "xyn-real-estate-deal-finder",
                     "app_slug": "real-estate-deal-finder",
                     "installed_artifact_slug": "app.real-estate-deal-finder",
+                    "sibling_ui_url": "http://smoke-real-estate-deal-finder.localhost",
                 }
             },
         )
@@ -264,6 +265,7 @@ class ArtifactActivationApiTests(TestCase):
                             "compose_project": "xyn-real-estate-deal-finder",
                             "app_slug": "real-estate-deal-finder",
                             "installed_artifact_slug": "app.real-estate-deal-finder",
+                            "sibling_ui_url": "http://smoke-real-estate-deal-finder.localhost",
                         },
                     ),
                 ):
@@ -275,6 +277,7 @@ class ArtifactActivationApiTests(TestCase):
         runtime_target = payload.get("runtime_target") or {}
         self.assertEqual(runtime_target.get("compose_project"), "xyn-real-estate-deal-finder")
         self.assertEqual(runtime_target.get("runtime_url"), "https://deal-finder.local")
+        self.assertEqual(payload.get("sibling_ui_url"), "http://smoke-real-estate-deal-finder.localhost")
         seed_mock.assert_not_called()
 
     def test_second_activation_reuses_same_runtime_instance_without_duplicates(self) -> None:
@@ -526,6 +529,8 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(runtime_target.get("runtime_url"), "http://localhost:32799")
         self.assertEqual(runtime_target.get("app_url"), "http://localhost:32799")
         self.assertEqual(runtime_target.get("installed_artifact_slug"), "app.real-estate-deal-finder")
+        self.assertEqual(payload.get("sibling_ui_url"), "http://smoke-real-estate-deal-finder.localhost")
+        self.assertEqual(payload.get("sibling_api_url"), "http://api.smoke-real-estate-deal-finder.localhost")
         seed_mock.assert_called()
 
     def test_inflight_job_for_different_artifact_same_app_slug_does_not_dedupe(self) -> None:

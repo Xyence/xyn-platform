@@ -4305,6 +4305,8 @@ export type ArtifactActivationResponse = {
   app_slug: string;
   revision_anchor?: Record<string, unknown>;
   runtime_target?: Record<string, unknown>;
+  sibling_ui_url?: string;
+  sibling_api_url?: string;
   runtime_instance?: {
     id?: string;
     app_slug?: string;

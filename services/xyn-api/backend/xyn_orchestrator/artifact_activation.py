@@ -435,6 +435,8 @@ def find_completed_activation(
             if not runtime_target and isinstance(runtime_registration.get("runtime_target"), dict):
                 runtime_target = runtime_registration.get("runtime_target")
             sibling_output = output_json.get("sibling_xyn") if isinstance(output_json.get("sibling_xyn"), dict) else {}
+            sibling_ui_url = str(output_json.get("ui_url") or sibling_output.get("ui_url") or "").strip()
+            sibling_api_url = str(output_json.get("api_url") or sibling_output.get("api_url") or "").strip()
             if not runtime_target and isinstance(sibling_output.get("runtime_target"), dict):
                 runtime_target = sibling_output.get("runtime_target")
             installed_artifact = output_json.get("installed_artifact") if isinstance(output_json.get("installed_artifact"), dict) else {}
@@ -460,5 +462,7 @@ def find_completed_activation(
                 "job_status": str(row.get("status") or "").strip(),
                 "runtime_target": runtime_target if isinstance(runtime_target, dict) else {},
                 "runtime_instance": runtime_instance if isinstance(runtime_instance, dict) else {},
+                "sibling_ui_url": sibling_ui_url,
+                "sibling_api_url": sibling_api_url,
             }
     return None

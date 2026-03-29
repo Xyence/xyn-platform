@@ -64,16 +64,11 @@ describe("Solution panels", () => {
     });
     apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
     apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
-    apiMocks.listArtifactSurfaces.mockResolvedValue({
-      artifact_id: "artifact-1",
-      surfaces: [
-        { id: "s1", artifact_id: "artifact-1", key: "home", title: "Home", route: "/app", nav_visibility: "always", surface_kind: "dashboard" },
-      ],
-    });
     apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
     apiMocks.activateApplication.mockResolvedValue({
       status: "reused",
       artifact_id: "artifact-1",
+      sibling_ui_url: "http://smoke-real-estate-deal-finder-bbb291.localhost",
       runtime_target: { public_app_url: "https://deal-finder.local.test" },
       solution_runtime_binding: { activation_mode: "composed", freshness: "current" },
       solution_activation_composition: {
@@ -87,13 +82,12 @@ describe("Solution panels", () => {
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
     await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
-    await waitFor(() => expect(apiMocks.listArtifactSurfaces).toHaveBeenCalledWith("artifact-1"));
-    expect(openSpy).toHaveBeenCalledWith("/w/ws-1/a", "_blank", "noopener,noreferrer");
+    expect(openSpy).toHaveBeenCalledWith("http://smoke-real-estate-deal-finder-bbb291.localhost", "_blank", "noopener,noreferrer");
     expect(screen.getByText(/Opened existing dev sibling runtime \(composed\)\./)).toBeInTheDocument();
     openSpy.mockRestore();
   });
 
-  it("falls back to raw runtime URL when shell surface target cannot be resolved", async () => {
+  it("falls back to raw runtime URL when sibling URL is unavailable", async () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
     apiMocks.getApplication.mockResolvedValue({
       id: "app-1",
@@ -108,7 +102,6 @@ describe("Solution panels", () => {
     });
     apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
     apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
-    apiMocks.listArtifactSurfaces.mockRejectedValue(new Error("surface lookup failed"));
     apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
     apiMocks.activateApplication.mockResolvedValue({
       status: "reused",
@@ -126,7 +119,6 @@ describe("Solution panels", () => {
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
     await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
-    await waitFor(() => expect(apiMocks.listArtifactSurfaces).toHaveBeenCalledWith("artifact-1"));
     expect(openSpy).toHaveBeenCalledWith("https://deal-finder.local.test", "_blank", "noopener,noreferrer");
     openSpy.mockRestore();
   });
