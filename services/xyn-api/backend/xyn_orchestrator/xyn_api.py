@@ -10813,31 +10813,35 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
     )
     if can_reuse and isinstance(runtime_record, dict):
         runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record.get("runtime_target"), dict) else {}
-        if runtime_target.get("public_app_url") and not runtime_target.get("runtime_url"):
-            runtime_target = dict(runtime_target)
-            runtime_target["runtime_url"] = runtime_target.get("public_app_url")
         runtime_instance = runtime_record.get("instance")
-        return JsonResponse(
-            {
-                "status": "reused",
-                "workspace_id": str(workspace.id),
-                "artifact_id": str(artifact.id),
-                "artifact_slug": str(_artifact_slug(artifact) or ""),
-                "app_slug": app_slug,
-                "revision_anchor": activation.get("revision_anchor"),
-                "runtime_target": runtime_target,
-                "runtime_instance": {
-                    "id": str(getattr(runtime_instance, "id", "") or "").strip(),
-                    "app_slug": str(getattr(runtime_instance, "app_slug", "") or "").strip(),
-                    "fqdn": str(getattr(runtime_instance, "fqdn", "") or "").strip(),
-                    "status": str(getattr(runtime_instance, "status", "") or "").strip(),
-                },
-                "policy_source": str(activation.get("policy_source") or "reconstructed"),
-                "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
-                "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
-                "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
-            }
-        )
+        is_live, live_reason, runtime_target = _activation_runtime_target_is_live(runtime_target, runtime_instance)
+        if not is_live:
+            reuse_reason = live_reason
+        else:
+            if runtime_target.get("public_app_url") and not runtime_target.get("runtime_url"):
+                runtime_target = dict(runtime_target)
+                runtime_target["runtime_url"] = runtime_target.get("public_app_url")
+            return JsonResponse(
+                {
+                    "status": "reused",
+                    "workspace_id": str(workspace.id),
+                    "artifact_id": str(artifact.id),
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "app_slug": app_slug,
+                    "revision_anchor": activation.get("revision_anchor"),
+                    "runtime_target": runtime_target,
+                    "runtime_instance": {
+                        "id": str(getattr(runtime_instance, "id", "") or "").strip(),
+                        "app_slug": str(getattr(runtime_instance, "app_slug", "") or "").strip(),
+                        "fqdn": str(getattr(runtime_instance, "fqdn", "") or "").strip(),
+                        "status": str(getattr(runtime_instance, "status", "") or "").strip(),
+                    },
+                    "policy_source": str(activation.get("policy_source") or "reconstructed"),
+                    "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+                    "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+                    "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
+                }
+            )
 
     completed = find_completed_activation(
         workspace_slug=str(workspace.slug or ""),
@@ -10846,35 +10850,39 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
     )
     if isinstance(completed, dict):
         runtime_target = completed.get("runtime_target") if isinstance(completed.get("runtime_target"), dict) else {}
-        if runtime_target.get("public_app_url") and not runtime_target.get("runtime_url"):
-            runtime_target = dict(runtime_target)
-            runtime_target["runtime_url"] = runtime_target.get("public_app_url")
         runtime_instance = completed.get("runtime_instance") if isinstance(completed.get("runtime_instance"), dict) else {}
-        return JsonResponse(
-            {
-                "status": "reused",
-                "workspace_id": str(workspace.id),
-                "artifact_id": str(artifact.id),
-                "artifact_slug": str(_artifact_slug(artifact) or ""),
-                "app_slug": app_slug,
-                "revision_anchor": activation.get("revision_anchor"),
-                "runtime_target": runtime_target,
-                "runtime_instance": {
-                    "id": str(runtime_instance.get("id") or "").strip(),
-                    "app_slug": str(runtime_instance.get("app_slug") or "").strip(),
-                    "fqdn": str(runtime_instance.get("fqdn") or "").strip(),
-                    "status": str(runtime_instance.get("status") or "").strip(),
-                },
-                "activation": {
-                    "job_id": str(completed.get("job_id") or "").strip(),
-                },
-                "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
-                "policy_source": str(activation.get("policy_source") or "reconstructed"),
-                "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
-                "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
-                "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
-            }
-        )
+        is_live, live_reason, runtime_target = _activation_runtime_target_is_live(runtime_target, runtime_instance)
+        if not is_live:
+            reuse_reason = live_reason
+        else:
+            if runtime_target.get("public_app_url") and not runtime_target.get("runtime_url"):
+                runtime_target = dict(runtime_target)
+                runtime_target["runtime_url"] = runtime_target.get("public_app_url")
+            return JsonResponse(
+                {
+                    "status": "reused",
+                    "workspace_id": str(workspace.id),
+                    "artifact_id": str(artifact.id),
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "app_slug": app_slug,
+                    "revision_anchor": activation.get("revision_anchor"),
+                    "runtime_target": runtime_target,
+                    "runtime_instance": {
+                        "id": str(runtime_instance.get("id") or "").strip(),
+                        "app_slug": str(runtime_instance.get("app_slug") or "").strip(),
+                        "fqdn": str(runtime_instance.get("fqdn") or "").strip(),
+                        "status": str(runtime_instance.get("status") or "").strip(),
+                    },
+                    "activation": {
+                        "job_id": str(completed.get("job_id") or "").strip(),
+                    },
+                    "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
+                    "policy_source": str(activation.get("policy_source") or "reconstructed"),
+                    "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+                    "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+                    "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
+                }
+            )
 
     in_flight = find_inflight_activation(
         workspace_slug=str(workspace.slug or ""),
@@ -10906,7 +10914,6 @@ def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
 
     try:
         queued = submit_artifact_activation(
-            workspace_id=str(workspace.id),
             workspace_slug=str(workspace.slug or ""),
             draft_payload=activation["draft_payload"],
             seed_api_request=_seed_api_request,
@@ -19550,14 +19557,18 @@ def _seed_api_request(
     base_url = _seed_api_base_url()
     url = f"{base_url}{path}"
     params: Dict[str, str] = dict(query or {})
+    headers: Dict[str, str] = {}
     if workspace_id:
         params["workspace_id"] = workspace_id
+        headers["X-Workspace-Id"] = workspace_id
     if workspace_slug:
         params["workspace_slug"] = workspace_slug
+        headers["X-Workspace-Slug"] = workspace_slug
     return requests.request(
         method=method.upper(),
         url=url,
         params=params or None,
+        headers=headers or None,
         json=payload,
         timeout=timeout,
     )
@@ -20238,6 +20249,68 @@ def _refresh_runtime_target_localhost_url(runtime_target: Dict[str, Any]) -> Dic
         if public_app_url.startswith("http://localhost:"):
             refreshed["runtime_url"] = public_app_url
     return refreshed
+
+
+def _runtime_target_probe_base_urls(runtime_target: Dict[str, Any]) -> List[str]:
+    if not isinstance(runtime_target, dict):
+        return []
+    candidates: List[str] = []
+    runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip().rstrip("/")
+    if runtime_base_url:
+        candidates.append(runtime_base_url)
+    for field in ("runtime_url", "public_app_url", "app_url"):
+        raw = str(runtime_target.get(field) or "").strip()
+        if not raw:
+            continue
+        parsed = urlsplit(raw)
+        if not parsed.scheme or not parsed.netloc:
+            continue
+        base = urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
+        if base:
+            candidates.append(base)
+    deduped: List[str] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped
+
+
+def _activation_runtime_target_is_live(
+    runtime_target: Dict[str, Any],
+    runtime_instance: Any | None = None,
+) -> tuple[bool, str, Dict[str, Any]]:
+    refreshed = _refresh_runtime_target_localhost_url(runtime_target if isinstance(runtime_target, dict) else {})
+    instance_status = ""
+    if isinstance(runtime_instance, dict):
+        instance_status = str(runtime_instance.get("status") or "").strip().lower()
+    elif runtime_instance is not None:
+        instance_status = str(getattr(runtime_instance, "status", "") or "").strip().lower()
+    if instance_status and instance_status not in {"active", "ready", "running"}:
+        return False, "runtime_instance_inactive", refreshed
+
+    base_urls = _runtime_target_probe_base_urls(refreshed)
+    if not base_urls:
+        return False, "runtime_target_missing_url", refreshed
+
+    probe_paths = ("/health", "/healthz", "/xyn/api/health")
+    for base_url in base_urls:
+        for path in probe_paths:
+            try:
+                response = _runtime_target_request(
+                    base_url=base_url,
+                    method="GET",
+                    path=path,
+                    timeout=3,
+                )
+            except requests.RequestException:
+                continue
+            if int(response.status_code or 0) == 200:
+                return True, "runtime_live", refreshed
+    return False, "runtime_not_live", refreshed
 
 
 def _installed_generated_artifact(workspace: Workspace, app_slug: str) -> Optional[Artifact]:

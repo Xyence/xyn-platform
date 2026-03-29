@@ -248,7 +248,22 @@ class ArtifactActivationApiTests(TestCase):
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             with mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as seed_mock:
-                response = artifact_activate(self._request(method="post"), str(self.artifact.id))
+                with mock.patch(
+                    "xyn_orchestrator.xyn_api._activation_runtime_target_is_live",
+                    return_value=(
+                        True,
+                        "runtime_live",
+                        {
+                            "runtime_owner": "sibling",
+                            "runtime_base_url": "http://real-estate-deal-finder-api:8080",
+                            "public_app_url": "https://deal-finder.local",
+                            "compose_project": "xyn-real-estate-deal-finder",
+                            "app_slug": "real-estate-deal-finder",
+                            "installed_artifact_slug": "app.real-estate-deal-finder",
+                        },
+                    ),
+                ):
+                    response = artifact_activate(self._request(method="post"), str(self.artifact.id))
 
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
@@ -277,8 +292,23 @@ class ArtifactActivationApiTests(TestCase):
             },
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
-            first = artifact_activate(self._request(method="post"), str(self.artifact.id))
-            second = artifact_activate(self._request(method="post"), str(self.artifact.id))
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._activation_runtime_target_is_live",
+                return_value=(
+                    True,
+                    "runtime_live",
+                    {
+                        "runtime_owner": "sibling",
+                        "runtime_base_url": "http://real-estate-deal-finder-api:8080",
+                        "public_app_url": "https://deal-finder.local",
+                        "compose_project": "xyn-real-estate-deal-finder",
+                        "app_slug": "real-estate-deal-finder",
+                        "installed_artifact_slug": "app.real-estate-deal-finder",
+                    },
+                ),
+            ):
+                first = artifact_activate(self._request(method="post"), str(self.artifact.id))
+                second = artifact_activate(self._request(method="post"), str(self.artifact.id))
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
@@ -468,7 +498,20 @@ class ArtifactActivationApiTests(TestCase):
                 "xyn_orchestrator.xyn_api._seed_api_request",
                 side_effect=self._seed_side_effect(jobs=completed_jobs, create_draft_id="draft-new", submit_job_id="job-new"),
             ) as seed_mock:
-                response = artifact_activate(self._request(method="post"), str(self.artifact.id))
+                with mock.patch(
+                    "xyn_orchestrator.xyn_api._activation_runtime_target_is_live",
+                    return_value=(
+                        True,
+                        "runtime_live",
+                        {
+                            "public_app_url": "http://localhost:32799",
+                            "runtime_base_url": "http://xyn-sibling-real-estate-deal-finder-api:8080",
+                            "app_url": "http://localhost:32799",
+                            "installed_artifact_slug": "app.real-estate-deal-finder",
+                        },
+                    ),
+                ):
+                    response = artifact_activate(self._request(method="post"), str(self.artifact.id))
 
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
@@ -584,8 +627,24 @@ class ArtifactActivationApiTests(TestCase):
         )
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             with mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as seed_mock:
-                first = application_activate(self._application_request(method="post"), str(self.application.id))
-                second = application_activate(self._application_request(method="post"), str(self.application.id))
+                with mock.patch(
+                    "xyn_orchestrator.xyn_api._activation_runtime_target_is_live",
+                    return_value=(
+                        True,
+                        "runtime_live",
+                        {
+                            "runtime_owner": "sibling",
+                            "runtime_base_url": "http://real-estate-deal-finder-api:8080",
+                            "public_app_url": "https://deal-finder.local",
+                            "runtime_url": "https://deal-finder.local",
+                            "compose_project": "xyn-real-estate-deal-finder",
+                            "app_slug": "real-estate-deal-finder",
+                            "installed_artifact_slug": "app.real-estate-deal-finder",
+                        },
+                    ),
+                ):
+                    first = application_activate(self._application_request(method="post"), str(self.application.id))
+                    second = application_activate(self._application_request(method="post"), str(self.application.id))
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
         first_payload = json.loads(first.content)
@@ -635,7 +694,9 @@ class ArtifactActivationApiTests(TestCase):
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             with mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as seed_mock:
                 with mock.patch("xyn_orchestrator.xyn_api.subprocess.run", return_value=inspect_completed) as run_mock:
-                    response = application_activate(self._application_request(method="post"), str(self.application.id))
+                    with mock.patch("xyn_orchestrator.xyn_api.requests.request") as request_mock:
+                        request_mock.return_value = _mock_json_response(200, {"status": "ok"})
+                        response = application_activate(self._application_request(method="post"), str(self.application.id))
         self.assertEqual(response.status_code, 200)
         payload = json.loads(response.content)
         self.assertEqual(payload.get("status"), "reused")
@@ -648,6 +709,42 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(str(binding.runtime_instance_id), str(runtime_instance.id))
         self.assertEqual((binding.runtime_target_json or {}).get("public_app_url"), "http://localhost:32878")
         self.assertEqual((binding.runtime_target_json or {}).get("runtime_url"), "http://localhost:32878")
+
+    def test_activation_matching_runtime_target_not_live_falls_through_to_queued(self) -> None:
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=self.artifact,
+            app_slug="real-estate-deal-finder",
+            fqdn="real-estate-deal-finder.internal",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://real-estate-deal-finder-api:8080",
+                    "public_app_url": "http://localhost:32799",
+                    "runtime_url": "http://localhost:32799",
+                    "compose_project": "xyn-real-estate-deal-finder",
+                    "app_slug": "real-estate-deal-finder",
+                    "installed_artifact_slug": "app.real-estate-deal-finder",
+                }
+            },
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._activation_runtime_target_is_live",
+                return_value=(False, "runtime_not_live", {"runtime_url": "http://localhost:32799"}),
+            ):
+                with mock.patch(
+                    "xyn_orchestrator.xyn_api._seed_api_request",
+                    side_effect=self._seed_side_effect(jobs=[]),
+                ) as seed_mock:
+                    response = artifact_activate(self._request(method="post"), str(self.artifact.id))
+
+        self.assertEqual(response.status_code, 202)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("status"), "queued")
+        self.assertEqual(payload.get("reuse_blocked_reason"), "runtime_not_live")
+        self.assertGreaterEqual(seed_mock.call_count, 3)
 
     def test_solution_runtime_binding_endpoint_returns_composition_and_binding(self) -> None:
         SolutionRuntimeBinding.objects.create(

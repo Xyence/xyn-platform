@@ -117,6 +117,42 @@ describe("Solution panels", () => {
     expect(screen.getByText(/Draft draft-1 · Job job-1/)).toBeInTheDocument();
   });
 
+  it("does not open browser window when activation is queued", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+      runtime_binding: { activation_mode: "composed", freshness: "unknown" },
+      activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+    apiMocks.activateApplication.mockResolvedValue({
+      status: "queued",
+      activation: { draft_id: "draft-2", job_id: "job-2" },
+      solution_runtime_binding: { activation_mode: "composed", freshness: "unknown" },
+      solution_activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(screen.getByText(/Solution activation queued \(composed\)\./)).toBeInTheDocument();
+    openSpy.mockRestore();
+  });
+
   it("renders solution list in panel and opens solution detail panel", async () => {
     const onOpenPanel = vi.fn();
     apiMocks.listApplications.mockResolvedValue({

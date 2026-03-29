@@ -10,6 +10,48 @@ class ArtifactActivationError(RuntimeError):
     """Raised when artifact activation cannot be safely queued."""
 
 
+def _ensure_workspace_exists(
+    *,
+    workspace_slug: str,
+    seed_api_request: Callable[..., Any],
+) -> None:
+    slug = str(workspace_slug or "").strip().lower()
+    if not slug:
+        return
+    try:
+        response = seed_api_request(
+            method="GET",
+            path="/api/v1/workspaces",
+            payload=None,
+            timeout=20,
+        )
+    except Exception:
+        return
+    if int(getattr(response, "status_code", 500) or 500) >= 300:
+        return
+    try:
+        rows = response.json() if response.content else []
+    except ValueError:
+        return
+    workspace_rows = rows if isinstance(rows, list) else []
+    slug_exists = any(
+        str(item.get("slug") or "").strip().lower() == slug
+        for item in workspace_rows
+        if isinstance(item, dict)
+    )
+    if slug_exists:
+        return
+    try:
+        seed_api_request(
+            method="POST",
+            path="/api/v1/workspaces",
+            payload={"slug": slug, "title": slug.replace("-", " ").title() or "Development"},
+            timeout=20,
+        )
+    except Exception:
+        return
+
+
 def _normalize_unique_strings(values: list[Any]) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -181,13 +223,16 @@ def build_activation_payload(
 
 def submit_artifact_activation(
     *,
+    workspace_id: str = "",
     workspace_slug: str,
     draft_payload: Dict[str, Any],
     seed_api_request: Callable[..., Any],
 ) -> Dict[str, str]:
+    _ensure_workspace_exists(workspace_slug=workspace_slug, seed_api_request=seed_api_request)
     create_response = seed_api_request(
         method="POST",
         path="/api/v1/drafts",
+        workspace_id=workspace_id,
         workspace_slug=workspace_slug,
         payload=draft_payload,
     )
@@ -206,6 +251,7 @@ def submit_artifact_activation(
     submit_response = seed_api_request(
         method="POST",
         path=f"/api/v1/drafts/{draft_id}/submit",
+        workspace_id=workspace_id,
         workspace_slug=workspace_slug,
         payload={},
     )
@@ -343,4 +389,76 @@ def find_inflight_activation(
                     "created_at": str(row.get("created_at") or "").strip(),
                     "updated_at": str(row.get("updated_at") or "").strip(),
                 }
+    return None
+
+
+def find_completed_activation(
+    *,
+    workspace_slug: str,
+    revision_anchor: Dict[str, Any],
+    seed_api_request: Callable[..., Any],
+) -> Dict[str, Any] | None:
+    # Reuse completed pipeline output only when it matches the same
+    # revision-anchor identity used for activation dedupe/reuse.
+    candidate_specs = [
+        ("provision_sibling_xyn", "succeeded"),
+        ("smoke_test", "succeeded"),
+    ]
+    for job_type, status in candidate_specs:
+        response = seed_api_request(
+            method="GET",
+            path="/api/v1/jobs",
+            workspace_slug=workspace_slug,
+            payload=None,
+            timeout=20,
+            query={"type": job_type, "status": status, "limit": "200"},
+        )
+        if int(getattr(response, "status_code", 500) or 500) >= 300:
+            continue
+        try:
+            rows = response.json() if response.content else []
+        except ValueError:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("status") or "").strip().lower() != "succeeded":
+                continue
+            candidate_anchor = _job_revision_anchor(row)
+            if not _anchors_match(revision_anchor, candidate_anchor):
+                continue
+            output_json = row.get("output_json") if isinstance(row.get("output_json"), dict) else {}
+            runtime_target = output_json.get("runtime_target") if isinstance(output_json.get("runtime_target"), dict) else {}
+            runtime_registration = output_json.get("runtime_registration") if isinstance(output_json.get("runtime_registration"), dict) else {}
+            if not runtime_target and isinstance(runtime_registration.get("runtime_target"), dict):
+                runtime_target = runtime_registration.get("runtime_target")
+            sibling_output = output_json.get("sibling_xyn") if isinstance(output_json.get("sibling_xyn"), dict) else {}
+            if not runtime_target and isinstance(sibling_output.get("runtime_target"), dict):
+                runtime_target = sibling_output.get("runtime_target")
+            installed_artifact = output_json.get("installed_artifact") if isinstance(output_json.get("installed_artifact"), dict) else {}
+            if not installed_artifact and isinstance(sibling_output.get("installed_artifact"), dict):
+                installed_artifact = sibling_output.get("installed_artifact")
+            if runtime_target and not str(runtime_target.get("installed_artifact_slug") or "").strip():
+                artifact_slug = str(installed_artifact.get("artifact_slug") or "").strip()
+                if artifact_slug:
+                    runtime_target = dict(runtime_target)
+                    runtime_target["installed_artifact_slug"] = artifact_slug
+            runtime_instance = (
+                runtime_registration.get("instance")
+                if isinstance(runtime_registration.get("instance"), dict)
+                else {}
+            )
+            if not runtime_instance and isinstance(output_json.get("sibling_instance"), dict):
+                runtime_instance = output_json.get("sibling_instance")
+            if not runtime_instance and isinstance(sibling_output.get("sibling_instance"), dict):
+                runtime_instance = sibling_output.get("sibling_instance")
+            return {
+                "job_id": str(row.get("id") or "").strip(),
+                "job_type": str(row.get("type") or "").strip(),
+                "job_status": str(row.get("status") or "").strip(),
+                "runtime_target": runtime_target if isinstance(runtime_target, dict) else {},
+                "runtime_instance": runtime_instance if isinstance(runtime_instance, dict) else {},
+            }
     return None
