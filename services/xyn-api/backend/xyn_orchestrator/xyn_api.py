@@ -7916,6 +7916,60 @@ def auth_session_check(request: HttpRequest) -> HttpResponse:
     return redirect(login_url)
 
 
+def _manifest_claims_global_root(manifest: Dict[str, Any]) -> bool:
+    if _manifest_ui_mount_scope(manifest) != "global":
+        return False
+    roles = manifest.get("roles") if isinstance(manifest.get("roles"), list) else []
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        if str(role.get("role") or "").strip().lower() != "ui_mount":
+            continue
+        mount_path = _normalize_surface_path(str(role.get("mount_path") or ""))
+        if mount_path == "/":
+            return True
+    for surface_key in ("nav", "manage", "docs"):
+        rows = _manifest_surface_entries(manifest, surface_key)
+        if any(_normalize_surface_path(str(row.get("path") or "")) == "/" for row in rows):
+            return True
+    return False
+
+
+def _resolve_public_root_owner() -> Optional[Artifact]:
+    bindings = (
+        WorkspaceArtifactBinding.objects.filter(enabled=True, installed_state="installed")
+        .select_related("artifact", "artifact__type")
+        .order_by("-updated_at", "-created_at")
+    )
+    for binding in bindings:
+        artifact = binding.artifact
+        if not artifact:
+            continue
+        try:
+            manifest = _load_artifact_manifest(artifact)
+        except Exception:
+            continue
+        if _manifest_claims_global_root(manifest):
+            return artifact
+    return None
+
+
+@csrf_exempt
+def public_root_resolution(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    owner = _resolve_public_root_owner()
+    if owner is None:
+        return JsonResponse({"mode": "private"})
+    return JsonResponse(
+        {
+            "mode": "public",
+            "owner_artifact_slug": str(_artifact_slug(owner) or ""),
+            "owner_artifact_id": str(owner.id),
+        }
+    )
+
+
 def _serialize_preview_status(identity: UserIdentity, request: HttpRequest) -> Dict[str, Any]:
     actor_roles = getattr(request, "actor_roles", None)
     if not isinstance(actor_roles, list):

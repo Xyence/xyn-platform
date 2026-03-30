@@ -8,6 +8,7 @@ import type {
   PublicPageSectionsResponse,
   PublicPagesResponse,
   PublicSiteResponse,
+  PublicRootResolutionResponse,
 } from "../public/types";
 
 async function handle<T>(response: Response): Promise<T> {
@@ -52,6 +53,12 @@ export async function fetchPublicSite(): Promise<PublicSiteResponse> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await fetch(`${apiBaseUrl}/xyn/api/public/site`);
   return handle<PublicSiteResponse>(response);
+}
+
+export async function fetchPublicRootResolution(): Promise<PublicRootResolutionResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await fetch(`${apiBaseUrl}/xyn/api/public/root-resolution`);
+  return handle<PublicRootResolutionResponse>(response);
 }
 
 export async function fetchPublicArticles(page = 1, surfacePath = "/articles"): Promise<PublicArticlesResponse> {

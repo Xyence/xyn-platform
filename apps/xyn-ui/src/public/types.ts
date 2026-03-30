@@ -50,6 +50,12 @@ export type PublicSiteResponse = {
   site_name: string;
 };
 
+export type PublicRootResolutionResponse = {
+  mode: "public" | "private";
+  owner_artifact_slug?: string;
+  owner_artifact_id?: string;
+};
+
 export type PublicArticleSummary = {
   title: string;
   slug: string;

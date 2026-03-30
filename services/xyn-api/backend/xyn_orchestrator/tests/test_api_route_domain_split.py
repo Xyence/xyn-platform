@@ -5,7 +5,7 @@ from xyn_orchestrator.api.appspec import composer_state
 from xyn_orchestrator.api.artifacts import artifacts_collection
 from xyn_orchestrator.api.orchestration import orchestration_runs_collection
 from xyn_orchestrator.api.solutions import applications_collection
-from xyn_orchestrator.api.system import system_readiness
+from xyn_orchestrator.api.system import public_root_resolution, system_readiness
 from xyn_orchestrator.api.workspaces import workspaces_collection
 
 
@@ -17,3 +17,4 @@ class ApiRouteDomainSplitTests(SimpleTestCase):
         self.assertIs(resolve('/xyn/api/orchestration/runs').func, orchestration_runs_collection)
         self.assertIs(resolve('/xyn/api/composer/state').func, composer_state)
         self.assertIs(resolve('/xyn/api/system/readiness').func, system_readiness)
+        self.assertIs(resolve('/xyn/api/public/root-resolution').func, public_root_resolution)
