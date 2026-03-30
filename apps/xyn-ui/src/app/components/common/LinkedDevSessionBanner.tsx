@@ -43,7 +43,7 @@ export default function LinkedDevSessionBanner({ workspaceId }: Props) {
         <p className="muted small">
           {sessionTitle || "Active change session"}
           {applicationName ? ` · ${applicationName}` : ""}
-          {executionStatus ? ` · ${executionStatus.replaceAll("_", " ")}` : ""}
+          {executionStatus ? ` · ${executionStatus.replace(/_/g, " ")}` : ""}
         </p>
       </div>
       <button
