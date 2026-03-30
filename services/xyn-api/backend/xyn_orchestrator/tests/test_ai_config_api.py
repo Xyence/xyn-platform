@@ -166,13 +166,90 @@ class AiConfigApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         routing = payload.get("routing") or []
-        self.assertEqual(len(routing), 3)
+        self.assertEqual(len(routing), 4)
         planning = next(item for item in routing if item.get("purpose") == "planning")
         coding = next(item for item in routing if item.get("purpose") == "coding")
+        palette = next(item for item in routing if item.get("purpose") == "palette")
         self.assertEqual(planning.get("resolved_agent_name"), "Xyn Planning Assistant")
         self.assertEqual(planning.get("resolution_source"), "explicit")
         self.assertEqual(coding.get("resolved_agent_name"), "Xyn Coding Assistant")
         self.assertEqual(coding.get("resolution_source"), "explicit")
+        self.assertEqual(palette.get("resolution_type"), "falls_back_to_default")
+
+    def test_ai_routing_status_supports_palette_and_default_fallback(self):
+        self._set_identity(self.admin_identity)
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+            },
+            clear=False,
+        ):
+            response = self.client.get("/xyn/api/ai/routing")
+        self.assertEqual(response.status_code, 200)
+        routing = response.json().get("routing") or []
+        default_route = next(item for item in routing if item.get("purpose") == "default")
+        palette_route = next(item for item in routing if item.get("purpose") == "palette")
+        self.assertEqual(palette_route.get("resolution_type"), "falls_back_to_default")
+        self.assertEqual(palette_route.get("resolved_agent_id"), default_route.get("resolved_agent_id"))
+
+    def test_env_routing_overrides_apply_deterministically_for_all_purposes(self):
+        self._set_identity(self.admin_identity)
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+            },
+            clear=False,
+        ):
+            self.client.get("/xyn/api/ai/routing")
+        provider = self._ensure_provider()
+        model_config = ModelConfig.objects.create(provider=provider, model_name="gpt-5.4", enabled=True)
+        for slug, name, purposes in [
+            ("routing-default", "Routing Default", ["planning", "coding", "palette"]),
+            ("routing-planning", "Routing Planning", ["planning"]),
+            ("routing-coding", "Routing Coding", ["coding"]),
+            ("routing-palette", "Routing Palette", ["palette"]),
+        ]:
+            create_response = self.client.post(
+                "/xyn/api/ai/agents",
+                data=json.dumps(
+                    {
+                        "slug": slug,
+                        "name": name,
+                        "model_config_id": str(model_config.id),
+                        "purposes": purposes,
+                        "enabled": True,
+                    }
+                ),
+                content_type="application/json",
+            )
+            self.assertEqual(create_response.status_code, 200)
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_ROUTING_DEFAULT_AGENT_SLUG": "routing-default",
+                "XYN_AI_ROUTING_PLANNING_AGENT_SLUG": "routing-planning",
+                "XYN_AI_ROUTING_CODING_AGENT_SLUG": "routing-coding",
+                "XYN_AI_ROUTING_PALETTE_AGENT_SLUG": "routing-palette",
+            },
+            clear=False,
+        ):
+            response = self.client.get("/xyn/api/ai/routing")
+        self.assertEqual(response.status_code, 200)
+        routing = response.json().get("routing") or []
+        default_route = next(item for item in routing if item.get("purpose") == "default")
+        planning_route = next(item for item in routing if item.get("purpose") == "planning")
+        coding_route = next(item for item in routing if item.get("purpose") == "coding")
+        palette_route = next(item for item in routing if item.get("purpose") == "palette")
+        self.assertEqual(default_route.get("resolved_agent_name"), "Routing Default")
+        self.assertEqual(planning_route.get("resolved_agent_name"), "Routing Planning")
+        self.assertEqual(coding_route.get("resolved_agent_name"), "Routing Coding")
+        self.assertEqual(palette_route.get("resolved_agent_name"), "Routing Palette")
 
     def test_ai_routing_patch_updates_and_clears_planning_assignment(self):
         self._set_identity(self.admin_identity)

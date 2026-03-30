@@ -213,6 +213,7 @@ from xyn_orchestrator.api.solutions import (
     application_solution_change_sessions_collection,
     application_solution_change_session_detail,
     application_solution_change_session_reply,
+    application_solution_change_session_continue,
     application_solution_change_session_regenerate_options,
     application_solution_change_session_select_option,
     application_solution_change_session_checkpoint_decision,
@@ -220,6 +221,7 @@ from xyn_orchestrator.api.solutions import (
     application_solution_change_session_stage_apply,
     application_solution_change_session_prepare_preview,
     application_solution_change_session_validate,
+    application_solution_change_session_finalize,
 )
 
 from xyn_orchestrator.api.artifacts import (
@@ -295,6 +297,7 @@ from xyn_orchestrator.api.artifacts import (
 from xyn_orchestrator.api.workspaces import (
     workspaces_collection,
     workspace_artifacts_collection,
+    workspace_linked_change_session,
     workspace_app_runtime_targets_collection,
     workspace_artifact_detail,
     workspace_artifact_publish,
@@ -666,6 +669,7 @@ urlpatterns = [
     path("api/workspaces", workspaces_collection),
     path("xyn/api/workspaces/<uuid:workspace_id>", workspace_detail),
     path("xyn/api/workspaces/<uuid:workspace_id>/artifacts", workspace_artifacts_collection),
+    path("xyn/api/workspaces/<uuid:workspace_id>/linked-change-session", workspace_linked_change_session),
     path("xyn/api/workspaces/<uuid:workspace_id>/app-runtime-targets", workspace_app_runtime_targets_collection),
     path("xyn/api/workspaces/<uuid:workspace_id>/artifacts/<uuid:artifact_id>", workspace_artifact_detail),
     path("xyn/api/workspaces/<uuid:workspace_id>/artifacts/<uuid:artifact_id>/publish", workspace_artifact_publish),
@@ -817,6 +821,7 @@ urlpatterns = [
     path("xyn/api/applications/<uuid:application_id>/change-sessions", application_solution_change_sessions_collection),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>", application_solution_change_session_detail),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/reply", application_solution_change_session_reply),
+    path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/continue", application_solution_change_session_continue),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/regenerate-options", application_solution_change_session_regenerate_options),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/select-option", application_solution_change_session_select_option),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/checkpoints/<uuid:checkpoint_id>/decision", application_solution_change_session_checkpoint_decision),
@@ -824,6 +829,7 @@ urlpatterns = [
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/stage-apply", application_solution_change_session_stage_apply),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/prepare-preview", application_solution_change_session_prepare_preview),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/validate", application_solution_change_session_validate),
+    path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/finalize", application_solution_change_session_finalize),
     path("xyn/api/campaign-types", campaign_types_collection),
     path("xyn/api/campaigns", campaigns_collection),
     path("xyn/api/campaigns/<uuid:campaign_id>", campaign_detail),

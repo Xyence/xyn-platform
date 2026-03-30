@@ -42,6 +42,12 @@ BOOTSTRAP_ROLE_ENV_PREFIX = {
     "planning": "XYN_AI_PLANNING",
     "coding": "XYN_AI_CODING",
 }
+BOOTSTRAP_ROUTING_ENV_KEYS = {
+    "default": "XYN_AI_ROUTING_DEFAULT_AGENT_SLUG",
+    "planning": "XYN_AI_ROUTING_PLANNING_AGENT_SLUG",
+    "coding": "XYN_AI_ROUTING_CODING_AGENT_SLUG",
+    "palette": "XYN_AI_ROUTING_PALETTE_AGENT_SLUG",
+}
 BOOTSTRAP_ROLE_AGENT_META = {
     "default": {
         "slug": "default-assistant",
@@ -614,7 +620,7 @@ def resolve_agent_routing(*, purpose_slug: Optional[str] = None, agent_slug: Opt
             reason=f"purpose '{purpose}' has an explicit default agent assignment",
         )
 
-    if purpose in {"planning", "coding"}:
+    if purpose in {"planning", "coding", "palette"}:
         if fallback_default:
             return _build_resolution_payload(
                 purpose=purpose,
@@ -1073,6 +1079,17 @@ def ensure_default_ai_seeds() -> None:
             "model_config": default_model,
         },
     )
+    palette, _ = AgentPurpose.objects.get_or_create(
+        slug="palette",
+        defaults={
+            "name": "Palette",
+            "description": "Palette and assistant command routing",
+            "status": "active",
+            "enabled": True,
+            "preamble": "Purpose: palette. Resolve concise, deterministic command interpretation and execution guidance.",
+            "model_config": default_model,
+        },
+    )
 
     if not coding.name:
         coding.name = "Coding"
@@ -1098,6 +1115,13 @@ def ensure_default_ai_seeds() -> None:
     if default_model and documentation.model_config_id != default_model.id:
         documentation.model_config = default_model
     documentation.save(update_fields=["name", "preamble", "model_config", "updated_at"])
+    if not palette.name:
+        palette.name = "Palette"
+    if not palette.preamble:
+        palette.preamble = "Purpose: palette. Resolve concise, deterministic command interpretation and execution guidance."
+    if default_model and palette.model_config_id != default_model.id:
+        palette.model_config = default_model
+    palette.save(update_fields=["name", "preamble", "model_config", "updated_at"])
 
     role_agents: Dict[str, AgentDefinition] = {}
     for role, meta in BOOTSTRAP_ROLE_AGENT_META.items():
@@ -1135,10 +1159,51 @@ def ensure_default_ai_seeds() -> None:
     if "default" in role_agents:
         AgentDefinition.objects.exclude(id=role_agents["default"].id).filter(is_default=True).update(is_default=False)
     bootstrap_managed_agent_slugs = {"default-assistant", "planning-assistant", "coding-assistant"}
+
+    # Apply deterministic env-driven routing defaults before bootstrap fallback ownership.
+    default_override_slug = str(os.environ.get(BOOTSTRAP_ROUTING_ENV_KEYS["default"]) or "").strip()
+    if default_override_slug:
+        override_default = AgentDefinition.objects.filter(slug=default_override_slug, enabled=True).first()
+        if override_default:
+            AgentDefinition.objects.exclude(id=override_default.id).filter(is_default=True).update(is_default=False)
+            if not override_default.is_default:
+                override_default.is_default = True
+                override_default.save(update_fields=["is_default", "updated_at"])
+        else:
+            logger.warning("AI routing bootstrap override skipped: default agent slug not found", extra={"slug": default_override_slug})
+
+    env_purpose_overrides: Dict[str, Optional[AgentDefinition]] = {}
+    for purpose_slug in ("planning", "coding", "palette"):
+        override_slug = str(os.environ.get(BOOTSTRAP_ROUTING_ENV_KEYS[purpose_slug]) or "").strip()
+        if not override_slug:
+            continue
+        override_agent = AgentDefinition.objects.filter(slug=override_slug, enabled=True).first()
+        if not override_agent:
+            logger.warning(
+                "AI routing bootstrap override skipped: purpose agent slug not found",
+                extra={"purpose": purpose_slug, "slug": override_slug},
+            )
+            continue
+        env_purpose_overrides[purpose_slug] = override_agent
+
     for purpose_slug, owner_role in {
         "planning": "planning" if "planning" in role_agents else "default",
         "coding": "coding" if "coding" in role_agents else "default",
+        "palette": "default",
     }.items():
+        env_override = env_purpose_overrides.get(purpose_slug)
+        if env_override:
+            purpose_obj = AgentPurpose.objects.filter(slug=purpose_slug).first()
+            if not purpose_obj:
+                continue
+            AgentDefinitionPurpose.objects.filter(purpose__slug=purpose_slug, is_default_for_purpose=True).exclude(
+                agent_definition=env_override
+            ).update(is_default_for_purpose=False)
+            link, _ = AgentDefinitionPurpose.objects.get_or_create(agent_definition=env_override, purpose=purpose_obj)
+            if not link.is_default_for_purpose:
+                link.is_default_for_purpose = True
+                link.save(update_fields=["is_default_for_purpose"])
+            continue
         current_default = (
             AgentDefinitionPurpose.objects.select_related("agent_definition")
             .filter(purpose__slug=purpose_slug, is_default_for_purpose=True)

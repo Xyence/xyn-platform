@@ -14,6 +14,7 @@ from xyn_orchestrator.models import (
     ApplicationArtifactMembership,
     Artifact,
     ArtifactType,
+    SolutionChangeSession,
     SolutionRuntimeBinding,
     UserIdentity,
     Workspace,
@@ -142,10 +143,10 @@ class ArtifactActivationApiTests(TestCase):
         request.user = self.user
         return request
 
-    def _application_request(self, *, method: str = "post") -> object:
+    def _application_request(self, *, method: str = "post", payload: dict | None = None) -> object:
         request = getattr(self.factory, method.lower())(
             f"/xyn/api/applications/{self.application.id}/activate",
-            data=json.dumps({}),
+            data=json.dumps(payload or {}),
             content_type="application/json",
         )
         request.user = self.user
@@ -596,6 +597,86 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(str(binding.primary_app_artifact_id), str(self.artifact.id))
         self.assertEqual(str(binding.policy_artifact_id), str(self.policy_artifact.id))
         self.assertEqual((payload.get("solution_runtime_binding") or {}).get("activation_mode"), "composed")
+
+    def test_solution_activation_with_session_persists_iteration_linkage(self) -> None:
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            title="Iteration Session",
+            request_text="Refine deployed sibling behavior",
+            created_by=self.identity,
+            status="planned",
+            execution_status="preview_ready",
+        )
+        runtime_instance = WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=self.artifact,
+            app_slug="real-estate-deal-finder",
+            fqdn="real-estate-deal-finder.internal",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://real-estate-deal-finder-api:8080",
+                    "public_app_url": "http://localhost:32900",
+                    "runtime_url": "http://localhost:32900",
+                    "compose_project": "xyn-real-estate-deal-finder",
+                    "app_slug": "real-estate-deal-finder",
+                    "installed_artifact_slug": "app.real-estate-deal-finder",
+                }
+            },
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as seed_mock:
+                with mock.patch(
+                    "xyn_orchestrator.xyn_api._activation_runtime_target_is_live",
+                    return_value=(
+                        True,
+                        "runtime_live",
+                        {
+                            "runtime_owner": "sibling",
+                            "runtime_base_url": "http://real-estate-deal-finder-api:8080",
+                            "public_app_url": "http://localhost:32900",
+                            "runtime_url": "http://localhost:32900",
+                            "compose_project": "xyn-real-estate-deal-finder",
+                            "app_slug": "real-estate-deal-finder",
+                            "installed_artifact_slug": "app.real-estate-deal-finder",
+                        },
+                    ),
+                ):
+                    first_response = application_activate(
+                        self._application_request(
+                            method="post",
+                            payload={"solution_change_session_id": str(session.id)},
+                        ),
+                        str(self.application.id),
+                    )
+                    second_response = application_activate(
+                        self._application_request(
+                            method="post",
+                            payload={"solution_change_session_id": str(session.id)},
+                        ),
+                        str(self.application.id),
+                    )
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        first_payload = json.loads(first_response.content)
+        payload = json.loads(second_response.content)
+        self.assertEqual(payload.get("status"), "reused")
+        seed_mock.assert_not_called()
+        self.assertEqual(
+            str((first_payload.get("solution_runtime_binding") or {}).get("id") or ""),
+            str((payload.get("solution_runtime_binding") or {}).get("id") or ""),
+        )
+        session.refresh_from_db()
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        linkage = metadata.get("iteration_linkage") if isinstance(metadata.get("iteration_linkage"), dict) else {}
+        self.assertEqual(str(linkage.get("runtime_binding_id") or "").strip() != "", True)
+        self.assertEqual(
+            str((linkage.get("runtime_instance") or {}).get("id") or ""),
+            str(runtime_instance.id),
+        )
+        self.assertEqual(str((linkage.get("revision_anchor") or {}).get("artifact_slug") or ""), "app.real-estate-deal-finder")
 
     def test_solution_activation_records_reconstructed_mode_without_policy_artifact(self) -> None:
         ApplicationArtifactMembership.objects.filter(

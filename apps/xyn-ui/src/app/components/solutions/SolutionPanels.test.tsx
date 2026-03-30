@@ -81,7 +81,7 @@ describe("Solution panels", () => {
 
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
-    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1", undefined));
     expect(openSpy).toHaveBeenCalledWith("http://smoke-real-estate-deal-finder-bbb291.localhost", "_blank", "noopener,noreferrer");
     expect(screen.getByText(/Opened existing dev sibling runtime \(composed\)\./)).toBeInTheDocument();
     openSpy.mockRestore();
@@ -118,7 +118,7 @@ describe("Solution panels", () => {
 
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
-    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1", undefined));
     expect(openSpy).toHaveBeenCalledWith("https://deal-finder.local.test", "_blank", "noopener,noreferrer");
     openSpy.mockRestore();
   });
@@ -153,7 +153,7 @@ describe("Solution panels", () => {
 
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
-    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1", undefined));
     expect(screen.getByText(/Solution activation already in progress \(reconstructed\)\./)).toBeInTheDocument();
     expect(screen.getByText(/Draft draft-1 · Job job-1/)).toBeInTheDocument();
   });
@@ -189,7 +189,7 @@ describe("Solution panels", () => {
 
     await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
     await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
-    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1"));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1", undefined));
     expect(openSpy).not.toHaveBeenCalled();
     expect(screen.getByText(/Solution activation queued \(composed\)\./)).toBeInTheDocument();
     openSpy.mockRestore();

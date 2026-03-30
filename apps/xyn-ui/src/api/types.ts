@@ -2928,6 +2928,18 @@ export type SolutionChangeSession = {
   updated_at: string;
 };
 
+export type WorkspaceLinkedChangeSession = {
+  workspace_id: string;
+  application_id: string;
+  application_name?: string;
+  solution_change_session_id: string;
+  session_title?: string;
+  status?: string;
+  execution_status?: string;
+  current_origin?: string;
+  origin_candidates?: string[];
+};
+
 export type SolutionPlanningTurn = {
   id: string;
   workspace_id: string;

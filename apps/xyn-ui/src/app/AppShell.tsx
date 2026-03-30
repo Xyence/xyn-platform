@@ -66,6 +66,7 @@ import { resolveRouteId } from "./help/routeHelp";
 import PreviewBanner from "./components/preview/PreviewBanner";
 import XynConsoleNode from "./components/console/XynConsoleNode";
 import HeaderUtilityMenu from "./components/common/HeaderUtilityMenu";
+import LinkedDevSessionBanner from "./components/common/LinkedDevSessionBanner";
 import SuggestionSwitcher from "./components/console/SuggestionSwitcher";
 import { useXynConsole } from "./state/xynConsoleStore";
 import useWorkspaceFromRoute from "./hooks/useWorkspaceFromRoute";
@@ -995,6 +996,9 @@ export default function AppShell() {
               }}
             />
           </div>
+          {isWorkbenchRoute && activeWorkspace?.id ? (
+            <LinkedDevSessionBanner workspaceId={activeWorkspace.id} />
+          ) : null}
           {!isWorkbenchRoute && breadcrumbTrail.length > 0 && (
             <div className="app-breadcrumbs" aria-label="Breadcrumb">
               {breadcrumbTrail.map((crumb) => crumb.label).join(" / ")}

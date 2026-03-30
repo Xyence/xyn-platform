@@ -11021,6 +11021,17 @@ def application_activate(request: HttpRequest, application_id: str) -> JsonRespo
         return JsonResponse({"error": "forbidden"}, status=403)
     if not _workspace_has_role(identity, str(workspace.id), "contributor"):
         return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    session_id = str(payload.get("solution_change_session_id") or payload.get("session_id") or "").strip()
+    solution_change_session = None
+    if session_id:
+        solution_change_session = SolutionChangeSession.objects.filter(
+            id=session_id,
+            application=application,
+            workspace_id=application.workspace_id,
+        ).first()
+        if solution_change_session is None:
+            return JsonResponse({"error": "solution_change_session_id was not found for this application"}, status=404)
     selected_app_member, _selected_policy_member = _solution_activation_memberships(application)
     if not selected_app_member or not selected_app_member.artifact:
         return JsonResponse({"error": "solution has no application artifact membership"}, status=400)
@@ -11033,11 +11044,17 @@ def application_activate(request: HttpRequest, application_id: str) -> JsonRespo
         runtime_target_payload = payload.get("runtime_target")
         if isinstance(runtime_target_payload, dict):
             payload["runtime_target"] = _refresh_runtime_target_localhost_url(runtime_target_payload)
-        _record_solution_runtime_binding_from_activation(
+        binding = _record_solution_runtime_binding_from_activation(
             application=application,
             selected_app_artifact=selected_app_member.artifact,
             activation_payload=payload,
         )
+        if solution_change_session is not None:
+            _persist_solution_session_activation_linkage(
+                session=solution_change_session,
+                binding=binding,
+                activation_payload=payload,
+            )
         binding_payload = _application_runtime_binding_payload(application)
         payload["solution_runtime_binding"] = binding_payload.get("runtime_binding")
         payload["solution_activation_composition"] = binding_payload.get("composition")
@@ -13339,6 +13356,92 @@ def workspace_artifacts_collection(request: HttpRequest, workspace_id: str) -> J
         except ValueError as exc:
             return JsonResponse({"error": str(exc)}, status=500)
     return JsonResponse({"artifacts": data})
+
+
+def _origin_from_url_token(value: str) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    parsed = urlsplit(token if "://" in token else f"http://{token}")
+    scheme = str(parsed.scheme or "").strip().lower() or "http"
+    host = str(parsed.hostname or "").strip().lower()
+    if not host:
+        return ""
+    if parsed.port:
+        return f"{scheme}://{host}:{parsed.port}"
+    return f"{scheme}://{host}"
+
+
+def _solution_change_session_resume_active(session: SolutionChangeSession) -> bool:
+    if str(session.status or "").strip().lower() == "archived":
+        return False
+    execution_status = str(session.execution_status or "").strip().lower()
+    if execution_status in {"ready_for_promotion", "failed"}:
+        return False
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    finalized = metadata.get("finalized")
+    return not isinstance(finalized, dict)
+
+
+def _solution_change_session_origin_candidates(session: SolutionChangeSession) -> Set[str]:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    linkage = metadata.get("iteration_linkage") if isinstance(metadata.get("iteration_linkage"), dict) else {}
+    runtime_target = linkage.get("runtime_target") if isinstance(linkage.get("runtime_target"), dict) else {}
+    candidates: Set[str] = set()
+    for field in ("public_app_url", "runtime_url", "app_url", "sibling_ui_url", "runtime_base_url"):
+        token = str(runtime_target.get(field) or "").strip()
+        normalized = _origin_from_url_token(token)
+        if normalized:
+            candidates.add(normalized)
+    return candidates
+
+
+@csrf_exempt
+def workspace_linked_change_session(request: HttpRequest, workspace_id: str) -> JsonResponse:
+    workspace = get_object_or_404(Workspace, id=workspace_id)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    membership = _workspace_membership(identity, workspace_id)
+    if not membership and not _is_platform_admin(identity):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    current_origin = _origin_from_url_token(
+        str(request.GET.get("current_origin") or "").strip() or request.build_absolute_uri("/")
+    )
+    if not current_origin:
+        return JsonResponse({"linked_session": None})
+
+    sessions = (
+        SolutionChangeSession.objects.filter(workspace=workspace)
+        .exclude(status="archived")
+        .select_related("application")
+        .order_by("-updated_at", "-created_at")[:200]
+    )
+    for session in sessions:
+        if not _solution_change_session_resume_active(session):
+            continue
+        candidates = _solution_change_session_origin_candidates(session)
+        if current_origin not in candidates:
+            continue
+        return JsonResponse(
+            {
+                "linked_session": {
+                    "workspace_id": str(workspace.id),
+                    "application_id": str(session.application_id),
+                    "application_name": str(getattr(session.application, "name", "") or ""),
+                    "solution_change_session_id": str(session.id),
+                    "session_title": str(session.title or ""),
+                    "status": str(session.status or ""),
+                    "execution_status": str(session.execution_status or ""),
+                    "current_origin": current_origin,
+                    "origin_candidates": sorted(candidates),
+                }
+            }
+        )
+    return JsonResponse({"linked_session": None})
 
 
 @csrf_exempt
@@ -17352,6 +17455,11 @@ def ai_routing_status(request: HttpRequest) -> JsonResponse:
             err = _update_purpose_routing_assignment("coding", payload.get("coding_agent_id"))
             if err:
                 return JsonResponse({"error": err}, status=400)
+        if "palette_agent_id" in payload:
+            updated = True
+            err = _update_purpose_routing_assignment("palette", payload.get("palette_agent_id"))
+            if err:
+                return JsonResponse({"error": err}, status=400)
     if not updated:
         return JsonResponse({"error": "at least one routing field is required"}, status=400)
     return JsonResponse(_serialize_ai_routing_status())
@@ -17374,7 +17482,7 @@ def _serialize_ai_routing_status() -> Dict[str, Any]:
     default_routing["resolution_type"] = "required_default"
 
     routing: List[Dict[str, Any]] = [default_routing]
-    for purpose_slug in ["planning", "coding"]:
+    for purpose_slug in ["planning", "coding", "palette"]:
         purpose_routing = dict(resolve_agent_routing(purpose_slug=purpose_slug))
         explicit_assignment = _resolve_explicit_purpose_assignment(purpose_slug)
         purpose_routing["resolution_type"] = "explicit" if explicit_assignment else "falls_back_to_default"
@@ -30995,6 +31103,121 @@ def _serialize_solution_change_session(
     }
 
 
+def _solution_session_iteration_linkage(session: SolutionChangeSession) -> Dict[str, Any]:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    linkage = metadata.get("iteration_linkage")
+    return linkage if isinstance(linkage, dict) else {}
+
+
+def _persist_solution_session_iteration_linkage(
+    *,
+    session: SolutionChangeSession,
+    linkage_updates: Dict[str, Any],
+    source: str,
+) -> None:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    existing = metadata.get("iteration_linkage") if isinstance(metadata.get("iteration_linkage"), dict) else {}
+    merged: Dict[str, Any] = {**existing, **(linkage_updates if isinstance(linkage_updates, dict) else {})}
+    merged["source"] = str(source or "unknown").strip() or "unknown"
+    merged["updated_at"] = timezone.now().isoformat()
+    metadata["iteration_linkage"] = merged
+    session.metadata_json = metadata
+    session.save(update_fields=["metadata_json", "updated_at"])
+
+
+def _persist_solution_session_activation_linkage(
+    *,
+    session: SolutionChangeSession,
+    binding: Optional[SolutionRuntimeBinding],
+    activation_payload: Dict[str, Any],
+) -> None:
+    if not isinstance(activation_payload, dict):
+        return
+    linkage_updates: Dict[str, Any] = {
+        "workspace_id": str(session.workspace_id),
+        "application_id": str(session.application_id),
+        "session_id": str(session.id),
+        "status": str(activation_payload.get("status") or "").strip().lower(),
+        "activation_mode": str(activation_payload.get("policy_source") or "reconstructed"),
+        "revision_anchor": activation_payload.get("revision_anchor") if isinstance(activation_payload.get("revision_anchor"), dict) else {},
+        "activation": activation_payload.get("activation") if isinstance(activation_payload.get("activation"), dict) else {},
+        "runtime_target": activation_payload.get("runtime_target") if isinstance(activation_payload.get("runtime_target"), dict) else {},
+        "runtime_instance": activation_payload.get("runtime_instance") if isinstance(activation_payload.get("runtime_instance"), dict) else {},
+    }
+    if binding is not None:
+        linkage_updates["runtime_binding_id"] = str(binding.id)
+    _persist_solution_session_iteration_linkage(
+        session=session,
+        linkage_updates=linkage_updates,
+        source="application_activate",
+    )
+
+
+def _process_solution_change_session_reply(
+    *,
+    session: SolutionChangeSession,
+    application: Application,
+    identity: UserIdentity,
+    reply_text: str,
+    force_planner_fallback: bool,
+    response_kind: str = "response",
+    source_turn_id: str = "",
+    include_iteration_linkage: bool = False,
+) -> Dict[str, Any]:
+    interpretation = _interpret_solution_refinement(
+        session=session,
+        reply_text=reply_text,
+        force_planner_fallback=force_planner_fallback,
+    )
+    interpretation_type = str(interpretation.get("result_type") or "cannot_interpret")
+    payload: Dict[str, Any] = {
+        "reply_text": reply_text,
+        "response_kind": response_kind,
+        "source_turn_id": source_turn_id or None,
+        "interpretation": interpretation,
+        "use_planner_interpretation": force_planner_fallback,
+    }
+    if include_iteration_linkage:
+        payload["iteration_linkage"] = _solution_session_iteration_linkage(session)
+    _append_solution_planning_turn(
+        session=session,
+        actor="user",
+        kind="response",
+        payload=payload,
+        created_by=identity,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    if interpretation_type in {"clarification_request", "cannot_interpret"}:
+        planner_question = str(interpretation.get("planner_message") or "").strip()
+        if not planner_question:
+            planner_question = (
+                "I could not safely interpret that refinement. Please clarify the request or provide a more specific constraint."
+                if interpretation_type == "cannot_interpret"
+                else "I need one clarification before I can revise the draft plan."
+            )
+        _append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="question",
+            payload={
+                "question": planner_question,
+                "reason": "cannot_interpret" if interpretation_type == "cannot_interpret" else "clarification_request",
+                "interpretation": interpretation,
+            },
+        )
+    else:
+        _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return {
+        "recorded": True,
+        "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+    }
+
+
 def _stage_solution_change_session(
     *,
     session: SolutionChangeSession,
@@ -31352,6 +31575,43 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             "reason": reason,
             "details": details,
         }
+    else:
+        primary_row = next((row for row in artifact_rows if isinstance(row, dict) and str(row.get("status") or "") == "ready"), None)
+        if isinstance(primary_row, dict):
+            _persist_solution_session_iteration_linkage(
+                session=session,
+                linkage_updates={
+                    "workspace_id": workspace_id,
+                    "application_id": application_id,
+                    "session_id": str(session.id),
+                    "status": "preview_ready",
+                    "activation_mode": "preview",
+                    "runtime_binding_id": "",
+                    "runtime_instance": {
+                        "id": str(primary_row.get("runtime_target_id") or "").strip(),
+                        "app_slug": str(primary_row.get("app_slug") or "").strip(),
+                        "status": "active",
+                    },
+                    "runtime_target": {
+                        "runtime_owner": str(primary_row.get("runtime_owner") or "sibling"),
+                        "runtime_base_url": str(primary_row.get("runtime_base_url") or "").strip(),
+                        "public_app_url": str(primary_row.get("public_app_url") or "").strip(),
+                        "compose_project": str(primary_row.get("compose_project") or "").strip(),
+                    },
+                    "activation": {
+                        "job_id": "",
+                        "draft_id": "",
+                        "source_build_job_ids": (
+                            ((preview_payload.get("build_deploy_evidence") or {}).get("source_build_job_ids") or [])
+                            if isinstance(preview_payload.get("build_deploy_evidence"), dict)
+                            else []
+                        ),
+                        "session_build_status": str((session_build or {}).get("status") or "").strip(),
+                    },
+                    "revision_anchor": {},
+                },
+                source="prepare_preview",
+            )
 
     staged["overall_state"] = "preview_ready" if status == "ready" else "preview_failed"
     staged["preview_prepared_at"] = now_iso
@@ -34748,57 +35008,69 @@ def application_solution_change_session_reply(
     if not reply_text:
         return JsonResponse({"error": "reply_text is required"}, status=400)
     force_planner_fallback = bool(payload.get("use_planner_interpretation"))
-    interpretation = _interpret_solution_refinement(
+    source_turn_id = str(payload.get("source_turn_id") or "").strip()
+    response_payload = _process_solution_change_session_reply(
         session=session,
+        application=application,
+        identity=identity,
         reply_text=reply_text,
         force_planner_fallback=force_planner_fallback,
+        source_turn_id=source_turn_id,
     )
-    interpretation_type = str(interpretation.get("result_type") or "cannot_interpret")
-    _append_solution_planning_turn(
-        session=session,
-        actor="user",
-        kind="response",
-        payload={
-            "reply_text": reply_text,
-            "response_kind": "response",
-            "source_turn_id": str(payload.get("source_turn_id") or "").strip() or None,
-            "interpretation": interpretation,
-            "use_planner_interpretation": force_planner_fallback,
-        },
-        created_by=identity,
-    )
-    memberships = list(
-        ApplicationArtifactMembership.objects.filter(application=application)
-        .select_related("artifact", "artifact__type")
-        .order_by("sort_order", "created_at")
-    )
-    if interpretation_type in {"clarification_request", "cannot_interpret"}:
-        planner_question = str(interpretation.get("planner_message") or "").strip()
-        if not planner_question:
-            planner_question = (
-                "I could not safely interpret that refinement. Please clarify the request or provide a more specific constraint."
-                if interpretation_type == "cannot_interpret"
-                else "I need one clarification before I can revise the draft plan."
-            )
-        _append_solution_planning_turn(
-            session=session,
-            actor="planner",
-            kind="question",
-            payload={
-                "question": planner_question,
-                "reason": "cannot_interpret" if interpretation_type == "cannot_interpret" else "clarification_request",
-                "interpretation": interpretation,
+    return JsonResponse(response_payload)
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_continue(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    iteration_linkage = _solution_session_iteration_linkage(session)
+    if not iteration_linkage:
+        return JsonResponse(
+            {
+                "error": "continue iteration requires an anchored dev sibling context; activate or prepare preview first",
             },
+            status=409,
         )
-    else:
-        _advance_solution_planning_after_user_response(session=session, memberships=memberships)
-    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
-    return JsonResponse(
-        {
-            "recorded": True,
-            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
-        }
+    payload = _parse_json(request)
+    reply_text = str(payload.get("reply_text") or payload.get("text") or "").strip()
+    if not reply_text:
+        return JsonResponse({"error": "reply_text is required"}, status=400)
+    force_planner_fallback = bool(payload.get("use_planner_interpretation"))
+    source_turn_id = str(payload.get("source_turn_id") or "").strip()
+    response_payload = _process_solution_change_session_reply(
+        session=session,
+        application=application,
+        identity=identity,
+        reply_text=reply_text,
+        force_planner_fallback=force_planner_fallback,
+        response_kind="continue_refinement",
+        source_turn_id=source_turn_id,
+        include_iteration_linkage=True,
     )
+    _persist_solution_session_iteration_linkage(
+        session=session,
+        linkage_updates={
+            "status": str(iteration_linkage.get("status") or ""),
+            "continued_at": timezone.now().isoformat(),
+            "last_reply_text": reply_text[:500],
+        },
+        source="continue_refinement",
+    )
+    response_payload["iteration_context"] = _solution_session_iteration_linkage(session)
+    return JsonResponse(response_payload)
 
 
 @csrf_exempt
@@ -35138,6 +35410,52 @@ def application_solution_change_session_validate(
     return JsonResponse(
         {
             "validated": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_finalize(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    execution_status = str(session.execution_status or "").strip().lower()
+    if execution_status != "ready_for_promotion":
+        return JsonResponse(
+            {
+                "error": "change session can only be finalized when execution_status=ready_for_promotion",
+            },
+            status=409,
+        )
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    metadata["finalized"] = {
+        "at": timezone.now().isoformat(),
+        "by_user_identity_id": str(identity.id),
+    }
+    session.metadata_json = metadata
+    session.status = "archived"
+    session.save(update_fields=["status", "metadata_json", "updated_at"])
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    return JsonResponse(
+        {
+            "finalized": True,
             "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
         }
     )

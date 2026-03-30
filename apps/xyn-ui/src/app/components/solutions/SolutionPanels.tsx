@@ -588,7 +588,10 @@ export function SolutionDetailPanel({
     setActivationBusy(true);
     setActivationFeedback(null);
     try {
-      const response = await activateApplication(applicationId);
+      const response = await activateApplication(
+        applicationId,
+        activeSessionId ? { solution_change_session_id: activeSessionId } : undefined
+      );
       const runtimeTarget = response.runtime_target && typeof response.runtime_target === "object" ? response.runtime_target : {};
       const runtimeInstance = response.runtime_instance && typeof response.runtime_instance === "object" ? response.runtime_instance : {};
       const binding = response.solution_runtime_binding && typeof response.solution_runtime_binding === "object" ? response.solution_runtime_binding : {};
@@ -704,6 +707,16 @@ export function SolutionDetailPanel({
   const planSharedContracts = (activePlan.shared_contracts as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
   const planImplementationSteps = (activePlan.implementation_steps as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
   const planValidationSteps = (activePlan.validation_plan as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
+  const iterationLinkage = (
+    (activeSession?.metadata as Record<string, unknown> | undefined)?.iteration_linkage as Record<string, unknown> | undefined
+  ) || {};
+  const iterationAnchorUrl = String(
+    ((iterationLinkage.runtime_target as Record<string, unknown> | undefined)?.public_app_url as string | undefined) || ""
+  ).trim();
+  const iterationAnchorAppSlug = String(
+    ((iterationLinkage.runtime_instance as Record<string, unknown> | undefined)?.app_slug as string | undefined) || ""
+  ).trim();
+  const hasIterationAnchor = Object.keys(iterationLinkage).length > 0;
 
   const planningState = (activeSession?.planning as Record<string, unknown> | undefined) || {};
   const pendingCheckpoints = Array.isArray(planningState?.pending_checkpoints)
@@ -847,6 +860,13 @@ export function SolutionDetailPanel({
           {" · "}
           Policy: <strong>{String(application.activation_composition?.policy_artifact_ref?.artifact_slug || "none")}</strong>
         </p>
+        {activeSession ? (
+          <p className="muted small">
+            Iteration anchor:{" "}
+            <strong>{hasIterationAnchor ? "linked to current dev sibling context" : "not yet linked"}</strong>
+            {hasIterationAnchor ? ` · ${iterationAnchorUrl || iterationAnchorAppSlug || "runtime target recorded"}` : ""}
+          </p>
+        ) : null}
       </section>
 
       <div className="solution-detail-grid">

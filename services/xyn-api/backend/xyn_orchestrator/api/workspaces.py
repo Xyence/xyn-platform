@@ -1,6 +1,7 @@
 from xyn_orchestrator.xyn_api import (
     workspaces_collection,
     workspace_artifacts_collection,
+    workspace_linked_change_session,
     workspace_app_runtime_targets_collection,
     workspace_artifact_detail,
     workspace_artifact_publish,
@@ -19,6 +20,7 @@ from xyn_orchestrator.xyn_api import (
 __all__ = [
     "workspaces_collection",
     "workspace_artifacts_collection",
+    "workspace_linked_change_session",
     "workspace_app_runtime_targets_collection",
     "workspace_artifact_detail",
     "workspace_artifact_publish",

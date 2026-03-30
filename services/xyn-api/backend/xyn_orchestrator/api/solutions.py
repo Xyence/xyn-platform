@@ -12,6 +12,7 @@ from xyn_orchestrator.xyn_api import (
     application_solution_change_sessions_collection,
     application_solution_change_session_detail,
     application_solution_change_session_reply,
+    application_solution_change_session_continue,
     application_solution_change_session_regenerate_options,
     application_solution_change_session_select_option,
     application_solution_change_session_checkpoint_decision,
@@ -19,6 +20,7 @@ from xyn_orchestrator.xyn_api import (
     application_solution_change_session_stage_apply,
     application_solution_change_session_prepare_preview,
     application_solution_change_session_validate,
+    application_solution_change_session_finalize,
 )
 
 __all__ = [
@@ -35,6 +37,7 @@ __all__ = [
     "application_solution_change_sessions_collection",
     "application_solution_change_session_detail",
     "application_solution_change_session_reply",
+    "application_solution_change_session_continue",
     "application_solution_change_session_regenerate_options",
     "application_solution_change_session_select_option",
     "application_solution_change_session_checkpoint_decision",
@@ -42,4 +45,5 @@ __all__ = [
     "application_solution_change_session_stage_apply",
     "application_solution_change_session_prepare_preview",
     "application_solution_change_session_validate",
+    "application_solution_change_session_finalize",
 ]

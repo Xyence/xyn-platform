@@ -1176,6 +1176,30 @@ button.sm {
   min-height: 52px;
 }
 
+.linked-dev-session-banner {
+  margin: 0 0 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent-soft) 65%, var(--card));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.linked-dev-session-banner-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.linked-dev-session-banner-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 .preview-chip {
   margin-left: 8px;
   display: inline-flex;

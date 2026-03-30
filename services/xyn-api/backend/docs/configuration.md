@@ -14,6 +14,11 @@
 - Optional purpose overlays:
   - `XYN_AI_PLANNING_PROVIDER` / `XYN_AI_PLANNING_MODEL` / `XYN_AI_PLANNING_API_KEY`
   - `XYN_AI_CODING_PROVIDER` / `XYN_AI_CODING_MODEL` / `XYN_AI_CODING_API_KEY`
+- Optional deterministic routing overrides (agent slugs):
+  - `XYN_AI_ROUTING_DEFAULT_AGENT_SLUG`
+  - `XYN_AI_ROUTING_PLANNING_AGENT_SLUG`
+  - `XYN_AI_ROUTING_CODING_AGENT_SLUG`
+  - `XYN_AI_ROUTING_PALETTE_AGENT_SLUG`
 - Managed storage roots:
   - `XYN_ARTIFACT_ROOT` for durable local artifact storage
   - `XYN_WORKSPACE_ROOT` for managed active coding/scratch workspaces
