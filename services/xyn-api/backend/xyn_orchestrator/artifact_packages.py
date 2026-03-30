@@ -49,6 +49,7 @@ ALLOWED_SURFACE_KINDS = {"config", "editor", "dashboard", "visualizer", "docs"}
 ALLOWED_NAV_VISIBILITY = {"hidden", "contextual", "always"}
 ALLOWED_RENDERER_TYPES = {"ui_component_ref", "generic_editor", "generic_dashboard", "workflow_visualizer", "article_editor"}
 ALLOWED_RUNTIME_ROLE_KINDS = {"route_provider", "job", "event_handler", "integration", "auth", "data_model"}
+GENERATED_APP_COMPAT_KEEP_ROUTES = {"/app/campaigns", "/app/campaigns/new", "/app/campaigns/:id"}
 
 
 class ArtifactPackageError(Exception):
@@ -192,6 +193,41 @@ def _validate_surface_defs(item_ref: str, rows: Any) -> List[str]:
         if renderer_type not in ALLOWED_RENDERER_TYPES:
             errors.append(f"{path}.renderer.type is invalid")
     return errors
+
+
+def _is_obsolete_generated_app_compat_surface(item_type: str, item_slug: str, row: Dict[str, Any]) -> bool:
+    if str(item_type or "").strip().lower() != "application":
+        return False
+    if not str(item_slug or "").strip().startswith("app."):
+        return False
+    route = str(row.get("route") or "").strip()
+    if not route.startswith("/app"):
+        return False
+    if route in GENERATED_APP_COMPAT_KEEP_ROUTES:
+        return False
+    renderer = row.get("renderer") if isinstance(row.get("renderer"), dict) else {}
+    renderer_type = str(renderer.get("type") or "").strip().lower()
+    if renderer_type not in {"generic_dashboard", "generic_editor"}:
+        return False
+    renderer_payload = renderer.get("payload") if isinstance(renderer.get("payload"), dict) else {}
+    # Keep generic renderer surfaces only when they are explicitly mapped to a known
+    # shell renderer contract. Pure compatibility rows should not be emitted.
+    if str(renderer_payload.get("shell_renderer_key") or "").strip():
+        return False
+    return True
+
+
+def _normalize_generated_app_surface_defs(item_type: str, item_slug: str, rows: Any) -> List[Dict[str, Any]]:
+    payload = rows if isinstance(rows, list) else []
+    normalized: List[Dict[str, Any]] = []
+    for row in payload:
+        if not isinstance(row, dict):
+            normalized.append(row)
+            continue
+        if _is_obsolete_generated_app_compat_surface(item_type, item_slug, row):
+            continue
+        normalized.append(row)
+    return normalized
 
 
 def _validate_runtime_role_defs(item_ref: str, rows: Any) -> List[str]:
@@ -721,6 +757,7 @@ def install_package(
                 item_type = str(item.get("type") or "")
                 item_slug = str(item.get("slug") or "")
                 item_version = str(item.get("version") or "")
+                surfaces_payload = _normalize_generated_app_surface_defs(item_type, item_slug, surfaces_payload)
                 item_hash = str(item.get("artifact_hash") or _sha256_bytes(raw))
                 dependencies = item.get("dependencies") if isinstance(item.get("dependencies"), list) else []
                 bindings = item.get("bindings") if isinstance(item.get("bindings"), list) else []
@@ -1080,6 +1117,7 @@ def export_artifact_package(*, root_artifact: Artifact, package_name: str, packa
             }
             for row in ArtifactSurface.objects.filter(artifact=artifact).order_by("sort_order", "key")
         ]
+        surfaces_payload = _normalize_generated_app_surface_defs(artifact.type.slug, artifact.slug, surfaces_payload)
         runtime_roles_payload = [
             {
                 "role_kind": row.role_kind,

@@ -845,6 +845,126 @@ class ArtifactPackagesApiTests(TestCase):
         self.assertIn("Campaigns", nav_labels)
         self.assertIn("Create Campaign", nav_labels)
 
+    def test_install_prunes_obsolete_generated_app_compat_surfaces(self):
+        self._grant_debug_view()
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "application",
+                    "slug": "app.generated-legacy-surfaces",
+                    "version": "0.0.1-dev",
+                    "content": {"artifact": {"id": "app.generated-legacy-surfaces"}},
+                    "surfaces": [
+                        {
+                            "key": "app-home",
+                            "title": "App Home",
+                            "surface_kind": "dashboard",
+                            "route": "/app",
+                            "nav_visibility": "always",
+                            "renderer": {"type": "generic_dashboard"},
+                        },
+                        {
+                            "key": "signals-list",
+                            "title": "Signals",
+                            "surface_kind": "dashboard",
+                            "route": "/app/signals",
+                            "nav_visibility": "always",
+                            "renderer": {"type": "generic_dashboard"},
+                        },
+                        {
+                            "key": "campaigns-list",
+                            "title": "Campaigns",
+                            "surface_kind": "dashboard",
+                            "route": "/app/campaigns",
+                            "nav_visibility": "always",
+                            "renderer": {"type": "generic_dashboard"},
+                        },
+                        {
+                            "key": "campaigns-create",
+                            "title": "Create Campaign",
+                            "surface_kind": "editor",
+                            "route": "/app/campaigns/new",
+                            "nav_visibility": "always",
+                            "renderer": {
+                                "type": "generic_editor",
+                                "payload": {"shell_renderer_key": "campaign_map_workflow", "mode": "create"},
+                            },
+                        },
+                    ],
+                }
+            ]
+        )
+        imported = self._import_package(blob)
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+        package_id = imported.json()["package"]["id"]
+        install = self.client.post(f"/xyn/api/artifacts/packages/{package_id}/install", data=json.dumps({}), content_type="application/json")
+        self.assertEqual(install.status_code, 200, install.content.decode())
+
+        artifact = Artifact.objects.get(type__slug="application", slug="app.generated-legacy-surfaces")
+        routes = set(ArtifactSurface.objects.filter(artifact=artifact).values_list("route", flat=True))
+        self.assertEqual(routes, {"/app/campaigns", "/app/campaigns/new"})
+
+    def test_export_package_omits_obsolete_generated_app_compat_surfaces(self):
+        self._grant_debug_view()
+        artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Legacy Surface Artifact",
+            slug=f"app.legacy-export-{uuid.uuid4().hex[:8]}",
+            status="active",
+            visibility="private",
+            package_version="0.0.1-dev",
+        )
+        ArtifactRevision.objects.create(
+            artifact=artifact,
+            revision_number=1,
+            content_json={"content": {"artifact": {"id": artifact.slug}}},
+            created_by=None,
+        )
+        ArtifactSurface.objects.create(
+            artifact=artifact,
+            key="app-root",
+            title="App Root",
+            surface_kind="dashboard",
+            route="/app",
+            nav_visibility="always",
+            renderer={"type": "generic_dashboard"},
+        )
+        ArtifactSurface.objects.create(
+            artifact=artifact,
+            key="campaigns-list",
+            title="Campaigns",
+            surface_kind="dashboard",
+            route="/app/campaigns",
+            nav_visibility="always",
+            renderer={"type": "generic_dashboard"},
+        )
+        ArtifactSurface.objects.create(
+            artifact=artifact,
+            key="campaigns-create",
+            title="Create Campaign",
+            surface_kind="editor",
+            route="/app/campaigns/new",
+            nav_visibility="always",
+            renderer={"type": "generic_editor", "payload": {"shell_renderer_key": "campaign_map_workflow", "mode": "create"}},
+        )
+
+        export_response = self.client.post(
+            f"/xyn/api/artifacts/{artifact.id}/export-package",
+            data=json.dumps({"package_name": f"{artifact.slug}-bundle", "package_version": "0.0.1-dev"}),
+            content_type="application/json",
+        )
+        self.assertEqual(export_response.status_code, 200)
+
+        with zipfile.ZipFile(io.BytesIO(export_response.content), "r") as archive:
+            surfaces_path = f"artifacts/application/{artifact.slug}/0.0.1-dev/surfaces.json"
+            surfaces_payload = json.loads(archive.read(surfaces_path).decode("utf-8"))
+        routes = {str(row.get("route") or "") for row in surfaces_payload if isinstance(row, dict)}
+        self.assertNotIn("/app", routes)
+        self.assertIn("/app/campaigns", routes)
+        self.assertIn("/app/campaigns/new", routes)
+
     def test_export_import_preserves_source_created_at_when_known(self):
         self._grant_debug_view()
         artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
