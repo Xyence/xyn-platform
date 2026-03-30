@@ -204,6 +204,23 @@ export default function WorkbenchPage({
       next.delete("panel");
       setSearchParams(next, { replace: true });
       return;
+    } else if (panelKey === "campaign_list") {
+      const create = ["1", "true", "yes"].includes(String(searchParams.get("create") || "").trim().toLowerCase());
+      const nextParams: Record<string, unknown> = {};
+      if (create) nextParams.create = true;
+      const activeCreate = Boolean(activePanel?.params?.create === true);
+      if (!activePanel || activePanel.key !== "campaign_list" || activeCreate !== create) {
+        openPanel({
+          key: "campaign_list",
+          params: nextParams,
+          open_in: "current_panel",
+        });
+      }
+      const next = new URLSearchParams(searchParams);
+      next.delete("create");
+      next.delete("panel");
+      setSearchParams(next, { replace: true });
+      return;
     } else if (panelKey === "composer_detail" || panelKey === "composer") {
       const nextParams: Record<string, unknown> = {};
       const applicationId = String(searchParams.get("application_id") || "").trim();

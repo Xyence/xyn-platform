@@ -203,6 +203,25 @@ describe("resolvePromptSurfaceTarget", () => {
     });
   });
 
+  it("ignores compatibility fallback artifact surfaces during prompt resolution", () => {
+    const result = resolvePromptSurfaceTarget("open campaigns", {
+      workspaceSurfaces: [
+        surface({
+          id: "campaign-list-legacy",
+          artifact_id: "a7",
+          key: "entity-campaigns-list",
+          title: "Campaigns",
+          surface_kind: "dashboard",
+          route: "/app/campaigns",
+          nav_visibility: "always",
+          ui_mount_scope: "workspace",
+          renderer: { type: "generic_dashboard" },
+        }),
+      ],
+    });
+    expect(result).toBeNull();
+  });
+
   it("resolves child global admin prompts to canonical child surfaces", () => {
     expect(
       resolvePromptSurfaceTarget("open oidc app clients", {

@@ -82,4 +82,39 @@ describe("AppShell metadata-driven nav composition", () => {
     expect(items).toEqual([]);
   });
 
+  it("filters compatibility fallback surfaces from app nav", () => {
+    const items = appItemsFor(
+      { roles: ["app_user"], permissions: [] },
+      [
+        surface({
+          id: "legacy-campaigns",
+          artifact_id: "artifact-deal-finder",
+          key: "legacy-campaigns",
+          title: "Campaigns",
+          surface_kind: "dashboard",
+          route: "/app/campaigns",
+          nav_visibility: "always",
+          ui_mount_scope: "workspace",
+          renderer: { type: "generic_dashboard" },
+          sort_order: 100,
+        }),
+        surface({
+          id: "modern-campaign-create",
+          artifact_id: "artifact-deal-finder",
+          key: "modern-campaign-create",
+          title: "Create Campaign",
+          surface_kind: "editor",
+          route: "/app/campaigns/new",
+          nav_visibility: "always",
+          ui_mount_scope: "workspace",
+          renderer: { type: "generic_editor", payload: { shell_renderer_key: "campaign_map_workflow" } },
+          sort_order: 101,
+        }),
+      ],
+      "ws-1",
+    );
+
+    expect(items).toEqual([{ label: "Create Campaign", path: "/w/ws-1/a/campaigns/new" }]);
+  });
+
 });
