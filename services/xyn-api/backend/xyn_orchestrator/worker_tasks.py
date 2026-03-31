@@ -248,6 +248,7 @@ def _effective_codegen_repo_targets(task: Dict[str, Any], work_item: Dict[str, A
                 repository=repository,
                 repository_slug=explicit_repo,
                 branch=explicit_branch or (repository.default_branch if repository else None),
+                allowed_paths=(),
                 source_kind="task_explicit",
                 application_id=None,
                 application_plan_id=None,

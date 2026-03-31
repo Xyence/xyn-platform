@@ -97,6 +97,7 @@ from .models import (
     SolutionChangeSession,
     SolutionPlanningTurn,
     SolutionPlanningCheckpoint,
+    SolutionChangeSessionRepoCommit,
     ApplicationPlan,
     Environment,
     EnvironmentAppState,
@@ -8273,6 +8274,60 @@ DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES: tuple[tuple[str, str, str, int], ...] = (
     ("xyn-api", "runtime_service", "Default API runtime artifact.", 30),
 )
 
+DEFAULT_RUNTIME_ARTIFACT_OWNERSHIP: Dict[str, Dict[str, Any]] = {
+    "core.workbench": {
+        "repo_slug": "xyn-platform",
+        "allowed_paths": [],
+        "edit_mode": "repo_backed",
+    },
+    "xyn-ui": {
+        "repo_slug": "xyn-platform",
+        "allowed_paths": ["apps/xyn-ui/"],
+        "edit_mode": "repo_backed",
+    },
+    "xyn-api": {
+        "repo_slug": "xyn-platform",
+        "allowed_paths": ["services/xyn-api/backend/"],
+        "edit_mode": "repo_backed",
+    },
+    "core.xyn-runtime": {
+        "repo_slug": "xyn",
+        "allowed_paths": [],
+        "edit_mode": "repo_backed",
+    },
+}
+
+
+def _runtime_artifact_ownership_for_slug(slug: str) -> Dict[str, Any]:
+    token = str(slug or "").strip().lower()
+    ownership = DEFAULT_RUNTIME_ARTIFACT_OWNERSHIP.get(token)
+    if ownership:
+        return {
+            "repo_slug": str(ownership.get("repo_slug") or "").strip(),
+            "allowed_paths": [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()],
+            "edit_mode": str(ownership.get("edit_mode") or "generated").strip().lower() or "generated",
+        }
+    if token.startswith("core.xyn-"):
+        return {"repo_slug": "xyn", "allowed_paths": [], "edit_mode": "repo_backed"}
+    return {"repo_slug": "", "allowed_paths": [], "edit_mode": "generated"}
+
+
+def resolve_artifact_ownership(artifact: Artifact) -> Dict[str, Any]:
+    allowed_paths = (
+        artifact.owner_path_prefixes_json
+        if isinstance(getattr(artifact, "owner_path_prefixes_json", None), list)
+        else []
+    )
+    normalized_paths = [str(item).strip() for item in allowed_paths if str(item).strip()]
+    edit_mode = str(getattr(artifact, "edit_mode", "") or "").strip().lower() or "generated"
+    if edit_mode not in {"repo_backed", "generated", "read_only"}:
+        edit_mode = "generated"
+    return {
+        "repo_slug": str(getattr(artifact, "owner_repo_slug", "") or "").strip() or None,
+        "allowed_paths": normalized_paths,
+        "edit_mode": edit_mode,
+    }
+
 
 def _bootstrap_runtime_db_ready() -> bool:
     readiness = schema_bootstrap_readiness(required_tables=DEFAULT_BOOTSTRAP_REQUIRED_TABLES)
@@ -8382,6 +8437,63 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
                 update_fields.append("updated_at")
                 application.save(update_fields=update_fields)
 
+    runtime_artifacts_by_slug: Dict[str, tuple[str, str, str]] = {
+        slug: (title, manifest_ref, summary)
+        for slug, title, manifest_ref, summary in DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS
+    }
+
+    def _materialize_solution_artifact(slug: str) -> Optional[Artifact]:
+        token = str(slug or "").strip().lower()
+        if not token:
+            return None
+        local = (
+            Artifact.objects.filter(workspace=workspace, slug=token)
+            .select_related("type")
+            .order_by("-updated_at", "-created_at")
+            .first()
+        )
+        if local is not None:
+            return local
+        runtime_entry = runtime_artifacts_by_slug.get(token)
+        if runtime_entry is not None:
+            title, manifest_ref, summary = runtime_entry
+            return _ensure_runtime_artifact(
+                workspace=workspace,
+                slug=token,
+                title=title,
+                manifest_ref=manifest_ref,
+                summary=summary,
+            )
+        source = (
+            Artifact.objects.filter(slug=token)
+            .exclude(workspace=workspace)
+            .select_related("type")
+            .order_by("-updated_at", "-created_at")
+            .first()
+        )
+        if source is None:
+            return None
+        return Artifact.objects.create(
+            workspace=workspace,
+            type=source.type,
+            title=source.title,
+            slug=source.slug,
+            status=source.status,
+            visibility=source.visibility,
+            summary=source.summary,
+            scope_json=dict(source.scope_json or {}),
+            owner_repo_slug=str(source.owner_repo_slug or "").strip(),
+            owner_path_prefixes_json=list(source.owner_path_prefixes_json or []),
+            edit_mode=str(source.edit_mode or "generated").strip().lower() or "generated",
+            provenance_json={
+                **(source.provenance_json if isinstance(source.provenance_json, dict) else {}),
+                "materialized_for_workspace": str(workspace.id),
+                "materialized_from_artifact_id": str(source.id),
+                "materialized_from_workspace_id": str(source.workspace_id),
+                "materialized_by": "default_xyn_solution_bootstrap",
+            },
+        )
+
     artifact_by_slug: Dict[str, Artifact] = {}
     bindings = (
         WorkspaceArtifactBinding.objects.filter(
@@ -8394,20 +8506,11 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
     for binding in bindings:
         slug = str(getattr(binding.artifact, "slug", "") or "").strip().lower()
         if slug and slug not in artifact_by_slug:
-            artifact_by_slug[slug] = binding.artifact
+            artifact_by_slug[slug] = _materialize_solution_artifact(slug) or binding.artifact
 
     for slug, role, responsibility_summary, sort_order in DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES:
-        artifact = artifact_by_slug.get(slug)
+        artifact = artifact_by_slug.get(slug) or _materialize_solution_artifact(slug)
         if artifact is None:
-            artifact = (
-                Artifact.objects.filter(workspace=workspace, slug=slug)
-                .select_related("type")
-                .order_by("-updated_at", "-created_at")
-                .first()
-            )
-        if artifact is None:
-            continue
-        if artifact.workspace_id != workspace.id:
             continue
         ApplicationArtifactMembership.objects.update_or_create(
             application=application,
@@ -9417,6 +9520,7 @@ def _serialize_artifact_summary(artifact: Artifact) -> Dict[str, Any]:
         "last_touched_by_agent": _artifact_last_touched_by_agent(artifact),
         "published_at": artifact.published_at,
         "updated_at": artifact.updated_at,
+        "ownership": resolve_artifact_ownership(artifact),
         "content": {
             "summary": content.get("summary") or "",
             "tags": content.get("tags") or [],
@@ -9450,6 +9554,7 @@ def _serialize_workspace_artifact_binding(binding: WorkspaceArtifactBinding) -> 
         "manifest_summary": manifest_summary,
         "capability": capability,
         "suggestions": suggestions if isinstance(suggestions, list) else [],
+        "ownership": resolve_artifact_ownership(artifact),
         "updated_at": artifact.updated_at,
     }
 
@@ -22213,6 +22318,7 @@ def _ensure_runtime_artifact(
         defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
     )
     artifact = Artifact.objects.filter(workspace=workspace, slug=slug).order_by("-updated_at", "-created_at").first()
+    ownership = _runtime_artifact_ownership_for_slug(slug)
     if artifact is None:
         artifact = Artifact.objects.create(
             workspace=workspace,
@@ -22224,6 +22330,9 @@ def _ensure_runtime_artifact(
             summary=summary,
             scope_json={"slug": slug, "manifest_ref": manifest_ref, "summary": summary},
             provenance_json={"source_system": "seed-kernel", "source_id": slug},
+            owner_repo_slug=str(ownership.get("repo_slug") or "").strip(),
+            owner_path_prefixes_json=list(ownership.get("allowed_paths") or []),
+            edit_mode=str(ownership.get("edit_mode") or "generated").strip().lower() or "generated",
         )
         return artifact
     scope = dict(artifact.scope_json or {})
@@ -22241,6 +22350,18 @@ def _ensure_runtime_artifact(
     if str(artifact.summary or "").strip() != summary:
         artifact.summary = summary
         update_fields.append("summary")
+    owner_repo_slug = str(ownership.get("repo_slug") or "").strip()
+    if str(artifact.owner_repo_slug or "").strip() != owner_repo_slug:
+        artifact.owner_repo_slug = owner_repo_slug
+        update_fields.append("owner_repo_slug")
+    owner_path_prefixes = list(ownership.get("allowed_paths") or [])
+    if list(artifact.owner_path_prefixes_json or []) != owner_path_prefixes:
+        artifact.owner_path_prefixes_json = owner_path_prefixes
+        update_fields.append("owner_path_prefixes_json")
+    edit_mode = str(ownership.get("edit_mode") or "generated").strip().lower() or "generated"
+    if str(artifact.edit_mode or "").strip().lower() != edit_mode:
+        artifact.edit_mode = edit_mode
+        update_fields.append("edit_mode")
     if scope_changed:
         artifact.scope_json = scope
         update_fields.append("scope_json")
@@ -31258,6 +31379,7 @@ def _serialize_solution_change_session(
             }
         )
     planning_state = _solution_planning_state(session)
+    commit_count = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).count()
     return {
         "id": str(session.id),
         "workspace_id": str(session.workspace_id),
@@ -31276,9 +31398,25 @@ def _serialize_solution_change_session(
         "preview": session.preview_json if isinstance(session.preview_json, dict) else {},
         "validation": session.validation_json if isinstance(session.validation_json, dict) else {},
         "metadata": session.metadata_json if isinstance(session.metadata_json, dict) else {},
+        "repo_commit_count": int(commit_count),
         "planning": planning_state,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
+    }
+
+
+def _serialize_solution_change_session_repo_commit(commit: SolutionChangeSessionRepoCommit) -> Dict[str, Any]:
+    return {
+        "id": str(commit.id),
+        "workspace_id": str(commit.workspace_id),
+        "solution_change_session_id": str(commit.solution_change_session_id),
+        "repository_slug": str(commit.repository_slug or "").strip(),
+        "branch": str(commit.branch or "").strip(),
+        "commit_sha": str(commit.commit_sha or "").strip(),
+        "changed_files": commit.changed_files_json if isinstance(commit.changed_files_json, list) else [],
+        "validation_status": str(commit.validation_status or "unknown").strip() or "unknown",
+        "created_at": commit.created_at,
+        "updated_at": commit.updated_at,
     }
 
 
@@ -35628,6 +35766,37 @@ def application_solution_change_session_validate(
 
 @csrf_exempt
 @login_required
+def application_solution_change_session_commits(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    commits = list(
+        SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session)
+        .order_by("-created_at", "-updated_at")
+    )
+    return JsonResponse({"commits": [_serialize_solution_change_session_repo_commit(item) for item in commits]})
+
+
+def _solution_change_session_requires_commit_provenance(session: SolutionChangeSession) -> bool:
+    selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    if not selected_ids:
+        staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+        selected_ids = {str(item).strip() for item in (staged.get("selected_artifact_ids") or []) if str(item).strip()}
+    if not selected_ids:
+        return False
+    return Artifact.objects.filter(id__in=selected_ids, edit_mode="repo_backed").exists()
+
+
+@csrf_exempt
+@login_required
 def application_solution_change_session_finalize(
     request: HttpRequest, application_id: str, session_id: str
 ) -> JsonResponse:
@@ -35650,6 +35819,15 @@ def application_solution_change_session_finalize(
             },
             status=409,
         )
+    if _solution_change_session_requires_commit_provenance(session):
+        has_commit_provenance = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).exists()
+        if not has_commit_provenance:
+            return JsonResponse(
+                {
+                    "error": "code-changing sessions require at least one recorded repository commit before finalize",
+                },
+                status=409,
+            )
     metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
     metadata["finalized"] = {
         "at": timezone.now().isoformat(),
@@ -39975,11 +40153,49 @@ def dev_task_publish(request: HttpRequest, task_id: str) -> JsonResponse:
         return JsonResponse({"error": "not authenticated"}, status=401)
     task = get_object_or_404(DevTask, id=task_id)
     payload = _parse_json(request)
+    requested_session_id = str(
+        payload.get("solution_change_session_id")
+        or payload.get("session_id")
+        or request.GET.get("solution_change_session_id")
+        or request.GET.get("session_id")
+        or ""
+    ).strip()
+    if not requested_session_id:
+        policy = task.execution_policy if isinstance(task.execution_policy, dict) else {}
+        requested_session_id = str(
+            policy.get("solution_change_session_id")
+            or ((policy.get("solution_change_session") or {}) if isinstance(policy.get("solution_change_session"), dict) else {}).get("id")
+            or ""
+        ).strip()
+    solution_change_session = None
+    if requested_session_id:
+        solution_change_session = SolutionChangeSession.objects.filter(id=requested_session_id).select_related("application").first()
+        if solution_change_session is None:
+            return JsonResponse({"error": "solution_change_session_id was not found"}, status=404)
+        if not _workspace_membership(identity, str(solution_change_session.workspace_id)):
+            return JsonResponse({"error": "forbidden"}, status=403)
     push = str(request.GET.get("push") or payload.get("push") or "").strip().lower() in {"1", "true", "yes", "on"}
     try:
         result = publish_dev_task(task, user=request.user, push=push)
     except ExecutionPublishError as exc:
         return JsonResponse({"error": str(exc), "work_item": _serialize_work_item_detail(task)}, status=409)
+    if solution_change_session is not None:
+        commit_sha = str(result.get("commit") or "").strip()
+        repository_slug = str(result.get("repository_slug") or "").strip()
+        if commit_sha and repository_slug:
+            branch = str(result.get("branch") or "").strip()
+            changed_files = result.get("changed_files") if isinstance(result.get("changed_files"), list) else []
+            SolutionChangeSessionRepoCommit.objects.update_or_create(
+                solution_change_session=solution_change_session,
+                repository_slug=repository_slug,
+                commit_sha=commit_sha,
+                defaults={
+                    "workspace": solution_change_session.workspace,
+                    "branch": branch,
+                    "changed_files_json": [str(item).strip() for item in changed_files if str(item).strip()],
+                    "validation_status": "unknown",
+                },
+            )
     task.refresh_from_db()
     return JsonResponse({"status": result.get("status"), "push": push, "work_item": _serialize_work_item_detail(task)})
 

@@ -20,6 +20,7 @@ from xyn_orchestrator.xyn_api import (
     application_solution_change_session_stage_apply,
     application_solution_change_session_prepare_preview,
     application_solution_change_session_validate,
+    application_solution_change_session_commits,
     application_solution_change_session_finalize,
     solution_bundle_install,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "application_solution_change_session_stage_apply",
     "application_solution_change_session_prepare_preview",
     "application_solution_change_session_validate",
+    "application_solution_change_session_commits",
     "application_solution_change_session_finalize",
     "solution_bundle_install",
 ]

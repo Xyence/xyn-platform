@@ -221,6 +221,7 @@ from xyn_orchestrator.api.solutions import (
     application_solution_change_session_stage_apply,
     application_solution_change_session_prepare_preview,
     application_solution_change_session_validate,
+    application_solution_change_session_commits,
     application_solution_change_session_finalize,
     solution_bundle_install,
 )
@@ -832,6 +833,7 @@ urlpatterns = [
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/stage-apply", application_solution_change_session_stage_apply),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/prepare-preview", application_solution_change_session_prepare_preview),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/validate", application_solution_change_session_validate),
+    path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/commits", application_solution_change_session_commits),
     path("xyn/api/applications/<uuid:application_id>/change-sessions/<uuid:session_id>/finalize", application_solution_change_session_finalize),
     path("xyn/api/solutions/install-bundle", solution_bundle_install),
     path("xyn/api/campaign-types", campaign_types_collection),

@@ -72,6 +72,7 @@ def serialize_execution_brief_review(task: DevTask, *, work_item: Optional[Dict[
         "objective": _clean_text(brief.get("objective")) or None,
         "target_repository_slug": _clean_text(target.get("repository_slug")) or None,
         "target_branch": _clean_text(target.get("branch")) or None,
+        "target_allowed_paths": _clean_list(target.get("allowed_paths") or []),
         "gated": readiness.gated,
         "ready": readiness.executable,
         "blocked": not readiness.executable,
@@ -158,6 +159,7 @@ def build_execution_brief(
             "application_id": _clean_text(getattr(target, "application_id", None)) or None,
             "application_plan_id": _clean_text(getattr(target, "application_plan_id", None)) or None,
             "goal_id": _clean_text(getattr(target, "goal_id", None)) or None,
+            "allowed_paths": _clean_list(getattr(target, "allowed_paths", ()) or ()),
             "unresolved_reason": _clean_text(getattr(target, "unresolved_reason", None)) or None,
         },
         "scope": {
@@ -267,6 +269,7 @@ def resolve_execution_brief(task: DevTask, *, work_item: Optional[Dict[str, Any]
         "application_id": _clean_text(target.application_id) or _clean_text(resolved_target.get("application_id")) or None,
         "application_plan_id": _clean_text(target.application_plan_id) or _clean_text(resolved_target.get("application_plan_id")) or None,
         "goal_id": _clean_text(target.goal_id) or _clean_text(resolved_target.get("goal_id")) or None,
+        "allowed_paths": _clean_list(target.allowed_paths or resolved_target.get("allowed_paths") or []),
         "unresolved_reason": _clean_text(target.unresolved_reason) or _clean_text(resolved_target.get("unresolved_reason")) or None,
     }
     return ExecutionBriefResolution(

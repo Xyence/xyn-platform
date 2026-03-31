@@ -936,6 +936,11 @@ class Artifact(models.Model):
         ("inactive", "Inactive"),
         ("error", "Error"),
     ]
+    EDIT_MODE_CHOICES = [
+        ("repo_backed", "Repo Backed"),
+        ("generated", "Generated"),
+        ("read_only", "Read Only"),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name="artifacts")
@@ -1004,6 +1009,9 @@ class Artifact(models.Model):
     verifiers_satisfied_json = models.JSONField(default=list, blank=True)
     provenance_json = models.JSONField(default=dict, blank=True)
     scope_json = models.JSONField(default=dict, blank=True)
+    owner_repo_slug = models.CharField(max_length=120, blank=True, default="")
+    owner_path_prefixes_json = models.JSONField(default=list, blank=True)
+    edit_mode = models.CharField(max_length=32, choices=EDIT_MODE_CHOICES, default="generated")
     video_spec_json = models.JSONField(null=True, blank=True)
     workflow_profile = models.CharField(max_length=40, blank=True, default="")
     workflow_spec_json = models.JSONField(null=True, blank=True)
@@ -5045,6 +5053,52 @@ class SolutionPlanningCheckpoint(models.Model):
 
     def __str__(self) -> str:
         return f"{self.session_id}:{self.checkpoint_key}:{self.required_before}:{self.status}"
+
+
+class SolutionChangeSessionRepoCommit(models.Model):
+    VALIDATION_STATUS_CHOICES = [
+        ("unknown", "Unknown"),
+        ("pending", "Pending"),
+        ("passed", "Passed"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_change_session_repo_commits")
+    solution_change_session = models.ForeignKey(
+        "SolutionChangeSession",
+        on_delete=models.CASCADE,
+        related_name="repo_commits",
+    )
+    repository_slug = models.CharField(max_length=120)
+    branch = models.CharField(max_length=120, blank=True, default="")
+    commit_sha = models.CharField(max_length=128)
+    changed_files_json = models.JSONField(default=list, blank=True)
+    validation_status = models.CharField(max_length=20, choices=VALIDATION_STATUS_CHOICES, default="unknown")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["solution_change_session", "repository_slug", "commit_sha"],
+                name="uniq_solution_change_session_repo_commit",
+            ),
+        ]
+
+    def clean(self):
+        if self.solution_change_session_id and self.workspace_id and self.solution_change_session.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match solution change session workspace")
+
+    def save(self, *args, **kwargs):
+        if self.solution_change_session_id and not self.workspace_id:
+            self.workspace_id = self.solution_change_session.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.solution_change_session_id}:{self.repository_slug}:{self.commit_sha}"
 
 
 class ApplicationPlan(models.Model):
