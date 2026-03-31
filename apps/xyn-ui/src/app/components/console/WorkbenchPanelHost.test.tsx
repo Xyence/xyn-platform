@@ -1347,6 +1347,121 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.queryAllByText("No selected artifact set provided yet.")).toHaveLength(0);
   });
 
+  it("prefers code-aware proposed_work over selected_artifact_ids in draft rendering", async () => {
+    const sessionPayload = {
+      id: "session-1",
+      workspace_id: "ws-1",
+      application_id: "app-1",
+      title: "Deal Finder Session",
+      request_text: "Widen requested change input in solution pane.",
+      status: "planned",
+      selected_artifact_ids: ["artifact-uuid-like-1"],
+      confirmed_workstreams: ["ui"],
+      planning: {
+        turns: [
+          {
+            id: "turn-draft",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "planner",
+            kind: "draft_plan",
+            sequence: 2,
+            payload: {
+              objective: "Widen requested change input in solution pane.",
+              selected_artifact_ids: ["ed714e7f-f012-4153-abac-21acb882c577"],
+              proposed_work: [
+                "Inspect apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx and widen Requested change input container.",
+                "Validate panel layout behavior in Composer and Solution detail views.",
+              ],
+              planning_mode: "code_aware",
+              candidate_files: ["apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx"],
+              shared_contracts: [],
+              validation_plan: ["Run focused UI regression checks for solution detail panel layout."],
+            },
+            created_at: "2026-03-20T10:02:00Z",
+            updated_at: "2026-03-20T10:02:00Z",
+          },
+        ],
+        checkpoints: [],
+        pending_question: null,
+        pending_option_set: null,
+        pending_checkpoints: [],
+        latest_draft_plan: {
+          id: "turn-draft",
+          workspace_id: "ws-1",
+          session_id: "session-1",
+          actor: "planner",
+          kind: "draft_plan",
+          sequence: 2,
+          payload: {
+            objective: "Widen requested change input in solution pane.",
+            selected_artifact_ids: ["ed714e7f-f012-4153-abac-21acb882c577"],
+            proposed_work: [
+              "Inspect apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx and widen Requested change input container.",
+              "Validate panel layout behavior in Composer and Solution detail views.",
+            ],
+            planning_mode: "code_aware",
+            candidate_files: ["apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx"],
+            shared_contracts: [],
+            validation_plan: ["Run focused UI regression checks for solution detail panel layout."],
+          },
+          created_at: "2026-03-20T10:02:00Z",
+          updated_at: "2026-03-20T10:02:00Z",
+        },
+      },
+      created_at: "2026-03-20T10:00:00Z",
+      updated_at: "2026-03-20T10:03:00Z",
+    };
+
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: "app-1",
+        goal_id: null,
+        thread_id: null,
+        solution_change_session_id: "session-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      solution_change_sessions: [sessionPayload],
+      solution_change_session: sessionPayload,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-code-aware",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
+    expect(screen.getAllByText(/Inspect apps\/xyn-ui\/src\/app\/components\/solutions\/SolutionPanels.tsx/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("ed714e7f-f012-4153-abac-21acb882c577")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Code-aware draft/).length).toBeGreaterThan(0);
+  });
+
   it("shows a regenerate-options fallback when planner option payload is empty", async () => {
     const onOpenPanel = vi.fn();
     const sessionPayload = {

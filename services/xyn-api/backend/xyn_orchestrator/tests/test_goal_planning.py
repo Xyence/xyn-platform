@@ -3456,6 +3456,9 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(any("Inspect `apps/xyn-ui/src/app/components/console/SolutionPanels.tsx`" in item for item in proposed_work))
         self.assertFalse(any(re.search(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", item, re.I) for item in proposed_work))
         self.assertEqual(plan.get("shared_contracts"), [])
+        latest_draft = (((payload.get("session") or {}).get("planning") or {}).get("latest_draft_plan") or {}).get("payload") or {}
+        self.assertEqual(latest_draft.get("planning_mode"), "code_aware")
+        self.assertEqual(latest_draft.get("proposed_work"), proposed_work)
 
     def test_solution_change_session_non_implementation_request_remains_deterministic(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")

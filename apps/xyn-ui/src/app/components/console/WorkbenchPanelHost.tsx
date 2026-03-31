@@ -4577,17 +4577,32 @@ function ComposerDetailPanel({
       : [];
     return dedupeList([...confirmed, ...suggested, ...sessionConfirmed]);
   };
+  const collectProposedWork = (payloadMap: Record<string, unknown>): string[] => {
+    const explicit = Array.isArray(payloadMap.proposed_work)
+      ? payloadMap.proposed_work.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    if (explicit.length) return dedupeList(explicit);
+    const implementation = Array.isArray(payloadMap.implementation_steps)
+      ? payloadMap.implementation_steps.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    if (implementation.length) return dedupeList(implementation);
+    return Array.isArray(payloadMap.selected_artifact_ids)
+      ? payloadMap.selected_artifact_ids.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+  };
   const formatWorkstreamLabel = (value: string): string => WORKSTREAM_LABELS[value] || value;
 
   const renderDraftPlanSummary = (turn: any) => {
     const payloadMap = selectedOptionTurnPayload(turn);
     const objectiveText = String(payloadMap.objective || payloadMap.request_text || selectedSession?.request_text || "—");
-    const proposedWork = Array.isArray(payloadMap.selected_artifact_ids)
-      ? payloadMap.selected_artifact_ids.map((value) => String(value || "")).filter(Boolean)
-      : [];
+    const proposedWork = collectProposedWork(payloadMap);
     const workstreamFocus = collectWorkstreamFocus(payloadMap);
     const keyImpacts = Array.isArray(payloadMap.shared_contracts)
       ? payloadMap.shared_contracts.map((value) => String(value || "")).filter(Boolean)
+      : [];
+    const planningMode = String(payloadMap.planning_mode || "deterministic").trim().toLowerCase();
+    const candidateFiles = Array.isArray(payloadMap.candidate_files)
+      ? payloadMap.candidate_files.map((value) => String(value || "").trim()).filter(Boolean)
       : [];
     const validationSteps = Array.isArray(payloadMap.validation_plan)
       ? payloadMap.validation_plan.map((value) => String(value || "")).filter(Boolean)
@@ -4612,6 +4627,14 @@ function ComposerDetailPanel({
             <p className="muted small">No selected artifact set provided yet.</p>
           )}
         </div>
+        {planningMode === "code_aware" ? (
+          <div>
+            <span className="field-label">Planning Mode</span>
+            <p>
+              This draft used repo context{candidateFiles.length ? ` (${candidateFiles.slice(0, 2).join(", ")})` : ""}.
+            </p>
+          </div>
+        ) : null}
         <div>
           <span className="field-label">Key Impacts</span>
           {keyImpacts.length ? (
@@ -4642,12 +4665,14 @@ function ComposerDetailPanel({
     return {};
   })();
   const draftObjective = String(latestDraftPayload.objective || latestDraftPayload.request_text || selectedSession?.request_text || "—");
-  const draftProposedWork = Array.isArray(latestDraftPayload.selected_artifact_ids)
-    ? latestDraftPayload.selected_artifact_ids.map((value) => String(value || "")).filter(Boolean)
-    : [];
+  const draftProposedWork = collectProposedWork(latestDraftPayload);
   const draftWorkstreamFocus = collectWorkstreamFocus(latestDraftPayload);
   const draftImpacts = Array.isArray(latestDraftPayload.shared_contracts)
     ? latestDraftPayload.shared_contracts.map((value) => String(value || "")).filter(Boolean)
+    : [];
+  const draftPlanningMode = String(latestDraftPayload.planning_mode || "deterministic").trim().toLowerCase();
+  const draftCandidateFiles = Array.isArray(latestDraftPayload.candidate_files)
+    ? latestDraftPayload.candidate_files.map((value) => String(value || "").trim()).filter(Boolean)
     : [];
   const draftValidation = Array.isArray(latestDraftPayload.validation_plan)
     ? latestDraftPayload.validation_plan.map((value) => String(value || "")).filter(Boolean)
@@ -5124,6 +5149,14 @@ function ComposerDetailPanel({
                       <p className="muted small">No selected artifact set provided yet.</p>
                     )}
                   </div>
+                  {draftPlanningMode === "code_aware" ? (
+                    <div>
+                      <span className="field-label">Planning Mode</span>
+                      <p>
+                        Code-aware draft{draftCandidateFiles.length ? ` using ${draftCandidateFiles.slice(0, 2).join(", ")}` : ""}.
+                      </p>
+                    </div>
+                  ) : null}
                   <div>
                     <span className="field-label">Key Impacts / Assumptions</span>
                     {draftImpacts.length ? (

@@ -31272,6 +31272,15 @@ def _maybe_apply_code_aware_solution_planning(
         implementation_specific
         and _plan_lacks_concrete_targets(base_plan)
     )
+    logger.info(
+        "solution planning mode decision session=%s should_run_code_aware=%s force=%s implementation_specific=%s selected_artifact=%s repo=%s",
+        str(session.id),
+        bool(should_run),
+        bool(force_code_aware_planning),
+        bool(implementation_specific),
+        str(getattr(selected_member, "artifact_id", "") or ""),
+        owner_repo_slug or "",
+    )
     if not should_run:
         return base_plan
     context = gather_solution_change_code_context(
@@ -31285,12 +31294,25 @@ def _maybe_apply_code_aware_solution_planning(
         base_plan["code_context_summary"] = str(context.get("summary") or "").strip()
         base_plan["candidate_files"] = []
         base_plan["candidate_components"] = []
+        logger.info(
+            "solution planning mode session=%s finalized_mode=%s reason=%s",
+            str(session.id),
+            "deterministic",
+            str(context.get("reason") or "context_unavailable"),
+        )
         return base_plan
-    return _generate_code_aware_solution_change_plan(
+    code_aware_plan = _generate_code_aware_solution_change_plan(
         base_plan=base_plan,
         request_text=str(session.request_text or ""),
         code_context=context,
     )
+    logger.info(
+        "solution planning mode session=%s finalized_mode=%s candidate_files=%s",
+        str(session.id),
+        str(code_aware_plan.get("planning_mode") or "deterministic"),
+        len(code_aware_plan.get("candidate_files") or []),
+    )
+    return code_aware_plan
 
 
 def _generate_solution_change_plan(
