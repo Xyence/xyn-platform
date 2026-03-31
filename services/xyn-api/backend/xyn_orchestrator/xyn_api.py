@@ -30559,6 +30559,7 @@ def _record_solution_draft_plan(
             "suggested_workstreams": list(plan.get("suggested_workstreams") or []),
             "implementation_steps": list(plan.get("implementation_steps") or []),
             "shared_contracts": list(plan.get("shared_contracts") or []),
+            "open_questions": list(plan.get("open_questions") or []),
             "validation_plan": list(plan.get("validation_plan") or []),
         },
     )
@@ -31331,6 +31332,7 @@ def _generate_solution_change_plan(
             "suggested_workstreams": suggested_workstreams,
             "per_artifact_work": [],
             "shared_contracts": shared_contracts,
+            "open_questions": [],
             "validation_plan": validation_steps,
             "preview_implications": [
                 "Use preview to verify the targeted behavior change against the existing solution baseline.",
@@ -31404,16 +31406,14 @@ def _generate_solution_change_plan(
             "Assumption: initial release targets internal authenticated users.",
         ]
         assumptions.extend(refinement_state["resolved_assumptions"])
+        open_questions: List[str] = []
         if refinement_state.get("has_explicit_open_questions"):
-            if "collaboration_model" in refinement_state.get("open_questions_remaining", set()):
-                assumptions.append("Open question: should v1 support a single-user or multi-user collaboration model?")
-            if "integration_v1" in refinement_state.get("open_questions_remaining", set()):
-                assumptions.append("Open question: which external integrations are required in v1 versus later phases?")
-        else:
-            if not refinement_state["collaboration"]:
-                assumptions.append("Open question: should v1 support a single-user or multi-user collaboration model?")
-            if refinement_state["integration_v1"] is None:
-                assumptions.append("Open question: which external integrations are required in v1 versus later phases?")
+            remaining = refinement_state.get("open_questions_remaining", set())
+            if "collaboration_model" in remaining:
+                open_questions.append("Collaboration model for v1 is still unresolved.")
+            if "integration_v1" in remaining:
+                open_questions.append("External integration scope for v1 is still unresolved.")
+            assumptions.extend([f"Open question: {question}" for question in open_questions])
         assumptions.extend(refinement_state["constraints"][:2])
         assumptions.extend(refinement_state["additional_considerations"][:2])
         return {
@@ -31430,6 +31430,7 @@ def _generate_solution_change_plan(
             "suggested_workstreams": effective_workstreams,
             "per_artifact_work": [],
             "shared_contracts": assumptions,
+            "open_questions": open_questions,
             "validation_plan": [
                 first_focus,
                 "Validate the first vertical slice end-to-end before broadening scope.",
@@ -31477,28 +31478,34 @@ def _generate_solution_change_plan(
             per_artifact[-1]["planned_work"].append(f"set default UI theme to {theme}")
         for feature in refinement_state.get("features") or []:
             per_artifact[-1]["planned_work"].append(f"add support for {feature}")
-    shared_contracts = [
-        "Cross-artifact API/schema compatibility",
-        "Event/payload shape compatibility where artifacts exchange runtime data",
-        "Generated surface/action metadata consistency for shell navigation",
-    ]
+    shared_contracts: List[str] = []
+    open_questions: List[str] = []
     validation_plan = [
         "Run artifact-local unit tests for each changed artifact",
         "Run integration tests covering cross-artifact contract seams",
         "Run shell/workbench smoke route checks for affected user paths",
     ]
+    selected_roles = {str(member.role or "").strip() for member in selected_members}
+    selected_artifact_count = len(selected_members)
+    lowered_request = original_request.lower()
+    api_workstream_active = ("api" in effective_workstreams) or bool(selected_roles.intersection({"primary_api", "integration_adapter"}))
+    mentions_contract = any(token in lowered_request for token in {"api", "endpoint", "schema", "contract", "payload", "response", "request"})
+    mentions_exchange = any(
+        token in lowered_request
+        for token in {"event", "payload", "message", "queue", "stream", "webhook", "integration", "adapter", "exchange"}
+    )
+    if selected_artifact_count > 1 and api_workstream_active and mentions_contract:
+        shared_contracts.append("Maintain backward-compatible API contracts across selected artifacts.")
+    if selected_artifact_count > 1 and (mentions_exchange or "data" in effective_workstreams):
+        shared_contracts.append("Validate payload/data-shape compatibility where selected artifacts exchange runtime data.")
     shared_contracts.extend(refinement_state["resolved_assumptions"])
     if refinement_state.get("has_explicit_open_questions"):
         remaining = refinement_state.get("open_questions_remaining", set())
         if "collaboration_model" in remaining:
-            shared_contracts.append("Open question: should v1 collaboration be single-user or multi-user?")
+            open_questions.append("Collaboration model for v1 is still unresolved.")
         if "integration_v1" in remaining:
-            shared_contracts.append("Open question: are external integrations required in v1?")
-    else:
-        if refinement_state["collaboration"] is None:
-            shared_contracts.append("Open question: should v1 collaboration be single-user or multi-user?")
-        if refinement_state["integration_v1"] is None:
-            shared_contracts.append("Open question: are external integrations required in v1?")
+            open_questions.append("External integration scope for v1 is still unresolved.")
+    shared_contracts.extend([f"Open question: {question}" for question in open_questions])
     shared_contracts.extend(refinement_state["constraints"])
     shared_contracts.extend(refinement_state["additional_considerations"][:2])
     if refinement_state["constraints"]:
@@ -31517,6 +31524,7 @@ def _generate_solution_change_plan(
         "suggested_workstreams": effective_workstreams,
         "per_artifact_work": per_artifact,
         "shared_contracts": shared_contracts,
+        "open_questions": open_questions,
         "validation_plan": validation_plan,
         "preview_implications": [
             "Preview instance should include all changed artifacts in one sibling deploy set",

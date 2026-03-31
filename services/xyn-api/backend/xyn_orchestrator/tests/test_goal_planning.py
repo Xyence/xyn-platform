@@ -3265,6 +3265,129 @@ class GoalPlanningTests(TestCase):
         latest_draft = planning.get("latest_draft_plan") or {}
         self.assertEqual(str(latest_draft.get("kind") or ""), "draft_plan")
 
+    def test_solution_change_session_simple_ui_change_has_no_default_shared_contracts_or_open_questions(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform shell",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Refine solution detail layout",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Resize field",
+            request_text="Resize the requested change input field to use the full panel width.",
+            created_by=self.identity,
+            analysis_json={"impacted_artifacts": [], "suggested_artifact_ids": [str(ui_artifact.id)]},
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+        )
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(plan_response.status_code, 200)
+        payload = json.loads(plan_response.content)
+        plan = ((payload.get("session") or {}).get("plan") or {})
+        self.assertEqual(plan.get("shared_contracts"), [])
+        self.assertEqual(plan.get("open_questions"), [])
+
+    def test_solution_change_session_multi_artifact_api_ui_change_adds_only_relevant_shared_contracts(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn API",
+            slug=f"xyn-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform shell",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Coordinate UI + API update",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Campaign contract update",
+            request_text="Update campaign UI and API payload schema; keep request/response contracts backward compatible.",
+            created_by=self.identity,
+            analysis_json={
+                "impacted_artifacts": [],
+                "suggested_artifact_ids": [str(ui_artifact.id), str(api_artifact.id)],
+                "suggested_workstreams": ["ui", "api"],
+            },
+            selected_artifact_ids_json=[str(ui_artifact.id), str(api_artifact.id)],
+        )
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(plan_response.status_code, 200)
+        payload = json.loads(plan_response.content)
+        plan = ((payload.get("session") or {}).get("plan") or {})
+        shared_contracts = [str(item) for item in (plan.get("shared_contracts") or []) if str(item).strip()]
+        self.assertIn("Maintain backward-compatible API contracts across selected artifacts.", shared_contracts)
+        self.assertIn(
+            "Validate payload/data-shape compatibility where selected artifacts exchange runtime data.",
+            shared_contracts,
+        )
+        self.assertFalse(any("generated surface/action metadata" in item.lower() for item in shared_contracts))
+        self.assertEqual(plan.get("open_questions"), [])
+
     def test_solution_change_session_can_persist_confirmed_workstreams(self):
         application = Application.objects.create(
             workspace=self.workspace,
