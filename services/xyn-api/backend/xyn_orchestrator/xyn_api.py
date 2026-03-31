@@ -30405,8 +30405,62 @@ def _solution_option_rows(
     memberships: List[ApplicationArtifactMembership],
     *,
     limit: int = 3,
+    ordered_artifact_ids: Optional[List[str]] = None,
+    request_text: str = "",
 ) -> List[Dict[str, Any]]:
-    candidate_members = memberships[: min(max(limit, 1), len(memberships))]
+    normalized_ordered_ids: List[str] = []
+    seen_ordered_ids: Set[str] = set()
+    if isinstance(ordered_artifact_ids, list):
+        for item in ordered_artifact_ids:
+            token = str(item or "").strip()
+            if not token or token in seen_ordered_ids:
+                continue
+            seen_ordered_ids.add(token)
+            normalized_ordered_ids.append(token)
+
+    membership_by_artifact_id: Dict[str, ApplicationArtifactMembership] = {
+        str(member.artifact_id): member for member in memberships
+    }
+    ordered_members: List[ApplicationArtifactMembership] = []
+    seen_membership_artifact_ids: Set[str] = set()
+    for artifact_id in normalized_ordered_ids:
+        member = membership_by_artifact_id.get(artifact_id)
+        if member is None:
+            continue
+        seen_membership_artifact_ids.add(str(member.artifact_id))
+        ordered_members.append(member)
+    for member in memberships:
+        artifact_id = str(member.artifact_id)
+        if artifact_id in seen_membership_artifact_ids:
+            continue
+        seen_membership_artifact_ids.add(artifact_id)
+        ordered_members.append(member)
+
+    lowered_request = str(request_text or "").strip().lower()
+    ui_context_tokens = {"ui", "ux", "frontend", "view", "screen", "page", "panel", "layout", "input", "component"}
+    ui_code_change_tokens = {"resize", "width", "height", "css", "style", "component", "input", "textarea", "field", "layout"}
+    is_ui_code_change_request = (
+        bool(lowered_request)
+        and any(token in lowered_request for token in ui_context_tokens)
+        and any(token in lowered_request for token in ui_code_change_tokens)
+    )
+    if is_ui_code_change_request:
+        editable_members: List[ApplicationArtifactMembership] = []
+        non_editable_members: List[ApplicationArtifactMembership] = []
+        for member in ordered_members:
+            artifact = member.artifact
+            has_editable_paths = bool(
+                isinstance(getattr(artifact, "owner_path_prefixes_json", None), list)
+                and any(str(item or "").strip() for item in (artifact.owner_path_prefixes_json or []))
+            )
+            if has_editable_paths:
+                editable_members.append(member)
+            else:
+                non_editable_members.append(member)
+        if editable_members:
+            ordered_members = editable_members + non_editable_members
+
+    candidate_members = ordered_members[: min(max(limit, 1), len(ordered_members))]
     options: List[Dict[str, Any]] = []
     for member in candidate_members:
         options.append(
@@ -30651,14 +30705,27 @@ def _seed_solution_planning_state_on_create(
             },
         )
     else:
-        options = _solution_option_rows(memberships)
+        analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+        ordered_artifact_ids = (
+            analysis.get("suggested_artifact_ids")
+            if isinstance(analysis.get("suggested_artifact_ids"), list)
+            else []
+        )
+        options = _solution_option_rows(
+            memberships,
+            ordered_artifact_ids=ordered_artifact_ids,
+            request_text=request_text,
+        )
         if options:
             _append_solution_planning_turn(
                 session=session,
                 actor="planner",
                 kind="option_set",
                 payload={
-                    "prompt": "Select the first artifact focus for this planning session.",
+                    "prompt": (
+                        "Select the initial artifact to focus planning on "
+                        "(you can still include multiple artifacts later)."
+                    ),
                     "options": options,
                 },
             )
@@ -35565,6 +35632,13 @@ def application_solution_change_session_select_option(
             break
     if selected_option is None:
         return JsonResponse({"error": "option_id is not part of the planner option set"}, status=400)
+    selected_artifact_id = str(selected_option.get("id") or option_id).strip() or option_id
+    current_selected_ids = _solution_change_session_selected_artifact_ids(session)
+    reordered_selected_ids = [selected_artifact_id] + [
+        artifact_id for artifact_id in current_selected_ids if artifact_id != selected_artifact_id
+    ]
+    session.selected_artifact_ids_json = reordered_selected_ids
+    session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
 
     _append_solution_planning_turn(
         session=session,
@@ -35675,19 +35749,32 @@ def application_solution_change_session_regenerate_options(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
-    options = _solution_option_rows(memberships)
+    analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+    ordered_artifact_ids = (
+        analysis.get("suggested_artifact_ids")
+        if isinstance(analysis.get("suggested_artifact_ids"), list)
+        else []
+    )
+    options = _solution_option_rows(
+        memberships,
+        ordered_artifact_ids=ordered_artifact_ids,
+        request_text=str(session.request_text or ""),
+    )
     if not options:
         return JsonResponse({"error": "no selectable artifacts are available for this solution"}, status=409)
     _append_solution_planning_turn(
         session=session,
-        actor="planner",
-        kind="option_set",
-        payload={
-            "prompt": "Select the first artifact focus for this planning session.",
-            "options": options,
-            "source": "regenerated",
-        },
-    )
+                actor="planner",
+                kind="option_set",
+                payload={
+                    "prompt": (
+                        "Select the initial artifact to focus planning on "
+                        "(you can still include multiple artifacts later)."
+                    ),
+                    "options": options,
+                    "source": "regenerated",
+                },
+            )
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {
@@ -35727,6 +35814,41 @@ def application_solution_change_session_plan(
     planning_state = _solution_planning_state(session)
     if planning_state.get("pending_question"):
         return JsonResponse({"error": "planner clarification is pending; submit a reply before generating a draft plan"}, status=409)
+    pending_option_set = planning_state.get("pending_option_set")
+    if pending_option_set:
+        pending_payload = pending_option_set.get("payload") if isinstance(pending_option_set.get("payload"), dict) else {}
+        pending_options = pending_payload.get("options") if isinstance(pending_payload.get("options"), list) else []
+        default_option = next(
+            (
+                item
+                for item in pending_options
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ),
+            None,
+        )
+        if default_option is not None:
+            selected_artifact_id = str(default_option.get("id") or "").strip()
+            current_selected_ids = _solution_change_session_selected_artifact_ids(session)
+            reordered_selected_ids = [selected_artifact_id] + [
+                artifact_id for artifact_id in current_selected_ids if artifact_id != selected_artifact_id
+            ]
+            session.selected_artifact_ids_json = reordered_selected_ids
+            session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+            _append_solution_planning_turn(
+                session=session,
+                actor="user",
+                kind="response",
+                payload={
+                    "response_kind": "option_selection",
+                    "source_turn_id": str(pending_option_set.get("id") or "").strip(),
+                    "option_id": selected_artifact_id,
+                    "option_label": str(default_option.get("label") or selected_artifact_id),
+                    "option_payload": default_option,
+                    "auto_selected": True,
+                },
+                created_by=identity,
+            )
+            planning_state = _solution_planning_state(session)
     if planning_state.get("pending_option_set"):
         return JsonResponse({"error": "planner option selection is pending; select an option before generating a draft plan"}, status=409)
     _record_solution_draft_plan(

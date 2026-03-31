@@ -1371,6 +1371,112 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(suggested_ids)
         self.assertEqual(suggested_ids[0], str(xyn_api_artifact.id))
 
+    def test_solution_change_session_option_set_orders_by_impacted_artifact_ranking(self):
+        application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Resize input field",
+                    "request_text": "Resize the requested change input field so it uses the full panel width.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        planning = ((payload.get("session") or {}).get("planning") or {})
+        option_turn = planning.get("pending_option_set") or {}
+        option_payload = option_turn.get("payload") if isinstance(option_turn.get("payload"), dict) else {}
+        options = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+        self.assertTrue(options)
+        self.assertEqual(str((options[0] or {}).get("id") or ""), str(xyn_ui_artifact.id))
+        self.assertIn("initial artifact", str(option_payload.get("prompt") or "").lower())
+
+    def test_solution_change_session_select_option_reorders_selected_artifacts_without_dropping_others(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Multi-artifact reorder",
+            request_text="Update UI and API behavior",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(xyn_api_artifact.id), str(xyn_ui_artifact.id)],
+        )
+        option_turn = SolutionPlanningTurn.objects.create(
+            workspace=self.workspace,
+            session=session,
+            actor="planner",
+            kind="option_set",
+            payload_json={
+                "prompt": "Select focus",
+                "options": [
+                    {"id": str(xyn_ui_artifact.id), "label": "xyn-ui"},
+                    {"id": str(xyn_api_artifact.id), "label": "xyn-api"},
+                ],
+            },
+            created_by=self.identity,
+        )
+        select_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/select-option",
+            method="post",
+            data=json.dumps({"source_turn_id": str(option_turn.id), "option_id": str(xyn_ui_artifact.id)}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_session_select_option(select_request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        session.refresh_from_db()
+        self.assertEqual(
+            [str(item) for item in (session.selected_artifact_ids_json or [])],
+            [str(xyn_ui_artifact.id), str(xyn_api_artifact.id)],
+        )
+
+    def test_solution_change_session_plan_auto_selects_default_pending_option(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Resize input field",
+                    "request_text": "Resize the requested change input field so it uses the full panel width.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            create_payload = json.loads(create_response.content)
+            session_id = str((create_payload.get("session") or {}).get("id") or "")
+            session = SolutionChangeSession.objects.get(id=session_id)
+            self.assertIn(str(xyn_ui_artifact.id), [str(item) for item in (session.selected_artifact_ids_json or [])])
+            self.assertIn(str(xyn_api_artifact.id), [str(item) for item in (session.selected_artifact_ids_json or [])])
+
+            plan_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+                method="post",
+                data=json.dumps({}),
+            )
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+
+        self.assertEqual(plan_response.status_code, 200)
+        session.refresh_from_db()
+        selected_ids = [str(item) for item in (session.selected_artifact_ids_json or [])]
+        self.assertTrue(selected_ids)
+        self.assertEqual(selected_ids[0], str(xyn_ui_artifact.id))
+        turns = list(SolutionPlanningTurn.objects.filter(session=session).order_by("sequence"))
+        auto_option_responses = [
+            turn for turn in turns
+            if turn.actor == "user"
+            and turn.kind == "response"
+            and isinstance(turn.payload_json, dict)
+            and str(turn.payload_json.get("response_kind") or "") == "option_selection"
+            and bool(turn.payload_json.get("auto_selected"))
+        ]
+        self.assertTrue(auto_option_responses)
+
     def test_solution_change_session_create_without_memberships_seeds_initial_draft_plan(self):
         application = Application.objects.create(
             workspace=self.workspace,
