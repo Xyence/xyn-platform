@@ -30708,6 +30708,64 @@ def _analyze_solution_impacted_artifacts(
 ) -> Dict[str, Any]:
     text = str(request_text or "").strip().lower()
     tokens = [token for token in re.findall(r"[a-z0-9_]+", text) if len(token) >= 3]
+    ui_context_tokens = {
+        "ui",
+        "ux",
+        "frontend",
+        "view",
+        "screen",
+        "page",
+        "panel",
+        "pane",
+        "layout",
+        "form",
+        "input",
+        "button",
+        "modal",
+        "workbench",
+        "console",
+        "header",
+        "footer",
+    }
+    ui_code_change_tokens = {
+        "resize",
+        "resized",
+        "width",
+        "height",
+        "align",
+        "spacing",
+        "margin",
+        "padding",
+        "css",
+        "style",
+        "styling",
+        "component",
+        "textfield",
+        "input",
+        "textarea",
+        "dropdown",
+        "select",
+        "placeholder",
+        "label",
+        "font",
+        "color",
+        "theme",
+        "fullwidth",
+    }
+    api_change_tokens = {
+        "api",
+        "endpoint",
+        "schema",
+        "contract",
+        "backend",
+        "payload",
+        "response",
+        "request",
+    }
+    has_ui_context = any(token in text for token in ui_context_tokens)
+    has_ui_code_change_signal = any(token in text for token in ui_code_change_tokens)
+    is_ui_code_change_request = has_ui_context and has_ui_code_change_signal
+    is_api_change_request = any(token in text for token in api_change_tokens) and not is_ui_code_change_request
     role_signals: Dict[str, List[str]] = {
         "primary_ui": ["ui", "ux", "frontend", "view", "screen", "page", "shell", "workbench"],
         "primary_api": ["api", "endpoint", "contract", "schema", "backend", "service", "orchestrator"],
@@ -30725,9 +30783,27 @@ def _analyze_solution_impacted_artifacts(
         artifact = member.artifact
         score = 0
         reasons: List[str] = []
+        has_editable_paths = bool(
+            isinstance(getattr(artifact, "owner_path_prefixes_json", None), list)
+            and any(str(item or "").strip() for item in (artifact.owner_path_prefixes_json or []))
+        )
+        is_repo_backed = str(getattr(artifact, "edit_mode", "") or "").strip().lower() == "repo_backed"
+        artifact_intent_text = " ".join(
+            [
+                str(getattr(artifact, "title", "") or ""),
+                str(getattr(artifact, "slug", "") or ""),
+                str(getattr(artifact, "summary", "") or ""),
+                str(member.responsibility_summary or ""),
+            ]
+        ).lower()
+        artifact_ui_signal = any(token in artifact_intent_text for token in {" ui", "frontend", "workbench", "panel", "layout"})
+        artifact_api_signal = any(token in artifact_intent_text for token in {"api", "backend", "endpoint", "service"})
         if member.role in matched_roles:
             score += 4
             reasons.append(f"request mentions {member.role.replace('_', ' ')} concerns")
+            if is_ui_code_change_request and member.role == "primary_ui" and not has_editable_paths:
+                score -= 3
+                reasons.append("role confidence reduced: primary_ui artifact has no editable paths for UI code changes")
         haystack = " ".join(
             [
                 str(member.role or ""),
@@ -30742,8 +30818,32 @@ def _analyze_solution_impacted_artifacts(
             score += min(3, len(token_hits))
             reasons.append(f"matched request terms: {', '.join(sorted(set(token_hits))[:3])}")
         if member.role in {"primary_ui", "primary_api"}:
-            score += 1
-            reasons.append("primary role default weighting")
+            if is_ui_code_change_request and member.role == "primary_ui" and not has_editable_paths:
+                reasons.append("primary role weighting suppressed: artifact is not editable for UI code changes")
+            else:
+                score += 1
+                reasons.append("primary role default weighting")
+        if is_ui_code_change_request:
+            if has_editable_paths:
+                bonus = 5 if is_repo_backed else 4
+                score += bonus
+                reasons.append("ui code-change request prefers artifacts with editable path ownership")
+            else:
+                score -= 4
+                reasons.append("ui code-change request penalizes artifacts without editable path ownership")
+            if artifact_ui_signal:
+                score += 3
+                reasons.append("ui code-change request aligns with artifact UI intent")
+            elif artifact_api_signal:
+                score -= 2
+                reasons.append("ui code-change request de-prioritizes API-oriented artifacts")
+        if is_api_change_request:
+            if artifact_api_signal:
+                score += 3
+                reasons.append("api change request aligns with artifact API intent")
+            elif artifact_ui_signal:
+                score -= 2
+                reasons.append("api change request de-prioritizes UI-oriented artifacts")
         if score <= 0:
             continue
         impacted_rows.append(

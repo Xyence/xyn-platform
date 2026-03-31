@@ -1233,6 +1233,144 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(len(checkpoints), 0)
         self.assertIsNone(planning.get("latest_draft_plan"))
 
+    def _seed_default_xyn_solution_memberships(self) -> tuple[Application, Artifact, Artifact, Artifact]:
+        module_type = ArtifactType.objects.create(slug=f"module-{uuid.uuid4().hex[:6]}", name="Module")
+        workbench_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=module_type,
+            title="Workbench",
+            slug=f"core.workbench-{uuid.uuid4().hex[:6]}",
+            status="published",
+            visibility="team",
+            summary="Default shell/workbench surface.",
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=[],
+            edit_mode="repo_backed",
+        )
+        xyn_ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=module_type,
+            title="xyn-ui",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="published",
+            visibility="team",
+            summary="Deployable Xyn UI runtime artifact.",
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        xyn_api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=module_type,
+            title="xyn-api",
+            slug=f"xyn-api-{uuid.uuid4().hex[:6]}",
+            status="published",
+            visibility="team",
+            summary="Deployable Xyn API runtime artifact.",
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["services/xyn-api/backend/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Default Xyn solution",
+            source_factory_key="xyn_platform_default",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Improve platform workflows",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=workbench_artifact,
+            role="primary_ui",
+            responsibility_summary="Default shell/workbench surface.",
+            sort_order=10,
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=xyn_ui_artifact,
+            role="runtime_service",
+            responsibility_summary="Default UI runtime artifact.",
+            sort_order=20,
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=xyn_api_artifact,
+            role="runtime_service",
+            responsibility_summary="Default API runtime artifact.",
+            sort_order=30,
+        )
+        return application, workbench_artifact, xyn_ui_artifact, xyn_api_artifact
+
+    def test_solution_change_session_ui_code_change_prefers_editable_xyn_ui_artifact(self):
+        application, workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Resize input field",
+                    "request_text": "Resize the requested change input field so it uses the full panel width.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_ui_artifact.id))
+        self.assertNotEqual(suggested_ids[0], str(workbench_artifact.id))
+
+    def test_solution_change_session_workbench_navigation_request_can_still_select_workbench(self):
+        application, workbench_artifact, _xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Workbench navigation",
+                    "request_text": "Change workbench navigation structure for platform settings grouping.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(workbench_artifact.id))
+
+    def test_solution_change_session_api_request_still_prefers_xyn_api(self):
+        application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "API schema update",
+                    "request_text": "Update API endpoint schema and response contract for change session payloads.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_api_artifact.id))
+
     def test_solution_change_session_create_without_memberships_seeds_initial_draft_plan(self):
         application = Application.objects.create(
             workspace=self.workspace,
