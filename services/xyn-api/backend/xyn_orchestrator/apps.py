@@ -32,10 +32,12 @@ class XynOrchestratorConfig(AppConfig):
             from xyn_orchestrator.ai_runtime import ensure_default_ai_seeds
             from xyn_orchestrator.instances.bootstrap import bootstrap_instance_registration
             from xyn_orchestrator.seeds import auto_apply_core_seed_packs
+            from xyn_orchestrator.solution_bundles import bootstrap_install_solution_bundles_from_env
 
             ensure_default_ai_seeds()
             bootstrap_instance_registration()
             auto_apply_core_seed_packs()
+            bootstrap_install_solution_bundles_from_env(reason="app_ready")
         except Exception as exc:
             logger.warning("Startup bootstrap did not complete: %s", exc)
             return

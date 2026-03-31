@@ -370,6 +370,12 @@ from .artifact_activation import (
     runtime_record_matches_revision_anchor,
     submit_artifact_activation,
 )
+from .solution_bundles import (
+    SolutionBundleError,
+    install_solution_bundle,
+    load_solution_bundle_from_source,
+    normalize_solution_bundle,
+)
 from .ai_runtime import (
     AiConfigError,
     AiInvokeError,
@@ -11018,23 +11024,51 @@ def _resolve_source_policy_bundle_for_activation(artifact: Artifact) -> tuple[Di
     app_memberships = list(
         ApplicationArtifactMembership.objects.filter(artifact=artifact)
         .select_related("application")
-        .order_by("sort_order", "created_at")
+        .order_by("sort_order", "created_at", "id")
     )
     if not app_memberships:
         return {}, {}
+    preferred_roles = ("primary_ui", "primary_api")
+    selected_app_membership = next(
+        (row for role in preferred_roles for row in app_memberships if str(row.role or "").strip() == role),
+        app_memberships[0],
+    )
     application_ids = [row.application_id for row in app_memberships if row.application_id]
     if not application_ids:
         return {}, {}
-    candidate_memberships = list(
+    role_preference = {"supporting": 0, "policy": 1, "shared_library": 2}
+
+    def _ordered_policy_memberships(queryset):
+        rows = list(
+            queryset.select_related("artifact", "artifact__type")
+            .order_by("sort_order", "created_at", "id")
+        )
+        rows.sort(
+            key=lambda row: (
+                role_preference.get(str(row.role or "").strip(), 99),
+                int(row.sort_order or 0),
+                str(getattr(row, "created_at", "") or ""),
+                str(getattr(row, "id", "") or ""),
+            )
+        )
+        return rows
+
+    candidate_memberships = _ordered_policy_memberships(
         ApplicationArtifactMembership.objects.filter(
-            application_id__in=application_ids,
+            application_id=selected_app_membership.application_id,
             workspace_id=artifact.workspace_id,
             artifact__type__slug="policy_bundle",
         )
         .exclude(artifact_id=artifact.id)
-        .select_related("artifact", "artifact__type")
-        .order_by("sort_order", "created_at")
     )
+    if not candidate_memberships:
+        candidate_memberships = _ordered_policy_memberships(
+            ApplicationArtifactMembership.objects.filter(
+                application_id__in=application_ids,
+                workspace_id=artifact.workspace_id,
+                artifact__type__slug="policy_bundle",
+            ).exclude(artifact_id=artifact.id)
+        )
     if not candidate_memberships:
         return {}, {}
     if preferred_policy_slug:
@@ -11119,6 +11153,12 @@ def application_activate(request: HttpRequest, application_id: str) -> JsonRespo
             # binding so subsequent solution activations remain stable and reusable.
             "interaction_rule": "solution_activation_records_binding; artifact_activation_remains_independent",
         }
+        resolved_policy_ref = payload.get("policy_artifact_ref") if isinstance(payload.get("policy_artifact_ref"), dict) else {}
+        payload["solution_slug"] = _application_solution_slug(application)
+        payload["artifact_ref"] = _artifact_ref_payload(selected_app_member.artifact if selected_app_member else None)
+        payload["policy_artifact_ref"] = resolved_policy_ref
+        payload["policy_source"] = str(payload.get("policy_source") or "reconstructed")
+        payload["install_source"] = _application_install_source(application)
         return JsonResponse(payload, status=response.status_code)
     return response
 
@@ -12574,6 +12614,76 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
             "solution_links": solution_links,
         },
         status=status,
+    )
+
+
+@csrf_exempt
+@login_required
+def solution_bundle_install(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if staff_error := _require_staff(request):
+        return staff_error
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+
+    workspace = _resolve_solution_import_workspace(identity, request)
+    if workspace is None:
+        return JsonResponse(
+            {"error": "workspace context is required for solution bundle install"},
+            status=400,
+        )
+
+    payload = _parse_json(request)
+    bundle_payload = payload.get("bundle") if isinstance(payload.get("bundle"), dict) else {}
+    source = str(payload.get("source") or "").strip()
+    try:
+        if bundle_payload:
+            bundle = normalize_solution_bundle(bundle_payload)
+        elif source:
+            bundle = load_solution_bundle_from_source(source)
+        else:
+            return JsonResponse({"error": "bundle or source is required"}, status=400)
+        result = install_solution_bundle(
+            workspace=workspace,
+            bundle=bundle,
+            install_source=(source or "inline_bundle"),
+            installed_by=request.user if request.user.is_authenticated else None,
+        )
+    except SolutionBundleError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    application = result.get("application")
+    memberships = result.get("memberships") if isinstance(result.get("memberships"), list) else []
+    bindings = result.get("workspace_bindings") if isinstance(result.get("workspace_bindings"), list) else []
+    receipts = result.get("receipts") if isinstance(result.get("receipts"), list) else []
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source": source or None,
+            "bundle": result.get("bundle") if isinstance(result.get("bundle"), dict) else {},
+            "application": _serialize_application_detail(application) if isinstance(application, Application) else None,
+            "application_created": bool(result.get("application_created")),
+            "memberships": [
+                _serialize_application_artifact_membership(member)
+                for member in memberships
+                if isinstance(member, ApplicationArtifactMembership)
+            ],
+            "workspace_bindings": [
+                _serialize_workspace_artifact_binding(binding)
+                for binding in bindings
+                if isinstance(binding, WorkspaceArtifactBinding)
+            ],
+            "receipts": [
+                _serialize_artifact_install_receipt(receipt)
+                for receipt in receipts
+                if isinstance(receipt, ArtifactInstallReceipt)
+            ],
+            "policy_source": str(result.get("policy_source") or "reconstructed"),
+            "install_source": str(result.get("install_source") or source or "inline_bundle"),
+            "warnings": [str(item) for item in (result.get("warnings") or []) if str(item).strip()],
+        }
     )
 
 
@@ -31760,7 +31870,7 @@ def _solution_activation_memberships(
     memberships = list(
         ApplicationArtifactMembership.objects.filter(application=application)
         .select_related("artifact", "artifact__type")
-        .order_by("sort_order", "created_at")
+        .order_by("sort_order", "created_at", "id")
     )
     app_memberships = [
         row
@@ -31775,17 +31885,49 @@ def _solution_activation_memberships(
         return None, None
     preferred_roles = ("primary_ui", "primary_api")
     selected_app = next((row for role in preferred_roles for row in app_memberships if row.role == role), app_memberships[0])
-    policy_member = next(
-        (
-            row
-            for row in memberships
-            if row.artifact
-            and row.artifact_id != selected_app.artifact_id
-            and str(getattr(row.artifact.type, "slug", "") or "").strip() == "policy_bundle"
-        ),
-        None,
+    policy_candidates = [
+        row
+        for row in memberships
+        if row.artifact
+        and row.artifact_id != selected_app.artifact_id
+        and str(getattr(row.artifact.type, "slug", "") or "").strip() == "policy_bundle"
+    ]
+    policy_role_preference = {"supporting": 0, "policy": 1, "shared_library": 2}
+    policy_candidates.sort(
+        key=lambda row: (
+            policy_role_preference.get(str(row.role or "").strip(), 99),
+            int(row.sort_order or 0),
+            str(getattr(row, "created_at", "") or ""),
+            str(getattr(row, "id", "") or ""),
+        )
     )
+    policy_member = policy_candidates[0] if policy_candidates else None
     return selected_app, policy_member
+
+
+def _artifact_ref_payload(artifact: Optional[Artifact]) -> Dict[str, str]:
+    if artifact is None:
+        return {}
+    return {
+        "artifact_id": str(artifact.id),
+        "artifact_slug": str(_artifact_slug(artifact) or ""),
+        "artifact_version": str(artifact.package_version or ""),
+    }
+
+
+def _application_solution_slug(application: Application) -> str:
+    metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
+    return str(
+        metadata.get("solution_bundle_slug")
+        or metadata.get("generated_artifact_key")
+        or metadata.get("system_solution_key")
+        or ""
+    ).strip()
+
+
+def _application_install_source(application: Application) -> str:
+    metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
+    return str(metadata.get("solution_bundle_install_source") or "").strip()
 
 
 def _application_runtime_binding(application: Application) -> Optional[SolutionRuntimeBinding]:

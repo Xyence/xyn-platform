@@ -99,6 +99,10 @@ class ArtifactActivationApiTests(TestCase):
             source_factory_key="manual",
             requested_by=self.identity,
             status="active",
+            metadata_json={
+                "solution_bundle_slug": "real-estate-deal-finder",
+                "solution_bundle_install_source": "s3://xyn-bundles/solutions/real-estate-deal-finder/v1",
+            },
         )
         ApplicationArtifactMembership.objects.create(
             workspace=self.workspace,
@@ -580,6 +584,14 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(response.status_code, 202)
         payload = json.loads(response.content)
         self.assertEqual(payload.get("artifact_slug"), "app.real-estate-deal-finder")
+        self.assertEqual(payload.get("solution_slug"), "real-estate-deal-finder")
+        self.assertEqual((payload.get("artifact_ref") or {}).get("artifact_slug"), "app.real-estate-deal-finder")
+        self.assertEqual((payload.get("policy_artifact_ref") or {}).get("artifact_slug"), "policy.real-estate-deal-finder")
+        self.assertEqual(payload.get("policy_source"), "artifact")
+        self.assertEqual(
+            payload.get("install_source"),
+            "s3://xyn-bundles/solutions/real-estate-deal-finder/v1",
+        )
 
     def test_solution_activation_records_composed_runtime_binding(self) -> None:
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
@@ -692,10 +704,49 @@ class ArtifactActivationApiTests(TestCase):
         self.assertEqual(response.status_code, 202)
         payload = json.loads(response.content)
         self.assertEqual(payload.get("status"), "queued")
+        self.assertEqual(payload.get("policy_source"), "reconstructed")
+        self.assertEqual(payload.get("policy_artifact_ref"), {})
         binding = SolutionRuntimeBinding.objects.get(application=self.application, workspace=self.workspace)
         self.assertEqual(binding.activation_mode, "reconstructed")
         self.assertIsNone(binding.policy_artifact_id)
         self.assertEqual((payload.get("solution_runtime_binding") or {}).get("activation_mode"), "reconstructed")
+
+    def test_solution_activation_primary_artifact_selection_prefers_primary_ui_role(self) -> None:
+        secondary_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=self.artifact_type,
+            title="Secondary App",
+            slug="app.real-estate-deal-finder.alt",
+            package_version="0.0.1-dev",
+            scope_json={
+                "imported_manifest": {
+                    "artifact": {"id": "app.real-estate-deal-finder.alt"},
+                    "content": {
+                        "app_spec": {
+                            "app_slug": "real-estate-deal-finder-alt",
+                            "title": "Alt Deal Finder",
+                        }
+                    },
+                }
+            },
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            artifact=secondary_artifact,
+            role="supporting",
+            sort_order=-10,
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._seed_api_request",
+                side_effect=self._seed_side_effect(jobs=[]),
+            ):
+                response = application_activate(self._application_request(method="post"), str(self.application.id))
+        self.assertEqual(response.status_code, 202)
+        payload = json.loads(response.content)
+        self.assertEqual((payload.get("artifact_ref") or {}).get("artifact_slug"), "app.real-estate-deal-finder")
+        self.assertEqual((payload.get("revision_anchor") or {}).get("artifact_slug"), "app.real-estate-deal-finder")
 
     def test_repeated_solution_activation_reuses_same_runtime_instance_and_binding(self) -> None:
         runtime_instance = WorkspaceAppInstance.objects.create(
