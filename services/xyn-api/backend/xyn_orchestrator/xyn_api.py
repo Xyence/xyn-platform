@@ -19119,16 +19119,7 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
     text = str(message or "").strip()
     if not text:
         return None
-    lower = re.sub(r"\s+", " ", text.lower()).strip()
-    lower = re.sub(r"^(?:please[,\s]+)+", "", lower)
-    lower = re.sub(r"^(?:can|could|would)\s+you\s+", "", lower)
-    lower = re.sub(r"^take\s+me\s+to\s+", "go to ", lower)
-    lower = re.sub(r"[.!?,:;]+$", "", lower)
-    lower = re.sub(r"^show\s+me\s+(?:a\s+)?list\s+of\s+", "list ", lower)
-    lower = re.sub(r"^show\s+me\s+", "show ", lower)
-    lower = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", lower)
-    lower = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", lower)
-    lower = re.sub(r"[.!?,:;]+$", "", lower)
+    lower = _normalize_palette_panel_command_phrase(text, support_show_me_list=True)
 
     def _artifact_created_day_query(day_offset: int) -> Dict[str, Any]:
         return {
@@ -19228,14 +19219,7 @@ def _match_core_surface_command(message: str) -> Optional[Tuple[str, Dict[str, A
     text = str(message or "").strip()
     if not text:
         return None
-    normalized = re.sub(r"\s+", " ", text.lower()).strip()
-    normalized = re.sub(r"^(?:please[,\s]+)+", "", normalized)
-    normalized = re.sub(r"^(?:can|could|would)\s+you\s+", "", normalized)
-    normalized = re.sub(r"^take\s+me\s+to\s+", "go to ", normalized)
-    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
-    normalized = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", normalized)
-    normalized = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", normalized)
-    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
+    normalized = _normalize_palette_panel_command_phrase(text, support_show_me_list=False)
     platform_settings_aliases = {
         "platform settings",
         "open platform settings",
@@ -19278,6 +19262,27 @@ def _should_invoke_legacy_intake_fallback(message: str, *, has_context_artifact:
     if re.search(r"\b(create|make|start|new|draft|write|build)\b", prompt) and re.search(r"\b(article|guide|tour|explainer|video)\b", prompt):
         return True
     return False
+
+
+def _normalize_palette_panel_command_phrase(message: str, *, support_show_me_list: bool) -> str:
+    normalized = re.sub(r"\s+", " ", str(message or "").strip().lower()).strip()
+    if not normalized:
+        return normalized
+
+    # Strip common conversational prefixes without changing the command payload.
+    normalized = re.sub(r"^(?:please[,\s]+)+", "", normalized)
+    normalized = re.sub(r"^(?:can|could|would)\s+you(?:\s+please)?\s+", "", normalized)
+    normalized = re.sub(r"^(?:i\s+would\s+like\s+you\s+to|i['’]?d\s+like\s+to)\s+", "", normalized)
+    normalized = re.sub(r"^(?:i\s+want\s+to|i\s+need\s+to)\s+", "", normalized)
+    normalized = re.sub(r"^take\s+me\s+to\s+", "go to ", normalized)
+    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
+    if support_show_me_list:
+        normalized = re.sub(r"^show\s+me\s+(?:a\s+)?list\s+of\s+", "list ", normalized)
+        normalized = re.sub(r"^show\s+me\s+", "show ", normalized)
+    normalized = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", normalized)
+    normalized = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", normalized)
+    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
+    return normalized
 
 
 def _direct_panel_intent_response(
@@ -20338,6 +20343,13 @@ def _should_use_legacy_intake_fallback(prompt: str, *, context_artifact: Optiona
             text,
         )
     )
+
+
+def _user_facing_unsupported_intent_summary(summary: str) -> str:
+    normalized = str(summary or "").strip()
+    if normalized.lower() == "no epic d resolver matched the message":
+        return "I couldn’t determine what action to take from that request."
+    return normalized or "I couldn’t determine what action to take from that request."
 
 
 def _workspace_has_installed_artifact_slug(workspace: Workspace, artifact_slug: str) -> bool:
@@ -23787,9 +23799,10 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 return JsonResponse({"error": "unsupported artifact_type context"}, status=400)
 
     if not _should_use_legacy_intake_fallback(message, context_artifact=context_artifact):
+        internal_summary = str((epic_d_intent.resolution_notes or ["Intent is unsupported in the current resolver scope."])[0])
         response_payload = {
             "status": "UnsupportedIntent",
-            "summary": str((epic_d_intent.resolution_notes or ["Intent is unsupported in the current resolver scope."])[0]),
+            "summary": _user_facing_unsupported_intent_summary(internal_summary),
             "intent": epic_d_payload,
             "prompt_interpretation": prompt_interpretation,
             "conversation_action": conversation_action,
@@ -23812,7 +23825,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 request_type="intent.resolve",
                 workspace_id=context_workspace_id,
                 summary=str(response_payload.get("summary") or ""),
-                error=str(epic_d_intent.clarification_reason or ""),
+                error=str(epic_d_intent.clarification_reason or internal_summary or ""),
                 trace=epic_d_trace,
                 structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                 prompt_interpretation=prompt_interpretation,

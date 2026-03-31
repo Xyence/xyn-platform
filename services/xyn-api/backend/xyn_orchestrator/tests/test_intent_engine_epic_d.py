@@ -561,6 +561,23 @@ class EpicDIntentEngineTests(unittest.TestCase):
             ("artifact_list", {}),
         )
 
+    def test_artifact_panel_matcher_accepts_natural_language_prefixes(self):
+        for prompt in [
+            "I would like you to list artifacts",
+            "I'd like to list artifacts",
+            "can you list artifacts",
+            "can you please list artifacts",
+            "could you list artifacts",
+            "would you list artifacts",
+            "I want to list artifacts",
+            "I need to list artifacts",
+        ]:
+            with self.subTest(prompt=prompt):
+                self.assertEqual(
+                    intent_api._match_artifact_panel_command(prompt),
+                    ("artifact_list", {}),
+                )
+
     def test_artifact_panel_matcher_extracts_supported_created_day_filters(self):
         self.assertEqual(
             intent_api._match_artifact_panel_command("show me artifacts created yesterday"),
@@ -627,6 +644,23 @@ class EpicDIntentEngineTests(unittest.TestCase):
             intent_api._match_core_surface_command("please, open the platform settings page."),
             ("platform_settings", {}),
         )
+
+    def test_core_surface_matcher_accepts_natural_language_prefixes(self):
+        for prompt in [
+            "I would like you to show the platform settings",
+            "I'd like to show the platform settings",
+            "can you show platform settings",
+            "can you please show platform settings",
+            "could you show platform settings",
+            "would you show platform settings",
+            "I want to show platform settings",
+            "I need to show platform settings",
+        ]:
+            with self.subTest(prompt=prompt):
+                self.assertEqual(
+                    intent_api._match_core_surface_command(prompt),
+                    ("platform_settings", {}),
+                )
 
     def test_core_surface_matcher_does_not_trap_broader_platform_help_requests(self):
         self.assertIsNone(intent_api._match_core_surface_command("help me understand how platform settings work"))
@@ -2651,6 +2685,7 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         with patch.object(intent_api, "_intent_engine_enabled", return_value=True), \
             patch.object(intent_api, "_require_authenticated", return_value=SimpleNamespace(id="user-1")), \
             patch.object(intent_api, "_resolve_workspace_for_identity", return_value=SimpleNamespace(id="ws-1")), \
+            patch.object(intent_api, "_conversation_execution_context", return_value=ConversationExecutionContext()), \
             patch.object(intent_api, "_workspace_runtime_target", return_value=None), \
             patch.object(intent_api, "_workspace_generated_artifact_issue", return_value=None), \
             patch.object(intent_api, "_workspace_installed_capability_manifest", return_value=None), \
@@ -2669,7 +2704,12 @@ class ArtifactCollectionFilterTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload["status"], "UnsupportedIntent")
         self.assertEqual((payload.get("intent") or {}).get("intent_type"), IntentType.UNSUPPORTED_INTENT.value)
-        self.assertEqual(payload.get("summary"), "no Epic D resolver matched the message")
+        self.assertEqual(payload.get("summary"), "I couldn’t determine what action to take from that request.")
+        self.assertNotIn("Epic D", str(payload.get("summary") or ""))
+        self.assertEqual(
+            ((payload.get("intent") or {}).get("resolution_notes") or [""])[0],
+            "no Epic D resolver matched the message",
+        )
         self.assertEqual(mock_engine.call_count, 1)
 
     def test_resolve_route_preserves_residual_legacy_intake_fallback(self):
