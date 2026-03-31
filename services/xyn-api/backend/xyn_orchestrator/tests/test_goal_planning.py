@@ -1,5 +1,7 @@
 import json
+import os
 import re
+import tempfile
 import uuid
 from unittest import mock
 
@@ -3644,6 +3646,16 @@ class GoalPlanningTests(TestCase):
         kwargs = gather_mock.call_args.kwargs
         self.assertEqual(kwargs.get("owner_repo_slug"), "xyn-platform")
         self.assertEqual(kwargs.get("allowed_paths"), ["apps/xyn-ui/"])
+
+    def test_resolve_local_repo_root_prefers_runtime_repo_map(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mapped_root = os.path.join(tmpdir, "xyn-platform")
+            os.makedirs(mapped_root, exist_ok=True)
+            runtime_map = json.dumps({"xyn-platform": [mapped_root]})
+            with mock.patch.dict("os.environ", {"XYN_RUNTIME_REPO_MAP": runtime_map}, clear=False):
+                resolved = xyn_api._resolve_local_repo_root("xyn-platform")
+            self.assertIsNotNone(resolved)
+            self.assertEqual(str(resolved), str(xyn_api.Path(mapped_root).resolve()))
 
     def test_solution_change_session_can_persist_confirmed_workstreams(self):
         application = Application.objects.create(

@@ -31060,15 +31060,29 @@ def _likely_code_context_keywords(request_text: str) -> List[str]:
 def _resolve_local_repo_root(repo_slug: str) -> Optional[Path]:
     slug = str(repo_slug or "").strip().lower()
     candidates: List[Path] = []
+    runtime_repo_map_raw = str(os.getenv("XYN_RUNTIME_REPO_MAP", "") or "").strip()
+    if runtime_repo_map_raw:
+        try:
+            parsed_map = json.loads(runtime_repo_map_raw)
+        except (TypeError, ValueError):
+            parsed_map = {}
+        mapped_paths = parsed_map.get(slug) if isinstance(parsed_map, dict) else []
+        if isinstance(mapped_paths, list):
+            for item in mapped_paths:
+                token = str(item or "").strip()
+                if token:
+                    candidates.append(Path(token))
     if slug == "xyn-platform":
         env_root = str(os.getenv("XYN_PLATFORM_REPO_ROOT", "") or "").strip()
         if env_root:
             candidates.append(Path(env_root))
+        candidates.append(Path("/workspace/xyn-platform"))
         candidates.append(Path("/home/jrestivo/src/xyn-platform"))
     elif slug == "xyn":
         env_root = str(os.getenv("XYN_REPO_ROOT", "") or "").strip()
         if env_root:
             candidates.append(Path(env_root))
+        candidates.append(Path("/workspace/xyn"))
         candidates.append(Path("/home/jrestivo/src/xyn"))
     for candidate in candidates:
         try:
@@ -31231,6 +31245,19 @@ def _generate_code_aware_solution_change_plan(
         code_context=code_context,
         request_text=request_text,
     )
+    shared_contracts = [str(item).strip() for item in (plan.get("shared_contracts") if isinstance(plan.get("shared_contracts"), list) else []) if str(item).strip()]
+    lowered_request = str(request_text or "").lower()
+    ui_only_request = any(token in lowered_request for token in {"field", "input", "textarea", "width", "layout", "panel"}) and not any(
+        token in lowered_request for token in {"api", "endpoint", "schema", "payload", "contract", "response"}
+    )
+    if ui_only_request:
+        shared_contracts = [
+            item
+            for item in shared_contracts
+            if "backward-compatible api contracts" not in item.lower()
+            and "payload/data-shape compatibility" not in item.lower()
+        ]
+    plan["shared_contracts"] = shared_contracts
     plan["proposed_work"] = [str(item).strip() for item in plan.get("implementation_steps", []) if str(item).strip()]
     return plan
 
@@ -31841,14 +31868,14 @@ def _generate_solution_change_plan(
     selected_artifact_count = len(selected_members)
     lowered_request = original_request.lower()
     api_workstream_active = ("api" in effective_workstreams) or bool(selected_roles.intersection({"primary_api", "integration_adapter"}))
-    mentions_contract = any(token in lowered_request for token in {"api", "endpoint", "schema", "contract", "payload", "response", "request"})
+    mentions_contract = any(token in lowered_request for token in {"api", "endpoint", "schema", "contract", "payload", "response"})
     mentions_exchange = any(
         token in lowered_request
         for token in {"event", "payload", "message", "queue", "stream", "webhook", "integration", "adapter", "exchange"}
     )
     if selected_artifact_count > 1 and api_workstream_active and mentions_contract:
         shared_contracts.append("Maintain backward-compatible API contracts across selected artifacts.")
-    if selected_artifact_count > 1 and (mentions_exchange or "data" in effective_workstreams):
+    if selected_artifact_count > 1 and mentions_exchange:
         shared_contracts.append("Validate payload/data-shape compatibility where selected artifacts exchange runtime data.")
     shared_contracts.extend(refinement_state["resolved_assumptions"])
     if refinement_state.get("has_explicit_open_questions"):
