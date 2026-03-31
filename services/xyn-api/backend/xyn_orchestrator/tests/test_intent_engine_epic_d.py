@@ -550,6 +550,10 @@ class EpicDIntentEngineTests(unittest.TestCase):
             intent_api._match_artifact_panel_command("show me a list of artifacts"),
             ("artifact_list", {}),
         )
+        self.assertEqual(
+            intent_api._match_artifact_panel_command("please show or give me a list of artifacts"),
+            ("artifact_list", {}),
+        )
 
     def test_artifact_panel_matcher_accepts_stable_direct_view_variants(self):
         self.assertEqual(

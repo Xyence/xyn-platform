@@ -19141,6 +19141,8 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
         return ("artifact_list", {"query": _artifact_created_day_query(-1)})
     if re.fullmatch(r"(?:list|show|open)\s+artifacts\s+created\s+two\s+days\s+ago", lower):
         return ("artifact_list", {"query": _artifact_created_day_query(-2)})
+    if re.search(r"\blist\s+of\s+artifacts\b", lower):
+        return ("artifact_list", {})
     list_match = re.search(r"\blist\s+([a-z0-9_.-]+)\s+artifacts\b", lower)
     if list_match:
         namespace = str(list_match.group(1) or "").strip().lower()
