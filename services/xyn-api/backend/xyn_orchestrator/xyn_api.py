@@ -30529,8 +30529,13 @@ def _record_solution_draft_plan(
     session: SolutionChangeSession,
     memberships: List[ApplicationArtifactMembership],
     summary: str,
+    force_code_aware_planning: bool = False,
 ) -> Dict[str, Any]:
-    plan = _generate_solution_change_plan(session=session, memberships=memberships)
+    plan = _generate_solution_change_plan(
+        session=session,
+        memberships=memberships,
+        force_code_aware_planning=force_code_aware_planning,
+    )
     objective_summary = str(
         plan.get("planner_objective_text")
         or plan.get("request_text")
@@ -30561,6 +30566,11 @@ def _record_solution_draft_plan(
             "shared_contracts": list(plan.get("shared_contracts") or []),
             "open_questions": list(plan.get("open_questions") or []),
             "validation_plan": list(plan.get("validation_plan") or []),
+            "planning_mode": str(plan.get("planning_mode") or "deterministic"),
+            "code_context_summary": str(plan.get("code_context_summary") or ""),
+            "candidate_files": list(plan.get("candidate_files") or []),
+            "candidate_components": list(plan.get("candidate_components") or []),
+            "proposed_work": list(plan.get("proposed_work") or []),
         },
     )
     return plan
@@ -30975,10 +30985,319 @@ def _build_solution_impacted_analysis(
     return analysis
 
 
+_CODE_AWARE_IMPLEMENTATION_TOKENS: Set[str] = {
+    "field",
+    "button",
+    "width",
+    "layout",
+    "component",
+    "form",
+    "page",
+    "panel",
+    "input",
+    "textarea",
+    "serializer",
+    "model",
+    "migration",
+    "endpoint",
+    "api",
+}
+
+_CODE_AWARE_STOPWORDS: Set[str] = {
+    "the",
+    "and",
+    "with",
+    "from",
+    "that",
+    "this",
+    "into",
+    "for",
+    "you",
+    "your",
+    "use",
+    "full",
+    "needs",
+    "need",
+    "make",
+    "show",
+    "list",
+}
+
+
+def _request_appears_implementation_specific(request_text: str) -> bool:
+    lowered = str(request_text or "").strip().lower()
+    if not lowered:
+        return False
+    return any(token in lowered for token in _CODE_AWARE_IMPLEMENTATION_TOKENS)
+
+
+def _plan_lacks_concrete_targets(plan: Dict[str, Any]) -> bool:
+    if not isinstance(plan, dict):
+        return True
+    if isinstance(plan.get("candidate_files"), list) and any(str(item or "").strip() for item in plan.get("candidate_files") or []):
+        return False
+    if isinstance(plan.get("candidate_components"), list) and any(str(item or "").strip() for item in plan.get("candidate_components") or []):
+        return False
+    implementation_steps = plan.get("implementation_steps") if isinstance(plan.get("implementation_steps"), list) else []
+    for step in implementation_steps:
+        text = str(step or "").strip()
+        if "/" in text or "." in text:
+            return False
+    return True
+
+
+def _likely_code_context_keywords(request_text: str) -> List[str]:
+    tokens = [str(token).strip().lower() for token in re.findall(r"[a-z0-9_]+", str(request_text or ""))]
+    keywords: List[str] = []
+    for token in tokens:
+        if len(token) < 3 or token in _CODE_AWARE_STOPWORDS:
+            continue
+        if token not in keywords:
+            keywords.append(token)
+    return keywords[:14]
+
+
+def _resolve_local_repo_root(repo_slug: str) -> Optional[Path]:
+    slug = str(repo_slug or "").strip().lower()
+    candidates: List[Path] = []
+    if slug == "xyn-platform":
+        env_root = str(os.getenv("XYN_PLATFORM_REPO_ROOT", "") or "").strip()
+        if env_root:
+            candidates.append(Path(env_root))
+        candidates.append(Path("/home/jrestivo/src/xyn-platform"))
+    elif slug == "xyn":
+        env_root = str(os.getenv("XYN_REPO_ROOT", "") or "").strip()
+        if env_root:
+            candidates.append(Path(env_root))
+        candidates.append(Path("/home/jrestivo/src/xyn"))
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except Exception:
+            continue
+        if resolved.exists() and resolved.is_dir():
+            return resolved
+    return None
+
+
+def gather_solution_change_code_context(
+    *,
+    request_text: str,
+    artifact: Artifact,
+    owner_repo_slug: str,
+    allowed_paths: List[str],
+) -> Dict[str, Any]:
+    artifact_title = str(getattr(artifact, "title", "") or "").strip() or str(getattr(artifact, "slug", "") or "").strip()
+    if not str(owner_repo_slug or "").strip():
+        return {
+            "available": False,
+            "reason": "artifact has no owner_repo_slug",
+            "candidate_files": [],
+            "candidate_components": [],
+            "summary": f"Code-aware planning unavailable: {artifact_title or 'selected artifact'} has no repository ownership metadata.",
+        }
+    safe_paths = [str(item).strip() for item in (allowed_paths or []) if str(item).strip()]
+    if not safe_paths:
+        return {
+            "available": False,
+            "reason": "artifact has no allowed owner paths",
+            "candidate_files": [],
+            "candidate_components": [],
+            "summary": f"Code-aware planning unavailable: {artifact_title or 'selected artifact'} has no editable path scope.",
+        }
+    repo_root = _resolve_local_repo_root(owner_repo_slug)
+    if repo_root is None:
+        return {
+            "available": False,
+            "reason": "repo root not available locally",
+            "candidate_files": [],
+            "candidate_components": [],
+            "summary": f"Code-aware planning unavailable: could not resolve local repo root for {owner_repo_slug}.",
+        }
+    keywords = _likely_code_context_keywords(request_text)
+    suffixes = {".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".py", ".json", ".md"}
+    ranked: List[Tuple[int, str, str]] = []
+    component_hits: List[str] = []
+    scanned_files = 0
+    max_scanned_files = 250
+    for prefix in safe_paths:
+        scoped_root = (repo_root / prefix).resolve()
+        if not scoped_root.exists() or not scoped_root.is_dir():
+            continue
+        for file_path in scoped_root.rglob("*"):
+            if scanned_files >= max_scanned_files:
+                break
+            if not file_path.is_file() or file_path.suffix.lower() not in suffixes:
+                continue
+            scanned_files += 1
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            lowered_name = file_path.name.lower()
+            score = 0
+            matched_terms: List[str] = []
+            for token in keywords:
+                if token in lowered_name:
+                    score += 3
+                    matched_terms.append(token)
+                elif token in content.lower():
+                    score += 1
+                    matched_terms.append(token)
+            if "requested change" in content.lower():
+                score += 2
+                matched_terms.append("requested change")
+            if "solution" in content.lower() and "panel" in content.lower():
+                score += 1
+                matched_terms.append("solution/panel")
+            if score <= 0:
+                continue
+            rel_path = str(file_path.relative_to(repo_root))
+            rationale = f"matched terms: {', '.join(sorted(set(matched_terms))[:4])}"
+            ranked.append((score, rel_path, rationale))
+            for match in re.findall(r"\b(?:function|const|class)\s+([A-Z][A-Za-z0-9_]*)", content):
+                if match not in component_hits:
+                    component_hits.append(match)
+                if len(component_hits) >= 8:
+                    break
+        if scanned_files >= max_scanned_files:
+            break
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    top_rows = ranked[:8]
+    candidate_files = [row[1] for row in top_rows]
+    evidence = [{"path": row[1], "rationale": row[2]} for row in top_rows]
+    if not candidate_files:
+        return {
+            "available": True,
+            "reason": "no strong matches",
+            "candidate_files": [],
+            "candidate_components": [],
+            "evidence": [],
+            "summary": f"Searched {owner_repo_slug} within {', '.join(safe_paths)} but found no strong file matches.",
+            "repo_slug": owner_repo_slug,
+            "scoped_paths": safe_paths,
+        }
+    return {
+        "available": True,
+        "reason": "matched",
+        "candidate_files": candidate_files,
+        "candidate_components": component_hits[:8],
+        "evidence": evidence,
+        "summary": f"Used repo context from {owner_repo_slug} ({', '.join(safe_paths)}).",
+        "repo_slug": owner_repo_slug,
+        "scoped_paths": safe_paths,
+    }
+
+
+def _format_code_aware_steps(base_steps: List[str], *, code_context: Dict[str, Any], request_text: str) -> List[str]:
+    candidate_files = [str(item).strip() for item in (code_context.get("candidate_files") or []) if str(item).strip()]
+    candidate_components = [str(item).strip() for item in (code_context.get("candidate_components") or []) if str(item).strip()]
+    if not candidate_files:
+        return base_steps
+    steps: List[str] = []
+    first_file = candidate_files[0]
+    steps.append(f"Inspect `{first_file}` to locate the UI surface handling: {str(request_text or '').strip()[:140]}.")
+    if len(candidate_files) > 1:
+        steps.append(f"Validate related layout/styles in `{candidate_files[1]}` before applying changes.")
+    if candidate_components:
+        steps.append(f"Focus component-level updates around: {', '.join(candidate_components[:3])}.")
+    steps.append("Apply a minimal styling/layout update and verify no adjacent panel regressions.")
+    steps.extend([step for step in base_steps if step not in steps][:2])
+    return steps
+
+
+def _plan_contains_uuid_like_work_items(plan: Dict[str, Any]) -> bool:
+    proposed_work = plan.get("proposed_work")
+    if not isinstance(proposed_work, list):
+        return False
+    uuid_like_pattern = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", re.IGNORECASE)
+    return any(uuid_like_pattern.search(str(item or "")) for item in proposed_work)
+
+
+def _generate_code_aware_solution_change_plan(
+    *,
+    base_plan: Dict[str, Any],
+    request_text: str,
+    code_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    plan = copy.deepcopy(base_plan if isinstance(base_plan, dict) else {})
+    plan["planning_mode"] = "code_aware"
+    plan["code_context_summary"] = str(code_context.get("summary") or "").strip()
+    plan["candidate_files"] = [str(item).strip() for item in (code_context.get("candidate_files") or []) if str(item).strip()]
+    plan["candidate_components"] = [str(item).strip() for item in (code_context.get("candidate_components") or []) if str(item).strip()]
+    implementation_steps = plan.get("implementation_steps") if isinstance(plan.get("implementation_steps"), list) else []
+    plan["implementation_steps"] = _format_code_aware_steps(
+        [str(step).strip() for step in implementation_steps if str(step).strip()],
+        code_context=code_context,
+        request_text=request_text,
+    )
+    plan["proposed_work"] = [str(item).strip() for item in plan.get("implementation_steps", []) if str(item).strip()]
+    return plan
+
+
+def _maybe_apply_code_aware_solution_planning(
+    *,
+    plan: Dict[str, Any],
+    session: SolutionChangeSession,
+    selected_members: List[ApplicationArtifactMembership],
+    force_code_aware_planning: bool = False,
+) -> Dict[str, Any]:
+    base_plan = copy.deepcopy(plan if isinstance(plan, dict) else {})
+    base_plan.setdefault("planning_mode", "deterministic")
+    base_plan.setdefault("code_context_summary", "")
+    base_plan.setdefault("candidate_files", [])
+    base_plan.setdefault("candidate_components", [])
+    base_plan["proposed_work"] = [
+        str(item).strip()
+        for item in (base_plan.get("implementation_steps") if isinstance(base_plan.get("implementation_steps"), list) else [])
+        if str(item).strip()
+    ]
+    if _plan_contains_uuid_like_work_items(base_plan):
+        base_plan["proposed_work"] = []
+    if not selected_members:
+        return base_plan
+    selected_ids = [str(item).strip() for item in _solution_change_session_selected_artifact_ids(session) if str(item).strip()]
+    selected_member = None
+    for artifact_id in selected_ids:
+        selected_member = next((member for member in selected_members if str(member.artifact_id) == artifact_id), None)
+        if selected_member is not None:
+            break
+    if selected_member is None:
+        selected_member = selected_members[0]
+    ownership = resolve_artifact_ownership(selected_member.artifact)
+    owner_repo_slug = str(ownership.get("repo_slug") or "").strip()
+    allowed_paths = [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()]
+    implementation_specific = _request_appears_implementation_specific(str(session.request_text or ""))
+    should_run = force_code_aware_planning or (
+        implementation_specific
+        and _plan_lacks_concrete_targets(base_plan)
+    )
+    if not should_run:
+        return base_plan
+    context = gather_solution_change_code_context(
+        request_text=str(session.request_text or ""),
+        artifact=selected_member.artifact,
+        owner_repo_slug=owner_repo_slug,
+        allowed_paths=allowed_paths,
+    )
+    if not bool(context.get("available")):
+        base_plan["planning_mode"] = "deterministic"
+        base_plan["code_context_summary"] = str(context.get("summary") or "").strip()
+        base_plan["candidate_files"] = []
+        base_plan["candidate_components"] = []
+        return base_plan
+    return _generate_code_aware_solution_change_plan(
+        base_plan=base_plan,
+        request_text=str(session.request_text or ""),
+        code_context=context,
+    )
+
+
 def _generate_solution_change_plan(
     *,
     session: SolutionChangeSession,
     memberships: List[ApplicationArtifactMembership],
+    force_code_aware_planning: bool = False,
 ) -> Dict[str, Any]:
     planning_turns = list(
         SolutionPlanningTurn.objects.filter(session=session)
@@ -31001,6 +31320,17 @@ def _generate_solution_change_plan(
                 "reply_text": reply_text,
                 "interpretation": payload.get("interpretation") if isinstance(payload.get("interpretation"), dict) else None,
             }
+        )
+
+    def _finalize_plan_payload(
+        payload: Dict[str, Any],
+        selected_members_for_plan: List[ApplicationArtifactMembership],
+    ) -> Dict[str, Any]:
+        return _maybe_apply_code_aware_solution_planning(
+            plan=payload,
+            session=session,
+            selected_members=selected_members_for_plan,
+            force_code_aware_planning=force_code_aware_planning,
         )
 
     def _compact_objective(text: str) -> str:
@@ -31318,7 +31648,7 @@ def _generate_solution_change_plan(
         shared_contracts.extend(refinement_state["constraints"])
         shared_contracts.extend(refinement_state["additional_considerations"][:2])
 
-        return {
+        return _finalize_plan_payload({
             "session_id": str(session.id),
             "application_id": str(session.application_id),
             "title": plan_title_value,
@@ -31338,7 +31668,7 @@ def _generate_solution_change_plan(
                 "Use preview to verify the targeted behavior change against the existing solution baseline.",
             ],
             "implementation_steps": implementation_steps,
-        }
+        }, [])
 
     analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
     confirmed_workstreams = _solution_change_session_confirmed_workstreams(session)
@@ -31381,13 +31711,13 @@ def _generate_solution_change_plan(
     plan_title = str(refinement_state.get("name") or fallback_title or "").strip() or fallback_title
     if not selected_members:
         if confirmed_workstreams or not _is_greenfield_initial_solution_plan():
-            return _existing_solution_no_membership_plan(
+            return _finalize_plan_payload(_existing_solution_no_membership_plan(
                 objective_text=_compact_objective(original_request),
                 plan_title_value=plan_title,
                 planner_objective_value=planner_objective_text,
                 planner_context_value=planner_context_text,
                 suggested_workstreams=effective_workstreams,
-            )
+            ), [])
         objective_text = _compact_objective(original_request)
         first_focus = "Start by shaping the primary data model and first user-facing workflow."
         objective_lower = objective_text.lower()
@@ -31416,7 +31746,7 @@ def _generate_solution_change_plan(
             assumptions.extend([f"Open question: {question}" for question in open_questions])
         assumptions.extend(refinement_state["constraints"][:2])
         assumptions.extend(refinement_state["additional_considerations"][:2])
-        return {
+        return _finalize_plan_payload({
             "session_id": str(session.id),
             "application_id": str(session.application_id),
             "title": plan_title,
@@ -31438,7 +31768,7 @@ def _generate_solution_change_plan(
             "preview_implications": [
                 "Use preview to validate the first vertical slice with representative data.",
             ],
-        }
+        }, [])
     per_artifact: List[Dict[str, Any]] = []
     for member in selected_members:
         artifact = member.artifact
@@ -31510,7 +31840,7 @@ def _generate_solution_change_plan(
     shared_contracts.extend(refinement_state["additional_considerations"][:2])
     if refinement_state["constraints"]:
         validation_plan.insert(0, "Validate that revision constraints are reflected in scope and acceptance checks.")
-    return {
+    return _finalize_plan_payload({
         "session_id": str(session.id),
         "application_id": str(session.application_id),
         "title": plan_title,
@@ -31530,7 +31860,7 @@ def _generate_solution_change_plan(
             "Preview instance should include all changed artifacts in one sibling deploy set",
             "Cross-artifact regression checks are required before promotion",
         ],
-    }
+    }, selected_members)
 
 
 def _serialize_solution_change_session(
@@ -35807,6 +36137,8 @@ def application_solution_change_session_plan(
         return JsonResponse({"error": "method not allowed"}, status=405)
     if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
         return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    force_code_aware_planning = bool(payload.get("force_code_aware_planning")) if isinstance(payload, dict) else False
     session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
     memberships = list(
         ApplicationArtifactMembership.objects.filter(application=application)
@@ -35863,6 +36195,7 @@ def application_solution_change_session_plan(
         session=session,
         memberships=memberships,
         summary="Generated structured cross-artifact draft plan.",
+        force_code_aware_planning=force_code_aware_planning,
     )
     checkpoint = _reset_solution_stage_checkpoint(session=session)
     _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
