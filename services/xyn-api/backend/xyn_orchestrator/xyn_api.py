@@ -32595,9 +32595,22 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         slug = str(getattr(artifact, "slug", "") or "").strip()
         if slug.startswith("app."):
             return slug[4:]
-        metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
+        metadata: Dict[str, Any] = {}
+        metadata_json = getattr(artifact, "metadata_json", None)
+        if isinstance(metadata_json, dict):
+            metadata.update(metadata_json)
+        scope_json = getattr(artifact, "scope_json", None)
+        if isinstance(scope_json, dict):
+            scope_metadata = scope_json.get("metadata")
+            if isinstance(scope_metadata, dict):
+                metadata.update(scope_metadata)
         runtime = metadata.get("runtime_target") if isinstance(metadata.get("runtime_target"), dict) else {}
-        runtime_app_slug = str(runtime.get("app_slug") or metadata.get("app_slug") or "").strip()
+        runtime_app_slug = str(
+            runtime.get("app_slug")
+            or metadata.get("app_slug")
+            or (scope_json.get("app_slug") if isinstance(scope_json, dict) else "")
+            or ""
+        ).strip()
         return runtime_app_slug
 
     def _probe_runtime(base_url: str) -> Dict[str, Any]:

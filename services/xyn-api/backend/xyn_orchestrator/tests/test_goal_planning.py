@@ -4999,6 +4999,71 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(preview_payload["session"]["execution_status"], "failed")
         self.assertEqual((preview_payload["session"].get("preview") or {}).get("status"), "failed")
 
+    def test_solution_change_session_prepare_preview_non_app_artifact_no_metadata_json_attr(self):
+        artifact_type = ArtifactType.objects.create(slug=f"runtime-ui-{uuid.uuid4().hex[:6]}", name="Runtime UI")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            scope_json={"slug": "xyn-ui", "manifest_ref": "registry/modules/xyn-ui.artifact.manifest.json"},
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform shell",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Platform shell updates",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Preview should fail cleanly",
+            request_text="Adjust header spacing",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={"per_artifact_work": [{"artifact_id": str(ui_artifact.id), "planned_work": ["Update header spacing"]}]},
+            staged_changes_json={
+                "artifact_states": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "artifact_title": ui_artifact.title,
+                        "role": "primary_ui",
+                        "apply_state": "proposed",
+                    }
+                ]
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            preview_response = application_solution_change_session_prepare_preview(
+                preview_request, str(application.id), str(session.id)
+            )
+        preview_payload = json.loads(preview_response.content)
+        self.assertEqual(preview_response.status_code, 409)
+        self.assertFalse(preview_payload["prepared"])
+        artifacts = ((preview_payload.get("session") or {}).get("preview") or {}).get("artifacts") or []
+        self.assertTrue(artifacts)
+        self.assertEqual(str(artifacts[0].get("reason") or ""), "preview_app_slug_unresolved")
+
     def test_solution_change_session_prepare_preview_marks_session_built_when_sibling_launch_succeeds(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
