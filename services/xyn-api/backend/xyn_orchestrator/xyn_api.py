@@ -31806,6 +31806,13 @@ def _generate_solution_change_plan(
                 ]
             )
 
+        validation_steps = [
+            "Stage the planned changes for the selected artifacts.",
+            "Prepare a preview environment to review the applied changes.",
+            "Validate the changes, including running relevant tests.",
+            *validation_steps,
+        ]
+
         shared_contracts = [
             "Plan against the current solution baseline; do not introduce greenfield/bootstrap assumptions.",
             "Preserve existing cross-artifact contracts unless the request explicitly requires contract changes.",
@@ -31977,9 +31984,9 @@ def _generate_solution_change_plan(
     shared_contracts: List[str] = []
     open_questions: List[str] = []
     validation_plan = [
-        "Run artifact-local unit tests for each changed artifact",
-        "Run integration tests covering cross-artifact contract seams",
-        "Run shell/workbench smoke route checks for affected user paths",
+        "Stage the planned changes for the selected artifacts.",
+        "Prepare a preview environment to review the applied changes.",
+        "Validate the changes, including running relevant tests.",
     ]
     selected_roles = {str(member.role or "").strip() for member in selected_members}
     selected_artifact_count = len(selected_members)

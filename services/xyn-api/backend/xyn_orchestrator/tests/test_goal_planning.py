@@ -3648,6 +3648,67 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(plan.get("proposed_work"))
         gather_mock.assert_called_once()
 
+    def test_solution_change_session_validation_plan_is_lifecycle_aligned(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform shell",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Improve solution UI",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Header layout refinement",
+                        "request_text": "Adjust the header control layout to align with profile menu spacing.",
+                    }
+                ),
+            )
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            create_payload = json.loads(create_response.content)
+            session_id = str((create_payload.get("session") or {}).get("id") or "")
+            plan_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session_id}/plan",
+                method="post",
+                data=json.dumps({}),
+            )
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), session_id)
+        self.assertEqual(plan_response.status_code, 200)
+        payload = json.loads(plan_response.content)
+        draft_payload = ((((payload.get("session") or {}).get("planning") or {}).get("latest_draft_plan") or {}).get("payload") or {})
+        validation_plan = [str(item) for item in (draft_payload.get("validation_plan") or [])]
+        validation_text = " ".join(validation_plan).lower()
+        self.assertNotIn("unit tests", validation_text)
+        self.assertIn("stage", validation_text)
+        self.assertIn("preview", validation_text)
+        self.assertIn("validate", validation_text)
+
     def test_solution_change_session_ui_request_never_returns_uuid_based_proposed_work(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
