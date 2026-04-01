@@ -32259,10 +32259,12 @@ def _resolve_stage_apply_target_branch(
     if repo_root is None:
         return "", "unresolved", f"unable to resolve local runtime repo root for {token}"
 
+    safe_directory = str(repo_root).strip()
+
     def _git_stdout(args: List[str]) -> str:
         try:
             proc = subprocess.run(
-                args,
+                ["git", "-c", f"safe.directory={safe_directory}", *args],
                 text=True,
                 capture_output=True,
                 check=False,
@@ -32274,10 +32276,10 @@ def _resolve_stage_apply_target_branch(
             return ""
         return str(proc.stdout or "").strip()
 
-    branch = _git_stdout(["git", "-C", str(repo_root), "branch", "--show-current"])
+    branch = _git_stdout(["-C", str(repo_root), "branch", "--show-current"])
     if branch and branch != "HEAD":
         return branch, "runtime_repo_checkout", ""
-    branch = _git_stdout(["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", "HEAD"])
+    branch = _git_stdout(["-C", str(repo_root), "rev-parse", "--abbrev-ref", "HEAD"])
     if branch and branch != "HEAD":
         return branch, "runtime_repo_checkout", ""
     return "", "runtime_repo_checkout", (

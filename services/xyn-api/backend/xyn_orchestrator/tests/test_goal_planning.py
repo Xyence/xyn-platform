@@ -4570,6 +4570,27 @@ class GoalPlanningTests(TestCase):
         self.assertFalse(DevTask.objects.filter(source_entity_type="solution_change_session", source_entity_id=session.id).exists())
         self.assertEqual(runtime_request.call_count, 0)
 
+    def test_resolve_stage_apply_target_branch_allows_safe_directory_git_resolution(self):
+        completed = mock.Mock(returncode=0, stdout="main\n")
+        with mock.patch("xyn_orchestrator.xyn_api._resolve_local_repo_root", return_value=tempfile.gettempdir()), mock.patch(
+            "xyn_orchestrator.xyn_api.subprocess.run",
+            return_value=completed,
+        ) as run_mock:
+            branch, branch_source, branch_error = xyn_api._resolve_stage_apply_target_branch(
+                repo_slug="xyn-platform",
+                fallback_branch="develop",
+            )
+
+        self.assertEqual(branch, "main")
+        self.assertEqual(branch_source, "runtime_repo_checkout")
+        self.assertEqual(branch_error, "")
+        self.assertEqual(run_mock.call_count, 1)
+        args = run_mock.call_args[0][0]
+        self.assertEqual(args[0], "git")
+        self.assertEqual(args[1], "-c")
+        self.assertTrue(str(args[2]).startswith("safe.directory="))
+        self.assertIn("branch", args)
+
     def test_solution_change_session_continue_requires_iteration_linkage(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
