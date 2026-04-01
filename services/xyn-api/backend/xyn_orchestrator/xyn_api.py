@@ -32246,6 +32246,46 @@ def _solution_change_stage_artifact_plan_steps(
     return ["Implement the approved solution change for this artifact."]
 
 
+def _resolve_stage_apply_target_branch(
+    *,
+    repo_slug: str,
+    fallback_branch: str,
+) -> Tuple[str, str, str]:
+    token = str(repo_slug or "").strip()
+    fallback = str(fallback_branch or "").strip() or "develop"
+    if not token:
+        return "", "unresolved", "missing_repo_slug"
+    repo_root = _resolve_local_repo_root(token)
+    if repo_root is None:
+        return "", "unresolved", f"unable to resolve local runtime repo root for {token}"
+
+    def _git_stdout(args: List[str]) -> str:
+        try:
+            proc = subprocess.run(
+                args,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return ""
+        if int(proc.returncode or 0) != 0:
+            return ""
+        return str(proc.stdout or "").strip()
+
+    branch = _git_stdout(["git", "-C", str(repo_root), "branch", "--show-current"])
+    if branch and branch != "HEAD":
+        return branch, "runtime_repo_checkout", ""
+    branch = _git_stdout(["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", "HEAD"])
+    if branch and branch != "HEAD":
+        return branch, "runtime_repo_checkout", ""
+    return "", "runtime_repo_checkout", (
+        f"unable to determine checked out branch for {token} at {repo_root}; "
+        f"fallback branch '{fallback}' was not used for safety"
+    )
+
+
 def _stage_solution_change_dispatch_dev_tasks(
     *,
     session: SolutionChangeSession,
@@ -32286,7 +32326,31 @@ def _stage_solution_change_dispatch_dev_tasks(
             )
             continue
         managed_repo = ManagedRepository.objects.filter(slug=repo_slug, is_active=True).first()
-        branch = str(getattr(managed_repo, "default_branch", "") or "develop").strip() or "develop"
+        default_branch = str(getattr(managed_repo, "default_branch", "") or "develop").strip() or "develop"
+        branch, branch_source, branch_error = _resolve_stage_apply_target_branch(
+            repo_slug=repo_slug,
+            fallback_branch=default_branch,
+        )
+        if not branch:
+            if isinstance(staged_row, dict):
+                staged_row["apply_state"] = "failed"
+                staged_row["apply_error"] = branch_error or "target branch could not be resolved"
+                staged_row["branch_source"] = branch_source
+            dispatch_results.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "status": "failed",
+                    "reason": "target_branch_unresolved",
+                    "error": branch_error or "target branch could not be resolved",
+                    "owner_repo_slug": repo_slug,
+                    "target_branch": "",
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
+                    "allowed_paths": allowed_paths,
+                }
+            )
+            continue
         implementation_steps = _solution_change_stage_artifact_plan_steps(
             artifact_id=artifact_id,
             session=session,
@@ -32375,6 +32439,8 @@ def _stage_solution_change_dispatch_dev_tasks(
                     "run_id": str(run_result.get("run_id") or ""),
                     "owner_repo_slug": repo_slug,
                     "target_branch": branch,
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
                     "allowed_paths": allowed_paths,
                 }
             )
@@ -32395,6 +32461,8 @@ def _stage_solution_change_dispatch_dev_tasks(
                     "error": str(exc),
                     "owner_repo_slug": repo_slug,
                     "target_branch": branch,
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
                     "allowed_paths": allowed_paths,
                 }
             )
@@ -32415,6 +32483,8 @@ def _stage_solution_change_dispatch_dev_tasks(
                     "error": str(exc),
                     "owner_repo_slug": repo_slug,
                     "target_branch": branch,
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
                     "allowed_paths": allowed_paths,
                 }
             )
