@@ -32590,6 +32590,26 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
     workspace_id = str(session.workspace_id)
     application_id = str(session.application_id)
     now_iso = timezone.now().isoformat()
+    local_public_base_url = str(os.getenv("XYN_PUBLIC_BASE_URL", "http://localhost") or "http://localhost").strip().rstrip("/")
+    local_compose_project = str(os.getenv("XYN_LOCAL_COMPOSE_PROJECT", "xyn-local") or "xyn-local").strip() or "xyn-local"
+
+    def _platform_preview_runtime_fallback(artifact: Artifact) -> Dict[str, Any]:
+        slug = str(_artifact_slug(artifact) or "").strip()
+        if slug not in {"core.workbench", "xyn-ui", "xyn-api"}:
+            return {}
+        if str(os.getenv("XYN_ENV", "") or "").strip().lower() not in {"local", "dev"}:
+            return {}
+        if not local_public_base_url:
+            return {}
+        return {
+            "runtime_owner": "primary",
+            "runtime_base_url": local_public_base_url,
+            "public_app_url": local_public_base_url,
+            "compose_project": local_compose_project,
+            "runtime_target_id": "",
+            "app_container_name": "",
+            "source_build_job_id": "",
+        }
 
     def _artifact_preview_app_slug(artifact: Artifact) -> str:
         slug = str(getattr(artifact, "slug", "") or "").strip()
@@ -32611,6 +32631,8 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             or (scope_json.get("app_slug") if isinstance(scope_json, dict) else "")
             or ""
         ).strip()
+        if not runtime_app_slug and slug in {"core.workbench", "xyn-ui", "xyn-api"}:
+            return slug
         return runtime_app_slug
 
     def _probe_runtime(base_url: str) -> Dict[str, Any]:
@@ -32780,6 +32802,13 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip()
         public_app_url = str(runtime_target.get("public_app_url") or "").strip()
         compose_project = str(runtime_target.get("compose_project") or "").strip()
+        fallback_runtime = {}
+        if not runtime_base_url or not compose_project:
+            fallback_runtime = _platform_preview_runtime_fallback(artifact)
+            if fallback_runtime:
+                runtime_base_url = str(fallback_runtime.get("runtime_base_url") or "").strip()
+                public_app_url = str(fallback_runtime.get("public_app_url") or "").strip()
+                compose_project = str(fallback_runtime.get("compose_project") or "").strip()
         if not runtime_base_url or not compose_project:
             all_bound = False
             artifact_rows.append(
@@ -32793,7 +32822,15 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 }
             )
             continue
-        probe = _probe_runtime(runtime_base_url)
+        probe = (
+            {
+                "ok": True,
+                "status_code": 200,
+                "path": "local_platform_runtime_fallback",
+            }
+            if fallback_runtime
+            else _probe_runtime(runtime_base_url)
+        )
         if not probe.get("ok"):
             all_bound = False
         compose_projects.add(compose_project)
@@ -32804,13 +32841,29 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 "artifact_slug": artifact.slug,
                 "app_slug": app_slug,
                 "status": "ready" if probe.get("ok") else "failed",
-                "runtime_owner": str(runtime_target.get("runtime_owner") or "sibling"),
+                "runtime_owner": str(
+                    runtime_target.get("runtime_owner")
+                    or fallback_runtime.get("runtime_owner")
+                    or "sibling"
+                ),
                 "runtime_base_url": runtime_base_url,
                 "public_app_url": public_app_url,
                 "compose_project": compose_project,
-                "runtime_target_id": str(getattr(runtime_instance, "id", "") or "").strip(),
-                "app_container_name": str(runtime_target.get("app_container_name") or "").strip(),
-                "source_build_job_id": str(runtime_target.get("source_build_job_id") or "").strip(),
+                "runtime_target_id": str(
+                    getattr(runtime_instance, "id", "")
+                    or fallback_runtime.get("runtime_target_id")
+                    or ""
+                ).strip(),
+                "app_container_name": str(
+                    runtime_target.get("app_container_name")
+                    or fallback_runtime.get("app_container_name")
+                    or ""
+                ).strip(),
+                "source_build_job_id": str(
+                    runtime_target.get("source_build_job_id")
+                    or fallback_runtime.get("source_build_job_id")
+                    or ""
+                ).strip(),
                 "probe": probe,
             }
         )
