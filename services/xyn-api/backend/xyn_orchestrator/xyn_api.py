@@ -30986,12 +30986,27 @@ def _build_solution_impacted_analysis(
 
 
 _CODE_AWARE_IMPLEMENTATION_TOKENS: Set[str] = {
+    "css",
+    "style",
+    "styling",
+    "alignment",
+    "spacing",
+    "height",
+    "header",
+    "dropdown",
+    "menu",
+    "navbar",
+    "nav",
+    "toolbar",
+    "section",
     "field",
     "button",
     "width",
     "layout",
     "component",
     "form",
+    "modal",
+    "dialog",
     "page",
     "panel",
     "input",
@@ -31001,6 +31016,35 @@ _CODE_AWARE_IMPLEMENTATION_TOKENS: Set[str] = {
     "migration",
     "endpoint",
     "api",
+}
+
+_CODE_AWARE_UI_HINT_TOKENS: Set[str] = {
+    "ui",
+    "css",
+    "style",
+    "styling",
+    "layout",
+    "alignment",
+    "spacing",
+    "width",
+    "height",
+    "header",
+    "dropdown",
+    "menu",
+    "navbar",
+    "nav",
+    "toolbar",
+    "panel",
+    "section",
+    "component",
+    "button",
+    "input",
+    "field",
+    "form",
+    "modal",
+    "dialog",
+    "page",
+    "screen",
 }
 
 _CODE_AWARE_STOPWORDS: Set[str] = {
@@ -31028,7 +31072,16 @@ def _request_appears_implementation_specific(request_text: str) -> bool:
     lowered = str(request_text or "").strip().lower()
     if not lowered:
         return False
-    return any(token in lowered for token in _CODE_AWARE_IMPLEMENTATION_TOKENS)
+    tokens = set(re.findall(r"[a-z0-9_]+", lowered))
+    return any(token in tokens for token in _CODE_AWARE_IMPLEMENTATION_TOKENS)
+
+
+def _request_appears_ui_implementation_specific(request_text: str) -> bool:
+    lowered = str(request_text or "").strip().lower()
+    if not lowered:
+        return False
+    tokens = set(re.findall(r"[a-z0-9_]+", lowered))
+    return any(token in tokens for token in _CODE_AWARE_UI_HINT_TOKENS)
 
 
 def _plan_lacks_concrete_targets(plan: Dict[str, Any]) -> bool:
@@ -31228,6 +31281,54 @@ def _plan_contains_uuid_like_work_items(plan: Dict[str, Any]) -> bool:
     return any(uuid_like_pattern.search(str(item or "")) for item in proposed_work)
 
 
+def _plan_has_meaningful_proposed_work(plan: Dict[str, Any]) -> bool:
+    if not isinstance(plan, dict):
+        return False
+    proposed_work = plan.get("proposed_work")
+    if not isinstance(proposed_work, list):
+        return False
+    entries = [str(item or "").strip() for item in proposed_work if str(item or "").strip()]
+    if not entries:
+        return False
+    uuid_like_pattern = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", re.IGNORECASE)
+    meaningful_entries = [entry for entry in entries if not uuid_like_pattern.search(entry)]
+    if not meaningful_entries:
+        return False
+    for entry in meaningful_entries:
+        lowered = entry.lower()
+        # File/component references and multi-word implementation steps are meaningful.
+        if "/" in entry or "`" in entry or "." in entry:
+            return True
+        if len(re.findall(r"[a-z]{3,}", lowered)) >= 3:
+            return True
+        if any(
+            token in lowered
+            for token in {
+                "inspect",
+                "update",
+                "adjust",
+                "apply",
+                "verify",
+                "validate",
+                "component",
+                "layout",
+                "style",
+                "css",
+                "header",
+                "dropdown",
+                "field",
+                "input",
+                "panel",
+                "endpoint",
+                "schema",
+                "model",
+                "migration",
+            }
+        ):
+            return True
+    return False
+
+
 def _generate_code_aware_solution_change_plan(
     *,
     base_plan: Dict[str, Any],
@@ -31294,19 +31395,35 @@ def _maybe_apply_code_aware_solution_planning(
     ownership = resolve_artifact_ownership(selected_member.artifact)
     owner_repo_slug = str(ownership.get("repo_slug") or "").strip()
     allowed_paths = [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()]
+    has_repo_backed_scope = bool(owner_repo_slug and allowed_paths)
     implementation_specific = _request_appears_implementation_specific(str(session.request_text or ""))
-    should_run = force_code_aware_planning or (
-        implementation_specific
-        and _plan_lacks_concrete_targets(base_plan)
-    )
+    ui_implementation_specific = _request_appears_ui_implementation_specific(str(session.request_text or ""))
+    lacks_concrete_targets = _plan_lacks_concrete_targets(base_plan)
+    has_meaningful_proposed_work = _plan_has_meaningful_proposed_work(base_plan)
+    structural_fallback = has_repo_backed_scope and ui_implementation_specific and (lacks_concrete_targets or not has_meaningful_proposed_work)
+    trigger_reason = "none"
+    should_run = False
+    if force_code_aware_planning:
+        should_run = True
+        trigger_reason = "forced"
+    elif implementation_specific and lacks_concrete_targets:
+        should_run = True
+        trigger_reason = "token_match"
+    elif structural_fallback:
+        should_run = True
+        trigger_reason = "structural_fallback"
     logger.info(
-        "solution planning mode decision session=%s should_run_code_aware=%s force=%s implementation_specific=%s selected_artifact=%s repo=%s",
+        "solution planning mode decision session=%s should_run_code_aware=%s reason=%s force=%s implementation_specific=%s ui_implementation_specific=%s selected_artifact=%s repo=%s lacks_targets=%s meaningful_proposed_work=%s",
         str(session.id),
         bool(should_run),
+        trigger_reason,
         bool(force_code_aware_planning),
         bool(implementation_specific),
+        bool(ui_implementation_specific),
         str(getattr(selected_member, "artifact_id", "") or ""),
         owner_repo_slug or "",
+        bool(lacks_concrete_targets),
+        bool(has_meaningful_proposed_work),
     )
     if not should_run:
         return base_plan
