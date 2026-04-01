@@ -4350,6 +4350,119 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(checks)
         self.assertTrue(all(item.get("status") == "passed" for item in checks if isinstance(item, dict)))
 
+    def test_solution_change_session_stage_apply_dispatches_dev_task_runtime_for_repo_backed_artifact(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        ManagedRepository.objects.create(
+            slug="xyn-platform",
+            display_name="Xyn Platform",
+            remote_url="https://example.com/xyn-platform.git",
+            default_branch="develop",
+            auth_mode="local",
+            is_active=True,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Campaign UX update",
+            request_text="Update campaign UX",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={
+                "proposed_work": ["Update the solution requested-change field to use full panel width."],
+                "per_artifact_work": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "planned_work": ["Update requested-change input layout classes and styles."],
+                    }
+                ],
+            },
+        )
+        SolutionPlanningTurn.objects.create(
+            workspace=self.workspace,
+            session=session,
+            actor="planner",
+            kind="draft_plan",
+            sequence=1,
+            payload_json={"summary": "Draft plan"},
+        )
+        SolutionPlanningCheckpoint.objects.create(
+            workspace=self.workspace,
+            session=session,
+            checkpoint_key="plan_scope_confirmed",
+            label="Approve planning scope before stage apply",
+            status="approved",
+            required_before="stage",
+            payload_json={},
+            decided_by=self.identity,
+        )
+
+        stage_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/stage-apply",
+            method="post",
+            data=json.dumps({}),
+        )
+        run_id = str(uuid.uuid4())
+        runtime_response = mock.Mock()
+        runtime_response.status_code = 200
+        runtime_response.headers = {"content-type": "application/json"}
+        runtime_response.content = b'{"id": "queued"}'
+        runtime_response.json.return_value = {"id": run_id, "status": "queued"}
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=runtime_response,
+        ) as runtime_request:
+            stage_response = application_solution_change_session_stage_apply(stage_request, str(application.id), str(session.id))
+        self.assertEqual(stage_response.status_code, 200)
+        payload = json.loads(stage_response.content)
+        staged_changes = ((payload.get("session") or {}).get("staged_changes") or {})
+        execution_summary = staged_changes.get("execution_summary") if isinstance(staged_changes.get("execution_summary"), dict) else {}
+        self.assertEqual(int(execution_summary.get("queued_count") or 0), 1)
+        execution_runs = staged_changes.get("execution_runs") if isinstance(staged_changes.get("execution_runs"), list) else []
+        self.assertEqual(len(execution_runs), 1)
+        self.assertEqual(str(execution_runs[0].get("status") or ""), "queued")
+        self.assertTrue(str(execution_runs[0].get("dev_task_id") or "").strip())
+        artifact_states = staged_changes.get("artifact_states") if isinstance(staged_changes.get("artifact_states"), list) else []
+        self.assertEqual(str((artifact_states[0] if artifact_states else {}).get("apply_state") or ""), "queued")
+
+        task = DevTask.objects.filter(source_entity_type="solution_change_session", source_entity_id=session.id).first()
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(str(task.target_repo or ""), "xyn-platform")
+        self.assertEqual(str(task.target_branch or ""), "develop")
+        self.assertEqual(str(task.runtime_run_id or ""), run_id)
+        self.assertEqual(str(task.runtime_workspace_id or ""), str(self.workspace.id))
+        self.assertEqual(str(task.status or ""), "queued")
+        self.assertEqual(runtime_request.call_count, 1)
+
     def test_solution_change_session_continue_requires_iteration_linkage(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(

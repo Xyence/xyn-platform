@@ -250,8 +250,9 @@ from .application_factories import (
     get_application_factory,
     list_application_factories,
 )
-from .development_targets import repo_target_payload_for_resolution, resolve_development_target
+from .development_targets import DevelopmentTargetResolution, repo_target_payload_for_resolution, resolve_development_target
 from .execution_briefs import (
+    build_execution_brief,
     ensure_execution_brief_ready,
     normalize_execution_brief_review_state,
     regenerate_execution_brief,
@@ -32213,10 +32214,219 @@ def _process_solution_change_session_reply(
     }
 
 
+def _solution_change_stage_work_item_seed(session: SolutionChangeSession, artifact: Artifact, sequence: int) -> str:
+    base = slugify(f"solution-{session.id}-{artifact.slug or artifact.id}")[:72]
+    token = base or f"solution-change-{str(artifact.id).replace('-', '')[:12]}"
+    return f"{token}-{sequence}"
+
+
+def _solution_change_stage_artifact_plan_steps(
+    *,
+    artifact_id: str,
+    session: SolutionChangeSession,
+    plan: Dict[str, Any],
+    planned_work_by_artifact: Dict[str, List[str]],
+) -> List[str]:
+    planned = [str(item).strip() for item in (planned_work_by_artifact.get(artifact_id) or []) if str(item).strip()]
+    if planned:
+        return planned
+    proposed_work = [str(item).strip() for item in (plan.get("proposed_work") if isinstance(plan.get("proposed_work"), list) else []) if str(item).strip()]
+    if proposed_work:
+        return proposed_work
+    implementation_steps = [
+        str(item).strip()
+        for item in (plan.get("implementation_steps") if isinstance(plan.get("implementation_steps"), list) else [])
+        if str(item).strip()
+    ]
+    if implementation_steps:
+        return implementation_steps[:4]
+    objective = str(session.request_text or "").strip()
+    if objective:
+        return [f"Implement requested change: {objective}"]
+    return ["Implement the approved solution change for this artifact."]
+
+
+def _stage_solution_change_dispatch_dev_tasks(
+    *,
+    session: SolutionChangeSession,
+    selected_members: List[ApplicationArtifactMembership],
+    staged_artifacts: List[Dict[str, Any]],
+    planned_work_by_artifact: Dict[str, List[str]],
+    plan: Dict[str, Any],
+    dispatch_user,
+) -> List[Dict[str, Any]]:
+    staged_artifacts_by_id = {
+        str(row.get("artifact_id") or "").strip(): row
+        for row in staged_artifacts
+        if isinstance(row, dict) and str(row.get("artifact_id") or "").strip()
+    }
+    dispatch_results: List[Dict[str, Any]] = []
+    if dispatch_user is None:
+        return dispatch_results
+    for index, member in enumerate(selected_members, start=1):
+        artifact = member.artifact
+        artifact_id = str(artifact.id)
+        ownership = resolve_artifact_ownership(artifact)
+        repo_slug = str(ownership.get("repo_slug") or "").strip()
+        allowed_paths = [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()]
+        edit_mode = str(ownership.get("edit_mode") or "").strip().lower()
+        staged_row = staged_artifacts_by_id.get(artifact_id)
+        if edit_mode != "repo_backed" or not repo_slug or not allowed_paths:
+            if isinstance(staged_row, dict):
+                staged_row["apply_state"] = "skipped"
+            dispatch_results.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "status": "skipped",
+                    "reason": "artifact_not_repo_backed_or_not_editable",
+                    "owner_repo_slug": repo_slug,
+                    "allowed_paths": allowed_paths,
+                }
+            )
+            continue
+        managed_repo = ManagedRepository.objects.filter(slug=repo_slug, is_active=True).first()
+        branch = str(getattr(managed_repo, "default_branch", "") or "develop").strip() or "develop"
+        implementation_steps = _solution_change_stage_artifact_plan_steps(
+            artifact_id=artifact_id,
+            session=session,
+            plan=plan,
+            planned_work_by_artifact=planned_work_by_artifact,
+        )
+        summary = f"{session.title or 'Apply solution change'} · {artifact.title}"
+        objective = str(session.request_text or "").strip()
+        brief_target = DevelopmentTargetResolution(
+            repository=managed_repo,
+            repository_slug=repo_slug,
+            branch=branch,
+            allowed_paths=tuple(allowed_paths),
+            source_kind="artifact_ownership",
+            application_id=str(session.application_id),
+            application_plan_id=None,
+            goal_id=None,
+            unresolved_reason=None,
+        )
+        execution_brief = build_execution_brief(
+            summary=summary,
+            objective=objective,
+            implementation_intent="; ".join(implementation_steps[:3]),
+            target=brief_target,
+            allowed_areas=allowed_paths,
+            acceptance_criteria=implementation_steps[:6],
+            validation_commands=[],
+            boundaries=[
+                "Keep changes scoped to the selected artifact ownership paths.",
+                "Do not modify files outside allowed artifact ownership boundaries.",
+            ],
+            source_context={
+                "source": "solution_change_session_stage_apply",
+                "solution_change_session_id": str(session.id),
+                "application_id": str(session.application_id),
+                "artifact_id": artifact_id,
+                "artifact_slug": str(_artifact_slug(artifact) or ""),
+            },
+            revision=1,
+            revision_reason="stage_apply",
+        )
+        task = DevTask.objects.create(
+            title=summary[:240],
+            description="\n".join(implementation_steps[:8]),
+            task_type="codegen",
+            status="queued",
+            priority=0,
+            max_attempts=2,
+            source_entity_type="solution_change_session",
+            source_entity_id=session.id,
+            source_conversation_id="",
+            intent_type="solution_change_apply",
+            target_repo=repo_slug,
+            target_branch=branch,
+            execution_brief=execution_brief,
+            execution_brief_history=[],
+            execution_brief_review_state="ready",
+            execution_brief_review_notes="Auto-generated from approved solution change plan stage apply.",
+            execution_policy={
+                "auto_continue": True,
+                "max_retries": 1,
+                "require_human_review_on_failure": True,
+                "solution_change_session_id": str(session.id),
+                "solution_change_session": {"id": str(session.id), "application_id": str(session.application_id)},
+            },
+            runtime_workspace_id=session.workspace_id,
+            context_purpose="coding",
+            work_item_id=_solution_change_stage_work_item_seed(session, artifact, index),
+            created_by=dispatch_user,
+            updated_by=dispatch_user,
+        )
+        if isinstance(staged_row, dict):
+            staged_row["dev_task_id"] = str(task.id)
+        try:
+            run_result = _submit_dev_task_runtime_run(task, workspace=session.workspace, user=dispatch_user)
+            task.refresh_from_db()
+            if isinstance(staged_row, dict):
+                staged_row["apply_state"] = "queued"
+            dispatch_results.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "dev_task_id": str(task.id),
+                    "work_item_id": str(task.work_item_id or ""),
+                    "status": "queued",
+                    "run_id": str(run_result.get("run_id") or ""),
+                    "owner_repo_slug": repo_slug,
+                    "target_branch": branch,
+                    "allowed_paths": allowed_paths,
+                }
+            )
+        except ValueError as exc:
+            task.status = "awaiting_review"
+            task.last_error = str(exc)
+            task.updated_by = dispatch_user
+            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+            if isinstance(staged_row, dict):
+                staged_row["apply_state"] = "failed"
+            dispatch_results.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "dev_task_id": str(task.id),
+                    "work_item_id": str(task.work_item_id or ""),
+                    "status": "failed",
+                    "error": str(exc),
+                    "owner_repo_slug": repo_slug,
+                    "target_branch": branch,
+                    "allowed_paths": allowed_paths,
+                }
+            )
+        except RuntimeError as exc:
+            task.status = "failed"
+            task.last_error = str(exc)
+            task.updated_by = dispatch_user
+            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+            if isinstance(staged_row, dict):
+                staged_row["apply_state"] = "failed"
+            dispatch_results.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "dev_task_id": str(task.id),
+                    "work_item_id": str(task.work_item_id or ""),
+                    "status": "failed",
+                    "error": str(exc),
+                    "owner_repo_slug": repo_slug,
+                    "target_branch": branch,
+                    "allowed_paths": allowed_paths,
+                }
+            )
+    return dispatch_results
+
+
 def _stage_solution_change_session(
     *,
     session: SolutionChangeSession,
     memberships: List[ApplicationArtifactMembership],
+    dispatch_runtime: bool = False,
+    dispatch_user=None,
 ) -> Dict[str, Any]:
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
     confirmed_workstreams = _solution_change_session_confirmed_workstreams(session)
@@ -32272,6 +32482,26 @@ def _stage_solution_change_session(
             "rejected_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="rejected").count(),
         },
     }
+    if dispatch_runtime:
+        dispatch_results = _stage_solution_change_dispatch_dev_tasks(
+            session=session,
+            selected_members=selected_members,
+            staged_artifacts=staged_artifacts,
+            planned_work_by_artifact=planned_work_by_artifact,
+            plan=plan,
+            dispatch_user=dispatch_user,
+        )
+        staged_payload["execution_runs"] = dispatch_results
+        staged_payload["dev_task_ids"] = [
+            str(row.get("dev_task_id") or "").strip()
+            for row in dispatch_results
+            if isinstance(row, dict) and str(row.get("dev_task_id") or "").strip()
+        ]
+        staged_payload["execution_summary"] = {
+            "queued_count": sum(1 for row in dispatch_results if isinstance(row, dict) and str(row.get("status") or "") == "queued"),
+            "failed_count": sum(1 for row in dispatch_results if isinstance(row, dict) and str(row.get("status") or "") == "failed"),
+            "skipped_count": sum(1 for row in dispatch_results if isinstance(row, dict) and str(row.get("status") or "") == "skipped"),
+        }
     session.staged_changes_json = staged_payload
     session.preview_json = {}
     session.validation_json = {}
@@ -36415,7 +36645,12 @@ def application_solution_change_session_stage_apply(
         return JsonResponse({"error": "planning approval checkpoint must be approved before staging"}, status=409)
     if not isinstance(session.plan_json, dict) or not session.plan_json:
         return JsonResponse({"error": "solution change session must have a generated plan before staging"}, status=409)
-    _stage_solution_change_session(session=session, memberships=memberships)
+    _stage_solution_change_session(
+        session=session,
+        memberships=memberships,
+        dispatch_runtime=True,
+        dispatch_user=request.user,
+    )
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {
