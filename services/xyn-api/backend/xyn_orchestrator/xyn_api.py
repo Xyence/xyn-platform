@@ -37831,7 +37831,10 @@ def application_solution_change_session_promote(
     now_iso = timezone.now().isoformat()
     payload = {
         "name": "local",
-        "force": True,
+        # Do not force-recreate the currently active local stack from inside its own API
+        # request path; that can tear down the serving container mid-response and surface
+        # Bad Gateway in Composer.
+        "force": False,
         "workspace_slug": str(getattr(application.workspace, "slug", "") or "").strip(),
         "prefer_local_images": True,
         "prefer_local_sources": True,
@@ -37895,19 +37898,20 @@ def application_solution_change_session_promote(
             status=409,
         )
 
+    provision_status = str((promote_payload or {}).get("status") or "").strip().lower()
     metadata["promotion"] = {
         "promoted_at": now_iso,
         "attempted_at": now_iso,
         "promote_mode": "local_runtime_update",
         "target_runtime": "xyn-local",
         "result": "success",
-        "reason": "primary_local_runtime_reprovisioned",
+        "reason": "primary_local_runtime_reprovisioned" if provision_status == "succeeded" else "primary_local_runtime_reused",
         "by_user_identity_id": str(identity.id),
         "deployment_id": str((promote_payload or {}).get("deployment_id") or ""),
         "compose_project": str((promote_payload or {}).get("compose_project") or ""),
         "ui_url": str((promote_payload or {}).get("ui_url") or ""),
         "api_url": str((promote_payload or {}).get("api_url") or ""),
-        "provision_status": str((promote_payload or {}).get("status") or ""),
+        "provision_status": provision_status,
     }
     session.metadata_json = metadata
     session.save(update_fields=["metadata_json", "updated_at"])
@@ -37920,7 +37924,7 @@ def application_solution_change_session_promote(
     return JsonResponse(
         {
             "promoted": True,
-            "already_up_to_date": False,
+            "already_up_to_date": provision_status == "reused",
             "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
         }
     )
