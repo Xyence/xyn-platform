@@ -3773,6 +3773,154 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(proposed_work)
         self.assertFalse(any(re.search(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", item, re.I) for item in proposed_work))
 
+    def test_code_context_prefers_header_component_paths_for_dropdown_css_requests(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        with tempfile.TemporaryDirectory() as temp_repo:
+            page_path = os.path.join(temp_repo, "apps/xyn-ui/src/app/pages/WorkspacesPage.tsx")
+            header_path = os.path.join(temp_repo, "apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx")
+            os.makedirs(os.path.dirname(page_path), exist_ok=True)
+            os.makedirs(os.path.dirname(header_path), exist_ok=True)
+            with open(page_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "export function WorkspacesPage(){ return <div>workspace dropdown settings page header css</div>; }\n"
+                )
+            with open(header_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "export const HeaderUtilityMenu = () => <div className='header-dropdown'>workspace dropdown header css</div>;\n"
+                )
+            with mock.patch("xyn_orchestrator.xyn_api._resolve_local_repo_root", return_value=xyn_api.Path(temp_repo)):
+                context = xyn_api.gather_solution_change_code_context(
+                    request_text="workspace dropdown in header too wide",
+                    artifact=ui_artifact,
+                    owner_repo_slug="xyn-platform",
+                    allowed_paths=["apps/xyn-ui/"],
+                )
+        self.assertTrue(context.get("available"))
+        candidate_files = [str(item) for item in (context.get("candidate_files") or [])]
+        self.assertTrue(candidate_files)
+        self.assertIn("components/common", candidate_files[0])
+        self.assertFalse(candidate_files[0].endswith("WorkspacesPage.tsx"))
+
+    def test_code_context_marks_low_confidence_when_header_request_only_matches_pages(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        with tempfile.TemporaryDirectory() as temp_repo:
+            page_path = os.path.join(temp_repo, "apps/xyn-ui/src/app/pages/WorkspacesPage.tsx")
+            os.makedirs(os.path.dirname(page_path), exist_ok=True)
+            with open(page_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "export function WorkspacesPage(){ return <div>workspace dropdown header css</div>; }\n"
+                )
+            with mock.patch("xyn_orchestrator.xyn_api._resolve_local_repo_root", return_value=xyn_api.Path(temp_repo)):
+                context = xyn_api.gather_solution_change_code_context(
+                    request_text="workspace dropdown in header too wide",
+                    artifact=ui_artifact,
+                    owner_repo_slug="xyn-platform",
+                    allowed_paths=["apps/xyn-ui/"],
+                )
+        self.assertTrue(context.get("available"))
+        self.assertTrue(context.get("needs_clarification"))
+        self.assertEqual(context.get("candidate_files"), [])
+        self.assertIn("header dropdown", str(context.get("clarification_prompt") or "").lower())
+        self.assertEqual(len(context.get("clarification_options") or []), 3)
+
+    def test_solution_change_plan_includes_meaningful_clarification_when_code_context_low_confidence(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform shell",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Header dropdown CSS consistency",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Header dropdown CSS mismatch",
+            request_text="workspace dropdown in header too wide",
+            created_by=self.identity,
+            analysis_json={"impacted_artifacts": [], "suggested_artifact_ids": [str(ui_artifact.id)]},
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+        )
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api.gather_solution_change_code_context",
+            return_value={
+                "available": True,
+                "summary": "Used repo context from xyn-platform (apps/xyn-ui/).",
+                "candidate_files": [],
+                "candidate_components": [],
+                "confidence": 0.32,
+                "needs_clarification": True,
+                "clarification_prompt": (
+                    "I may not have identified the correct component. "
+                    "This request refers to a header dropdown, but current matches are page-level files."
+                ),
+                "clarification_options": [
+                    "Search specifically for header/navigation components",
+                    "Expand search scope",
+                    "Proceed with current candidates",
+                ],
+                "search_strategy": "focused_header_navigation",
+            },
+        ):
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(plan_response.status_code, 200)
+        payload = json.loads(plan_response.content)
+        plan = ((payload.get("session") or {}).get("plan") or {})
+        self.assertEqual(plan.get("planning_mode"), "code_aware")
+        self.assertIn("clarify", str(plan.get("next_action") or "").lower())
+        self.assertTrue(any("identified the correct component" in str(item).lower() for item in (plan.get("open_questions") or [])))
+        self.assertEqual(len(plan.get("clarification_options") or []), 3)
+
     def test_solution_change_session_code_aware_reports_unavailable_for_non_repo_backed_artifact(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(

@@ -31068,6 +31068,40 @@ _CODE_AWARE_STOPWORDS: Set[str] = {
     "list",
 }
 
+_CODE_AWARE_HEADER_LAYOUT_TOKENS: Set[str] = {
+    "header",
+    "nav",
+    "navbar",
+    "navigation",
+    "shell",
+    "layout",
+    "dropdown",
+    "menu",
+    "toolbar",
+}
+
+_CODE_AWARE_STYLE_HINT_TOKENS: Set[str] = {
+    "css",
+    "style",
+    "styling",
+    "width",
+    "height",
+    "spacing",
+    "alignment",
+    "layout",
+}
+
+_CODE_AWARE_HEADER_PATH_HINTS: Tuple[str, ...] = (
+    "/components/common/",
+    "/components/layout/",
+    "/components/shell/",
+    "header",
+    "nav",
+    "navbar",
+    "menu",
+    "toolbar",
+)
+
 
 def _request_appears_implementation_specific(request_text: str) -> bool:
     lowered = str(request_text or "").strip().lower()
@@ -31109,6 +31143,36 @@ def _likely_code_context_keywords(request_text: str) -> List[str]:
         if token not in keywords:
             keywords.append(token)
     return keywords[:14]
+
+
+def _request_token_set(request_text: str) -> Set[str]:
+    return {str(token).strip().lower() for token in re.findall(r"[a-z0-9_]+", str(request_text or "")) if str(token).strip()}
+
+
+def _request_prefers_header_navigation_scope(request_text: str) -> bool:
+    tokens = _request_token_set(request_text)
+    if not tokens:
+        return False
+    has_header_scope = bool(tokens.intersection(_CODE_AWARE_HEADER_LAYOUT_TOKENS))
+    has_style_hint = bool(tokens.intersection(_CODE_AWARE_STYLE_HINT_TOKENS))
+    has_navigation_target = bool(tokens.intersection({"dropdown", "menu", "nav", "navbar", "navigation", "header"}))
+    return has_header_scope and (has_style_hint or has_navigation_target)
+
+
+def _normalized_repo_path(path: str) -> str:
+    return str(path or "").strip().replace("\\", "/").lower()
+
+
+def _path_is_page_level(path: str) -> bool:
+    normalized = _normalized_repo_path(path)
+    if "/pages/" in normalized:
+        return True
+    return bool(re.search(r"[a-z0-9_-]+page\.(tsx|ts|jsx|js)$", normalized))
+
+
+def _path_has_header_navigation_hint(path: str) -> bool:
+    normalized = _normalized_repo_path(path)
+    return any(token in normalized for token in _CODE_AWARE_HEADER_PATH_HINTS)
 
 
 def _resolve_local_repo_root(repo_slug: str) -> Optional[Path]:
@@ -31183,6 +31247,7 @@ def gather_solution_change_code_context(
             "summary": f"Code-aware planning unavailable: could not resolve local repo root for {owner_repo_slug}.",
         }
     keywords = _likely_code_context_keywords(request_text)
+    prefers_header_scope = _request_prefers_header_navigation_scope(request_text)
     suffixes = {".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".py", ".json", ".md"}
     ranked: List[Tuple[int, str, str]] = []
     component_hits: List[str] = []
@@ -31218,9 +31283,16 @@ def gather_solution_change_code_context(
             if "solution" in content.lower() and "panel" in content.lower():
                 score += 1
                 matched_terms.append("solution/panel")
+            rel_path = str(file_path.relative_to(repo_root))
+            if prefers_header_scope:
+                if _path_has_header_navigation_hint(rel_path):
+                    score += 4
+                    matched_terms.append("header/navigation path")
+                if _path_is_page_level(rel_path):
+                    score -= 4
+                    matched_terms.append("page-level path penalty")
             if score <= 0:
                 continue
-            rel_path = str(file_path.relative_to(repo_root))
             rationale = f"matched terms: {', '.join(sorted(set(matched_terms))[:4])}"
             ranked.append((score, rel_path, rationale))
             for match in re.findall(r"\b(?:function|const|class)\s+([A-Z][A-Za-z0-9_]*)", content):
@@ -31231,19 +31303,71 @@ def gather_solution_change_code_context(
         if scanned_files >= max_scanned_files:
             break
     ranked.sort(key=lambda row: (-row[0], row[1]))
+    search_strategy = "default"
+    if prefers_header_scope:
+        focused_rows = [row for row in ranked if _path_has_header_navigation_hint(row[1])]
+        if focused_rows:
+            focused_rows.sort(key=lambda row: (-row[0], row[1]))
+            ranked = focused_rows + [row for row in ranked if row not in focused_rows]
+            search_strategy = "focused_header_navigation"
     top_rows = ranked[:8]
     candidate_files = [row[1] for row in top_rows]
     evidence = [{"path": row[1], "rationale": row[2]} for row in top_rows]
+    top_slice = top_rows[:3]
+    top_all_page_level = bool(top_slice) and all(_path_is_page_level(row[1]) for row in top_slice)
+    top_has_header_hint = bool(top_slice) and any(_path_has_header_navigation_hint(row[1]) for row in top_slice)
+    top_score = int(top_rows[0][0]) if top_rows else 0
+    needs_clarification = False
+    confidence_reason = ""
+    if prefers_header_scope:
+        if top_rows and top_all_page_level and not top_has_header_hint:
+            needs_clarification = True
+            confidence_reason = "header_request_only_page_level_matches"
+        elif top_rows and top_score < 5:
+            needs_clarification = True
+            confidence_reason = "header_request_low_match_confidence"
+        elif not top_rows:
+            needs_clarification = True
+            confidence_reason = "header_request_no_matches"
+    confidence = 0.0
+    if top_rows:
+        confidence = max(0.25, min(0.95, float(top_score) / 10.0))
+        if needs_clarification:
+            confidence = min(confidence, 0.4)
+
+    clarification_prompt = (
+        "I may not have identified the correct component. "
+        "This request refers to a header dropdown, but current matches are page-level files.\n\n"
+        "Would you like me to:\n"
+        "1. Search specifically for header/navigation components?\n"
+        "2. Expand search scope?\n"
+        "3. Proceed with current candidates?"
+    )
+    clarification_options = [
+        "Search specifically for header/navigation components",
+        "Expand search scope",
+        "Proceed with current candidates",
+    ]
+
+    if needs_clarification and (not top_has_header_hint or top_all_page_level):
+        candidate_files = []
+        evidence = []
+
     if not candidate_files:
         return {
             "available": True,
-            "reason": "no strong matches",
+            "reason": confidence_reason or "no strong matches",
             "candidate_files": [],
             "candidate_components": [],
             "evidence": [],
             "summary": f"Searched {owner_repo_slug} within {', '.join(safe_paths)} but found no strong file matches.",
             "repo_slug": owner_repo_slug,
             "scoped_paths": safe_paths,
+            "confidence": confidence,
+            "needs_clarification": needs_clarification,
+            "clarification_prompt": clarification_prompt if needs_clarification else "",
+            "clarification_options": clarification_options if needs_clarification else [],
+            "search_strategy": search_strategy,
         }
     return {
         "available": True,
@@ -31254,6 +31378,11 @@ def gather_solution_change_code_context(
         "summary": f"Used repo context from {owner_repo_slug} ({', '.join(safe_paths)}).",
         "repo_slug": owner_repo_slug,
         "scoped_paths": safe_paths,
+        "confidence": confidence,
+        "needs_clarification": needs_clarification,
+        "clarification_prompt": clarification_prompt if needs_clarification else "",
+        "clarification_options": clarification_options if needs_clarification else [],
+        "search_strategy": search_strategy,
     }
 
 
@@ -31341,6 +31470,8 @@ def _generate_code_aware_solution_change_plan(
     plan["code_context_summary"] = str(code_context.get("summary") or "").strip()
     plan["candidate_files"] = [str(item).strip() for item in (code_context.get("candidate_files") or []) if str(item).strip()]
     plan["candidate_components"] = [str(item).strip() for item in (code_context.get("candidate_components") or []) if str(item).strip()]
+    plan["code_context_confidence"] = float(code_context.get("confidence") or 0.0)
+    plan["code_context_search_strategy"] = str(code_context.get("search_strategy") or "").strip()
     implementation_steps = plan.get("implementation_steps") if isinstance(plan.get("implementation_steps"), list) else []
     plan["implementation_steps"] = _format_code_aware_steps(
         [str(step).strip() for step in implementation_steps if str(step).strip()],
@@ -31360,6 +31491,20 @@ def _generate_code_aware_solution_change_plan(
             and "payload/data-shape compatibility" not in item.lower()
         ]
     plan["shared_contracts"] = shared_contracts
+    needs_clarification = bool(code_context.get("needs_clarification"))
+    if needs_clarification:
+        clarification_prompt = str(code_context.get("clarification_prompt") or "").strip()
+        clarification_options = [
+            str(item).strip() for item in (code_context.get("clarification_options") or []) if str(item).strip()
+        ]
+        existing_open_questions = [
+            str(item).strip() for item in (plan.get("open_questions") if isinstance(plan.get("open_questions"), list) else []) if str(item).strip()
+        ]
+        if clarification_prompt and clarification_prompt not in existing_open_questions:
+            existing_open_questions.append(clarification_prompt)
+        plan["open_questions"] = existing_open_questions
+        plan["clarification_options"] = clarification_options
+        plan["next_action"] = "Clarify the target header/navigation component before staging code changes."
     plan["proposed_work"] = [str(item).strip() for item in plan.get("implementation_steps", []) if str(item).strip()]
     return plan
 
