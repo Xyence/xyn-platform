@@ -4382,7 +4382,7 @@ function ComposerDetailPanel({
   const [payload, setPayload] = useState<ComposerState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<React.ReactNode>(null);
   const [requestDraft, setRequestDraft] = useState("");
   const [refinementDraft, setRefinementDraft] = useState("");
   const [questionReplyDraft, setQuestionReplyDraft] = useState("");
