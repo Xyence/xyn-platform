@@ -32901,11 +32901,17 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
     session_preview_fallback_reason = ""
     if isolated_session_preview_requested:
         session_preview_runtime = _provision_session_preview_environment()
-        if str(session_preview_runtime.get("status") or "").strip().lower() != "newly_built_for_session":
-            session_preview_fallback_reason = str(
-                session_preview_runtime.get("reason") or "session_preview_environment_unavailable"
-            ).strip() or "session_preview_environment_unavailable"
-            session_preview_runtime = {}
+        provision_status = str(session_preview_runtime.get("status") or "").strip().lower()
+        if provision_status != "newly_built_for_session":
+            if provision_status == "failed":
+                # Keep failed provisioning evidence and surface an explicit preview failure
+                # instead of silently reusing a stale runtime target.
+                session_preview_fallback_reason = ""
+            else:
+                session_preview_fallback_reason = str(
+                    session_preview_runtime.get("reason") or "session_preview_environment_unavailable"
+                ).strip() or "session_preview_environment_unavailable"
+                session_preview_runtime = {}
 
     artifact_rows: List[Dict[str, Any]] = []
     selected_artifact_ids: List[str] = []
