@@ -3847,6 +3847,86 @@ class GoalPlanningTests(TestCase):
         self.assertIn("header dropdown", str(context.get("clarification_prompt") or "").lower())
         self.assertEqual(len(context.get("clarification_options") or []), 3)
 
+    def test_code_context_component_graph_boosts_shared_owner_for_header_dropdown_requests(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        with tempfile.TemporaryDirectory() as temp_repo:
+            page_path = os.path.join(temp_repo, "apps/xyn-ui/src/app/pages/WorkspacesPage.tsx")
+            shared_owner_path = os.path.join(temp_repo, "apps/xyn-ui/src/app/components/shared/GlobalControls.tsx")
+            os.makedirs(os.path.dirname(page_path), exist_ok=True)
+            os.makedirs(os.path.dirname(shared_owner_path), exist_ok=True)
+            with open(page_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "import { WorkspaceDropdown } from '../components/shared/GlobalControls';\n"
+                    "export function WorkspacesPage(){ return <WorkspaceDropdown />; }\n"
+                )
+            with open(shared_owner_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "export const WorkspaceDropdown = () => <div className='dropdown'>workspace control</div>;\n"
+                )
+            with mock.patch("xyn_orchestrator.xyn_api._resolve_local_repo_root", return_value=xyn_api.Path(temp_repo)):
+                context = xyn_api.gather_solution_change_code_context(
+                    request_text="profile dropdown styling in header should match workspace dropdown",
+                    artifact=ui_artifact,
+                    owner_repo_slug="xyn-platform",
+                    allowed_paths=["apps/xyn-ui/"],
+                )
+        self.assertTrue(context.get("available"))
+        candidate_files = [str(item) for item in (context.get("candidate_files") or [])]
+        self.assertTrue(candidate_files)
+        self.assertTrue(candidate_files[0].endswith("components/shared/GlobalControls.tsx"))
+        evidence = context.get("evidence") or []
+        self.assertTrue(any("ownership bonus" in str((row or {}).get("rationale") or "").lower() for row in evidence if isinstance(row, dict)))
+
+    def test_code_context_page_specific_request_can_still_target_page_file(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        with tempfile.TemporaryDirectory() as temp_repo:
+            page_path = os.path.join(temp_repo, "apps/xyn-ui/src/app/pages/WorkspacesPage.tsx")
+            header_path = os.path.join(temp_repo, "apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx")
+            os.makedirs(os.path.dirname(page_path), exist_ok=True)
+            os.makedirs(os.path.dirname(header_path), exist_ok=True)
+            with open(page_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "export function WorkspacesPage(){ return <label>Workspace name</label><input className='workspace-field' />; }\n"
+                )
+            with open(header_path, "w", encoding="utf-8") as handle:
+                handle.write("export const HeaderUtilityMenu = () => <div>profile</div>;\n")
+            with mock.patch("xyn_orchestrator.xyn_api._resolve_local_repo_root", return_value=xyn_api.Path(temp_repo)):
+                context = xyn_api.gather_solution_change_code_context(
+                    request_text="Increase field width on the Workspaces page form.",
+                    artifact=ui_artifact,
+                    owner_repo_slug="xyn-platform",
+                    allowed_paths=["apps/xyn-ui/"],
+                )
+        self.assertTrue(context.get("available"))
+        candidate_files = [str(item) for item in (context.get("candidate_files") or [])]
+        self.assertTrue(candidate_files)
+        self.assertTrue(candidate_files[0].endswith("pages/WorkspacesPage.tsx"))
+        self.assertFalse(context.get("needs_clarification"))
+
     def test_solution_change_plan_includes_meaningful_clarification_when_code_context_low_confidence(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(

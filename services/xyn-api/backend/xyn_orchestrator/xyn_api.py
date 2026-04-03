@@ -31175,6 +31175,134 @@ def _path_has_header_navigation_hint(path: str) -> bool:
     return any(token in normalized for token in _CODE_AWARE_HEADER_PATH_HINTS)
 
 
+def _component_name_has_header_navigation_hint(name: str) -> bool:
+    token = str(name or "").strip().lower()
+    if not token:
+        return False
+    return any(
+        hint in token
+        for hint in (
+            "header",
+            "nav",
+            "navbar",
+            "menu",
+            "dropdown",
+            "shell",
+            "toolbar",
+            "layout",
+            "topbar",
+            "utility",
+            "workspace",
+            "profile",
+        )
+    )
+
+
+def _extract_exported_components(content: str) -> List[str]:
+    if not content:
+        return []
+    hits: List[str] = []
+    patterns = [
+        r"export\s+function\s+([A-Z][A-Za-z0-9_]*)\b",
+        r"export\s+const\s+([A-Z][A-Za-z0-9_]*)\b",
+        r"export\s+class\s+([A-Z][A-Za-z0-9_]*)\b",
+        r"export\s+default\s+function\s+([A-Z][A-Za-z0-9_]*)\b",
+        r"export\s+default\s+([A-Z][A-Za-z0-9_]*)\b",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, content):
+            value = str(match or "").strip()
+            if value and value not in hits:
+                hits.append(value)
+    return hits[:24]
+
+
+def _extract_imported_components(content: str) -> List[str]:
+    if not content:
+        return []
+    hits: List[str] = []
+    for block in re.findall(r"import\s+([^;]+?)\s+from\s+['\"][^'\"]+['\"]", content, flags=re.MULTILINE):
+        token = str(block or "").strip()
+        if not token:
+            continue
+        candidates: List[str] = []
+        if token.startswith("{") and token.endswith("}"):
+            candidates = [item.strip() for item in token[1:-1].split(",")]
+        elif token.startswith("* as "):
+            candidates = [token[5:].strip()]
+        elif "," in token:
+            left, right = token.split(",", 1)
+            candidates.append(left.strip())
+            right = right.strip()
+            if right.startswith("{") and right.endswith("}"):
+                candidates.extend([item.strip() for item in right[1:-1].split(",")])
+            else:
+                candidates.append(right)
+        else:
+            candidates = [token]
+        for candidate in candidates:
+            value = str(candidate or "").split(" as ", 1)[0].strip()
+            if value and re.match(r"^[A-Z][A-Za-z0-9_]*$", value) and value not in hits:
+                hits.append(value)
+    return hits[:24]
+
+
+def _extract_local_import_specs(content: str) -> List[str]:
+    if not content:
+        return []
+    specs: List[str] = []
+    for match in re.findall(r"import\s+[^;]+?\s+from\s+['\"]([^'\"]+)['\"]", content, flags=re.MULTILINE):
+        spec = str(match or "").strip()
+        if spec.startswith(".") and spec not in specs:
+            specs.append(spec)
+    return specs[:48]
+
+
+def _extract_jsx_component_tags(content: str) -> List[str]:
+    if not content:
+        return []
+    tags: List[str] = []
+    for match in re.findall(r"<([A-Z][A-Za-z0-9_]*)\b", content):
+        token = str(match or "").strip()
+        if token and token not in tags:
+            tags.append(token)
+    return tags[:32]
+
+
+def _resolve_local_import_paths(
+    *,
+    current_rel_path: str,
+    import_specs: List[str],
+    known_files: Set[str],
+) -> List[str]:
+    resolved: List[str] = []
+    current_path = Path(current_rel_path)
+    current_parent = current_path.parent
+    for spec in import_specs:
+        raw = str(spec or "").strip()
+        if not raw:
+            continue
+        base = (current_parent / raw).as_posix()
+        candidates = [
+            f"{base}.tsx",
+            f"{base}.ts",
+            f"{base}.jsx",
+            f"{base}.js",
+            f"{base}.css",
+            f"{base}.scss",
+            f"{base}/index.tsx",
+            f"{base}/index.ts",
+            f"{base}/index.jsx",
+            f"{base}/index.js",
+        ]
+        for candidate in candidates:
+            normalized = _normalized_repo_path(candidate)
+            if normalized in known_files and normalized not in resolved:
+                resolved.append(normalized)
+                break
+    return resolved
+
+
 def _resolve_local_repo_root(repo_slug: str) -> Optional[Path]:
     slug = str(repo_slug or "").strip().lower()
     candidates: List[Path] = []
@@ -31249,10 +31377,9 @@ def gather_solution_change_code_context(
     keywords = _likely_code_context_keywords(request_text)
     prefers_header_scope = _request_prefers_header_navigation_scope(request_text)
     suffixes = {".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".py", ".json", ".md"}
-    ranked: List[Tuple[int, str, str]] = []
-    component_hits: List[str] = []
     scanned_files = 0
-    max_scanned_files = 250
+    max_scanned_files = 260
+    file_records: List[Dict[str, Any]] = []
     for prefix in safe_paths:
         scoped_root = (repo_root / prefix).resolve()
         if not scoped_root.exists() or not scoped_root.is_dir():
@@ -31267,41 +31394,132 @@ def gather_solution_change_code_context(
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
-            lowered_name = file_path.name.lower()
-            score = 0
-            matched_terms: List[str] = []
-            for token in keywords:
-                if token in lowered_name:
-                    score += 3
-                    matched_terms.append(token)
-                elif token in content.lower():
-                    score += 1
-                    matched_terms.append(token)
-            if "requested change" in content.lower():
-                score += 2
-                matched_terms.append("requested change")
-            if "solution" in content.lower() and "panel" in content.lower():
-                score += 1
-                matched_terms.append("solution/panel")
             rel_path = str(file_path.relative_to(repo_root))
-            if prefers_header_scope:
-                if _path_has_header_navigation_hint(rel_path):
-                    score += 4
-                    matched_terms.append("header/navigation path")
-                if _path_is_page_level(rel_path):
-                    score -= 4
-                    matched_terms.append("page-level path penalty")
-            if score <= 0:
-                continue
-            rationale = f"matched terms: {', '.join(sorted(set(matched_terms))[:4])}"
-            ranked.append((score, rel_path, rationale))
-            for match in re.findall(r"\b(?:function|const|class)\s+([A-Z][A-Za-z0-9_]*)", content):
-                if match not in component_hits:
-                    component_hits.append(match)
-                if len(component_hits) >= 8:
-                    break
+            normalized_path = _normalized_repo_path(rel_path)
+            lowered_content = content.lower()
+            file_records.append(
+                {
+                    "path": rel_path,
+                    "normalized_path": normalized_path,
+                    "lowered_name": file_path.name.lower(),
+                    "lowered_content": lowered_content,
+                    "exported_components": _extract_exported_components(content),
+                    "imported_components": _extract_imported_components(content),
+                    "jsx_components": _extract_jsx_component_tags(content),
+                    "import_specs": _extract_local_import_specs(content),
+                }
+            )
         if scanned_files >= max_scanned_files:
             break
+    known_files = {str(record.get("normalized_path") or "").strip() for record in file_records if str(record.get("normalized_path") or "").strip()}
+    component_exports: Dict[str, Set[str]] = {}
+    for record in file_records:
+        rel_path = str(record.get("path") or "").strip()
+        if not rel_path:
+            continue
+        record["local_import_paths"] = _resolve_local_import_paths(
+            current_rel_path=rel_path,
+            import_specs=[str(item) for item in (record.get("import_specs") or [])],
+            known_files=known_files,
+        )
+        for component in record.get("exported_components") or []:
+            component_name = str(component or "").strip()
+            if not component_name:
+                continue
+            component_exports.setdefault(component_name, set()).add(rel_path)
+
+    score_bonus_by_path: Dict[str, int] = {}
+    ranked: List[Tuple[int, str, str]] = []
+    for record in file_records:
+        rel_path = str(record.get("path") or "").strip()
+        if not rel_path:
+            continue
+        score = 0
+        matched_terms: List[str] = []
+        lowered_name = str(record.get("lowered_name") or "")
+        lowered_content = str(record.get("lowered_content") or "")
+        for token in keywords:
+            if token in lowered_name:
+                score += 3
+                matched_terms.append(token)
+            elif token in lowered_content:
+                score += 1
+                matched_terms.append(token)
+        if "requested change" in lowered_content:
+            score += 2
+            matched_terms.append("requested change")
+        if "solution" in lowered_content and "panel" in lowered_content:
+            score += 1
+            matched_terms.append("solution/panel")
+
+        exported = [str(item).strip() for item in (record.get("exported_components") or []) if str(item).strip()]
+        imported = [str(item).strip() for item in (record.get("imported_components") or []) if str(item).strip()]
+        jsx_components = [str(item).strip() for item in (record.get("jsx_components") or []) if str(item).strip()]
+        local_import_paths = [str(item).strip() for item in (record.get("local_import_paths") or []) if str(item).strip()]
+
+        if prefers_header_scope:
+            if _path_has_header_navigation_hint(rel_path):
+                score += 4
+                matched_terms.append("header/navigation path")
+            if _path_is_page_level(rel_path):
+                score -= 4
+                matched_terms.append("page-level path penalty")
+            if any(_component_name_has_header_navigation_hint(item) for item in exported):
+                score += 4
+                matched_terms.append("header/navigation export")
+            if any(_component_name_has_header_navigation_hint(item) for item in imported):
+                score += 2
+                matched_terms.append("header/navigation import")
+            if any(_component_name_has_header_navigation_hint(item) for item in jsx_components):
+                score += 3
+                matched_terms.append("header/navigation jsx ownership")
+            if any(_path_has_header_navigation_hint(item) for item in local_import_paths):
+                score += 2
+                matched_terms.append("imports header/navigation module")
+
+            # Lightweight ownership tracing: if a page references a header/nav component,
+            # boost the owning component file instead of the page wrapper.
+            if _path_is_page_level(rel_path):
+                page_mentions_header_owner = False
+                for component_name in jsx_components:
+                    if not _component_name_has_header_navigation_hint(component_name):
+                        continue
+                    for owner_path in component_exports.get(component_name, set()):
+                        if owner_path == rel_path:
+                            continue
+                        if _path_has_header_navigation_hint(owner_path) or _component_name_has_header_navigation_hint(component_name):
+                            score_bonus_by_path[owner_path] = int(score_bonus_by_path.get(owner_path, 0)) + 5
+                            page_mentions_header_owner = True
+                if page_mentions_header_owner:
+                    score -= 2
+                    matched_terms.append("page wrapper around shared header component")
+
+        if score <= 0:
+            continue
+        rationale = f"matched terms: {', '.join(sorted(set(matched_terms))[:5])}"
+        ranked.append((score, rel_path, rationale))
+
+    if score_bonus_by_path:
+        boosted: List[Tuple[int, str, str]] = []
+        for score, rel_path, rationale in ranked:
+            bonus = int(score_bonus_by_path.get(rel_path, 0))
+            if bonus > 0:
+                boosted.append((score + bonus, rel_path, f"{rationale}; ownership bonus +{bonus}"))
+            else:
+                boosted.append((score, rel_path, rationale))
+        ranked = boosted
+
+    component_hits: List[str] = []
+    for record in file_records:
+        for component_name in [*record.get("exported_components", []), *record.get("jsx_components", [])]:
+            candidate = str(component_name or "").strip()
+            if candidate and candidate not in component_hits:
+                component_hits.append(candidate)
+            if len(component_hits) >= 12:
+                break
+        if len(component_hits) >= 12:
+            break
+
     ranked.sort(key=lambda row: (-row[0], row[1]))
     search_strategy = "default"
     if prefers_header_scope:
