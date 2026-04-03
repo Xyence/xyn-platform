@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List
 from unittest import mock
 
@@ -5006,6 +5007,12 @@ class GoalPlanningTests(TestCase):
             "xyn_orchestrator.xyn_api._resolve_stage_apply_target_branch",
             return_value=("main", "runtime_repo_checkout", ""),
         ), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_local_repo_root",
+            return_value=tempfile.gettempdir(),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._git_repo_dirty_files",
+            return_value=([], ""),
+        ), mock.patch(
             "xyn_orchestrator.xyn_api._seed_api_request",
             return_value=runtime_response,
         ) as runtime_request:
@@ -5135,6 +5142,245 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(str((artifact_states[0] if artifact_states else {}).get("apply_state") or ""), "failed")
         self.assertFalse(DevTask.objects.filter(source_entity_type="solution_change_session", source_entity_id=session.id).exists())
         self.assertEqual(runtime_request.call_count, 0)
+
+    def test_solution_change_session_stage_apply_coordinates_multiple_artifacts_per_repo(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder API",
+            slug=f"app.deal-finder-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["services/xyn-api/backend/"],
+            edit_mode="repo_backed",
+        )
+        ManagedRepository.objects.create(
+            slug="xyn-platform",
+            display_name="Xyn Platform",
+            remote_url="https://example.com/xyn-platform.git",
+            default_branch="develop",
+            auth_mode="local",
+            is_active=True,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Cross-artifact session",
+            request_text="Adjust shared UI and API behavior",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id), str(api_artifact.id)],
+            status="planned",
+            plan_json={
+                "proposed_work": ["Apply repo-coordinated changes."],
+                "per_artifact_work": [
+                    {"artifact_id": str(ui_artifact.id), "planned_work": ["Update UI component behavior."]},
+                    {"artifact_id": str(api_artifact.id), "planned_work": ["Update API handler behavior."]},
+                ],
+            },
+        )
+        SolutionPlanningTurn.objects.create(
+            workspace=self.workspace,
+            session=session,
+            actor="planner",
+            kind="draft_plan",
+            sequence=1,
+            payload_json={"summary": "Draft plan"},
+        )
+        SolutionPlanningCheckpoint.objects.create(
+            workspace=self.workspace,
+            session=session,
+            checkpoint_key="plan_scope_confirmed",
+            label="Approve planning scope before stage apply",
+            status="approved",
+            required_before="stage",
+            payload_json={},
+            decided_by=self.identity,
+        )
+
+        stage_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/stage-apply",
+            method="post",
+            data=json.dumps({}),
+        )
+        run_id = str(uuid.uuid4())
+        runtime_response = mock.Mock()
+        runtime_response.status_code = 200
+        runtime_response.headers = {"content-type": "application/json"}
+        runtime_response.content = b'{"id": "queued"}'
+        runtime_response.json.return_value = {"id": run_id, "status": "queued"}
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_stage_apply_target_branch",
+            return_value=("main", "runtime_repo_checkout", ""),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._git_repo_dirty_files",
+            return_value=([], ""),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=runtime_response,
+        ) as runtime_request:
+            stage_response = application_solution_change_session_stage_apply(stage_request, str(application.id), str(session.id))
+
+        self.assertEqual(stage_response.status_code, 200)
+        payload = json.loads(stage_response.content)
+        staged_changes = ((payload.get("session") or {}).get("staged_changes") or {})
+        execution_runs = staged_changes.get("execution_runs") if isinstance(staged_changes.get("execution_runs"), list) else []
+        self.assertEqual(len(execution_runs), 2)
+        dev_task_ids = {str(item.get("dev_task_id") or "") for item in execution_runs if isinstance(item, dict)}
+        self.assertEqual(len(dev_task_ids), 1)
+        self.assertEqual(runtime_request.call_count, 1)
+        self.assertEqual(DevTask.objects.filter(source_entity_type="solution_change_session", source_entity_id=session.id).count(), 1)
+        per_repo_results = staged_changes.get("per_repo_results") if isinstance(staged_changes.get("per_repo_results"), list) else []
+        self.assertEqual(len(per_repo_results), 1)
+        self.assertEqual(str(per_repo_results[0].get("status") or ""), "queued")
+        self.assertEqual(len(per_repo_results[0].get("targeted_artifacts") or []), 2)
+        stage_apply_result = payload.get("stage_apply_result") if isinstance(payload.get("stage_apply_result"), dict) else {}
+        self.assertEqual(str(stage_apply_result.get("overall_status") or ""), "materialization_queued")
+        self.assertTrue(bool(stage_apply_result.get("preview_can_proceed")))
+
+    def test_solution_change_session_stage_apply_blocks_dirty_repo_before_dispatch(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        ManagedRepository.objects.create(
+            slug="xyn-platform",
+            display_name="Xyn Platform",
+            remote_url="https://example.com/xyn-platform.git",
+            default_branch="develop",
+            auth_mode="local",
+            is_active=True,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Dirty repo guarded session",
+            request_text="Update requested change field",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={
+                "proposed_work": ["Update requested-change field styles."],
+                "per_artifact_work": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "planned_work": ["Update requested-change input layout classes and styles."],
+                    }
+                ],
+            },
+        )
+        SolutionPlanningTurn.objects.create(
+            workspace=self.workspace,
+            session=session,
+            actor="planner",
+            kind="draft_plan",
+            sequence=1,
+            payload_json={"summary": "Draft plan"},
+        )
+        SolutionPlanningCheckpoint.objects.create(
+            workspace=self.workspace,
+            session=session,
+            checkpoint_key="plan_scope_confirmed",
+            label="Approve planning scope before stage apply",
+            status="approved",
+            required_before="stage",
+            payload_json={},
+            decided_by=self.identity,
+        )
+
+        stage_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/stage-apply",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_stage_apply_target_branch",
+            return_value=("main", "runtime_repo_checkout", ""),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_local_repo_root",
+            return_value=Path(tempfile.gettempdir()),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._git_repo_dirty_files",
+            return_value=(["apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx"], ""),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+        ) as runtime_request:
+            stage_response = application_solution_change_session_stage_apply(stage_request, str(application.id), str(session.id))
+        self.assertEqual(stage_response.status_code, 200)
+        payload = json.loads(stage_response.content)
+        staged_changes = ((payload.get("session") or {}).get("staged_changes") or {})
+        execution_runs = staged_changes.get("execution_runs") if isinstance(staged_changes.get("execution_runs"), list) else []
+        self.assertEqual(len(execution_runs), 1)
+        self.assertEqual(str(execution_runs[0].get("reason") or ""), "unsafe_repository_state")
+        self.assertFalse(DevTask.objects.filter(source_entity_type="solution_change_session", source_entity_id=session.id).exists())
+        self.assertEqual(runtime_request.call_count, 0)
+        per_repo_results = staged_changes.get("per_repo_results") if isinstance(staged_changes.get("per_repo_results"), list) else []
+        self.assertEqual(len(per_repo_results), 1)
+        self.assertEqual(str(per_repo_results[0].get("blocked_reason") or ""), "unsafe_repository_state")
+        stage_apply_result = payload.get("stage_apply_result") if isinstance(payload.get("stage_apply_result"), dict) else {}
+        self.assertEqual(str(stage_apply_result.get("overall_status") or ""), "failed")
+        self.assertFalse(bool(stage_apply_result.get("preview_can_proceed")))
 
     def test_resolve_stage_apply_target_branch_allows_safe_directory_git_resolution(self):
         completed = mock.Mock(returncode=0, stdout="main\n")
