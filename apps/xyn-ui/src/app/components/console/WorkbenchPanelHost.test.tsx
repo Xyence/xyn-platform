@@ -47,6 +47,7 @@ const apiMocks = vi.hoisted(() => ({
   stageSolutionChangeApply: vi.fn(),
   prepareSolutionChangePreview: vi.fn(),
   validateSolutionChangeSession: vi.fn(),
+  promoteSolutionChangeSession: vi.fn(),
   finalizeSolutionChangeSession: vi.fn(),
   replyToSolutionPlanningSession: vi.fn(),
   regenerateSolutionPlanningOptions: vi.fn(),
@@ -117,6 +118,7 @@ vi.mock("../../../api/xyn", async () => {
     stageSolutionChangeApply: apiMocks.stageSolutionChangeApply,
     prepareSolutionChangePreview: apiMocks.prepareSolutionChangePreview,
     validateSolutionChangeSession: apiMocks.validateSolutionChangeSession,
+    promoteSolutionChangeSession: apiMocks.promoteSolutionChangeSession,
     finalizeSolutionChangeSession: apiMocks.finalizeSolutionChangeSession,
     replyToSolutionPlanningSession: apiMocks.replyToSolutionPlanningSession,
     regenerateSolutionPlanningOptions: apiMocks.regenerateSolutionPlanningOptions,
@@ -5538,6 +5540,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
     const onOpenPanel = vi.fn();
     const readyForPromotionSession = createComposerSession({
       execution_status: "ready_for_promotion",
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+      },
       preview: {
         status: "ready",
         source: "reused_runtime",
@@ -5586,6 +5595,68 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
     expect(linkedSessionUpdatedSpy).toHaveBeenCalled();
     linkedSessionUpdatedSpy.mockRestore();
+  });
+
+  it("promotes a validated session before finalize and reports running-environment update", async () => {
+    const onOpenPanel = vi.fn();
+    const readyForPromotionSession = createComposerSession({
+      execution_status: "ready_for_promotion",
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-123.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    const promotedSession = createComposerSession({
+      execution_status: "ready_for_promotion",
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+      },
+      preview: readyForPromotionSession.preview,
+      validation: readyForPromotionSession.validation,
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(readyForPromotionSession))
+      .mockResolvedValueOnce(createComposerState(promotedSession));
+    apiMocks.promoteSolutionChangeSession.mockResolvedValue({
+      promoted: true,
+      already_up_to_date: false,
+      session: promotedSession,
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Promote" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Promote" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.promoteSolutionChangeSession).toHaveBeenCalledWith("app-1", "session-1"));
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "http://localhost" })).toHaveAttribute("href", "http://localhost")
+    );
+    expect(screen.getByRole("button", { name: "Finalize Session" })).toBeEnabled();
   });
 
   it("activates artifact detail into reusable dev sibling and opens runtime for reused status", async () => {

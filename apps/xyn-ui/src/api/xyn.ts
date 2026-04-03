@@ -4751,6 +4751,19 @@ export async function validateSolutionChangeSession(
   return handle<{ validated: boolean; session: SolutionChangeSession }>(response);
 }
 
+export async function promoteSolutionChangeSession(
+  applicationId: string,
+  sessionId: string
+): Promise<{ promoted: boolean; already_up_to_date?: boolean; session: SolutionChangeSession }> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/promote`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{ promoted: boolean; already_up_to_date?: boolean; session: SolutionChangeSession }>(response);
+}
+
 export async function continueSolutionChangeSessionRefinement(
   applicationId: string,
   sessionId: string,

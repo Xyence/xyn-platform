@@ -36,6 +36,7 @@ import {
   finalizeSolutionChangeSession,
   generateSolutionChangePlan,
   prepareSolutionChangePreview,
+  promoteSolutionChangeSession,
   publishDevTask,
   queryArtifactCanvasTable,
   queryEmsDevicesCanvasTable,
@@ -172,7 +173,7 @@ export type ConsolePanelSpec = {
 
 type ComposerExecutionPhase = "planned" | "staged" | "preview_ready" | "ready_for_promotion" | "failed";
 
-type ComposerExecutionActionKey = "stage-apply" | "prepare-preview" | "validate" | "finalize";
+type ComposerExecutionActionKey = "stage-apply" | "prepare-preview" | "validate" | "promote" | "finalize";
 
 type PanelProps = {
   onOpenPanel: (panelKey: ConsolePanelKey, params?: Record<string, unknown>) => void;
@@ -252,7 +253,7 @@ function executionPhaseNextActionLabel(phase: ComposerExecutionPhase): string {
 function defaultPrimaryActionForPhase(phase: ComposerExecutionPhase): ComposerExecutionActionKey {
   if (phase === "staged") return "prepare-preview";
   if (phase === "preview_ready") return "validate";
-  if (phase === "ready_for_promotion") return "finalize";
+  if (phase === "ready_for_promotion") return "promote";
   return "stage-apply";
 }
 
@@ -4539,8 +4540,19 @@ function ComposerDetailPanel({
   const previewBuildStatus = String(previewSessionBuild?.status || "").trim().toLowerCase();
   const previewBuildReason = String(previewSessionBuild?.reason || "").trim();
   const previewSummarySource = String(selectedSession?.preview?.source || selectedSession?.preview?.mode || "").trim().toLowerCase();
+  const promotionState = selectedSession?.metadata?.promotion
+    && typeof selectedSession.metadata.promotion === "object"
+    ? selectedSession.metadata.promotion as Record<string, unknown>
+    : null;
+  const promotionResult = String(promotionState?.result || "").trim().toLowerCase();
+  const promotionSucceeded = promotionResult === "success";
+  const promotionTarget = String(promotionState?.target_runtime || "").trim() || "xyn-local";
+  const promotionUrl = String(promotionState?.ui_url || "").trim();
   const latestExecutionResult = (() => {
-    if (executionPhase === "ready_for_promotion") return "Validation complete — ready for promotion.";
+    if (executionPhase === "ready_for_promotion") {
+      if (promotionSucceeded) return "Changes promoted to the primary local runtime — ready to finalize.";
+      return "Validation complete — ready for promotion.";
+    }
     if (executionPhase === "preview_ready") {
       if (previewSummarySource.includes("reused")) return "Preview ready (reused runtime).";
       if (previewPrimaryUrl) return `Preview ready (${previewPrimaryUrl}).`;
@@ -4564,7 +4576,8 @@ function ComposerDetailPanel({
   const canStageApply = canRunExecution && executionPhase !== "ready_for_promotion";
   const canPreparePreview = canRunExecution && (executionPhase === "staged" || executionPhase === "failed");
   const canValidate = canRunExecution && (executionPhase === "preview_ready" || executionPhase === "failed");
-  const canFinalize = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion";
+  const canPromote = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion";
+  const canFinalize = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion" && promotionSucceeded;
   const hasExecutionProgress = ["staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion", "completed", "applied"].includes(
     String(selectedSession?.execution_status || "").toLowerCase()
   );
@@ -5544,6 +5557,46 @@ function ComposerDetailPanel({
                     {executionPhase === "ready_for_promotion" ? (
                       <button
                         type="button"
+                        className={`${primaryExecutionAction === "promote" ? "primary" : "ghost"} sm`}
+                        disabled={!canPromote || busyAction === "promote"}
+                        onClick={() => {
+                          setBusyAction("promote");
+                          void withSessionGuard(async () => {
+                            const response = await promoteSolutionChangeSession(
+                              String(selectedSession.application_id),
+                              String(selectedSession.id)
+                            );
+                            mergeUpdatedSession(response.session);
+                            const promotedState = response.session?.metadata?.promotion;
+                            const promotedUiUrl = String(
+                              promotedState && typeof promotedState === "object" ? (promotedState as Record<string, unknown>).ui_url || "" : ""
+                            ).trim();
+                            if (response.already_up_to_date) {
+                              setMessage("Primary local runtime is already up to date.");
+                              return;
+                            }
+                            if (promotedUiUrl) {
+                              setMessage(
+                                <>
+                                  Changes applied to running environment (
+                                  <a href={promotedUiUrl} target="_blank" rel="noreferrer">
+                                    {promotedUiUrl}
+                                  </a>
+                                  ).
+                                </>
+                              );
+                              return;
+                            }
+                            setMessage("Changes applied to running environment.");
+                          });
+                        }}
+                      >
+                        Promote
+                      </button>
+                    ) : null}
+                    {executionPhase === "ready_for_promotion" ? (
+                      <button
+                        type="button"
                         className={`${primaryExecutionAction === "finalize" ? "primary" : "ghost"} sm`}
                         disabled={!canFinalize || busyAction === "finalize"}
                         onClick={() => {
@@ -5569,10 +5622,12 @@ function ComposerDetailPanel({
                     ? "Blocked: unresolved planner question or option set."
                     : !hasDraftPlan
                       ? "Blocked: no draft plan yet."
-                      : hasPendingCheckpoint
+                        : hasPendingCheckpoint
                         ? "Blocked: checkpoint approval pending."
                         : !hasApprovedStageCheckpoint
                           ? "Blocked: required checkpoint is not approved."
+                          : executionPhase === "ready_for_promotion" && !promotionSucceeded
+                            ? "Blocked: promote validated changes to the primary runtime before finalizing."
                           : isSessionFinalized
                             ? "Session finalized."
                           : `Current phase: ${currentPhaseLabel}. Next step: ${derivedExecutionNextAction}.`}
@@ -5610,6 +5665,18 @@ function ComposerDetailPanel({
                   <div>
                     <span className="field-label">Build Reason</span>
                     <p>{previewBuildReason}</p>
+                  </div>
+                ) : null}
+                {promotionState ? (
+                  <div>
+                    <span className="field-label">Promotion</span>
+                    <p>{titleCaseLabel(promotionResult || "unknown")} · {promotionTarget}</p>
+                  </div>
+                ) : null}
+                {promotionUrl ? (
+                  <div>
+                    <span className="field-label">Promoted URL</span>
+                    <p>{promotionUrl}</p>
                   </div>
                 ) : null}
                 {sessionExecutionSummary ? (

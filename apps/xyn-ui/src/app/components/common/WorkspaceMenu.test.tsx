@@ -20,6 +20,7 @@ describe("WorkspaceMenu", () => {
     render(<WorkspaceMenu activeWorkspaceId="ws-1" workspaces={workspaces} onWorkspaceChange={onWorkspaceChange} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    expect(document.querySelector(".workspace-menu-popover")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Workspace Three" }));
 
     expect(onWorkspaceChange).toHaveBeenCalledWith("ws-3");

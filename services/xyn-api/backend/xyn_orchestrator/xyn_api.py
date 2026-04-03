@@ -37699,6 +37699,146 @@ def application_solution_change_session_validate(
 
 @csrf_exempt
 @login_required
+def application_solution_change_session_promote(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    execution_status = str(session.execution_status or "").strip().lower()
+    if execution_status != "ready_for_promotion":
+        return JsonResponse(
+            {
+                "error": "change session can only be promoted when execution_status=ready_for_promotion",
+            },
+            status=409,
+        )
+
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    promotion = metadata.get("promotion") if isinstance(metadata.get("promotion"), dict) else {}
+    if str(promotion.get("result") or "").strip().lower() == "success":
+        memberships_by_artifact_id = {
+            str(member.artifact_id): member
+            for member in ApplicationArtifactMembership.objects.filter(application=application)
+            .select_related("artifact", "artifact__type")
+            .all()
+        }
+        return JsonResponse(
+            {
+                "promoted": True,
+                "already_up_to_date": True,
+                "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+            }
+        )
+
+    now_iso = timezone.now().isoformat()
+    payload = {
+        "name": "local",
+        "force": True,
+        "workspace_slug": str(getattr(application.workspace, "slug", "") or "").strip(),
+        "prefer_local_images": True,
+        "prefer_local_sources": True,
+    }
+    try:
+        response = _seed_api_request(
+            method="POST",
+            path="/api/v1/provision/local-instance",
+            payload=payload,
+            timeout=180,
+        )
+    except requests.RequestException as exc:
+        metadata["promotion"] = {
+            "promoted_at": "",
+            "attempted_at": now_iso,
+            "promote_mode": "local_runtime_update",
+            "target_runtime": "xyn-local",
+            "result": "failed",
+            "reason": "xyn_core_unreachable",
+            "details": exc.__class__.__name__,
+            "by_user_identity_id": str(identity.id),
+        }
+        session.metadata_json = metadata
+        session.save(update_fields=["metadata_json", "updated_at"])
+        return JsonResponse({"error": "failed to reach xyn-core for promotion"}, status=502)
+
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        metadata["promotion"] = {
+            "promoted_at": "",
+            "attempted_at": now_iso,
+            "promote_mode": "local_runtime_update",
+            "target_runtime": "xyn-local",
+            "result": "failed",
+            "reason": "invalid_response",
+            "details": response.text[:300],
+            "by_user_identity_id": str(identity.id),
+        }
+        session.metadata_json = metadata
+        session.save(update_fields=["metadata_json", "updated_at"])
+        return JsonResponse({"error": "unexpected xyn-core response during promotion"}, status=502)
+    try:
+        promote_payload = response.json() if response.content else {}
+    except ValueError:
+        promote_payload = {}
+    if response.status_code >= 400:
+        metadata["promotion"] = {
+            "promoted_at": "",
+            "attempted_at": now_iso,
+            "promote_mode": "local_runtime_update",
+            "target_runtime": "xyn-local",
+            "result": "failed",
+            "reason": "promotion_request_failed",
+            "details": str((promote_payload or {}).get("detail") or (promote_payload or {}).get("error") or response.text[:300]),
+            "by_user_identity_id": str(identity.id),
+        }
+        session.metadata_json = metadata
+        session.save(update_fields=["metadata_json", "updated_at"])
+        return JsonResponse(
+            {"error": "promotion request failed", "details": metadata["promotion"]["details"]},
+            status=409,
+        )
+
+    metadata["promotion"] = {
+        "promoted_at": now_iso,
+        "attempted_at": now_iso,
+        "promote_mode": "local_runtime_update",
+        "target_runtime": "xyn-local",
+        "result": "success",
+        "reason": "primary_local_runtime_reprovisioned",
+        "by_user_identity_id": str(identity.id),
+        "deployment_id": str((promote_payload or {}).get("deployment_id") or ""),
+        "compose_project": str((promote_payload or {}).get("compose_project") or ""),
+        "ui_url": str((promote_payload or {}).get("ui_url") or ""),
+        "api_url": str((promote_payload or {}).get("api_url") or ""),
+        "provision_status": str((promote_payload or {}).get("status") or ""),
+    }
+    session.metadata_json = metadata
+    session.save(update_fields=["metadata_json", "updated_at"])
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    return JsonResponse(
+        {
+            "promoted": True,
+            "already_up_to_date": False,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
 def application_solution_change_session_commits(
     request: HttpRequest, application_id: str, session_id: str
 ) -> JsonResponse:

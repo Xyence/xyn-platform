@@ -56,6 +56,7 @@ from xyn_orchestrator.xyn_api import (
     application_solution_change_session_prepare_preview,
     application_solution_change_session_stage_apply,
     application_solution_change_session_validate,
+    application_solution_change_session_promote,
     application_solution_change_session_finalize,
     application_solution_change_sessions_collection,
     application_detail,
@@ -5321,6 +5322,130 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(session.status, "archived")
         finalized_meta = (session.metadata_json or {}).get("finalized") if isinstance(session.metadata_json, dict) else {}
         self.assertEqual(str(finalized_meta.get("by_user_identity_id") or ""), str(self.identity.id))
+
+    def test_solution_change_session_promote_updates_local_runtime_and_records_metadata(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Promote campaign UX update",
+            request_text="Promote validated campaign UX",
+            created_by=self.identity,
+            status="planned",
+            execution_status="ready_for_promotion",
+        )
+        promote_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/promote",
+            method="post",
+            data=json.dumps({}),
+        )
+        core_response = mock.Mock()
+        core_response.status_code = 200
+        core_response.headers = {"content-type": "application/json"}
+        core_response.content = b'{"status":"succeeded","deployment_id":"dep-1","compose_project":"xyn-local","ui_url":"http://localhost","api_url":"http://localhost/xyn/api"}'
+        core_response.json.return_value = {
+            "status": "succeeded",
+            "deployment_id": "dep-1",
+            "compose_project": "xyn-local",
+            "ui_url": "http://localhost",
+            "api_url": "http://localhost/xyn/api",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch("xyn_orchestrator.xyn_api._seed_api_request", return_value=core_response) as mocked_seed:
+                promoted = application_solution_change_session_promote(promote_request, str(application.id), str(session.id))
+        self.assertEqual(promoted.status_code, 200)
+        payload = json.loads(promoted.content)
+        self.assertTrue(payload.get("promoted"))
+        self.assertFalse(payload.get("already_up_to_date"))
+        mocked_seed.assert_called_once()
+        session.refresh_from_db()
+        promotion_meta = (session.metadata_json or {}).get("promotion") if isinstance(session.metadata_json, dict) else {}
+        self.assertEqual(str(promotion_meta.get("result") or ""), "success")
+        self.assertEqual(str(promotion_meta.get("promote_mode") or ""), "local_runtime_update")
+        self.assertEqual(str(promotion_meta.get("target_runtime") or ""), "xyn-local")
+
+    def test_solution_change_session_promote_is_idempotent_when_already_promoted(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Promote campaign UX update",
+            request_text="Promote validated campaign UX",
+            created_by=self.identity,
+            status="planned",
+            execution_status="ready_for_promotion",
+            metadata_json={
+                "promotion": {
+                    "result": "success",
+                    "promoted_at": "2026-04-03T10:00:00Z",
+                    "promote_mode": "local_runtime_update",
+                    "target_runtime": "xyn-local",
+                }
+            },
+        )
+        promote_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/promote",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as mocked_seed:
+                promoted = application_solution_change_session_promote(promote_request, str(application.id), str(session.id))
+        self.assertEqual(promoted.status_code, 200)
+        payload = json.loads(promoted.content)
+        self.assertTrue(payload.get("promoted"))
+        self.assertTrue(payload.get("already_up_to_date"))
+        mocked_seed.assert_not_called()
 
     def test_workspace_linked_change_session_returns_active_matching_session(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
