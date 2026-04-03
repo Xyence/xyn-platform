@@ -1,7 +1,9 @@
+import type { ReactNode } from "react";
+
 type InlineMessageProps = {
   tone?: "info" | "warn" | "error";
   title: string;
-  body?: string;
+  body?: ReactNode;
 };
 
 export default function InlineMessage({ tone = "info", title, body }: InlineMessageProps) {

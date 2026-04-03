@@ -4149,7 +4149,7 @@ function ApplicationPlanDetailPanel({
   const [payload, setPayload] = useState<ApplicationPlanDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<React.ReactNode>(null);
 
   useEffect(() => {
     let active = true;
@@ -5502,7 +5502,15 @@ function ComposerDetailPanel({
                             return;
                           }
                           if (previewUrl) {
-                            setMessage(`Preview ready (${previewUrl}).`);
+                            setMessage(
+                              <>
+                                Preview ready (
+                                <a href={previewUrl} target="_blank" rel="noreferrer">
+                                  {previewUrl}
+                                </a>
+                                ).
+                              </>
+                            );
                             return;
                           }
                           setMessage("Preview preparation completed.");

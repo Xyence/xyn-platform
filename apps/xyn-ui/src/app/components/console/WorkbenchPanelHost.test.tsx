@@ -5447,6 +5447,58 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByRole("button", { name: "Validate" })).toHaveClass("primary");
   });
 
+  it("renders preview-ready message with clickable URL when preview is newly prepared", async () => {
+    const onOpenPanel = vi.fn();
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+          skipped_artifacts: 0,
+          total_artifacts: 1,
+        },
+      },
+    });
+    const previewReadySession = createComposerSession({
+      execution_status: "preview_ready",
+      staged_changes: stagedSession.staged_changes,
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://localhost:32932/app/",
+      },
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(stagedSession))
+      .mockResolvedValueOnce(createComposerState(previewReadySession));
+    apiMocks.prepareSolutionChangePreview.mockResolvedValue({ session: previewReadySession });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Prepare Preview" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Prepare Preview" }).click();
+    });
+
+    const previewLink = await screen.findByRole("link", { name: "http://localhost:32932/app/" });
+    expect(previewLink).toHaveAttribute("href", "http://localhost:32932/app/");
+  });
+
   it("shows open preview action only when preview is ready and opens the preview URL", async () => {
     const onOpenPanel = vi.fn();
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
