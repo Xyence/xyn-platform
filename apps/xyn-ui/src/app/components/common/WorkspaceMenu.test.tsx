@@ -26,4 +26,24 @@ describe("WorkspaceMenu", () => {
     expect(onWorkspaceChange).toHaveBeenCalledWith("ws-3");
     expect(screen.queryByRole("button", { name: "Workspace Two" })).not.toBeInTheDocument();
   });
+
+  it("applies truncation class to workspace option labels for long names", () => {
+    const longName = "Workspace With An Extremely Long Name That Should Not Force The Dropdown Wider Than The Viewport";
+    render(
+      <WorkspaceMenu
+        activeWorkspaceId="ws-1"
+        workspaces={[
+          { id: "ws-1", name: longName },
+          { id: "ws-2", name: `${longName} 2` },
+        ]}
+        onWorkspaceChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Workspace" }));
+    const labels = screen.getAllByText(longName);
+    const optionLabel = labels.find((element) => element.classList.contains("workspace-menu-item-label"));
+    expect(optionLabel).toBeDefined();
+    expect(optionLabel).toHaveClass("workspace-menu-item-label");
+  });
 });

@@ -51,7 +51,7 @@ export default function WorkspaceMenu({ activeWorkspaceId, workspaces, onWorkspa
                 onWorkspaceChange(workspace.id);
               }}
             >
-              <span>{workspace.name}</span>
+              <span className="workspace-menu-item-label">{workspace.name}</span>
               {workspace.id === activeWorkspaceId ? <Check size={14} aria-hidden="true" /> : null}
             </button>
           ))}

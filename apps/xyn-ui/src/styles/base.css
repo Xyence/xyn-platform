@@ -1655,6 +1655,18 @@ button.sm {
   right: auto;
   width: min(320px, calc(100vw - 16px));
   max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+}
+
+.workspace-menu-popover .xyn-menu-item {
+  min-width: 0;
+}
+
+.workspace-menu-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .xyn-popover {
