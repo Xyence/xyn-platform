@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 import uuid
+from typing import Any, Dict, List
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -5328,6 +5329,243 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(preview.get("status"), "failed")
         self.assertFalse(bool(preview.get("newly_built_for_session")))
         self.assertEqual((preview.get("error") or {}).get("reason"), "docker_restart_failed")
+
+    def test_solution_change_session_prepare_preview_provisions_session_scoped_runtime_for_repo_backed_stage(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Campaign UX update",
+            request_text="Update campaign UX",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={"per_artifact_work": [{"artifact_id": str(ui_artifact.id), "planned_work": ["Update shell UI"]}]},
+            staged_changes_json={
+                "artifact_states": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "artifact_title": ui_artifact.title,
+                        "role": "primary_ui",
+                        "apply_state": "queued",
+                    }
+                ],
+                "selected_artifact_ids": [str(ui_artifact.id)],
+                "execution_runs": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "status": "queued",
+                        "dev_task_id": str(uuid.uuid4()),
+                        "runtime_run_id": str(uuid.uuid4()),
+                    }
+                ],
+                "dev_task_ids": [str(uuid.uuid4())],
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        provision_response = mock.Mock()
+        provision_response.status_code = 200
+        provision_response.headers = {"content-type": "application/json"}
+        provision_response.content = b'{"status":"succeeded"}'
+        provision_response.json.return_value = {
+            "status": "succeeded",
+            "compose_project": "xyn-preview-123",
+            "ui_url": "http://xyn-preview-session.localhost",
+            "api_url": "http://api.xyn-preview-session.localhost",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=provision_response,
+        ) as provision_request:
+            preview_response = application_solution_change_session_prepare_preview(
+                preview_request, str(application.id), str(session.id)
+            )
+        preview_payload = json.loads(preview_response.content)
+        self.assertEqual(preview_response.status_code, 200)
+        self.assertTrue(preview_payload["prepared"])
+        preview = preview_payload["session"].get("preview") or {}
+        self.assertTrue(bool(preview.get("isolated_session_preview_requested")))
+        self.assertTrue(bool(preview.get("newly_built_for_session")))
+        self.assertFalse(bool(preview.get("reused_existing_runtime")))
+        self.assertEqual(str(preview.get("primary_url") or ""), "http://xyn-preview-session.localhost")
+        self.assertNotEqual(str(preview.get("primary_url") or ""), "http://localhost")
+        session_build = preview.get("session_build") if isinstance(preview.get("session_build"), dict) else {}
+        self.assertEqual(str(session_build.get("status") or ""), "newly_built_for_session")
+        self.assertEqual(str(session_build.get("reason") or ""), "session_preview_environment_created")
+        self.assertEqual(provision_request.call_count, 1)
+        kwargs = provision_request.call_args.kwargs
+        payload = kwargs.get("payload") if isinstance(kwargs, dict) else {}
+        self.assertTrue(str((payload or {}).get("name") or "").startswith("preview-"))
+        self.assertTrue(str((payload or {}).get("ui_host") or "").startswith("xyn-preview-"))
+        self.assertTrue(str((payload or {}).get("api_host") or "").startswith("api.xyn-preview-"))
+
+    def test_solution_change_session_prepare_preview_uses_unique_session_preview_project_per_session(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+
+        def _session_payload(session_id: str) -> Dict[str, Any]:
+            return {
+                "artifact_states": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "artifact_title": ui_artifact.title,
+                        "role": "primary_ui",
+                        "apply_state": "queued",
+                    }
+                ],
+                "selected_artifact_ids": [str(ui_artifact.id)],
+                "execution_runs": [
+                    {
+                        "artifact_id": str(ui_artifact.id),
+                        "status": "queued",
+                        "dev_task_id": str(uuid.uuid4()),
+                        "runtime_run_id": str(uuid.uuid4()),
+                    }
+                ],
+                "dev_task_ids": [str(uuid.uuid4())],
+                "session_id": session_id,
+            }
+
+        session_one = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Preview one",
+            request_text="Update campaign UX",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={"per_artifact_work": [{"artifact_id": str(ui_artifact.id), "planned_work": ["Update shell UI"]}]},
+            staged_changes_json=_session_payload("one"),
+            execution_status="staged",
+        )
+        session_two = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Preview two",
+            request_text="Update campaign UX",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            plan_json={"per_artifact_work": [{"artifact_id": str(ui_artifact.id), "planned_work": ["Update shell UI"]}]},
+            staged_changes_json=_session_payload("two"),
+            execution_status="staged",
+        )
+
+        def _make_response(url: str, compose_project: str) -> mock.Mock:
+            response = mock.Mock()
+            response.status_code = 200
+            response.headers = {"content-type": "application/json"}
+            response.content = b'{"status":"succeeded"}'
+            response.json.return_value = {
+                "status": "succeeded",
+                "compose_project": compose_project,
+                "ui_url": url,
+                "api_url": f"{url}/api",
+            }
+            return response
+
+        provision_calls: List[Dict[str, Any]] = []
+
+        def _seed_side_effect(**kwargs: Any) -> mock.Mock:
+            payload = kwargs.get("payload") if isinstance(kwargs, dict) else {}
+            payload = payload if isinstance(payload, dict) else {}
+            provision_calls.append(dict(payload))
+            name = str(payload.get("name") or "")
+            return _make_response(
+                url=f"http://{name}.localhost",
+                compose_project=f"xyn-{name}",
+            )
+
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            side_effect=_seed_side_effect,
+        ):
+            request_one = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session_one.id}/prepare-preview",
+                method="post",
+                data=json.dumps({}),
+            )
+            response_one = application_solution_change_session_prepare_preview(
+                request_one, str(application.id), str(session_one.id)
+            )
+            request_two = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session_two.id}/prepare-preview",
+                method="post",
+                data=json.dumps({}),
+            )
+            response_two = application_solution_change_session_prepare_preview(
+                request_two, str(application.id), str(session_two.id)
+            )
+
+        payload_one = json.loads(response_one.content)
+        payload_two = json.loads(response_two.content)
+        preview_one = payload_one.get("session", {}).get("preview") or {}
+        preview_two = payload_two.get("session", {}).get("preview") or {}
+        self.assertEqual(response_one.status_code, 200)
+        self.assertEqual(response_two.status_code, 200)
+        self.assertEqual(len(provision_calls), 2)
+        self.assertNotEqual(str(provision_calls[0].get("name") or ""), str(provision_calls[1].get("name") or ""))
+        self.assertNotEqual(str(preview_one.get("primary_url") or ""), str(preview_two.get("primary_url") or ""))
 
     def test_application_plan_detail_patch_updates_plan_status(self):
         plan = ApplicationPlan.objects.create(

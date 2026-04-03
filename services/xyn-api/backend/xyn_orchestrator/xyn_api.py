@@ -32593,6 +32593,134 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
     local_public_base_url = str(os.getenv("XYN_PUBLIC_BASE_URL", "http://localhost") or "http://localhost").strip().rstrip("/")
     local_compose_project = str(os.getenv("XYN_LOCAL_COMPOSE_PROJECT", "xyn-local") or "xyn-local").strip() or "xyn-local"
 
+    def _session_preview_candidate_artifact_ids() -> List[str]:
+        selected_ids = [str(item).strip() for item in (staged.get("selected_artifact_ids") or []) if str(item).strip()]
+        if selected_ids:
+            return selected_ids
+        inferred: List[str] = []
+        for row in artifact_states:
+            if not isinstance(row, dict):
+                continue
+            artifact_id = str(row.get("artifact_id") or "").strip()
+            if artifact_id and artifact_id not in inferred:
+                inferred.append(artifact_id)
+        return inferred
+
+    def _session_preview_should_provision_isolated_runtime(*, artifact_ids: List[str]) -> bool:
+        if not artifact_ids:
+            return False
+        execution_runs = staged.get("execution_runs") if isinstance(staged.get("execution_runs"), list) else []
+        has_stage_execution_evidence = bool(execution_runs) or bool(staged.get("dev_task_ids"))
+        if not has_stage_execution_evidence:
+            return False
+        artifacts = list(Artifact.objects.filter(id__in=artifact_ids))
+        if not artifacts:
+            return False
+        for artifact in artifacts:
+            ownership = resolve_artifact_ownership(artifact)
+            edit_mode = str(ownership.get("edit_mode") or "").strip().lower()
+            if edit_mode == "repo_backed":
+                return True
+        return False
+
+    def _provision_session_preview_environment() -> Dict[str, Any]:
+        started_at = timezone.now().isoformat()
+        session_token = str(session.id).replace("-", "")[:8]
+        if not session_token:
+            return {
+                "attempted": False,
+                "supported": False,
+                "status": "reused",
+                "reason": "session_id_unavailable",
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        project_name = f"preview-{session_token}"
+        ui_host = f"xyn-preview-{session_token}.localhost"
+        api_host = f"api.xyn-preview-{session_token}.localhost"
+        payload = {
+            "name": project_name,
+            "workspace_slug": str(getattr(session.workspace, "slug", "") or "").strip(),
+            "ui_host": ui_host,
+            "api_host": api_host,
+        }
+        try:
+            response = _seed_api_request(
+                method="POST",
+                path="/api/v1/provision/local-instance",
+                payload=payload,
+                timeout=180,
+            )
+        except requests.RequestException as exc:
+            return {
+                "attempted": True,
+                "supported": True,
+                "status": "failed",
+                "reason": "session_preview_provision_unreachable",
+                "details": exc.__class__.__name__,
+                "session_preview_project": f"xyn-{project_name}",
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        content_type = str(response.headers.get("content-type") or "").lower()
+        if "application/json" not in content_type:
+            return {
+                "attempted": True,
+                "supported": True,
+                "status": "failed",
+                "reason": "session_preview_provision_invalid_response",
+                "details": response.text[:300],
+                "session_preview_project": f"xyn-{project_name}",
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        try:
+            provision_payload = response.json() if response.content else {}
+        except ValueError:
+            provision_payload = {}
+        if response.status_code >= 400:
+            return {
+                "attempted": True,
+                "supported": True,
+                "status": "failed",
+                "reason": "session_preview_provision_failed",
+                "details": str((provision_payload or {}).get("detail") or (provision_payload or {}).get("error") or response.text[:300]),
+                "session_preview_project": f"xyn-{project_name}",
+                "provision_status": str((provision_payload or {}).get("status") or "").strip().lower(),
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        ui_url = str((provision_payload or {}).get("ui_url") or "").strip()
+        api_url = str((provision_payload or {}).get("api_url") or "").strip()
+        compose_project = str((provision_payload or {}).get("compose_project") or "").strip() or f"xyn-{project_name}"
+        provision_status = str((provision_payload or {}).get("status") or "").strip().lower()
+        if not ui_url:
+            return {
+                "attempted": True,
+                "supported": True,
+                "status": "failed",
+                "reason": "session_preview_missing_ui_url",
+                "details": "Provisioning response did not include a UI URL.",
+                "compose_project": compose_project,
+                "provision_status": provision_status,
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        return {
+            "attempted": True,
+            "supported": True,
+            "status": "newly_built_for_session",
+            "reason": "session_preview_environment_created",
+            "details": "",
+            "compose_project": compose_project,
+            "ui_url": ui_url,
+            "api_url": api_url,
+            "provision_status": provision_status,
+            "session_preview_project": f"xyn-{project_name}",
+            "started_at": started_at,
+            "completed_at": timezone.now().isoformat(),
+        }
+
     def _platform_preview_runtime_fallback(artifact: Artifact) -> Dict[str, Any]:
         slug = str(_artifact_slug(artifact) or "").strip()
         if slug not in {"core.workbench", "xyn-ui", "xyn-api"}:
@@ -32761,6 +32889,20 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             "completed_at": timezone.now().isoformat(),
         }
 
+    selected_artifact_ids_for_preview = _session_preview_candidate_artifact_ids()
+    isolated_session_preview_requested = _session_preview_should_provision_isolated_runtime(
+        artifact_ids=selected_artifact_ids_for_preview
+    )
+    session_preview_runtime: Dict[str, Any] = {}
+    session_preview_fallback_reason = ""
+    if isolated_session_preview_requested:
+        session_preview_runtime = _provision_session_preview_environment()
+        if str(session_preview_runtime.get("status") or "").strip().lower() != "newly_built_for_session":
+            session_preview_fallback_reason = str(
+                session_preview_runtime.get("reason") or "session_preview_environment_unavailable"
+            ).strip() or "session_preview_environment_unavailable"
+            session_preview_runtime = {}
+
     artifact_rows: List[Dict[str, Any]] = []
     selected_artifact_ids: List[str] = []
     compose_projects: set[str] = set()
@@ -32803,7 +32945,11 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         public_app_url = str(runtime_target.get("public_app_url") or "").strip()
         compose_project = str(runtime_target.get("compose_project") or "").strip()
         fallback_runtime = {}
-        if not runtime_base_url or not compose_project:
+        if session_preview_runtime:
+            public_app_url = str(session_preview_runtime.get("ui_url") or "").strip()
+            runtime_base_url = str(session_preview_runtime.get("api_url") or public_app_url).strip()
+            compose_project = str(session_preview_runtime.get("compose_project") or "").strip()
+        elif not runtime_base_url or not compose_project:
             fallback_runtime = _platform_preview_runtime_fallback(artifact)
             if fallback_runtime:
                 runtime_base_url = str(fallback_runtime.get("runtime_base_url") or "").strip()
@@ -32826,6 +32972,12 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             {
                 "ok": True,
                 "status_code": 200,
+                "path": "session_preview_environment_created",
+            }
+            if session_preview_runtime
+            else {
+                "ok": True,
+                "status_code": 200,
                 "path": "local_platform_runtime_fallback",
             }
             if fallback_runtime
@@ -32842,7 +32994,8 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 "app_slug": app_slug,
                 "status": "ready" if probe.get("ok") else "failed",
                 "runtime_owner": str(
-                    runtime_target.get("runtime_owner")
+                    session_preview_runtime.get("runtime_owner")
+                    or runtime_target.get("runtime_owner")
                     or fallback_runtime.get("runtime_owner")
                     or "sibling"
                 ),
@@ -32860,7 +33013,8 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                     or ""
                 ).strip(),
                 "source_build_job_id": str(
-                    runtime_target.get("source_build_job_id")
+                    session_preview_runtime.get("source_build_job_id")
+                    or runtime_target.get("source_build_job_id")
                     or fallback_runtime.get("source_build_job_id")
                     or ""
                 ).strip(),
@@ -32880,9 +33034,16 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         if url and url not in preview_urls:
             preview_urls.append(url)
 
-    session_build = _launch_preview_for_session(artifact_rows=artifact_rows, compose_projects=compose_projects)
+    session_build = (
+        dict(session_preview_runtime)
+        if session_preview_runtime
+        else _launch_preview_for_session(artifact_rows=artifact_rows, compose_projects=compose_projects)
+    )
+    if not session_preview_runtime and session_preview_fallback_reason:
+        session_build = dict(session_build)
+        session_build["fallback_reason"] = session_preview_fallback_reason
     build_status = str(session_build.get("status") or "").strip().lower()
-    built_for_session = bool(session_build.get("attempted")) and build_status == "succeeded"
+    built_for_session = bool(session_build.get("attempted")) and build_status in {"succeeded", "newly_built_for_session"}
     reused_existing_runtime = not built_for_session
     if build_status == "failed":
         for artifact_row in artifact_rows:
@@ -32899,6 +33060,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         "prepared_at": now_iso,
         "newly_built_for_session": built_for_session,
         "reused_existing_runtime": reused_existing_runtime,
+        "isolated_session_preview_requested": isolated_session_preview_requested,
         "selected_artifact_ids": selected_artifact_ids,
         "artifact_count": len(selected_artifact_ids),
         "artifacts": artifact_rows,
@@ -32937,6 +33099,12 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         preview_payload["error"] = {
             "reason": reason,
             "details": details,
+        }
+    elif session_preview_fallback_reason:
+        preview_payload["warning"] = {
+            "reason": "session_preview_environment_create_failed_fallback_reused",
+            "details": "Isolated session preview could not be provisioned; reused existing runtime target.",
+            "fallback_reason": session_preview_fallback_reason,
         }
     else:
         primary_row = next((row for row in artifact_rows if isinstance(row, dict) and str(row.get("status") or "") == "ready"), None)
