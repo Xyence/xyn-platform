@@ -2923,6 +2923,8 @@ export type SolutionChangeSession = {
   preview?: Record<string, unknown>;
   validation?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  repo_commit_count?: number;
+  requires_commit_provenance?: boolean;
   planning?: SolutionPlanningState;
   created_at: string;
   updated_at: string;

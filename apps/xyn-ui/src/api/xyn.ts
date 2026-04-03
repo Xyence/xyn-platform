@@ -4764,6 +4764,31 @@ export async function promoteSolutionChangeSession(
   return handle<{ promoted: boolean; already_up_to_date?: boolean; session: SolutionChangeSession }>(response);
 }
 
+export async function commitSolutionChangeSession(
+  applicationId: string,
+  sessionId: string
+): Promise<{
+  committed: boolean;
+  already_committed?: boolean;
+  no_changes?: boolean;
+  commits?: Array<Record<string, unknown>>;
+  session: SolutionChangeSession;
+}> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/commit`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<{
+    committed: boolean;
+    already_committed?: boolean;
+    no_changes?: boolean;
+    commits?: Array<Record<string, unknown>>;
+    session: SolutionChangeSession;
+  }>(response);
+}
+
 export async function continueSolutionChangeSessionRefinement(
   applicationId: string,
   sessionId: string,

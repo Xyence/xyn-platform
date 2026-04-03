@@ -33,6 +33,7 @@ import {
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
   decideSolutionPlanningCheckpoint,
+  commitSolutionChangeSession,
   finalizeSolutionChangeSession,
   generateSolutionChangePlan,
   prepareSolutionChangePreview,
@@ -173,7 +174,7 @@ export type ConsolePanelSpec = {
 
 type ComposerExecutionPhase = "planned" | "staged" | "preview_ready" | "ready_for_promotion" | "failed";
 
-type ComposerExecutionActionKey = "stage-apply" | "prepare-preview" | "validate" | "promote" | "finalize";
+type ComposerExecutionActionKey = "stage-apply" | "prepare-preview" | "validate" | "promote" | "commit" | "finalize";
 
 type PanelProps = {
   onOpenPanel: (panelKey: ConsolePanelKey, params?: Record<string, unknown>) => void;
@@ -4523,7 +4524,7 @@ function ComposerDetailPanel({
   const validationStatusToken = String(selectedSession?.validation?.status || "").trim().toLowerCase();
   const executionPhase = deriveComposerExecutionPhase(executionStatusToken, previewStatusToken, validationStatusToken);
   const currentPhaseLabel = executionPhaseLabel(executionPhase);
-  const derivedExecutionNextAction = executionPhaseNextActionLabel(executionPhase);
+  const baseExecutionNextAction = executionPhaseNextActionLabel(executionPhase);
   const sessionExecutionSummary = selectedSession?.staged_changes?.execution_summary
     && typeof selectedSession.staged_changes.execution_summary === "object"
     ? selectedSession.staged_changes.execution_summary as Record<string, unknown>
@@ -4548,8 +4549,19 @@ function ComposerDetailPanel({
   const promotionSucceeded = promotionResult === "success";
   const promotionTarget = String(promotionState?.target_runtime || "").trim() || "xyn-local";
   const promotionUrl = String(promotionState?.ui_url || "").trim();
+  const repoCommitCount = Number(selectedSession?.repo_commit_count || 0);
+  const requiresCommitProvenance = Boolean(selectedSession?.requires_commit_provenance);
+  const commitRequiredAndMissing = requiresCommitProvenance && repoCommitCount < 1;
+  const derivedExecutionNextAction = executionPhase === "ready_for_promotion"
+    ? !promotionSucceeded
+      ? "Promote validated changes to the primary runtime"
+      : commitRequiredAndMissing
+        ? "Commit repository changes"
+        : "Finalize session"
+    : baseExecutionNextAction;
   const latestExecutionResult = (() => {
     if (executionPhase === "ready_for_promotion") {
+      if (promotionSucceeded && commitRequiredAndMissing) return "Changes promoted. Commit repository changes before finalizing.";
       if (promotionSucceeded) return "Changes promoted to the primary local runtime — ready to finalize.";
       return "Validation complete — ready for promotion.";
     }
@@ -4569,7 +4581,13 @@ function ComposerDetailPanel({
     if (executionPhase === "failed") return "Execution failed. Retry the failed step.";
     return "No execution action has run yet.";
   })();
-  const primaryExecutionAction = defaultPrimaryActionForPhase(executionPhase);
+  const primaryExecutionAction = (() => {
+    const fallback = defaultPrimaryActionForPhase(executionPhase);
+    if (executionPhase !== "ready_for_promotion") return fallback;
+    if (!promotionSucceeded) return "promote";
+    if (commitRequiredAndMissing) return "commit";
+    return "finalize";
+  })();
   const sessionStatusToken = String(selectedSession?.status || "").trim().toLowerCase();
   const isSessionFinalized = ["finalized", "completed", "archived"].includes(sessionStatusToken)
     || ["completed", "finalized", "archived"].includes(executionStatusToken);
@@ -4577,7 +4595,13 @@ function ComposerDetailPanel({
   const canPreparePreview = canRunExecution && (executionPhase === "staged" || executionPhase === "failed");
   const canValidate = canRunExecution && (executionPhase === "preview_ready" || executionPhase === "failed");
   const canPromote = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion";
-  const canFinalize = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion" && promotionSucceeded;
+  const canCommit = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion" && promotionSucceeded && commitRequiredAndMissing;
+  const canFinalize =
+    canRunExecution
+    && !isSessionFinalized
+    && executionPhase === "ready_for_promotion"
+    && promotionSucceeded
+    && (!requiresCommitProvenance || repoCommitCount > 0);
   const hasExecutionProgress = ["staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion", "completed", "applied"].includes(
     String(selectedSession?.execution_status || "").toLowerCase()
   );
@@ -5597,6 +5621,39 @@ function ComposerDetailPanel({
                     {executionPhase === "ready_for_promotion" ? (
                       <button
                         type="button"
+                        className={`${primaryExecutionAction === "commit" ? "primary" : "ghost"} sm`}
+                        disabled={!canCommit || busyAction === "commit"}
+                        onClick={() => {
+                          setBusyAction("commit");
+                          void withSessionGuard(async () => {
+                            const response = await commitSolutionChangeSession(
+                              String(selectedSession.application_id),
+                              String(selectedSession.id)
+                            );
+                            mergeUpdatedSession(response.session);
+                            const commits = Array.isArray(response.commits) ? response.commits : [];
+                            const latestCommit = commits.length > 0 && commits[0] && typeof commits[0] === "object"
+                              ? commits[0] as Record<string, unknown>
+                              : null;
+                            const latestSha = String(latestCommit?.commit_sha || "").trim();
+                            if (response.already_committed) {
+                              setMessage(latestSha ? `Repository changes already committed (${latestSha.slice(0, 12)}).` : "Repository changes already committed.");
+                              return;
+                            }
+                            if (response.no_changes) {
+                              setMessage("No changes to commit.");
+                              return;
+                            }
+                            setMessage(latestSha ? `Committed repository changes (${latestSha.slice(0, 12)}).` : "Committed repository changes.");
+                          });
+                        }}
+                      >
+                        Commit Changes
+                      </button>
+                    ) : null}
+                    {executionPhase === "ready_for_promotion" ? (
+                      <button
+                        type="button"
                         className={`${primaryExecutionAction === "finalize" ? "primary" : "ghost"} sm`}
                         disabled={!canFinalize || busyAction === "finalize"}
                         onClick={() => {
@@ -5628,6 +5685,8 @@ function ComposerDetailPanel({
                           ? "Blocked: required checkpoint is not approved."
                           : executionPhase === "ready_for_promotion" && !promotionSucceeded
                             ? "Blocked: promote validated changes to the primary runtime before finalizing."
+                            : executionPhase === "ready_for_promotion" && commitRequiredAndMissing
+                              ? "Blocked: commit repository changes before finalizing."
                           : isSessionFinalized
                             ? "Session finalized."
                           : `Current phase: ${currentPhaseLabel}. Next step: ${derivedExecutionNextAction}.`}
@@ -5679,6 +5738,13 @@ function ComposerDetailPanel({
                     <p>{promotionUrl}</p>
                   </div>
                 ) : null}
+                <div>
+                  <span className="field-label">Repository Commits</span>
+                  <p>
+                    {repoCommitCount}
+                    {requiresCommitProvenance ? " required" : " optional"}
+                  </p>
+                </div>
                 {sessionExecutionSummary ? (
                   <div>
                     <span className="field-label">Execution Summary</span>

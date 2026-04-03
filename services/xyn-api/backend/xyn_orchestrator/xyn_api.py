@@ -32705,6 +32705,7 @@ def _serialize_solution_change_session(
         )
     planning_state = _solution_planning_state(session)
     commit_count = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).count()
+    requires_commit_provenance = _solution_change_session_requires_commit_provenance(session)
     return {
         "id": str(session.id),
         "workspace_id": str(session.workspace_id),
@@ -32724,6 +32725,7 @@ def _serialize_solution_change_session(
         "validation": session.validation_json if isinstance(session.validation_json, dict) else {},
         "metadata": session.metadata_json if isinstance(session.metadata_json, dict) else {},
         "repo_commit_count": int(commit_count),
+        "requires_commit_provenance": bool(requires_commit_provenance),
         "planning": planning_state,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
@@ -32932,6 +32934,93 @@ def _resolve_stage_apply_target_branch(
         f"unable to determine checked out branch for {token} at {repo_root}; "
         f"fallback branch '{fallback}' was not used for safety"
     )
+
+
+def _git_repo_command(
+    *,
+    repo_root: Path,
+    args: List[str],
+    timeout_seconds: int = 20,
+) -> Tuple[int, str, str]:
+    safe_directory = str(repo_root).strip()
+    cmd = ["git", "-c", f"safe.directory={safe_directory}", "-C", str(repo_root), *args]
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = str(exc.stdout or "").strip()
+        stderr = str(exc.stderr or "").strip()
+        return 124, stdout, stderr or f"command timed out after {timeout_seconds}s"
+    except Exception as exc:  # pragma: no cover - defensive
+        return 1, "", str(exc)
+    return int(proc.returncode or 0), str(proc.stdout or "").strip(), str(proc.stderr or "").strip()
+
+
+def _git_changed_files_for_paths(
+    *,
+    repo_root: Path,
+    pathspecs: List[str],
+) -> List[str]:
+    scoped = [str(item).strip() for item in pathspecs if str(item).strip()]
+    if not scoped:
+        return []
+    commands = [
+        ["diff", "--name-only", "--", *scoped],
+        ["diff", "--cached", "--name-only", "--", *scoped],
+        ["ls-files", "--others", "--exclude-standard", "--", *scoped],
+    ]
+    changed: List[str] = []
+    for args in commands:
+        code, out, _err = _git_repo_command(repo_root=repo_root, args=args)
+        if code != 0:
+            continue
+        for line in (out or "").splitlines():
+            token = str(line or "").strip()
+            if not token:
+                continue
+            normalized = _normalized_repo_path(token)
+            if normalized and normalized not in changed:
+                changed.append(normalized)
+    return changed
+
+
+def _solution_change_commit_message(session: SolutionChangeSession) -> str:
+    request_text = str(session.request_text or "").strip()
+    title = str(session.title or "").strip()
+    summary = title or request_text or "Apply validated solution change"
+    summary = re.sub(r"\s+", " ", summary).strip()
+    if len(summary) > 120:
+        summary = summary[:117].rstrip() + "..."
+    return f"Xyn session {session.id}: {summary}"
+
+
+def _solution_change_commit_repo_scopes(session: SolutionChangeSession) -> Dict[str, List[str]]:
+    selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    if not selected_ids:
+        staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+        selected_ids = {str(item).strip() for item in (staged.get("selected_artifact_ids") or []) if str(item).strip()}
+    if not selected_ids:
+        return {}
+    artifacts = list(Artifact.objects.filter(id__in=selected_ids))
+    repo_scopes: Dict[str, List[str]] = {}
+    for artifact in artifacts:
+        ownership = resolve_artifact_ownership(artifact)
+        if str(ownership.get("edit_mode") or "").strip().lower() != "repo_backed":
+            continue
+        repo_slug = str(ownership.get("repo_slug") or "").strip()
+        allowed_paths = [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()]
+        if not repo_slug or not allowed_paths:
+            continue
+        existing = repo_scopes.setdefault(repo_slug, [])
+        for path in allowed_paths:
+            if path not in existing:
+                existing.append(path)
+    return repo_scopes
 
 
 def _stage_solution_change_dispatch_dev_tasks(
@@ -37866,6 +37955,179 @@ def _solution_change_session_requires_commit_provenance(session: SolutionChangeS
     if not selected_ids:
         return False
     return Artifact.objects.filter(id__in=selected_ids, edit_mode="repo_backed").exists()
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_commit(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    execution_status = str(session.execution_status or "").strip().lower()
+    if execution_status not in {"ready_for_promotion", "promoted"}:
+        return JsonResponse(
+            {
+                "error": "change session can only be committed when execution_status=ready_for_promotion or promoted",
+            },
+            status=409,
+        )
+    repo_scopes = _solution_change_commit_repo_scopes(session)
+    if not repo_scopes:
+        return JsonResponse(
+            {"error": "selected artifacts do not expose repo-backed editable ownership for commit"},
+            status=409,
+        )
+    commit_message = _solution_change_commit_message(session)
+    commit_records: List[Dict[str, Any]] = []
+    no_changes_repos: List[str] = []
+    for repo_slug, allowed_paths in sorted(repo_scopes.items()):
+        managed_repo = ManagedRepository.objects.filter(slug=repo_slug, is_active=True).first()
+        fallback_branch = str(getattr(managed_repo, "default_branch", "") or "develop").strip() or "develop"
+        branch, _branch_source, branch_error = _resolve_stage_apply_target_branch(
+            repo_slug=repo_slug,
+            fallback_branch=fallback_branch,
+        )
+        if not branch:
+            return JsonResponse(
+                {"error": "unable to determine current branch for repository commit", "repository_slug": repo_slug, "details": branch_error},
+                status=409,
+            )
+        repo_root = _resolve_local_repo_root(repo_slug)
+        if repo_root is None:
+            return JsonResponse(
+                {"error": "unable to resolve local repository root for commit", "repository_slug": repo_slug},
+                status=409,
+            )
+        changed_files = _git_changed_files_for_paths(repo_root=repo_root, pathspecs=allowed_paths)
+        if not changed_files:
+            no_changes_repos.append(repo_slug)
+            continue
+        add_code, _add_out, add_err = _git_repo_command(
+            repo_root=repo_root,
+            args=["add", "--", *changed_files],
+        )
+        if add_code != 0:
+            return JsonResponse(
+                {
+                    "error": "failed to stage repository changes for commit",
+                    "repository_slug": repo_slug,
+                    "details": add_err or "git add failed",
+                },
+                status=409,
+            )
+        commit_code, _commit_out, commit_err = _git_repo_command(
+            repo_root=repo_root,
+            args=["commit", "-m", commit_message, "--", *changed_files],
+        )
+        if commit_code != 0:
+            if "nothing to commit" in str(commit_err or "").lower():
+                no_changes_repos.append(repo_slug)
+                continue
+            return JsonResponse(
+                {
+                    "error": "failed to create repository commit",
+                    "repository_slug": repo_slug,
+                    "details": commit_err or "git commit failed",
+                },
+                status=409,
+            )
+        sha_code, sha_out, sha_err = _git_repo_command(repo_root=repo_root, args=["rev-parse", "HEAD"])
+        if sha_code != 0 or not str(sha_out or "").strip():
+            return JsonResponse(
+                {
+                    "error": "commit created but commit SHA could not be resolved",
+                    "repository_slug": repo_slug,
+                    "details": sha_err or "git rev-parse failed",
+                },
+                status=409,
+            )
+        commit_sha = str(sha_out or "").strip()
+        record, _created = SolutionChangeSessionRepoCommit.objects.update_or_create(
+            workspace=session.workspace,
+            solution_change_session=session,
+            repository_slug=repo_slug,
+            commit_sha=commit_sha,
+            defaults={
+                "branch": branch,
+                "changed_files_json": changed_files,
+                "validation_status": "unknown",
+            },
+        )
+        commit_records.append(_serialize_solution_change_session_repo_commit(record))
+
+    existing_commits = list(
+        SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).order_by("-created_at", "-updated_at")
+    )
+    if not commit_records:
+        if existing_commits:
+            return JsonResponse(
+                {
+                    "committed": True,
+                    "already_committed": True,
+                    "no_changes": True,
+                    "commits": [_serialize_solution_change_session_repo_commit(item) for item in existing_commits],
+                    "session": _serialize_solution_change_session(session),
+                }
+            )
+        return JsonResponse(
+            {
+                "committed": False,
+                "already_committed": False,
+                "no_changes": True,
+                "no_changes_repositories": no_changes_repos,
+                "message": "No changes to commit.",
+                "session": _serialize_solution_change_session(session),
+            }
+        )
+
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    now_iso = timezone.now().isoformat()
+    metadata["commit"] = {
+        "at": now_iso,
+        "by_user_identity_id": str(identity.id),
+        "repository_count": len(commit_records),
+        "repositories": [
+            {
+                "repository_slug": str(item.get("repository_slug") or ""),
+                "branch": str(item.get("branch") or ""),
+                "commit_sha": str(item.get("commit_sha") or ""),
+                "changed_files": item.get("changed_files") if isinstance(item.get("changed_files"), list) else [],
+            }
+            for item in commit_records
+        ],
+    }
+    if len(commit_records) == 1:
+        metadata["commit"]["hash"] = str(commit_records[0].get("commit_sha") or "")
+    session.metadata_json = metadata
+    session.save(update_fields=["metadata_json", "updated_at"])
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    refreshed_commits = list(
+        SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).order_by("-created_at", "-updated_at")
+    )
+    return JsonResponse(
+        {
+            "committed": True,
+            "already_committed": False,
+            "no_changes": False,
+            "commits": [_serialize_solution_change_session_repo_commit(item) for item in refreshed_commits],
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
 
 
 @csrf_exempt

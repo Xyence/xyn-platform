@@ -48,6 +48,7 @@ const apiMocks = vi.hoisted(() => ({
   prepareSolutionChangePreview: vi.fn(),
   validateSolutionChangeSession: vi.fn(),
   promoteSolutionChangeSession: vi.fn(),
+  commitSolutionChangeSession: vi.fn(),
   finalizeSolutionChangeSession: vi.fn(),
   replyToSolutionPlanningSession: vi.fn(),
   regenerateSolutionPlanningOptions: vi.fn(),
@@ -119,6 +120,7 @@ vi.mock("../../../api/xyn", async () => {
     prepareSolutionChangePreview: apiMocks.prepareSolutionChangePreview,
     validateSolutionChangeSession: apiMocks.validateSolutionChangeSession,
     promoteSolutionChangeSession: apiMocks.promoteSolutionChangeSession,
+    commitSolutionChangeSession: apiMocks.commitSolutionChangeSession,
     finalizeSolutionChangeSession: apiMocks.finalizeSolutionChangeSession,
     replyToSolutionPlanningSession: apiMocks.replyToSolutionPlanningSession,
     regenerateSolutionPlanningOptions: apiMocks.regenerateSolutionPlanningOptions,
@@ -5656,6 +5658,82 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() =>
       expect(screen.getByRole("link", { name: "http://localhost" })).toHaveAttribute("href", "http://localhost")
     );
+    expect(screen.getByRole("button", { name: "Finalize Session" })).toBeEnabled();
+  });
+
+  it("requires commit before finalize when commit provenance is required", async () => {
+    const onOpenPanel = vi.fn();
+    const readyForCommitSession = createComposerSession({
+      execution_status: "ready_for_promotion",
+      repo_commit_count: 0,
+      requires_commit_provenance: true,
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+      },
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-456.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    const committedSession = createComposerSession({
+      execution_status: "ready_for_promotion",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+        commit: { hash: "abc123def456" },
+      },
+      preview: readyForCommitSession.preview,
+      validation: readyForCommitSession.validation,
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(readyForCommitSession))
+      .mockResolvedValueOnce(createComposerState(committedSession));
+    apiMocks.commitSolutionChangeSession.mockResolvedValue({
+      committed: true,
+      already_committed: false,
+      no_changes: false,
+      commits: [{ commit_sha: "abc123def4567890", repository_slug: "xyn-platform", branch: "main", changed_files: ["apps/xyn-ui/src/a.tsx"] }],
+      session: committedSession,
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Commit Changes" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Finalize Session" })).toBeDisabled();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Commit Changes" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.commitSolutionChangeSession).toHaveBeenCalledWith("app-1", "session-1"));
+    await waitFor(() => expect(screen.getAllByText(/Committed repository changes/i).length).toBeGreaterThan(0));
     expect(screen.getByRole("button", { name: "Finalize Session" })).toBeEnabled();
   });
 

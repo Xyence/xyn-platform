@@ -24,6 +24,7 @@ from xyn_orchestrator.models import (
     WorkspaceMembership,
 )
 from xyn_orchestrator.xyn_api import (
+    application_solution_change_session_commit,
     application_solution_change_session_commits,
     application_solution_change_session_finalize,
     dev_task_publish,
@@ -112,8 +113,12 @@ class SolutionChangeSessionRepoCommitTests(TestCase):
         )
 
     def _request(self, path: str, *, method: str = "post", data: dict | None = None):
-        body = json.dumps(data or {})
-        request = getattr(self.factory, method.lower())(path, data=body, content_type="application/json")
+        method_name = method.lower()
+        if method_name == "get":
+            request = self.factory.get(path, data=data or {})
+        else:
+            body = json.dumps(data or {})
+            request = getattr(self.factory, method_name)(path, data=body, content_type="application/json")
         request.user = self.user
         return request
 
@@ -200,3 +205,130 @@ class SolutionChangeSessionRepoCommitTests(TestCase):
         self.assertEqual(response.status_code, 409)
         payload = json.loads(response.content)
         self.assertIn("require at least one recorded repository commit", payload.get("error", ""))
+
+    def test_session_commit_creates_commit_provenance_and_allows_finalize(self):
+        artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-ui",
+            slug=f"app-{uuid.uuid4().hex[:8]}",
+            edit_mode="repo_backed",
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/src/"],
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            artifact=artifact,
+            role="primary_ui",
+        )
+        self.session.selected_artifact_ids_json = [str(artifact.id)]
+        self.session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+
+        repo_dir = Path(self.tempdir.name) / "xyn-platform"
+        target_file = repo_dir / "apps" / "xyn-ui" / "src" / "feature.tsx"
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "checkout", "-B", "main"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "session@example.com"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.name", "Session Test"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        target_file.write_text("export const value = 1;\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        target_file.write_text("export const value = 2;\n", encoding="utf-8")
+
+        commit_request = self._request(
+            f"/xyn/api/applications/{self.application.id}/change-sessions/{self.session.id}/commit",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "XYN_PLATFORM_REPO_ROOT": str(repo_dir),
+                "XYN_RUNTIME_REPO_MAP": json.dumps({"xyn-platform": [str(repo_dir)]}),
+            },
+            clear=False,
+        ):
+            with self._auth_patches()[1], self._auth_patches()[2]:
+                commit_response = application_solution_change_session_commit(commit_request, str(self.application.id), str(self.session.id))
+        self.assertEqual(commit_response.status_code, 200, commit_response.content.decode())
+        commit_payload = json.loads(commit_response.content)
+        self.assertTrue(commit_payload.get("committed"))
+        self.assertFalse(commit_payload.get("already_committed"))
+        self.assertFalse(commit_payload.get("no_changes"))
+
+        commits = list(SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=self.session).order_by("-created_at"))
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(commits[0].repository_slug, "xyn-platform")
+        self.assertEqual(commits[0].branch, "main")
+        self.assertIn("apps/xyn-ui/src/feature.tsx", commits[0].changed_files_json)
+
+        status_proc = subprocess.run(
+            ["git", "status", "--porcelain", "--", "apps/xyn-ui/src/"],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(status_proc.stdout.strip(), "")
+
+        finalize_request = self._request(
+            f"/xyn/api/applications/{self.application.id}/change-sessions/{self.session.id}/finalize",
+        )
+        with self._auth_patches()[1], self._auth_patches()[2]:
+            finalize_response = application_solution_change_session_finalize(finalize_request, str(self.application.id), str(self.session.id))
+        self.assertEqual(finalize_response.status_code, 200)
+        finalize_payload = json.loads(finalize_response.content)
+        self.assertTrue(finalize_payload.get("finalized"))
+
+    def test_session_commit_is_idempotent_when_no_new_changes_exist(self):
+        artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-ui",
+            slug=f"app-{uuid.uuid4().hex[:8]}",
+            edit_mode="repo_backed",
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/src/"],
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            artifact=artifact,
+            role="primary_ui",
+        )
+        self.session.selected_artifact_ids_json = [str(artifact.id)]
+        self.session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+
+        repo_dir = Path(self.tempdir.name) / "xyn-platform"
+        target_file = repo_dir / "apps" / "xyn-ui" / "src" / "feature.tsx"
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "checkout", "-B", "main"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "session@example.com"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.name", "Session Test"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        target_file.write_text("export const value = 1;\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        target_file.write_text("export const value = 2;\n", encoding="utf-8")
+
+        commit_request = self._request(
+            f"/xyn/api/applications/{self.application.id}/change-sessions/{self.session.id}/commit",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "XYN_PLATFORM_REPO_ROOT": str(repo_dir),
+                "XYN_RUNTIME_REPO_MAP": json.dumps({"xyn-platform": [str(repo_dir)]}),
+            },
+            clear=False,
+        ):
+            with self._auth_patches()[1], self._auth_patches()[2]:
+                first_response = application_solution_change_session_commit(commit_request, str(self.application.id), str(self.session.id))
+                second_response = application_solution_change_session_commit(commit_request, str(self.application.id), str(self.session.id))
+        self.assertEqual(first_response.status_code, 200, first_response.content.decode())
+        self.assertEqual(second_response.status_code, 200, second_response.content.decode())
+        second_payload = json.loads(second_response.content)
+        self.assertTrue(second_payload.get("already_committed"))
+        self.assertTrue(second_payload.get("no_changes"))
