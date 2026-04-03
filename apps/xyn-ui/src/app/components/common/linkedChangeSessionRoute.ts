@@ -1,6 +1,8 @@
 import type { WorkspaceLinkedChangeSession } from "../../../api/types";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 
+export const LINKED_SESSION_UPDATED_EVENT = "xyn:linked-session-updated";
+
 export function buildLinkedChangeSessionRoute(workspaceId: string, linkedSession: WorkspaceLinkedChangeSession | null): string {
   if (!linkedSession) return "";
   const applicationId = String(linkedSession.application_id || "").trim();

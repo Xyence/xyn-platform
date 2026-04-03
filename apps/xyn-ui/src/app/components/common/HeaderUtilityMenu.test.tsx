@@ -158,6 +158,34 @@ describe("HeaderUtilityMenu", () => {
     );
   });
 
+  it("shows feedback and skips navigation when linked session is already focused", async () => {
+    const onMessage = vi.fn();
+    apiMocks.getWorkspaceLinkedChangeSession.mockResolvedValue({
+      linked_session: {
+        workspace_id: "ws-1",
+        application_id: "app-1",
+        solution_change_session_id: "scs-1",
+        status: "planned",
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={["/w/ws-1/workbench?panel=composer_detail&application_id=app-1&solution_change_session_id=scs-1"]}>
+        <HeaderUtilityMenu
+          workspaceId="ws-1"
+          actorRoles={["platform_admin"]}
+          actorLabel="user@example.com"
+          onOpenAgentActivity={vi.fn()}
+          onMessage={onMessage}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Utilities" }));
+    const button = await screen.findByRole("button", { name: /Resume change session/i });
+    fireEvent.click(button);
+    expect(navigateMock).not.toHaveBeenCalled();
+    expect(onMessage).toHaveBeenCalledWith({ level: "success", title: "Already viewing linked session" });
+  });
+
   it("hides resume control when no linked session is present", async () => {
     apiMocks.getWorkspaceLinkedChangeSession.mockResolvedValue({ linked_session: null });
     render(

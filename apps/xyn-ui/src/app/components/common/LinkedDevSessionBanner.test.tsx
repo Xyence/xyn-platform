@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import LinkedDevSessionBanner from "./LinkedDevSessionBanner";
+import { LINKED_SESSION_UPDATED_EVENT } from "./linkedChangeSessionRoute";
 
 const navigateMock = vi.hoisted(() => vi.fn());
 const apiMocks = vi.hoisted(() => ({
@@ -54,6 +55,24 @@ describe("LinkedDevSessionBanner", () => {
     );
   });
 
+  it("shows feedback and does not navigate when linked session is already focused", async () => {
+    apiMocks.getWorkspaceLinkedChangeSession.mockResolvedValue({
+      linked_session: {
+        workspace_id: "ws-1",
+        application_id: "app-1",
+        solution_change_session_id: "scs-1",
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={["/w/ws-1/workbench?panel=composer_detail&application_id=app-1&solution_change_session_id=scs-1"]}>
+        <LinkedDevSessionBanner workspaceId="ws-1" />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /Resume session/i }));
+    expect(navigateMock).not.toHaveBeenCalled();
+    expect(screen.getByText(/Already viewing linked session/i)).toBeInTheDocument();
+  });
+
   it("hides banner when no linkage exists", async () => {
     apiMocks.getWorkspaceLinkedChangeSession.mockResolvedValue({ linked_session: null });
     render(
@@ -91,5 +110,30 @@ describe("LinkedDevSessionBanner", () => {
     );
     await waitFor(() => expect(apiMocks.getWorkspaceLinkedChangeSession).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: /Resume session/i })).not.toBeInTheDocument();
+  });
+
+  it("refreshes linkage on linked-session updates and hides banner after finalize", async () => {
+    apiMocks.getWorkspaceLinkedChangeSession
+      .mockResolvedValueOnce({
+        linked_session: {
+          workspace_id: "ws-1",
+          application_id: "app-1",
+          application_name: "Deal Finder",
+          solution_change_session_id: "scs-1",
+          session_title: "Campaign UX update",
+          status: "planned",
+          execution_status: "preview_ready",
+        },
+      })
+      .mockResolvedValueOnce({ linked_session: null });
+    render(
+      <MemoryRouter>
+        <LinkedDevSessionBanner workspaceId="ws-1" />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(/linked to an in-flight change session/i)).toBeInTheDocument();
+    window.dispatchEvent(new Event(LINKED_SESSION_UPDATED_EVENT));
+    await waitFor(() => expect(apiMocks.getWorkspaceLinkedChangeSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(/linked to an in-flight change session/i)).not.toBeInTheDocument());
   });
 });

@@ -47,6 +47,7 @@ const apiMocks = vi.hoisted(() => ({
   stageSolutionChangeApply: vi.fn(),
   prepareSolutionChangePreview: vi.fn(),
   validateSolutionChangeSession: vi.fn(),
+  finalizeSolutionChangeSession: vi.fn(),
   replyToSolutionPlanningSession: vi.fn(),
   regenerateSolutionPlanningOptions: vi.fn(),
   selectSolutionPlanningOption: vi.fn(),
@@ -116,6 +117,7 @@ vi.mock("../../../api/xyn", async () => {
     stageSolutionChangeApply: apiMocks.stageSolutionChangeApply,
     prepareSolutionChangePreview: apiMocks.prepareSolutionChangePreview,
     validateSolutionChangeSession: apiMocks.validateSolutionChangeSession,
+    finalizeSolutionChangeSession: apiMocks.finalizeSolutionChangeSession,
     replyToSolutionPlanningSession: apiMocks.replyToSolutionPlanningSession,
     regenerateSolutionPlanningOptions: apiMocks.regenerateSolutionPlanningOptions,
     selectSolutionPlanningOption: apiMocks.selectSolutionPlanningOption,
@@ -134,6 +136,110 @@ vi.mock("../../utils/runtimeEventStream", async () => {
     subscribeRuntimeEventStream: streamMocks.subscribeRuntimeEventStream,
   };
 });
+
+function createComposerSession(overrides: Record<string, any> = {}) {
+  const draftPayload = {
+    objective: "Widen requested change input in solution pane.",
+    proposed_work: ["Update the requested change input layout in Solution detail."],
+    shared_contracts: [],
+    validation_plan: ["Apply planned changes"],
+    ...(overrides.draft_payload || {}),
+  };
+  const draftTurn = {
+    id: "turn-draft",
+    workspace_id: "ws-1",
+    session_id: "session-1",
+    actor: "planner",
+    kind: "draft_plan",
+    sequence: 2,
+    payload: draftPayload,
+    created_at: "2026-03-20T10:02:00Z",
+    updated_at: "2026-03-20T10:02:00Z",
+  };
+  const planning = {
+    turns: [
+      {
+        id: "turn-request",
+        workspace_id: "ws-1",
+        session_id: "session-1",
+        actor: "user",
+        kind: "request",
+        sequence: 1,
+        payload: { request_text: "Widen requested change input in solution pane." },
+        created_at: "2026-03-20T10:00:00Z",
+        updated_at: "2026-03-20T10:00:00Z",
+      },
+      draftTurn,
+    ],
+    checkpoints: [
+      {
+        id: "checkpoint-1",
+        workspace_id: "ws-1",
+        session_id: "session-1",
+        checkpoint_key: "plan_scope_confirmed",
+        label: "Approve planning scope before stage apply",
+        status: "approved",
+        required_before: "stage",
+        payload: {},
+        decided_by: "admin",
+        decided_at: "2026-03-20T10:02:10Z",
+        created_at: "2026-03-20T10:02:10Z",
+        updated_at: "2026-03-20T10:02:10Z",
+      },
+    ],
+    pending_question: null,
+    pending_option_set: null,
+    pending_checkpoints: [],
+    latest_draft_plan: draftTurn,
+    ...(overrides.planning || {}),
+  };
+  return {
+    id: "session-1",
+    workspace_id: "ws-1",
+    application_id: "app-1",
+    title: "Deal Finder Session",
+    request_text: "Widen requested change input in solution pane.",
+    status: "planned",
+    execution_status: "not_started",
+    selected_artifact_ids: ["artifact-1"],
+    planning,
+    staged_changes: null,
+    preview: null,
+    validation: null,
+    created_at: "2026-03-20T10:00:00Z",
+    updated_at: "2026-03-20T10:03:00Z",
+    ...overrides,
+  };
+}
+
+function createComposerState(session: Record<string, any>) {
+  return {
+    workspace_id: "ws-1",
+    stage: "application_overview",
+    context: {
+      factory_key: null,
+      application_plan_id: null,
+      application_id: "app-1",
+      goal_id: null,
+      thread_id: null,
+      solution_change_session_id: "session-1",
+    },
+    factory_catalog: [],
+    application_plans: [],
+    applications: [],
+    application_plan: null,
+    application: null,
+    goal: null,
+    thread: null,
+    solution_change_sessions: [session],
+    solution_change_session: session,
+    related_goals: [],
+    related_threads: [],
+    portfolio_context: null,
+    breadcrumbs: [{ kind: "composer", label: "Composer" }],
+    available_actions: [],
+  };
+}
 
 describe("WorkbenchPanelHost entity refresh", () => {
   beforeEach(() => {
@@ -5234,6 +5340,200 @@ describe("WorkbenchPanelHost entity refresh", () => {
       screen.getByRole("button", { name: "Open Threads" }).click();
     });
     expect(onOpenPanel).toHaveBeenCalledWith(expect.objectContaining({ key: "thread_list" }));
+  });
+
+  it("shows one primary execution action per phase and derives next action from execution state", async () => {
+    const onOpenPanel = vi.fn();
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+          skipped_artifacts: 0,
+          total_artifacts: 1,
+        },
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(stagedSession));
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText("Current phase")).toBeInTheDocument());
+    expect(screen.getAllByText("Staged").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Prepare preview environment").length).toBeGreaterThan(0);
+    expect(screen.getByText("Changes staged (1 task queued).")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Prepare Preview" })).toHaveClass("primary");
+    expect(screen.getByRole("button", { name: "Stage Apply" })).toHaveClass("ghost");
+    expect(screen.getByRole("button", { name: "Validate" })).toHaveClass("ghost");
+  });
+
+  it("updates feedback, phase, and preview evidence after preparing preview", async () => {
+    const onOpenPanel = vi.fn();
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+          skipped_artifacts: 0,
+          total_artifacts: 1,
+        },
+      },
+    });
+    const previewReadySession = createComposerSession({
+      execution_status: "preview_ready",
+      staged_changes: stagedSession.staged_changes,
+      preview: {
+        status: "ready",
+        source: "reused_runtime",
+        primary_url: "http://localhost:32932/app/",
+        session_build: {
+          status: "reused",
+          reason: "runtime_reused_live_target",
+        },
+      },
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(stagedSession))
+      .mockResolvedValueOnce(createComposerState(previewReadySession));
+    apiMocks.prepareSolutionChangePreview.mockResolvedValue({ session: previewReadySession });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Prepare Preview" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Prepare Preview" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.prepareSolutionChangePreview).toHaveBeenCalledWith("app-1", "session-1"));
+    await waitFor(() => expect(screen.getAllByText("Preview ready (reused runtime).").length).toBeGreaterThan(0));
+    expect(screen.getByText("Preview URL")).toBeInTheDocument();
+    expect(screen.getByText("http://localhost:32932/app/")).toBeInTheDocument();
+    expect(screen.getByText("Session Build")).toBeInTheDocument();
+    expect(screen.getByText("Reused")).toBeInTheDocument();
+    expect(screen.getByText("Build Reason")).toBeInTheDocument();
+    expect(screen.getByText("runtime_reused_live_target")).toBeInTheDocument();
+    expect(screen.getAllByText("Preview Ready").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Validate changes").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Validate" })).toHaveClass("primary");
+  });
+
+  it("shows open preview action only when preview is ready and opens the preview URL", async () => {
+    const onOpenPanel = vi.fn();
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const previewReadySession = createComposerSession({
+      execution_status: "preview_ready",
+      preview: {
+        status: "ready",
+        source: "reused_runtime",
+        primary_url: "http://localhost:32932/app/",
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(previewReadySession));
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open Preview (existing runtime)" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Open Preview (existing runtime)" }));
+    expect(openSpy).toHaveBeenCalledWith("http://localhost:32932/app/", "_blank", "noopener,noreferrer");
+    openSpy.mockRestore();
+  });
+
+  it("finalizes a ready-for-promotion session and hides execution controls", async () => {
+    const onOpenPanel = vi.fn();
+    const readyForPromotionSession = createComposerSession({
+      execution_status: "ready_for_promotion",
+      preview: {
+        status: "ready",
+        source: "reused_runtime",
+        primary_url: "http://localhost:32932/app/",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    const finalizedSession = createComposerSession({
+      status: "completed",
+      execution_status: "completed",
+      preview: readyForPromotionSession.preview,
+      validation: readyForPromotionSession.validation,
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(readyForPromotionSession))
+      .mockResolvedValueOnce(createComposerState(finalizedSession));
+    apiMocks.finalizeSolutionChangeSession.mockResolvedValue({ finalized: true, session: finalizedSession });
+    const linkedSessionUpdatedSpy = vi.spyOn(window, "dispatchEvent");
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Finalize Session" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Finalize Session" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.finalizeSolutionChangeSession).toHaveBeenCalledWith("app-1", "session-1"));
+    await waitFor(() => expect(screen.getAllByText("Session finalized.").length).toBeGreaterThan(0));
+    expect(screen.getByText("Session finalized. Execution controls are hidden.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
+    expect(linkedSessionUpdatedSpy).toHaveBeenCalled();
+    linkedSessionUpdatedSpy.mockRestore();
   });
 
   it("activates artifact detail into reusable dev sibling and opens runtime for reused status", async () => {

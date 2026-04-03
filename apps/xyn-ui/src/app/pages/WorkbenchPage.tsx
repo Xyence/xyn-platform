@@ -21,6 +21,29 @@ export function shouldReuseExistingLayoutOnWorkspaceSwitch(input: {
   return input.panelCount > 0;
 }
 
+export function shouldReopenComposerForRouteParams(input: {
+  activePanel: { key?: string; params?: Record<string, unknown> } | null;
+  routeParams: Record<string, unknown>;
+}): boolean {
+  const active = input.activePanel;
+  if (!active || String(active.key || "") !== "composer_detail") return true;
+  const activeParams = active.params || {};
+  const keys: Array<keyof typeof input.routeParams> = [
+    "application_id",
+    "application_plan_id",
+    "goal_id",
+    "thread_id",
+    "factory_key",
+    "solution_change_session_id",
+  ];
+  for (const key of keys) {
+    const expected = String(input.routeParams[key] || "").trim();
+    const current = String(activeParams[String(key)] || "").trim();
+    if (expected !== current) return true;
+  }
+  return false;
+}
+
 export default function WorkbenchPage({
   workspaceName = "",
   workspaceColor = "#6c7a89",
@@ -235,7 +258,7 @@ export default function WorkbenchPage({
       if (threadId) nextParams.thread_id = threadId;
       if (factoryKey) nextParams.factory_key = factoryKey;
       if (solutionChangeSessionId) nextParams.solution_change_session_id = solutionChangeSessionId;
-      if (!activePanel || activePanel.key !== "composer_detail") {
+      if (shouldReopenComposerForRouteParams({ activePanel, routeParams: nextParams })) {
         openPanel({
           key: "composer_detail",
           params: nextParams,

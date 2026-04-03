@@ -33,6 +33,7 @@ import {
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
   decideSolutionPlanningCheckpoint,
+  finalizeSolutionChangeSession,
   generateSolutionChangePlan,
   prepareSolutionChangePreview,
   publishDevTask,
@@ -115,6 +116,7 @@ import RulesBrowserPanel from "../rules/RulesBrowserPanel";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { SolutionDetailPanel, SolutionListPanel } from "../solutions/SolutionPanels";
 import WorkspaceUnavailableState, { classifyWorkspaceUnavailableReason } from "../common/WorkspaceUnavailableState";
+import { LINKED_SESSION_UPDATED_EVENT } from "../common/linkedChangeSessionRoute";
 
 export type ConsolePanelKey =
   | "platform_settings"
@@ -168,6 +170,10 @@ export type ConsolePanelSpec = {
   params?: Record<string, unknown>;
 };
 
+type ComposerExecutionPhase = "planned" | "staged" | "preview_ready" | "ready_for_promotion" | "failed";
+
+type ComposerExecutionActionKey = "stage-apply" | "prepare-preview" | "validate" | "finalize";
+
 type PanelProps = {
   onOpenPanel: (panelKey: ConsolePanelKey, params?: Record<string, unknown>) => void;
 };
@@ -184,6 +190,70 @@ function formatPanelTimestamp(value?: string | null): string {
   const parsed = new Date(String(value || ""));
   if (Number.isNaN(parsed.getTime())) return "—";
   return parsed.toLocaleString();
+}
+
+function deriveComposerExecutionPhase(
+  executionStatus: string,
+  previewStatus: string,
+  validationStatus: string,
+): ComposerExecutionPhase {
+  const execution = String(executionStatus || "").trim().toLowerCase();
+  const preview = String(previewStatus || "").trim().toLowerCase();
+  const validation = String(validationStatus || "").trim().toLowerCase();
+  if (execution === "failed" || preview === "failed" || validation === "failed") return "failed";
+  if (
+    execution === "ready_for_promotion"
+    || execution === "validated"
+    || execution === "completed"
+    || execution === "finalized"
+    || execution === "archived"
+    || validation === "passed"
+    || validation === "validated"
+    || validation === "ready_for_promotion"
+    || validation === "success"
+  ) {
+    return "ready_for_promotion";
+  }
+  if (
+    execution === "preview_ready"
+    || preview === "ready"
+    || preview === "prepared"
+    || preview === "preview_ready"
+  ) {
+    return "preview_ready";
+  }
+  if (
+    execution === "staged"
+    || execution === "applied"
+    || execution === "preview_preparing"
+    || execution === "validating"
+  ) {
+    return "staged";
+  }
+  return "planned";
+}
+
+function executionPhaseLabel(phase: ComposerExecutionPhase): string {
+  if (phase === "planned") return "Not Started";
+  if (phase === "staged") return "Staged";
+  if (phase === "preview_ready") return "Preview Ready";
+  if (phase === "ready_for_promotion") return "Validated";
+  return "Failed";
+}
+
+function executionPhaseNextActionLabel(phase: ComposerExecutionPhase): string {
+  if (phase === "planned") return "Apply planned changes";
+  if (phase === "staged") return "Prepare preview environment";
+  if (phase === "preview_ready") return "Validate changes";
+  if (phase === "ready_for_promotion") return "Finalize session";
+  return "Retry the failed execution step";
+}
+
+function defaultPrimaryActionForPhase(phase: ComposerExecutionPhase): ComposerExecutionActionKey {
+  if (phase === "staged") return "prepare-preview";
+  if (phase === "preview_ready") return "validate";
+  if (phase === "ready_for_promotion") return "finalize";
+  return "stage-apply";
 }
 
 function briefReviewLabel(item: Pick<WorkItemSummary, "execution_brief_review" | "execution_queue">): string {
@@ -4447,6 +4517,50 @@ function ComposerDetailPanel({
   const stageCheckpoint = allCheckpoints.find((entry: any) => String(entry.checkpoint_key || "") === "plan_scope_confirmed") || null;
   const hasApprovedStageCheckpoint = !stageCheckpoint || String(stageCheckpoint.status || "") === "approved";
   const canRunExecution = hasDraftPlan && !hasPendingPrompt && hasApprovedStageCheckpoint && !hasPendingCheckpoint;
+  const executionStatusToken = String(selectedSession?.execution_status || "not_started").trim().toLowerCase();
+  const previewStatusToken = String(selectedSession?.preview?.status || "").trim().toLowerCase();
+  const validationStatusToken = String(selectedSession?.validation?.status || "").trim().toLowerCase();
+  const executionPhase = deriveComposerExecutionPhase(executionStatusToken, previewStatusToken, validationStatusToken);
+  const currentPhaseLabel = executionPhaseLabel(executionPhase);
+  const derivedExecutionNextAction = executionPhaseNextActionLabel(executionPhase);
+  const sessionExecutionSummary = selectedSession?.staged_changes?.execution_summary
+    && typeof selectedSession.staged_changes.execution_summary === "object"
+    ? selectedSession.staged_changes.execution_summary as Record<string, unknown>
+    : null;
+  const executionQueuedCount = Number(sessionExecutionSummary?.queued_artifacts ?? sessionExecutionSummary?.queued ?? 0);
+  const executionFailedCount = Number(sessionExecutionSummary?.failed_artifacts ?? sessionExecutionSummary?.failed ?? 0);
+  const executionSkippedCount = Number(sessionExecutionSummary?.skipped_artifacts ?? sessionExecutionSummary?.skipped ?? 0);
+  const executionTotalCount = Number(sessionExecutionSummary?.total_artifacts ?? sessionExecutionSummary?.total ?? 0);
+  const previewPrimaryUrl = String(selectedSession?.preview?.primary_url || "").trim();
+  const previewBuildStatus = String(selectedSession?.preview?.session_build?.status || "").trim().toLowerCase();
+  const previewBuildReason = String(selectedSession?.preview?.session_build?.reason || "").trim();
+  const previewSummarySource = String(selectedSession?.preview?.source || selectedSession?.preview?.mode || "").trim().toLowerCase();
+  const latestExecutionResult = (() => {
+    if (executionPhase === "ready_for_promotion") return "Validation complete — ready for promotion.";
+    if (executionPhase === "preview_ready") {
+      if (previewSummarySource.includes("reused")) return "Preview ready (reused runtime).";
+      if (previewPrimaryUrl) return `Preview ready (${previewPrimaryUrl}).`;
+      return "Preview ready.";
+    }
+    if (executionPhase === "staged") {
+      if (executionFailedCount > 0) {
+        return `Changes staged (${executionQueuedCount} queued, ${executionFailedCount} failed).`;
+      }
+      if (executionQueuedCount > 0) return `Changes staged (${executionQueuedCount} task${executionQueuedCount === 1 ? "" : "s"} queued).`;
+      if (executionTotalCount > 0 || executionSkippedCount > 0) return "Changes staged.";
+      return "Stage apply has not queued execution tasks yet.";
+    }
+    if (executionPhase === "failed") return "Execution failed. Retry the failed step.";
+    return "No execution action has run yet.";
+  })();
+  const primaryExecutionAction = defaultPrimaryActionForPhase(executionPhase);
+  const sessionStatusToken = String(selectedSession?.status || "").trim().toLowerCase();
+  const isSessionFinalized = ["finalized", "completed", "archived"].includes(sessionStatusToken)
+    || ["completed", "finalized", "archived"].includes(executionStatusToken);
+  const canStageApply = canRunExecution && executionPhase !== "ready_for_promotion";
+  const canPreparePreview = canRunExecution && (executionPhase === "staged" || executionPhase === "failed");
+  const canValidate = canRunExecution && (executionPhase === "preview_ready" || executionPhase === "failed");
+  const canFinalize = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion";
   const hasExecutionProgress = ["staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion", "completed", "applied"].includes(
     String(selectedSession?.execution_status || "").toLowerCase()
   );
@@ -4673,9 +4787,6 @@ function ComposerDetailPanel({
   const draftPlanningMode = String(latestDraftPayload.planning_mode || "deterministic").trim().toLowerCase();
   const draftCandidateFiles = Array.isArray(latestDraftPayload.candidate_files)
     ? latestDraftPayload.candidate_files.map((value) => String(value || "").trim()).filter(Boolean)
-    : [];
-  const draftValidation = Array.isArray(latestDraftPayload.validation_plan)
-    ? latestDraftPayload.validation_plan.map((value) => String(value || "")).filter(Boolean)
     : [];
   const draftOpenQuestions = draftImpacts.filter((item) => /open question/i.test(item));
   const draftRevisionCount = planningTurns.filter(
@@ -5179,7 +5290,7 @@ function ComposerDetailPanel({
                   </div>
                   <div>
                     <span className="field-label">Next Action</span>
-                    <p>{draftValidation[0] || "Review and approve checkpoint to continue execution."}</p>
+                    <p>{derivedExecutionNextAction}</p>
                   </div>
                 </div>
               ) : (
@@ -5295,6 +5406,17 @@ function ComposerDetailPanel({
               <p className="muted small">Execution actions are available after selecting a solution change session.</p>
             ) : (
               <>
+                {previewPrimaryUrl && previewStatusToken === "ready" ? (
+                  <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      className="ghost sm"
+                      onClick={() => window.open(previewPrimaryUrl, "_blank", "noopener,noreferrer")}
+                    >
+                      {previewSummarySource.includes("reused") ? "Open Preview (existing runtime)" : "Open Preview"}
+                    </button>
+                  </div>
+                ) : null}
                 {!hasDraftPlan && !hasPendingPrompt ? (
                   <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
                     <button
@@ -5318,62 +5440,118 @@ function ComposerDetailPanel({
                     </button>
                   </div>
                 ) : null}
-                <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
-                  <button
-                    type="button"
-                    className="ghost sm"
-                    disabled={!canRunExecution || busyAction === "stage-apply"}
-                    onClick={() => {
-                      setBusyAction("stage-apply");
-                      void withSessionGuard(async () => {
-                        const response = await stageSolutionChangeApply(
-                          String(selectedSession.application_id),
-                          String(selectedSession.id)
-                        );
-                        mergeUpdatedSession(response.session);
-                        setMessage("Stage apply completed.");
-                      });
-                    }}
-                  >
-                    Stage Apply
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost sm"
-                    disabled={!canRunExecution || busyAction === "prepare-preview"}
-                    onClick={() => {
-                      setBusyAction("prepare-preview");
-                      void withSessionGuard(async () => {
-                        const response = await prepareSolutionChangePreview(
-                          String(selectedSession.application_id),
-                          String(selectedSession.id)
-                        );
-                        mergeUpdatedSession(response.session);
-                        setMessage("Preview preparation completed.");
-                      });
-                    }}
-                  >
-                    Prepare Preview
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost sm"
-                    disabled={!canRunExecution || busyAction === "validate"}
-                    onClick={() => {
-                      setBusyAction("validate");
-                      void withSessionGuard(async () => {
-                        const response = await validateSolutionChangeSession(
-                          String(selectedSession.application_id),
-                          String(selectedSession.id)
-                        );
-                        mergeUpdatedSession(response.session);
-                        setMessage("Validation completed.");
-                      });
-                    }}
-                  >
-                    Validate
-                  </button>
-                </div>
+                {isSessionFinalized ? (
+                  <p className="muted small" style={{ marginTop: 8 }}>
+                    Session finalized. Execution controls are hidden.
+                  </p>
+                ) : (
+                  <div className="inline-action-row" style={{ flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      className={`${primaryExecutionAction === "stage-apply" ? "primary" : "ghost"} sm`}
+                      disabled={!canStageApply || busyAction === "stage-apply"}
+                      onClick={() => {
+                        setBusyAction("stage-apply");
+                        void withSessionGuard(async () => {
+                          const response = await stageSolutionChangeApply(
+                            String(selectedSession.application_id),
+                            String(selectedSession.id)
+                          );
+                          mergeUpdatedSession(response.session);
+                          const summary = response.session?.staged_changes?.execution_summary
+                            && typeof response.session.staged_changes.execution_summary === "object"
+                            ? response.session.staged_changes.execution_summary as Record<string, unknown>
+                            : null;
+                          const queuedCount = Number(summary?.queued_artifacts ?? summary?.queued ?? 0);
+                          const failedCount = Number(summary?.failed_artifacts ?? summary?.failed ?? 0);
+                          if (failedCount > 0) {
+                            setMessage(`Changes staged (${queuedCount} queued, ${failedCount} failed).`);
+                            return;
+                          }
+                          if (queuedCount > 0) {
+                            setMessage(`Changes staged (${queuedCount} task${queuedCount === 1 ? "" : "s"} queued).`);
+                            return;
+                          }
+                          setMessage("Changes staged.");
+                        });
+                      }}
+                    >
+                      Stage Apply
+                    </button>
+                    <button
+                      type="button"
+                      className={`${primaryExecutionAction === "prepare-preview" ? "primary" : "ghost"} sm`}
+                      disabled={!canPreparePreview || busyAction === "prepare-preview"}
+                      onClick={() => {
+                        setBusyAction("prepare-preview");
+                        void withSessionGuard(async () => {
+                          const response = await prepareSolutionChangePreview(
+                            String(selectedSession.application_id),
+                            String(selectedSession.id)
+                          );
+                          mergeUpdatedSession(response.session);
+                          const preview = response.session?.preview;
+                          const previewUrl = String(preview?.primary_url || "").trim();
+                          const previewSource = String(preview?.source || preview?.mode || "").trim().toLowerCase();
+                          if (previewSource.includes("reused")) {
+                            setMessage("Preview ready (reused runtime).");
+                            return;
+                          }
+                          if (previewUrl) {
+                            setMessage(`Preview ready (${previewUrl}).`);
+                            return;
+                          }
+                          setMessage("Preview preparation completed.");
+                        });
+                      }}
+                    >
+                      Prepare Preview
+                    </button>
+                    <button
+                      type="button"
+                      className={`${primaryExecutionAction === "validate" ? "primary" : "ghost"} sm`}
+                      disabled={!canValidate || busyAction === "validate"}
+                      onClick={() => {
+                        setBusyAction("validate");
+                        void withSessionGuard(async () => {
+                          const response = await validateSolutionChangeSession(
+                            String(selectedSession.application_id),
+                            String(selectedSession.id)
+                          );
+                          mergeUpdatedSession(response.session);
+                          if (String(response.session?.execution_status || "").toLowerCase() === "ready_for_promotion") {
+                            setMessage("Validation complete — ready for promotion.");
+                            return;
+                          }
+                          setMessage("Validation completed.");
+                        });
+                      }}
+                    >
+                      Validate
+                    </button>
+                    {executionPhase === "ready_for_promotion" ? (
+                      <button
+                        type="button"
+                        className={`${primaryExecutionAction === "finalize" ? "primary" : "ghost"} sm`}
+                        disabled={!canFinalize || busyAction === "finalize"}
+                        onClick={() => {
+                          setBusyAction("finalize");
+                          void withSessionGuard(async () => {
+                            const response = await finalizeSolutionChangeSession(
+                              String(selectedSession.application_id),
+                              String(selectedSession.id)
+                            );
+                            mergeUpdatedSession(response.session);
+                            window.dispatchEvent(new Event(LINKED_SESSION_UPDATED_EVENT));
+                            setMessage("Session finalized.");
+                          });
+                        }}
+                      >
+                        Finalize Session
+                      </button>
+                    ) : null}
+                  </div>
+                )}
                 <p className="muted small" style={{ marginTop: 8 }}>
                   {hasPendingPrompt
                     ? "Blocked: unresolved planner question or option set."
@@ -5383,7 +5561,9 @@ function ComposerDetailPanel({
                         ? "Blocked: checkpoint approval pending."
                         : !hasApprovedStageCheckpoint
                           ? "Blocked: required checkpoint is not approved."
-                          : "Execution actions are available."}
+                          : isSessionFinalized
+                            ? "Session finalized."
+                          : `Current phase: ${currentPhaseLabel}. Next step: ${derivedExecutionNextAction}.`}
                 </p>
               </>
             )}
@@ -5395,10 +5575,42 @@ function ComposerDetailPanel({
               <p className="muted small">No session selected.</p>
             ) : (
               <div className="composer-execution-status">
+                <div><span className="field-label">Current phase</span><p>{currentPhaseLabel}</p></div>
+                <div><span className="field-label">Recommended next action</span><p>{derivedExecutionNextAction}</p></div>
+                <div><span className="field-label">Latest result</span><p>{latestExecutionResult}</p></div>
                 <div><span className="field-label">Session status</span><p>{titleCaseLabel(String(selectedSession.status || "draft"))}</p></div>
                 <div><span className="field-label">Execution</span><p>{titleCaseLabel(String(selectedSession.execution_status || "not_started"))}</p></div>
                 <div><span className="field-label">Preview</span><p>{selectedSession.preview?.status ? titleCaseLabel(String(selectedSession.preview.status)) : "Not prepared"}</p></div>
                 <div><span className="field-label">Validation</span><p>{selectedSession.validation?.status ? titleCaseLabel(String(selectedSession.validation.status)) : "Not run"}</p></div>
+                {previewPrimaryUrl ? (
+                  <div>
+                    <span className="field-label">Preview URL</span>
+                    <p>{previewPrimaryUrl}</p>
+                  </div>
+                ) : null}
+                {previewBuildStatus ? (
+                  <div>
+                    <span className="field-label">Session Build</span>
+                    <p>{titleCaseLabel(previewBuildStatus)}</p>
+                  </div>
+                ) : null}
+                {previewBuildReason ? (
+                  <div>
+                    <span className="field-label">Build Reason</span>
+                    <p>{previewBuildReason}</p>
+                  </div>
+                ) : null}
+                {sessionExecutionSummary ? (
+                  <div>
+                    <span className="field-label">Execution Summary</span>
+                    <p>
+                      {executionQueuedCount} queued
+                      {executionFailedCount ? ` · ${executionFailedCount} failed` : ""}
+                      {executionSkippedCount ? ` · ${executionSkippedCount} skipped` : ""}
+                      {executionTotalCount ? ` · ${executionTotalCount} total` : ""}
+                    </p>
+                  </div>
+                ) : null}
               </div>
             )}
           </section>

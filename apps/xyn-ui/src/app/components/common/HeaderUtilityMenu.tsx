@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Compass, Settings2, Activity, Bot, ShieldCheck } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { getAiRoutingStatus, getSystemReadiness, getWorkspaceLinkedChangeSession } from "../../../api/xyn";
 import type { AiAgentResolution, AiRoutingStatusResponse, SystemReadinessResponse, WorkspaceLinkedChangeSession } from "../../../api/types";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import HeaderPreviewControl from "../preview/HeaderPreviewControl";
 import { type CapabilityEntry, useCapabilitySuggestions } from "../console/capabilitySuggestions";
-import { buildLinkedChangeSessionRoute } from "./linkedChangeSessionRoute";
+import { buildLinkedChangeSessionRoute, LINKED_SESSION_UPDATED_EVENT } from "./linkedChangeSessionRoute";
 
 const AI_ROUTING_UPDATED_EVENT = "xyn:ai-routing-updated";
 
@@ -46,6 +46,7 @@ function readinessTone(readiness: SystemReadinessResponse | null): "ok" | "warni
 
 export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel, onOpenAgentActivity, onMessage }: Props) {
   const navigate = useNavigate();
+  const location = useLocation();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const { openPanel, setInputText, setOpen, requestSubmit } = useXynConsole();
   const [open, setOpenPopover] = useState(false);
@@ -77,9 +78,12 @@ export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel,
       .catch(() => setSystemReadiness(null));
   }, [workspaceId]);
 
-  useEffect(() => {
-    if (!open || !workspaceId) return;
-    getWorkspaceLinkedChangeSession(workspaceId, window.location.origin)
+  const refreshLinkedSession = useCallback(() => {
+    if (!workspaceId) {
+      setLinkedSession(null);
+      return Promise.resolve();
+    }
+    return getWorkspaceLinkedChangeSession(workspaceId, window.location.origin)
       .then((payload) => {
         const linked = payload?.linked_session;
         if (!linked || !linked.application_id || !linked.solution_change_session_id) {
@@ -89,7 +93,12 @@ export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel,
         setLinkedSession(linked);
       })
       .catch(() => setLinkedSession(null));
-  }, [open, workspaceId]);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!open) return;
+    void refreshLinkedSession();
+  }, [open, refreshLinkedSession]);
 
   useEffect(() => {
     refreshAiRoutingStatus();
@@ -107,6 +116,15 @@ export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel,
     window.addEventListener(AI_ROUTING_UPDATED_EVENT, onRoutingUpdated as EventListener);
     return () => window.removeEventListener(AI_ROUTING_UPDATED_EVENT, onRoutingUpdated as EventListener);
   }, [refreshAiRoutingStatus]);
+
+  useEffect(() => {
+    const onLinkedSessionUpdated = () => {
+      if (!open) return;
+      void refreshLinkedSession();
+    };
+    window.addEventListener(LINKED_SESSION_UPDATED_EVENT, onLinkedSessionUpdated);
+    return () => window.removeEventListener(LINKED_SESSION_UPDATED_EVENT, onLinkedSessionUpdated);
+  }, [open, refreshLinkedSession]);
 
   const openCapability = (entry: CapabilityEntry) => {
     const target = entry.managePath || entry.docsPath;
@@ -218,6 +236,12 @@ export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel,
                   type="button"
                   className="ghost sm"
                   onClick={() => {
+                    const currentRoute = `${location.pathname}${location.search}`;
+                    if (linkedSessionRoute === currentRoute) {
+                      onMessage({ level: "success", title: "Already viewing linked session" });
+                      setOpenPopover(false);
+                      return;
+                    }
                     navigate(linkedSessionRoute);
                     setOpenPopover(false);
                   }}

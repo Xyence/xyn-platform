@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { getWorkspaceLinkedChangeSession } from "../../../api/xyn";
 import type { WorkspaceLinkedChangeSession } from "../../../api/types";
-import { buildLinkedChangeSessionRoute } from "./linkedChangeSessionRoute";
+import { buildLinkedChangeSessionRoute, LINKED_SESSION_UPDATED_EVENT } from "./linkedChangeSessionRoute";
 
 type Props = {
   workspaceId: string;
@@ -10,14 +10,16 @@ type Props = {
 
 export default function LinkedDevSessionBanner({ workspaceId }: Props) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [linkedSession, setLinkedSession] = useState<WorkspaceLinkedChangeSession | null>(null);
+  const [resumeMessage, setResumeMessage] = useState("");
 
-  useEffect(() => {
+  const refreshLinkedSession = useCallback(() => {
     if (!workspaceId) {
       setLinkedSession(null);
-      return;
+      return Promise.resolve();
     }
-    getWorkspaceLinkedChangeSession(workspaceId, window.location.origin)
+    return getWorkspaceLinkedChangeSession(workspaceId, window.location.origin)
       .then((payload) => {
         const linked = payload?.linked_session;
         if (!linked || !linked.application_id || !linked.solution_change_session_id) {
@@ -29,8 +31,21 @@ export default function LinkedDevSessionBanner({ workspaceId }: Props) {
       .catch(() => setLinkedSession(null));
   }, [workspaceId]);
 
+  useEffect(() => {
+    void refreshLinkedSession();
+  }, [refreshLinkedSession]);
+
+  useEffect(() => {
+    const onLinkedSessionUpdated = () => {
+      void refreshLinkedSession();
+    };
+    window.addEventListener(LINKED_SESSION_UPDATED_EVENT, onLinkedSessionUpdated);
+    return () => window.removeEventListener(LINKED_SESSION_UPDATED_EVENT, onLinkedSessionUpdated);
+  }, [refreshLinkedSession]);
+
   const targetRoute = useMemo(() => buildLinkedChangeSessionRoute(workspaceId, linkedSession), [workspaceId, linkedSession]);
   if (!linkedSession || !targetRoute) return null;
+  const currentRoute = `${location.pathname}${location.search}`;
 
   const sessionTitle = String(linkedSession.session_title || "").trim();
   const applicationName = String(linkedSession.application_name || "").trim();
@@ -49,10 +64,18 @@ export default function LinkedDevSessionBanner({ workspaceId }: Props) {
       <button
         type="button"
         className="ghost sm"
-        onClick={() => navigate(targetRoute)}
+        onClick={() => {
+          if (targetRoute === currentRoute) {
+            setResumeMessage("Already viewing linked session.");
+            return;
+          }
+          setResumeMessage("");
+          navigate(targetRoute);
+        }}
       >
         Resume session
       </button>
+      {resumeMessage ? <p className="muted small">{resumeMessage}</p> : null}
     </section>
   );
 }
