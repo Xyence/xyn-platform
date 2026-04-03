@@ -194,7 +194,8 @@ class SolutionChangeSessionRepoCommitTests(TestCase):
             role="primary_api",
         )
         self.session.selected_artifact_ids_json = [str(artifact.id)]
-        self.session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+        self.session.execution_status = "promoted"
+        self.session.save(update_fields=["selected_artifact_ids_json", "execution_status", "updated_at"])
 
         request = self._request(
             f"/xyn/api/applications/{self.application.id}/change-sessions/{self.session.id}/finalize",
@@ -271,6 +272,9 @@ class SolutionChangeSessionRepoCommitTests(TestCase):
             text=True,
         )
         self.assertEqual(status_proc.stdout.strip(), "")
+
+        self.session.execution_status = "promoted"
+        self.session.save(update_fields=["execution_status", "updated_at"])
 
         finalize_request = self._request(
             f"/xyn/api/applications/{self.application.id}/change-sessions/{self.session.id}/finalize",

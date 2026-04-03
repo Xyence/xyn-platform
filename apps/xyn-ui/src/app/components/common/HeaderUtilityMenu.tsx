@@ -31,10 +31,15 @@ function routingStatusLabel(row: AiAgentResolution | null): string {
 }
 
 function titleCaseToken(value: string): string {
+  const upperAcronyms = new Set(["ai"]);
   return String(value || "")
     .split(/[_\-\s]+/)
     .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .map((part) => {
+      const normalized = part.trim().toLowerCase();
+      if (upperAcronyms.has(normalized)) return normalized.toUpperCase();
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
     .join(" ");
 }
 

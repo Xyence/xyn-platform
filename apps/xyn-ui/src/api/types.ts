@@ -2906,6 +2906,8 @@ export type SolutionChangeSession = {
     | "preview_ready"
     | "validating"
     | "ready_for_promotion"
+    | "committed"
+    | "promoted"
     | "failed"
     | string;
   created_by?: string | null;

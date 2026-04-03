@@ -5538,10 +5538,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
     openSpy.mockRestore();
   });
 
-  it("finalizes a ready-for-promotion session and hides execution controls", async () => {
+  it("finalizes a promoted session and hides execution controls", async () => {
     const onOpenPanel = vi.fn();
-    const readyForPromotionSession = createComposerSession({
-      execution_status: "ready_for_promotion",
+    const promotedSession = createComposerSession({
+      execution_status: "promoted",
       metadata: {
         promotion: {
           result: "success",
@@ -5561,11 +5561,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
     const finalizedSession = createComposerSession({
       status: "completed",
       execution_status: "completed",
-      preview: readyForPromotionSession.preview,
-      validation: readyForPromotionSession.validation,
+      preview: promotedSession.preview,
+      validation: promotedSession.validation,
     });
     apiMocks.getComposerState
-      .mockResolvedValueOnce(createComposerState(readyForPromotionSession))
+      .mockResolvedValueOnce(createComposerState(promotedSession))
       .mockResolvedValueOnce(createComposerState(finalizedSession));
     apiMocks.finalizeSolutionChangeSession.mockResolvedValue({ finalized: true, session: finalizedSession });
     const linkedSessionUpdatedSpy = vi.spyOn(window, "dispatchEvent");
@@ -5599,10 +5599,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
     linkedSessionUpdatedSpy.mockRestore();
   });
 
-  it("promotes a validated session before finalize and reports running-environment update", async () => {
+  it("promotes a committed session and reports running-environment update", async () => {
     const onOpenPanel = vi.fn();
-    const readyForPromotionSession = createComposerSession({
-      execution_status: "ready_for_promotion",
+    const committedSession = createComposerSession({
+      execution_status: "committed",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
       preview: {
         status: "ready",
         source: "session_build",
@@ -5613,7 +5615,9 @@ describe("WorkbenchPanelHost entity refresh", () => {
       },
     });
     const promotedSession = createComposerSession({
-      execution_status: "ready_for_promotion",
+      execution_status: "promoted",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
       metadata: {
         promotion: {
           result: "success",
@@ -5621,11 +5625,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
           ui_url: "http://localhost",
         },
       },
-      preview: readyForPromotionSession.preview,
-      validation: readyForPromotionSession.validation,
+      preview: committedSession.preview,
+      validation: committedSession.validation,
     });
     apiMocks.getComposerState
-      .mockResolvedValueOnce(createComposerState(readyForPromotionSession))
+      .mockResolvedValueOnce(createComposerState(committedSession))
       .mockResolvedValueOnce(createComposerState(promotedSession));
     apiMocks.promoteSolutionChangeSession.mockResolvedValue({
       promoted: true,
@@ -5661,19 +5665,12 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getByRole("button", { name: "Finalize Session" })).toBeEnabled();
   });
 
-  it("requires commit before finalize when commit provenance is required", async () => {
+  it("requires commit before promote when commit provenance is required", async () => {
     const onOpenPanel = vi.fn();
     const readyForCommitSession = createComposerSession({
       execution_status: "ready_for_promotion",
       repo_commit_count: 0,
       requires_commit_provenance: true,
-      metadata: {
-        promotion: {
-          result: "success",
-          target_runtime: "xyn-local",
-          ui_url: "http://localhost",
-        },
-      },
       preview: {
         status: "ready",
         source: "session_build",
@@ -5684,17 +5681,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
       },
     });
     const committedSession = createComposerSession({
-      execution_status: "ready_for_promotion",
+      execution_status: "committed",
       repo_commit_count: 1,
       requires_commit_provenance: true,
-      metadata: {
-        promotion: {
-          result: "success",
-          target_runtime: "xyn-local",
-          ui_url: "http://localhost",
-        },
-        commit: { hash: "abc123def456" },
-      },
+      metadata: { commit: { hash: "abc123def456" } },
       preview: readyForCommitSession.preview,
       validation: readyForCommitSession.validation,
     });
@@ -5726,7 +5716,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
     );
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Commit Changes" })).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Finalize Session" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Promote" })).not.toBeInTheDocument();
 
     await act(async () => {
       screen.getByRole("button", { name: "Commit Changes" }).click();
@@ -5734,7 +5724,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
 
     await waitFor(() => expect(apiMocks.commitSolutionChangeSession).toHaveBeenCalledWith("app-1", "session-1"));
     await waitFor(() => expect(screen.getAllByText(/Committed repository changes/i).length).toBeGreaterThan(0));
-    expect(screen.getByRole("button", { name: "Finalize Session" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Promote" })).toBeEnabled();
   });
 
   it("activates artifact detail into reusable dev sibling and opens runtime for reused status", async () => {

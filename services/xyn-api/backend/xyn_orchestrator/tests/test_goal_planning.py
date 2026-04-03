@@ -5309,9 +5309,9 @@ class GoalPlanningTests(TestCase):
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             blocked = application_solution_change_session_finalize(finalize_request, str(application.id), str(session.id))
         self.assertEqual(blocked.status_code, 409)
-        self.assertIn("ready_for_promotion", str(json.loads(blocked.content).get("error") or ""))
+        self.assertIn("execution_status=promoted", str(json.loads(blocked.content).get("error") or ""))
 
-        session.execution_status = "ready_for_promotion"
+        session.execution_status = "promoted"
         session.save(update_fields=["execution_status", "updated_at"])
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
             finalized = application_solution_change_session_finalize(finalize_request, str(application.id), str(session.id))
@@ -5357,7 +5357,7 @@ class GoalPlanningTests(TestCase):
             request_text="Promote validated campaign UX",
             created_by=self.identity,
             status="planned",
-            execution_status="ready_for_promotion",
+            execution_status="committed",
         )
         promote_request = self._request(
             f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/promote",
@@ -5423,7 +5423,7 @@ class GoalPlanningTests(TestCase):
             request_text="Promote validated campaign UX",
             created_by=self.identity,
             status="planned",
-            execution_status="ready_for_promotion",
+            execution_status="committed",
             metadata_json={
                 "promotion": {
                     "result": "success",

@@ -34437,7 +34437,8 @@ def _serialize_composer_state(
             _serialize_composer_action(
                 action_type="prepare_solution_preview",
                 label="Prepare Preview Handoff",
-                enabled=session_execution_status in {"staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion"},
+                enabled=session_execution_status
+                in {"staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion", "committed", "promoted"},
                 target_kind="solution_change_session",
                 target_id=str(solution_change_session.id),
             )
@@ -34446,7 +34447,7 @@ def _serialize_composer_state(
             _serialize_composer_action(
                 action_type="validate_solution_change",
                 label="Validate Staged Change",
-                enabled=session_execution_status in {"preview_ready", "validating", "ready_for_promotion"},
+                enabled=session_execution_status in {"preview_ready", "validating", "ready_for_promotion", "committed", "promoted"},
                 target_kind="solution_change_session",
                 target_id=str(solution_change_session.id),
             )
@@ -37803,17 +37804,29 @@ def application_solution_change_session_promote(
         return JsonResponse({"error": "forbidden"}, status=403)
     session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
     execution_status = str(session.execution_status or "").strip().lower()
-    if execution_status != "ready_for_promotion":
+    if execution_status not in {"committed", "promoted"}:
         return JsonResponse(
             {
-                "error": "change session can only be promoted when execution_status=ready_for_promotion",
+                "error": "change session can only be promoted after commit (execution_status=committed)",
             },
             status=409,
         )
+    if _solution_change_session_requires_commit_provenance(session):
+        has_commit_provenance = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).exists()
+        if not has_commit_provenance:
+            return JsonResponse(
+                {
+                    "error": "code-changing sessions require at least one recorded repository commit before promote",
+                },
+                status=409,
+            )
 
     metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
     promotion = metadata.get("promotion") if isinstance(metadata.get("promotion"), dict) else {}
     if str(promotion.get("result") or "").strip().lower() == "success":
+        if execution_status != "promoted":
+            session.execution_status = "promoted"
+            session.save(update_fields=["execution_status", "updated_at"])
         memberships_by_artifact_id = {
             str(member.artifact_id): member
             for member in ApplicationArtifactMembership.objects.filter(application=application)
@@ -37914,7 +37927,8 @@ def application_solution_change_session_promote(
         "provision_status": provision_status,
     }
     session.metadata_json = metadata
-    session.save(update_fields=["metadata_json", "updated_at"])
+    session.execution_status = "promoted"
+    session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
     memberships_by_artifact_id = {
         str(member.artifact_id): member
         for member in ApplicationArtifactMembership.objects.filter(application=application)
@@ -37978,18 +37992,49 @@ def application_solution_change_session_commit(
         return JsonResponse({"error": "forbidden"}, status=403)
     session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
     execution_status = str(session.execution_status or "").strip().lower()
-    if execution_status not in {"ready_for_promotion", "promoted"}:
+    if execution_status not in {"ready_for_promotion", "committed"}:
         return JsonResponse(
             {
-                "error": "change session can only be committed when execution_status=ready_for_promotion or promoted",
+                "error": "change session can only be committed after validation (execution_status=ready_for_promotion)",
+            },
+            status=409,
+        )
+    validation = session.validation_json if isinstance(session.validation_json, dict) else {}
+    validation_status = str(validation.get("status") or "").strip().lower()
+    if validation_status not in {"passed", "validated", "success"}:
+        return JsonResponse(
+            {
+                "error": "change session can only be committed after successful validation",
             },
             status=409,
         )
     repo_scopes = _solution_change_commit_repo_scopes(session)
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
     if not repo_scopes:
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        metadata["commit"] = {
+            "at": timezone.now().isoformat(),
+            "by_user_identity_id": str(identity.id),
+            "repository_count": 0,
+            "repositories": [],
+            "result": "no_repo_backed_changes",
+        }
+        session.metadata_json = metadata
+        session.execution_status = "committed"
+        session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
         return JsonResponse(
-            {"error": "selected artifacts do not expose repo-backed editable ownership for commit"},
-            status=409,
+            {
+                "committed": True,
+                "already_committed": False,
+                "no_changes": True,
+                "commits": [],
+                "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+            }
         )
     commit_message = _solution_change_commit_message(session)
     commit_records: List[Dict[str, Any]] = []
@@ -38073,6 +38118,25 @@ def application_solution_change_session_commit(
         SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).order_by("-created_at", "-updated_at")
     )
     if not commit_records:
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        metadata["commit"] = {
+            "at": timezone.now().isoformat(),
+            "by_user_identity_id": str(identity.id),
+            "repository_count": len(existing_commits),
+            "repositories": [
+                {
+                    "repository_slug": str(item.repository_slug or "").strip(),
+                    "branch": str(item.branch or "").strip(),
+                    "commit_sha": str(item.commit_sha or "").strip(),
+                    "changed_files": item.changed_files_json if isinstance(item.changed_files_json, list) else [],
+                }
+                for item in existing_commits
+            ],
+            "result": "already_committed" if existing_commits else "no_changes",
+        }
+        session.metadata_json = metadata
+        session.execution_status = "committed"
+        session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
         if existing_commits:
             return JsonResponse(
                 {
@@ -38080,7 +38144,7 @@ def application_solution_change_session_commit(
                     "already_committed": True,
                     "no_changes": True,
                     "commits": [_serialize_solution_change_session_repo_commit(item) for item in existing_commits],
-                    "session": _serialize_solution_change_session(session),
+                    "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
                 }
             )
         return JsonResponse(
@@ -38090,7 +38154,7 @@ def application_solution_change_session_commit(
                 "no_changes": True,
                 "no_changes_repositories": no_changes_repos,
                 "message": "No changes to commit.",
-                "session": _serialize_solution_change_session(session),
+                "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
             }
         )
 
@@ -38113,13 +38177,8 @@ def application_solution_change_session_commit(
     if len(commit_records) == 1:
         metadata["commit"]["hash"] = str(commit_records[0].get("commit_sha") or "")
     session.metadata_json = metadata
-    session.save(update_fields=["metadata_json", "updated_at"])
-    memberships_by_artifact_id = {
-        str(member.artifact_id): member
-        for member in ApplicationArtifactMembership.objects.filter(application=application)
-        .select_related("artifact", "artifact__type")
-        .all()
-    }
+    session.execution_status = "committed"
+    session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
     refreshed_commits = list(
         SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).order_by("-created_at", "-updated_at")
     )
@@ -38151,10 +38210,10 @@ def application_solution_change_session_finalize(
         return JsonResponse({"error": "forbidden"}, status=403)
     session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
     execution_status = str(session.execution_status or "").strip().lower()
-    if execution_status != "ready_for_promotion":
+    if execution_status != "promoted":
         return JsonResponse(
             {
-                "error": "change session can only be finalized when execution_status=ready_for_promotion",
+                "error": "change session can only be finalized after promotion (execution_status=promoted)",
             },
             status=409,
         )

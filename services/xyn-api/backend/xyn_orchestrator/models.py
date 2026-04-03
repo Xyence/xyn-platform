@@ -4906,6 +4906,8 @@ class SolutionChangeSession(models.Model):
         ("preview_ready", "Preview Ready"),
         ("validating", "Validating"),
         ("ready_for_promotion", "Ready for Promotion"),
+        ("committed", "Committed"),
+        ("promoted", "Promoted"),
         ("failed", "Failed"),
     ]
 

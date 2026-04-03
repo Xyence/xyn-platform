@@ -227,4 +227,26 @@ describe("HeaderUtilityMenu", () => {
     await waitFor(() => expect(apiMocks.getWorkspaceLinkedChangeSession).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: /Resume change session/i })).not.toBeInTheDocument();
   });
+
+  it("renders readiness component labels with expected acronym capitalization", async () => {
+    apiMocks.getSystemReadiness.mockResolvedValue({
+      ready: false,
+      summary: "Configuration required",
+      checks: [{ component: "ai_providers", status: "missing", message: "No providers configured." }],
+    });
+    render(
+      <MemoryRouter>
+        <HeaderUtilityMenu
+          workspaceId="ws-1"
+          actorRoles={["platform_admin"]}
+          actorLabel="user@example.com"
+          onOpenAgentActivity={vi.fn()}
+          onMessage={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Utilities" }));
+    expect(await screen.findByText("AI Providers")).toBeInTheDocument();
+  });
 });

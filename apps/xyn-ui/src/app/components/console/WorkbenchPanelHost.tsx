@@ -172,7 +172,7 @@ export type ConsolePanelSpec = {
   params?: Record<string, unknown>;
 };
 
-type ComposerExecutionPhase = "planned" | "staged" | "preview_ready" | "ready_for_promotion" | "failed";
+type ComposerExecutionPhase = "planned" | "staged" | "preview_ready" | "ready_for_promotion" | "committed" | "promoted" | "failed";
 
 type ComposerExecutionActionKey = "stage-apply" | "prepare-preview" | "validate" | "promote" | "commit" | "finalize";
 
@@ -203,12 +203,11 @@ function deriveComposerExecutionPhase(
   const preview = String(previewStatus || "").trim().toLowerCase();
   const validation = String(validationStatus || "").trim().toLowerCase();
   if (execution === "failed" || preview === "failed" || validation === "failed") return "failed";
+  if (execution === "promoted") return "promoted";
+  if (execution === "committed") return "committed";
   if (
     execution === "ready_for_promotion"
     || execution === "validated"
-    || execution === "completed"
-    || execution === "finalized"
-    || execution === "archived"
     || validation === "passed"
     || validation === "validated"
     || validation === "ready_for_promotion"
@@ -240,6 +239,8 @@ function executionPhaseLabel(phase: ComposerExecutionPhase): string {
   if (phase === "staged") return "Staged";
   if (phase === "preview_ready") return "Preview Ready";
   if (phase === "ready_for_promotion") return "Validated";
+  if (phase === "committed") return "Committed";
+  if (phase === "promoted") return "Promoted";
   return "Failed";
 }
 
@@ -247,14 +248,18 @@ function executionPhaseNextActionLabel(phase: ComposerExecutionPhase): string {
   if (phase === "planned") return "Apply planned changes";
   if (phase === "staged") return "Prepare preview environment";
   if (phase === "preview_ready") return "Validate changes";
-  if (phase === "ready_for_promotion") return "Finalize session";
+  if (phase === "ready_for_promotion") return "Commit repository changes";
+  if (phase === "committed") return "Promote committed changes";
+  if (phase === "promoted") return "Finalize session";
   return "Retry the failed execution step";
 }
 
 function defaultPrimaryActionForPhase(phase: ComposerExecutionPhase): ComposerExecutionActionKey {
   if (phase === "staged") return "prepare-preview";
   if (phase === "preview_ready") return "validate";
-  if (phase === "ready_for_promotion") return "promote";
+  if (phase === "ready_for_promotion") return "commit";
+  if (phase === "committed") return "promote";
+  if (phase === "promoted") return "finalize";
   return "stage-apply";
 }
 
@@ -4553,17 +4558,22 @@ function ComposerDetailPanel({
   const requiresCommitProvenance = Boolean(selectedSession?.requires_commit_provenance);
   const commitRequiredAndMissing = requiresCommitProvenance && repoCommitCount < 1;
   const derivedExecutionNextAction = executionPhase === "ready_for_promotion"
-    ? !promotionSucceeded
-      ? "Promote validated changes to the primary runtime"
-      : commitRequiredAndMissing
-        ? "Commit repository changes"
-        : "Finalize session"
-    : baseExecutionNextAction;
+    ? "Commit repository changes for this validated session."
+    : executionPhase === "committed"
+      ? "Promote committed changes to the primary runtime."
+      : executionPhase === "promoted"
+        ? "Finalize the promoted session."
+        : baseExecutionNextAction;
   const latestExecutionResult = (() => {
-    if (executionPhase === "ready_for_promotion") {
-      if (promotionSucceeded && commitRequiredAndMissing) return "Changes promoted. Commit repository changes before finalizing.";
+    if (executionPhase === "promoted") {
       if (promotionSucceeded) return "Changes promoted to the primary local runtime — ready to finalize.";
-      return "Validation complete — ready for promotion.";
+      return "Changes promoted — ready to finalize.";
+    }
+    if (executionPhase === "committed") {
+      return "Repository changes committed — ready for promotion.";
+    }
+    if (executionPhase === "ready_for_promotion") {
+      return "Validation complete — ready to commit repository changes.";
     }
     if (executionPhase === "preview_ready") {
       if (previewSummarySource.includes("reused")) return "Preview ready (reused runtime).";
@@ -4582,27 +4592,26 @@ function ComposerDetailPanel({
     return "No execution action has run yet.";
   })();
   const primaryExecutionAction = (() => {
-    const fallback = defaultPrimaryActionForPhase(executionPhase);
-    if (executionPhase !== "ready_for_promotion") return fallback;
-    if (!promotionSucceeded) return "promote";
-    if (commitRequiredAndMissing) return "commit";
-    return "finalize";
+    return defaultPrimaryActionForPhase(executionPhase);
   })();
   const sessionStatusToken = String(selectedSession?.status || "").trim().toLowerCase();
   const isSessionFinalized = ["finalized", "completed", "archived"].includes(sessionStatusToken)
     || ["completed", "finalized", "archived"].includes(executionStatusToken);
-  const canStageApply = canRunExecution && executionPhase !== "ready_for_promotion";
+  const canStageApply = canRunExecution && (executionPhase === "planned" || executionPhase === "failed");
   const canPreparePreview = canRunExecution && (executionPhase === "staged" || executionPhase === "failed");
   const canValidate = canRunExecution && (executionPhase === "preview_ready" || executionPhase === "failed");
-  const canPromote = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion";
-  const canCommit = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion" && promotionSucceeded && commitRequiredAndMissing;
+  const canCommit = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion";
+  const canPromote =
+    canRunExecution
+    && !isSessionFinalized
+    && executionPhase === "committed"
+    && (!requiresCommitProvenance || repoCommitCount > 0);
   const canFinalize =
     canRunExecution
     && !isSessionFinalized
-    && executionPhase === "ready_for_promotion"
-    && promotionSucceeded
+    && executionPhase === "promoted"
     && (!requiresCommitProvenance || repoCommitCount > 0);
-  const hasExecutionProgress = ["staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion", "completed", "applied"].includes(
+  const hasExecutionProgress = ["staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion", "committed", "promoted", "completed", "applied"].includes(
     String(selectedSession?.execution_status || "").toLowerCase()
   );
   const showInitialRequestInput = !hasDraftPlan && !hasPendingPrompt;
@@ -5569,7 +5578,7 @@ function ComposerDetailPanel({
                           );
                           mergeUpdatedSession(response.session);
                           if (String(response.session?.execution_status || "").toLowerCase() === "ready_for_promotion") {
-                            setMessage("Validation complete — ready for promotion.");
+                            setMessage("Validation complete — commit repository changes before promotion.");
                             return;
                           }
                           setMessage("Validation completed.");
@@ -5578,7 +5587,7 @@ function ComposerDetailPanel({
                     >
                       Validate
                     </button>
-                    {executionPhase === "ready_for_promotion" ? (
+                    {executionPhase === "committed" ? (
                       <button
                         type="button"
                         className={`${primaryExecutionAction === "promote" ? "primary" : "ghost"} sm`}
@@ -5644,14 +5653,18 @@ function ComposerDetailPanel({
                               setMessage("No changes to commit.");
                               return;
                             }
-                            setMessage(latestSha ? `Committed repository changes (${latestSha.slice(0, 12)}).` : "Committed repository changes.");
+                            setMessage(
+                              latestSha
+                                ? `Committed repository changes (${latestSha.slice(0, 12)}). Promote when ready.`
+                                : "Committed repository changes. Promote when ready."
+                            );
                           });
                         }}
                       >
                         Commit Changes
                       </button>
                     ) : null}
-                    {executionPhase === "ready_for_promotion" ? (
+                    {executionPhase === "promoted" ? (
                       <button
                         type="button"
                         className={`${primaryExecutionAction === "finalize" ? "primary" : "ghost"} sm`}
@@ -5683,10 +5696,12 @@ function ComposerDetailPanel({
                         ? "Blocked: checkpoint approval pending."
                         : !hasApprovedStageCheckpoint
                           ? "Blocked: required checkpoint is not approved."
-                          : executionPhase === "ready_for_promotion" && !promotionSucceeded
-                            ? "Blocked: promote validated changes to the primary runtime before finalizing."
-                            : executionPhase === "ready_for_promotion" && commitRequiredAndMissing
-                              ? "Blocked: commit repository changes before finalizing."
+                          : executionPhase === "ready_for_promotion"
+                            ? "Blocked: commit repository changes before promoting."
+                            : executionPhase === "committed"
+                              ? "Blocked: promote committed changes before finalizing."
+                              : executionPhase === "promoted" && commitRequiredAndMissing
+                                ? "Blocked: commit provenance is required before finalizing."
                           : isSessionFinalized
                             ? "Session finalized."
                           : `Current phase: ${currentPhaseLabel}. Next step: ${derivedExecutionNextAction}.`}
