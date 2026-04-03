@@ -5431,6 +5431,8 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(str((payload or {}).get("name") or "").startswith("preview-"))
         self.assertTrue(str((payload or {}).get("ui_host") or "").startswith("xyn-preview-"))
         self.assertTrue(str((payload or {}).get("api_host") or "").startswith("api.xyn-preview-"))
+        self.assertTrue(bool((payload or {}).get("prefer_local_images")))
+        self.assertTrue(bool((payload or {}).get("prefer_local_sources")))
 
     def test_solution_change_session_prepare_preview_uses_unique_session_preview_project_per_session(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")

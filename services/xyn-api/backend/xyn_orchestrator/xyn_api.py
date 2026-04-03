@@ -32644,6 +32644,10 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             "ui_host": ui_host,
             "api_host": api_host,
         }
+        env_mode = str(os.getenv("XYN_ENV", "") or "").strip().lower()
+        if env_mode in {"local", "dev", ""}:
+            payload["prefer_local_images"] = True
+            payload["prefer_local_sources"] = True
         try:
             response = _seed_api_request(
                 method="POST",
