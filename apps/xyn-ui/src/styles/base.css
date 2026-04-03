@@ -234,24 +234,6 @@ input {
   font-weight: 600;
 }
 
-.workspace-selector {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--card);
-  color: var(--text);
-  padding: 4px 8px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  min-width: 96px;
-  width: auto;
-  max-width: 170px;
-}
-
-.workspace-selector:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
 .header-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1637,6 +1619,10 @@ button.sm {
   position: relative;
 }
 
+.workspace-menu-wrap {
+  color: var(--ink);
+}
+
 .user-menu-trigger {
   display: inline-flex;
   align-items: center;
@@ -1645,12 +1631,27 @@ button.sm {
   padding: 4px 8px;
 }
 
+.workspace-menu-trigger {
+  min-width: 96px;
+  max-width: 180px;
+}
+
+.workspace-menu-trigger-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .user-menu-popover {
   position: absolute;
   top: 40px;
   right: 0;
   width: 260px;
   z-index: 1200;
+}
+
+.workspace-menu-popover {
+  width: min(320px, 80vw);
 }
 
 .xyn-popover {

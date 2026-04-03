@@ -4532,8 +4532,12 @@ function ComposerDetailPanel({
   const executionSkippedCount = Number(sessionExecutionSummary?.skipped_artifacts ?? sessionExecutionSummary?.skipped ?? 0);
   const executionTotalCount = Number(sessionExecutionSummary?.total_artifacts ?? sessionExecutionSummary?.total ?? 0);
   const previewPrimaryUrl = String(selectedSession?.preview?.primary_url || "").trim();
-  const previewBuildStatus = String(selectedSession?.preview?.session_build?.status || "").trim().toLowerCase();
-  const previewBuildReason = String(selectedSession?.preview?.session_build?.reason || "").trim();
+  const previewSessionBuild = selectedSession?.preview?.session_build
+    && typeof selectedSession.preview.session_build === "object"
+    ? selectedSession.preview.session_build as Record<string, unknown>
+    : null;
+  const previewBuildStatus = String(previewSessionBuild?.status || "").trim().toLowerCase();
+  const previewBuildReason = String(previewSessionBuild?.reason || "").trim();
   const previewSummarySource = String(selectedSession?.preview?.source || selectedSession?.preview?.mode || "").trim().toLowerCase();
   const latestExecutionResult = (() => {
     if (executionPhase === "ready_for_promotion") return "Validation complete — ready for promotion.";

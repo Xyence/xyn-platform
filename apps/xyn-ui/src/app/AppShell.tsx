@@ -54,6 +54,7 @@ const PlatformInitializationPage = lazy(() => import("./pages/PlatformInitializa
 import { useGlobalHotkeys } from "./hooks/useGlobalHotkeys";
 import ReportOverlay from "./components/ReportOverlay";
 import UserMenu from "./components/common/UserMenu";
+import WorkspaceMenu from "./components/common/WorkspaceMenu";
 import NotificationBell from "./components/notifications/NotificationBell";
 import ToastHost from "./components/notifications/ToastHost";
 import AgentActivityDrawer from "./components/activity/AgentActivityDrawer";
@@ -930,21 +931,11 @@ export default function AppShell() {
           </Link>
           {isWorkbenchRoute && activeWorkspace?.name ? (
             <div className="app-header-workspace">
-              <label htmlFor="workspace-selector" className="sr-only">
-                Workspace
-              </label>
-              <select
-                id="workspace-selector"
-                className="workspace-selector"
-                value={activeWorkspace.id}
-                onChange={(event) => handleWorkspaceChange(String(event.target.value || ""))}
-              >
-                {workspaceSelectionOptions.map((workspace) => (
-                  <option key={workspace.id} value={workspace.id}>
-                    {workspace.name}
-                  </option>
-                ))}
-              </select>
+              <WorkspaceMenu
+                activeWorkspaceId={activeWorkspace.id}
+                workspaces={workspaceSelectionOptions}
+                onWorkspaceChange={handleWorkspaceChange}
+              />
             </div>
           ) : null}
         </div>
