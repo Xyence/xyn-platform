@@ -75,6 +75,7 @@ class SolutionChangeSessionRepoCommitTests(TestCase):
             status="planned",
             created_by=self.identity,
             execution_status="ready_for_promotion",
+            validation_json={"status": "passed"},
             selected_artifact_ids_json=[],
         )
 
