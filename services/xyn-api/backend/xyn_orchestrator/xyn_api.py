@@ -29871,6 +29871,208 @@ def _append_unique_lowered(target: List[str], value: str) -> None:
     target.append(text)
 
 
+_PLAN_REWRITE_INSTRUCTION_PATTERNS: Tuple[re.Pattern[str], ...] = (
+    re.compile(r"\brewrite\b.*\bproposed\s+work\b", re.IGNORECASE),
+    re.compile(r"\breplace\b.*\bnext\s+action\b", re.IGNORECASE),
+    re.compile(r"\bkeep\b.*\bprimary\b", re.IGNORECASE),
+    re.compile(r"\binclude\b.*\bonly\s+if\b", re.IGNORECASE),
+    re.compile(r"\bremove\b.*\b(provider|framework)\b", re.IGNORECASE),
+    re.compile(r"\bnarrow\b.*\bscope\b", re.IGNORECASE),
+    re.compile(r"\btighten\b.*\bplan\b", re.IGNORECASE),
+)
+
+
+def _looks_like_plan_rewrite_instruction(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    if any(token in lowered for token in {"proposed work", "next action", "keep", "include", "primary", "only if evidence", "provider", "framework"}):
+        return True
+    return any(pattern.search(value) for pattern in _PLAN_REWRITE_INSTRUCTION_PATTERNS)
+
+
+def _extract_filename_tokens(text: str) -> List[str]:
+    tokens: List[str] = []
+    if not text:
+        return tokens
+    for match in re.findall(r"\b([A-Za-z0-9_./-]+\.(?:tsx|ts|jsx|js|css|scss|py))\b", text):
+        candidate = str(match or "").strip()
+        if candidate and candidate not in tokens:
+            tokens.append(candidate)
+    return tokens
+
+
+def _normalize_file_hint(value: str) -> str:
+    return str(value or "").strip().replace("\\", "/").lower()
+
+
+def _match_file_hint_to_candidates(hint: str, candidates: List[str]) -> str:
+    normalized_hint = _normalize_file_hint(hint)
+    if not normalized_hint:
+        return ""
+    hint_name = normalized_hint.rsplit("/", 1)[-1]
+    for candidate in candidates:
+        normalized_candidate = _normalize_file_hint(candidate)
+        if normalized_candidate.endswith(normalized_hint):
+            return candidate
+    for candidate in candidates:
+        normalized_candidate = _normalize_file_hint(candidate)
+        candidate_name = normalized_candidate.rsplit("/", 1)[-1]
+        if hint_name and candidate_name == hint_name:
+            return candidate
+    return ""
+
+
+def _extract_plan_rewrite_directives(records: List[Dict[str, Any]], refinements: List[str]) -> Dict[str, Any]:
+    reply_texts: List[str] = []
+    for record in records:
+        reply = str((record or {}).get("reply_text") or "").strip()
+        if reply:
+            reply_texts.append(reply)
+    for reply in refinements:
+        candidate = str(reply or "").strip()
+        if candidate and candidate not in reply_texts:
+            reply_texts.append(candidate)
+
+    directives: Dict[str, Any] = {
+        "rewrite_requested": False,
+        "rewrite_proposed_work": False,
+        "replace_next_action": False,
+        "remove_provider_framework_noise": False,
+        "narrow_scope": False,
+        "primary_file_hints": [],
+        "conditional_file_hints": [],
+    }
+    for text in reply_texts:
+        lowered = text.lower()
+        has_instruction = _looks_like_plan_rewrite_instruction(text)
+        if has_instruction:
+            directives["rewrite_requested"] = True
+        if re.search(r"\brewrite\b.*\bproposed\s+work\b", lowered):
+            directives["rewrite_proposed_work"] = True
+        if re.search(r"\breplace\b.*\bnext\s+action\b", lowered) or (
+            "next action" in lowered and any(token in lowered for token in {"replace", "actual implementation", "implementation action"})
+        ):
+            directives["replace_next_action"] = True
+        if re.search(r"\bremove\b.*\b(provider|framework)\b", lowered) or ("provider/framework" in lowered):
+            directives["remove_provider_framework_noise"] = True
+        if any(token in lowered for token in {"tighten", "narrow scope", "narrow the scope", "focus scope", "keep scope tight"}):
+            directives["narrow_scope"] = True
+        file_tokens = _extract_filename_tokens(text)
+        if "primary" in lowered:
+            for token in file_tokens:
+                if token not in directives["primary_file_hints"]:
+                    directives["primary_file_hints"].append(token)
+        if "only if" in lowered or "only when" in lowered:
+            for token in file_tokens:
+                if token not in directives["conditional_file_hints"]:
+                    directives["conditional_file_hints"].append(token)
+    return directives
+
+
+def _sanitize_shared_contracts_for_refinement(
+    contracts: List[str],
+    *,
+    directives: Dict[str, Any],
+) -> List[str]:
+    cleaned: List[str] = []
+    remove_noise = bool(directives.get("remove_provider_framework_noise"))
+    for item in contracts:
+        token = str(item or "").strip()
+        if not token:
+            continue
+        lowered = token.lower()
+        if _looks_like_plan_rewrite_instruction(token):
+            continue
+        if remove_noise and any(noise in lowered for noise in {"provider", "framework"}):
+            continue
+        if token not in cleaned:
+            cleaned.append(token)
+    return cleaned
+
+
+def _apply_refinement_rewrite_to_plan_payload(
+    *,
+    plan: Dict[str, Any],
+    directives: Dict[str, Any],
+    request_text: str,
+) -> Dict[str, Any]:
+    if not isinstance(plan, dict):
+        return plan
+    if not bool(directives.get("rewrite_requested")):
+        return plan
+    updated = copy.deepcopy(plan)
+    candidate_files = [str(item).strip() for item in (updated.get("candidate_files") or []) if str(item).strip()]
+
+    primary_candidate = ""
+    for hint in directives.get("primary_file_hints") or []:
+        matched = _match_file_hint_to_candidates(str(hint or ""), candidate_files)
+        if matched:
+            primary_candidate = matched
+            break
+    if not primary_candidate and candidate_files:
+        primary_candidate = candidate_files[0]
+
+    conditional_candidates: List[str] = []
+    for hint in directives.get("conditional_file_hints") or []:
+        matched = _match_file_hint_to_candidates(str(hint or ""), candidate_files)
+        if matched and matched != primary_candidate and matched not in conditional_candidates:
+            conditional_candidates.append(matched)
+
+    if bool(directives.get("rewrite_proposed_work")):
+        if primary_candidate:
+            rewritten_steps: List[str] = [
+                f"Inspect `{primary_candidate}` and confirm ownership of the affected header/dropdown styling behavior.",
+                f"Apply a minimal UI/layout fix in `{primary_candidate}` to address: {str(request_text or '').strip()[:140]}.",
+            ]
+            if conditional_candidates:
+                rewritten_steps.append(
+                    f"Include `{conditional_candidates[0]}` only if evidence shows shared styling/component coupling requires it."
+                )
+            rewritten_steps.extend(
+                [
+                    "Validate the dropdown styling/width behavior in the live header shell and check adjacent control parity.",
+                    "Add or update a focused regression test for this UI behavior.",
+                ]
+            )
+            updated["implementation_steps"] = rewritten_steps[:5]
+            updated["proposed_work"] = rewritten_steps[:5]
+        else:
+            message = (
+                "Could not confidently identify owning component files for the requested rewrite. "
+                "Please confirm the primary component path before revising implementation steps."
+            )
+            open_questions = [
+                str(item).strip()
+                for item in (updated.get("open_questions") if isinstance(updated.get("open_questions"), list) else [])
+                if str(item).strip()
+            ]
+            if message not in open_questions:
+                open_questions.append(message)
+            updated["open_questions"] = open_questions
+            updated["next_action"] = "Confirm the primary target component path, then regenerate the plan rewrite."
+
+    if bool(directives.get("replace_next_action")) and primary_candidate:
+        next_action = f"Apply the first implementation change in `{primary_candidate}` and capture a focused diff."
+        updated["next_action"] = next_action
+        validation_plan = [
+            str(item).strip()
+            for item in (updated.get("validation_plan") if isinstance(updated.get("validation_plan"), list) else [])
+            if str(item).strip()
+        ]
+        tail = [item for item in validation_plan if item != next_action]
+        updated["validation_plan"] = [next_action, *tail]
+
+    contracts = [
+        str(item).strip()
+        for item in (updated.get("shared_contracts") if isinstance(updated.get("shared_contracts"), list) else [])
+        if str(item).strip()
+    ]
+    updated["shared_contracts"] = _sanitize_shared_contracts_for_refinement(contracts, directives=directives)
+    return updated
+
+
 def _normalize_question_key(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
@@ -31856,11 +32058,16 @@ def _generate_solution_change_plan(
         payload: Dict[str, Any],
         selected_members_for_plan: List[ApplicationArtifactMembership],
     ) -> Dict[str, Any]:
-        return _maybe_apply_code_aware_solution_planning(
+        finalized = _maybe_apply_code_aware_solution_planning(
             plan=payload,
             session=session,
             selected_members=selected_members_for_plan,
             force_code_aware_planning=force_code_aware_planning,
+        )
+        return _apply_refinement_rewrite_to_plan_payload(
+            plan=finalized,
+            directives=plan_rewrite_directives,
+            request_text=original_request,
         )
 
     def _compact_objective(text: str) -> str:
@@ -32075,7 +32282,16 @@ def _generate_solution_change_plan(
         state["additional_considerations"] = additional_considerations
         return state
 
+    plan_rewrite_directives = _extract_plan_rewrite_directives(response_records, user_refinements)
     refinement_state = _refinement_state(response_records, user_refinements)
+    refinement_state["constraints"] = _sanitize_shared_contracts_for_refinement(
+        [str(item).strip() for item in (refinement_state.get("constraints") or []) if str(item).strip()],
+        directives=plan_rewrite_directives,
+    )
+    refinement_state["additional_considerations"] = _sanitize_shared_contracts_for_refinement(
+        [str(item).strip() for item in (refinement_state.get("additional_considerations") or []) if str(item).strip()],
+        directives=plan_rewrite_directives,
+    )
     latest_draft_summary = ""
     for turn in reversed(planning_turns):
         if str(turn.actor or "") == "planner" and str(turn.kind or "") == "draft_plan":

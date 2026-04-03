@@ -2132,6 +2132,153 @@ class GoalPlanningTests(TestCase):
             ).lower()
             self.assertIn("rich text", merged_text)
 
+    def test_solution_change_session_refinement_rewrites_plan_sections_instead_of_echoing_constraints(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform shell",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Fix workspace dropdown header styling",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api.gather_solution_change_code_context",
+            return_value={
+                "available": True,
+                "summary": "Used repo context from xyn-platform (apps/xyn-ui/).",
+                "candidate_files": [
+                    "apps/xyn-ui/src/app/components/common/WorkspaceContextBar.tsx",
+                    "apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx",
+                ],
+                "candidate_components": ["WorkspaceContextBar", "HeaderUtilityMenu"],
+                "confidence": 0.86,
+                "needs_clarification": False,
+            },
+        ):
+            create_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Header dropdown CSS mismatch",
+                        "request_text": "The workspace dropdown in the Xyn UI header does not appear to use the same CSS as the header profile dropdown.",
+                    }
+                ),
+            )
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            create_payload = json.loads(create_response.content)
+            session_id = str((create_payload.get("session") or {}).get("id") or "")
+            session = SolutionChangeSession.objects.get(id=session_id)
+
+            option_turn = (
+                SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="option_set")
+                .order_by("-sequence")
+                .first()
+            )
+            self.assertIsNotNone(option_turn)
+            option_payload = option_turn.payload_json if isinstance(option_turn.payload_json, dict) else {}
+            options = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+            self.assertTrue(options)
+            option_id = str((options[0] if isinstance(options[0], dict) else {}).get("id") or "")
+
+            select_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/select-option",
+                method="post",
+                data=json.dumps({"source_turn_id": str(option_turn.id), "option_id": option_id}),
+            )
+            select_response = application_solution_change_session_select_option(select_request, str(application.id), str(session.id))
+            self.assertEqual(select_response.status_code, 200)
+
+            plan_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+                method="post",
+                data=json.dumps({}),
+            )
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+            self.assertEqual(plan_response.status_code, 200)
+            initial_plan_payload = json.loads(plan_response.content)
+            initial_plan = ((initial_plan_payload.get("session") or {}).get("plan") or {})
+            initial_proposed_work = [str(item) for item in (initial_plan.get("proposed_work") or [])]
+            self.assertTrue(initial_proposed_work)
+
+            refinement_text = (
+                "Tighten this draft: keep WorkspaceContextBar.tsx primary, include HeaderUtilityMenu.tsx only if evidence supports it, "
+                "remove provider/framework noise, rewrite Proposed Work as concrete implementation steps, and replace Next Action with an actual implementation action."
+            )
+            with mock.patch(
+                "xyn_orchestrator.xyn_api._interpret_solution_refinement",
+                return_value={
+                    "mode": "agent_fallback",
+                    "result_type": "plan_revision",
+                    "confidence": 0.91,
+                    "normalized_updates": {
+                        "constraints_add": [
+                            "keep WorkspaceContextBar.tsx primary",
+                            "include HeaderUtilityMenu.tsx only if evidence supports it",
+                            "remove provider/framework noise",
+                            "rewrite Proposed Work as concrete implementation steps",
+                            "replace Next Action with an actual implementation action",
+                        ]
+                    },
+                    "planner_message": "Applied requested refinement.",
+                    "warnings": [],
+                },
+            ):
+                refinement_request = self._request(
+                    f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/reply",
+                    method="post",
+                    data=json.dumps({"reply_text": refinement_text}),
+                )
+                refinement_response = application_solution_change_session_reply(
+                    refinement_request,
+                    str(application.id),
+                    str(session.id),
+                )
+            self.assertEqual(refinement_response.status_code, 200)
+            refinement_payload = json.loads(refinement_response.content)
+            revised_plan = ((refinement_payload.get("session") or {}).get("plan") or {})
+
+        revised_proposed_work = [str(item) for item in (revised_plan.get("proposed_work") or [])]
+        revised_contracts = [str(item) for item in (revised_plan.get("shared_contracts") or [])]
+        revised_validation_plan = [str(item) for item in (revised_plan.get("validation_plan") or [])]
+        combined_contract_text = " ".join(revised_contracts).lower()
+        combined_work_text = " ".join(revised_proposed_work).lower()
+
+        self.assertTrue(revised_proposed_work)
+        self.assertNotEqual(revised_proposed_work, initial_proposed_work)
+        self.assertTrue(any("workspacecontextbar.tsx" in item.lower() for item in revised_proposed_work))
+        self.assertFalse(any("provider" in item.lower() or "framework" in item.lower() for item in revised_contracts))
+        self.assertNotIn("rewrite proposed work", combined_contract_text)
+        self.assertNotIn("replace next action", combined_contract_text)
+        self.assertNotIn("keep workspacecontextbar", combined_contract_text)
+        self.assertIn("only if evidence", combined_work_text)
+        self.assertTrue(revised_validation_plan)
+        self.assertIn("apply the first implementation change", revised_validation_plan[0].lower())
+        self.assertIn("workspacecontextbar.tsx", revised_validation_plan[0].lower())
+        self.assertIn("workspacecontextbar.tsx", str(revised_plan.get("next_action") or "").lower())
+
     def test_solution_change_session_refinement_resolves_open_questions_without_pasting_raw_notes(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
