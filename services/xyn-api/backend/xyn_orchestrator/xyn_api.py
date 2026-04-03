@@ -31471,6 +31471,47 @@ def _extract_jsx_component_tags(content: str) -> List[str]:
     return tags[:32]
 
 
+def _humanize_request_issue(request_text: str) -> str:
+    text = str(request_text or "").strip()
+    if not text:
+        return "the reported UI behavior issue"
+    lowered = text.lower()
+    if any(token in lowered for token in {"dropdown", "menu"}) and any(token in lowered for token in {"header", "nav", "toolbar"}):
+        return "the reported header dropdown sizing/alignment issue"
+    if any(token in lowered for token in {"width", "height", "layout", "spacing", "alignment", "css", "style"}):
+        return "the reported layout/styling issue"
+    if any(token in lowered for token in {"field", "input", "form"}):
+        return "the reported form field behavior issue"
+    return "the reported behavior issue"
+
+
+def _file_rationale_map(code_context: Dict[str, Any]) -> Dict[str, str]:
+    rows = code_context.get("evidence") if isinstance(code_context.get("evidence"), list) else []
+    mapping: Dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path") or "").strip()
+        rationale = str(row.get("rationale") or "").strip()
+        if path and rationale:
+            mapping[path] = rationale
+    return mapping
+
+
+def _candidate_file_is_strongly_supported(path: str, *, code_context: Dict[str, Any]) -> bool:
+    confidence = float(code_context.get("confidence") or 0.0)
+    rationale = _file_rationale_map(code_context).get(path, "").lower()
+    if "page-level path penalty" in rationale:
+        return False
+    if confidence >= 0.75:
+        return True
+    return bool(
+        "header/navigation path" in rationale
+        or "header/navigation export" in rationale
+        or "ownership bonus" in rationale
+    )
+
+
 def _resolve_local_import_paths(
     *,
     current_rel_path: str,
@@ -31732,7 +31773,7 @@ def gather_solution_change_code_context(
             search_strategy = "focused_header_navigation"
     top_rows = ranked[:8]
     candidate_files = [row[1] for row in top_rows]
-    evidence = [{"path": row[1], "rationale": row[2]} for row in top_rows]
+    evidence = [{"path": row[1], "rationale": row[2], "score": int(row[0])} for row in top_rows]
     top_slice = top_rows[:3]
     top_all_page_level = bool(top_slice) and all(_path_is_page_level(row[1]) for row in top_slice)
     top_has_header_hint = bool(top_slice) and any(_path_has_header_navigation_hint(row[1]) for row in top_slice)
@@ -31808,19 +31849,35 @@ def gather_solution_change_code_context(
 
 def _format_code_aware_steps(base_steps: List[str], *, code_context: Dict[str, Any], request_text: str) -> List[str]:
     candidate_files = [str(item).strip() for item in (code_context.get("candidate_files") or []) if str(item).strip()]
-    candidate_components = [str(item).strip() for item in (code_context.get("candidate_components") or []) if str(item).strip()]
     if not candidate_files:
         return base_steps
     steps: List[str] = []
     first_file = candidate_files[0]
-    steps.append(f"Inspect `{first_file}` to locate the UI surface handling: {str(request_text or '').strip()[:140]}.")
+    issue_summary = _humanize_request_issue(request_text)
+    steps.append(
+        f"Inspect the owning UI component in `{first_file}` to confirm whether width, min-width, max-width, or anchoring is causing {issue_summary}."
+    )
+    steps.append(
+        f"Apply the narrowest styling/positioning fix in `{first_file}` so the control remains visible and aligned within the viewport."
+    )
+    steps.append("Verify the updated control alignment does not regress neighboring header/navigation controls.")
     if len(candidate_files) > 1:
-        steps.append(f"Validate related layout/styles in `{candidate_files[1]}` before applying changes.")
-    if candidate_components:
-        steps.append(f"Focus component-level updates around: {', '.join(candidate_components[:3])}.")
-    steps.append("Apply a minimal styling/layout update and verify no adjacent panel regressions.")
-    steps.extend([step for step in base_steps if step not in steps][:2])
-    return steps
+        secondary = candidate_files[1]
+        if _candidate_file_is_strongly_supported(secondary, code_context=code_context):
+            steps.append(f"Review `{secondary}` if shared dropdown logic or styles are referenced during implementation.")
+        else:
+            steps.append(f"Review `{secondary}` only if implementation evidence shows shared dropdown logic.")
+    steps.append("Add or update a focused regression check for the affected UI behavior.")
+    unique_steps: List[str] = []
+    for item in [*steps, *base_steps]:
+        token = str(item or "").strip()
+        if not token:
+            continue
+        if token not in unique_steps:
+            unique_steps.append(token)
+        if len(unique_steps) >= 5:
+            break
+    return unique_steps
 
 
 def _plan_contains_uuid_like_work_items(plan: Dict[str, Any]) -> bool:
@@ -31925,7 +31982,17 @@ def _generate_code_aware_solution_change_plan(
         plan["open_questions"] = existing_open_questions
         plan["clarification_options"] = clarification_options
         plan["next_action"] = "Clarify the target header/navigation component before staging code changes."
-    plan["proposed_work"] = [str(item).strip() for item in plan.get("implementation_steps", []) if str(item).strip()]
+    proposed_work = [str(item).strip() for item in plan.get("implementation_steps", []) if str(item).strip()]
+    plan["proposed_work"] = proposed_work
+    if not str(plan.get("next_action") or "").strip():
+        plan["next_action"] = proposed_work[0] if proposed_work else "Confirm the first implementation step before staging."
+    validation_plan = [str(item).strip() for item in (plan.get("validation_plan") if isinstance(plan.get("validation_plan"), list) else []) if str(item).strip()]
+    if validation_plan:
+        if validation_plan[0] != str(plan.get("next_action") or ""):
+            validation_plan = [str(plan.get("next_action") or ""), *[item for item in validation_plan if item != str(plan.get("next_action") or "")]]
+    else:
+        validation_plan = [str(plan.get("next_action") or "Confirm the first implementation step before staging.")]
+    plan["validation_plan"] = validation_plan
     return plan
 
 

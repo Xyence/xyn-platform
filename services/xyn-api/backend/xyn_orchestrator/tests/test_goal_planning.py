@@ -2279,6 +2279,195 @@ class GoalPlanningTests(TestCase):
         self.assertIn("workspacecontextbar.tsx", revised_validation_plan[0].lower())
         self.assertIn("workspacecontextbar.tsx", str(revised_plan.get("next_action") or "").lower())
 
+    def test_solution_change_session_initial_code_aware_draft_is_clean_and_actionable(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform shell",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Fix workspace dropdown header overflow",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api.gather_solution_change_code_context",
+            return_value={
+                "available": True,
+                "summary": "Used repo context from xyn-platform (apps/xyn-ui/).",
+                "candidate_files": [
+                    "apps/xyn-ui/src/app/components/common/WorkspaceContextBar.tsx",
+                    "apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx",
+                ],
+                "candidate_components": ["WorkspaceContextBar", "HeaderUtilityMenu", "ThemeProvider"],
+                "confidence": 0.58,
+                "needs_clarification": False,
+                "evidence": [
+                    {
+                        "path": "apps/xyn-ui/src/app/components/common/WorkspaceContextBar.tsx",
+                        "rationale": "matched terms: header/navigation path, header/navigation export",
+                        "score": 8,
+                    },
+                    {
+                        "path": "apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx",
+                        "rationale": "matched terms: page-level path penalty, matched terms: dropdown",
+                        "score": 3,
+                    },
+                ],
+            },
+        ):
+            create_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions",
+                method="post",
+                data=json.dumps(
+                    {
+                        "title": "Header dropdown width",
+                        "request_text": "The Workspaces dropdown in the header is wider than the page.",
+                    }
+                ),
+            )
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+            self.assertEqual(create_response.status_code, 201)
+            create_payload = json.loads(create_response.content)
+            session_id = str((create_payload.get("session") or {}).get("id") or "")
+            session = SolutionChangeSession.objects.get(id=session_id)
+
+            option_turn = (
+                SolutionPlanningTurn.objects.filter(session=session, actor="planner", kind="option_set")
+                .order_by("-sequence")
+                .first()
+            )
+            self.assertIsNotNone(option_turn)
+            option_payload = option_turn.payload_json if isinstance(option_turn.payload_json, dict) else {}
+            options = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+            self.assertTrue(options)
+            option_id = str((options[0] if isinstance(options[0], dict) else {}).get("id") or "")
+            select_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/select-option",
+                method="post",
+                data=json.dumps({"source_turn_id": str(option_turn.id), "option_id": option_id}),
+            )
+            select_response = application_solution_change_session_select_option(select_request, str(application.id), str(session.id))
+            self.assertEqual(select_response.status_code, 200)
+
+            plan_request = self._request(
+                f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+                method="post",
+                data=json.dumps({}),
+            )
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+            self.assertEqual(plan_response.status_code, 200)
+            plan_payload = json.loads(plan_response.content)
+            plan = ((plan_payload.get("session") or {}).get("plan") or {})
+
+        proposed_work = [str(item) for item in (plan.get("proposed_work") or [])]
+        self.assertGreaterEqual(len(proposed_work), 3)
+        self.assertLessEqual(len(proposed_work), 5)
+        self.assertTrue(any("workspacecontextbar.tsx" in item.lower() for item in proposed_work))
+        combined_work = " ".join(proposed_work).lower()
+        self.assertNotIn("themeprovider", combined_work)
+        self.assertNotIn("operationsprovider", combined_work)
+        self.assertNotIn("the workspaces dropdown in the header is wider than the page", combined_work)
+        self.assertTrue(any("only if implementation evidence" in item.lower() for item in proposed_work))
+        next_action = str(plan.get("next_action") or "").strip()
+        self.assertTrue(next_action)
+        self.assertIn("workspacecontextbar.tsx", next_action.lower())
+        validation_plan = [str(item).strip() for item in (plan.get("validation_plan") or []) if str(item).strip()]
+        self.assertTrue(validation_plan)
+        self.assertEqual(validation_plan[0], next_action)
+
+    def test_solution_change_session_page_specific_initial_draft_has_actionable_next_action(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform shell",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Adjust page-specific workspace form field width",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Workspace page input width",
+            request_text="Increase field width on the Workspaces page form.",
+            created_by=self.identity,
+            analysis_json={"impacted_artifacts": [], "suggested_artifact_ids": [str(ui_artifact.id)]},
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+        )
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api.gather_solution_change_code_context",
+            return_value={
+                "available": True,
+                "summary": "Used repo context from xyn-platform (apps/xyn-ui/).",
+                "candidate_files": ["apps/xyn-ui/src/app/pages/WorkspacesPage.tsx"],
+                "candidate_components": ["WorkspacesPage"],
+                "confidence": 0.83,
+                "needs_clarification": False,
+                "evidence": [
+                    {
+                        "path": "apps/xyn-ui/src/app/pages/WorkspacesPage.tsx",
+                        "rationale": "matched terms: page, workspace, field, width",
+                        "score": 8,
+                    }
+                ],
+            },
+        ):
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(plan_response.status_code, 200)
+        payload = json.loads(plan_response.content)
+        plan = ((payload.get("session") or {}).get("plan") or {})
+        proposed_work = [str(item) for item in (plan.get("proposed_work") or [])]
+        self.assertTrue(proposed_work)
+        self.assertTrue(any("workspacespage.tsx" in item.lower() for item in proposed_work))
+        next_action = str(plan.get("next_action") or "").strip()
+        self.assertTrue(next_action)
+        self.assertIn("workspacespage.tsx", next_action.lower())
+
     def test_solution_change_session_refinement_resolves_open_questions_without_pasting_raw_notes(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
