@@ -2656,6 +2656,48 @@ def _ssm_prepare_runtime_root_marker(
     }
 
 
+def _ssm_stage_execution_manifest(
+    instance_id: str,
+    aws_region: str,
+    root_dir: str,
+    *,
+    manifest_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    root = str(root_dir or "").strip()
+    if not root:
+        raise RuntimeError("remote_root is required for execution manifest staging")
+    payload = json.dumps(manifest_payload or {}, sort_keys=True)
+    marker_path = f"{root.rstrip('/')}/.xyn_execution_manifest.json"
+    payload_sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    result = _run_ssm_commands(
+        instance_id,
+        aws_region,
+        [
+            "set -euo pipefail",
+            f"ROOT={shlex.quote(root)}",
+            "mkdir -p \"$ROOT\"",
+            f"MANIFEST={shlex.quote(marker_path)}",
+            f"printf '%s' {shlex.quote(payload)} > \"$MANIFEST\"",
+            "wc -c < \"$MANIFEST\"",
+        ],
+    )
+    if result.get("invocation_status") != "Success":
+        raise RuntimeError(result.get("stderr") or "SSM execution manifest write failed")
+    line = (result.get("stdout") or "").strip().splitlines()
+    bytes_written = 0
+    if line:
+        try:
+            bytes_written = int(line[-1].strip())
+        except ValueError:
+            bytes_written = 0
+    return {
+        "manifest_path": marker_path,
+        "manifest_sha256": payload_sha,
+        "bytes_written": bytes_written,
+        "invocation_status": str(result.get("invocation_status") or ""),
+    }
+
+
 def _normalize_sha256(value: str) -> Optional[str]:
     if not value:
         return None

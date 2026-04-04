@@ -374,6 +374,11 @@ class LegacyAwsSsmRoute53ProviderStub:
             "runtime_prepare_root",
             "prepare_root",
         }
+        can_stage_execution_manifest = not blocked_reason and not missing_inputs and op in {
+            "stage_execution_manifest",
+            "prepare_execution_manifest",
+            "runtime_stage_execution_manifest",
+        }
         return {
             "provider_key": self.provider_key,
             "seam_source": "deployment_provider_contract",
@@ -381,6 +386,7 @@ class LegacyAwsSsmRoute53ProviderStub:
             "runtime_transport": transport or "ssm",
             "can_probe_runtime_marker": bool(can_probe_runtime_marker),
             "can_prepare_runtime_root": bool(can_prepare_runtime_root),
+            "can_stage_execution_manifest": bool(can_stage_execution_manifest),
             "blocked_reason": blocked_reason,
             "missing_inputs": missing_inputs,
         }
@@ -698,6 +704,7 @@ def evaluate_deployment_execution_preflight_readiness(
             "runtime_transport": str((runtime_config or {}).get("transport") or "").strip().lower(),
             "can_probe_runtime_marker": False,
             "can_prepare_runtime_root": False,
+            "can_stage_execution_manifest": False,
             "blocked_reason": "deployment provider implementation not found",
             "missing_inputs": [],
         }
