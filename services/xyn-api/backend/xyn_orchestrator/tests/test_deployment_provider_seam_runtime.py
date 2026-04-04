@@ -10,6 +10,7 @@ from xyn_orchestrator.deployment_provider_contract import (
     evaluate_deployment_dns_deploy_preparation_readiness,
     evaluate_deployment_dns_deprovision_readiness,
     normalize_deployment_dns_provider_config,
+    resolve_deployment_target_contract,
     resolve_deployment_dns_deprovision_orchestration,
     validate_deployment_dns_provider_config,
 )
@@ -168,6 +169,19 @@ class DeploymentProviderSeamRuntimeTests(SimpleTestCase):
         )
         self.assertFalse(blocked.get("can_probe_runtime_marker"))
         self.assertIn("not supported", str(blocked.get("blocked_reason") or ""))
+
+    def test_seam_stub_exposes_provider_neutral_deployment_target_contract(self):
+        contract = resolve_deployment_target_contract(selected_provider_key="aws_ssm_route53")
+        self.assertEqual(contract.get("provider_key"), "aws_ssm_route53")
+        self.assertEqual(contract.get("target_profile_kind"), "sibling_runtime")
+        self.assertEqual(contract.get("runtime_target_kind"), "ec2_instance")
+        self.assertIn("prepare_runtime_target", contract.get("capability_categories") or [])
+        module_contract = contract.get("provider_module_contract") or {}
+        self.assertEqual(module_contract.get("module_id"), "deploy-aws-ec2-sibling")
+        self.assertEqual(
+            module_contract.get("module_manifest_ref"),
+            "backend/registry/modules/deploy-aws-ec2-sibling.json",
+        )
 
     def test_release_target_normalization_uses_seam_dns_profile_resolution(self):
         profile = {

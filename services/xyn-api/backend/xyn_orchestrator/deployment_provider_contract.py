@@ -25,6 +25,9 @@ class DeploymentProviderImplementation(Protocol):
     def describe(self) -> Dict[str, object]:
         ...
 
+    def describe_deployment_target_contract(self) -> Dict[str, object]:
+        ...
+
     def default_dns_provider(self) -> str:
         ...
 
@@ -99,6 +102,58 @@ class LegacyAwsSsmRoute53ProviderStub:
                 "Current execution remains core-coded while seam migration is in progress.",
                 "New provider-specific behavior should be implemented through seam-registered modules.",
             ],
+        }
+
+    def describe_deployment_target_contract(self) -> Dict[str, object]:
+        return {
+            "seam_source": "deployment_provider_contract",
+            "provider_key": self.provider_key,
+            "target_profile_kind": "sibling_runtime",
+            "runtime_target_kind": "ec2_instance",
+            "provider_identity": {
+                "cloud": "aws",
+                "transport": "ssm",
+                "dns_provider_default": "route53",
+            },
+            "capability_categories": [
+                "prepare_runtime_target",
+                "prepare_dns_target",
+                "execution_preflight",
+            ],
+            "required_configuration": [
+                "release_target.target_instance_id",
+                "target_instance.aws_region",
+                "release_target.runtime.transport",
+                "release_target.runtime.remote_root",
+            ],
+            "dns_exposure_expectations": {
+                "supported_provider_kinds": ["route53"],
+                "required_inputs": [
+                    "release_target.dns_provider.hosted_zone_id",
+                    "release_target.dns_provider.credentials_ref.context_pack_id",
+                ],
+            },
+            "execution_support": {
+                "deploy_execution_in_scope": False,
+                "preflight_only": True,
+                "notes": [
+                    "Execution/apply remains outside this seam-backed contract slice.",
+                ],
+            },
+            "provider_module_contract": {
+                "module_id": "deploy-aws-ec2-sibling",
+                "module_manifest_ref": "backend/registry/modules/deploy-aws-ec2-sibling.json",
+                "capabilities_expected": [
+                    "runtime.sibling.ec2.preparation",
+                    "runtime.sibling.ec2.provision",
+                    "runtime.compose.apply_remote",
+                    "dns.route53.records",
+                ],
+                "deployment_target_defaults": {
+                    "instance_type": "t3.small",
+                    "hostname_pattern": "{app}.{zone}",
+                },
+            },
         }
 
     def default_dns_provider(self) -> str:
@@ -380,7 +435,32 @@ def resolve_deployment_provider_for_request(request_text: str, *, capability_dom
             "artifact_extension_expected": bool(contract.artifact_extension_expected) if contract else True,
         },
         "implementation": implementation.describe() if implementation else {},
+        "deployment_target_contract": implementation.describe_deployment_target_contract() if implementation else {},
     }
+
+
+def resolve_deployment_target_contract(*, selected_provider_key: str = "") -> Dict[str, object]:
+    ensure_default_deployment_provider_contracts()
+    selected_key = str(selected_provider_key or "").strip().lower() or "aws_ssm_route53"
+    implementation = resolve_deployment_provider_implementation(selected_key)
+    if implementation is None:
+        return {
+            "seam_source": "deployment_provider_contract",
+            "provider_key": selected_key,
+            "target_profile_kind": "unknown",
+            "runtime_target_kind": "",
+            "provider_identity": {},
+            "capability_categories": [],
+            "required_configuration": [],
+            "dns_exposure_expectations": {},
+            "execution_support": {
+                "deploy_execution_in_scope": False,
+                "preflight_only": True,
+                "notes": ["deployment provider implementation not found"],
+            },
+            "provider_module_contract": {},
+        }
+    return implementation.describe_deployment_target_contract()
 
 
 def resolve_deployment_dns_profile(*, requested_provider: str = "") -> Dict[str, object]:

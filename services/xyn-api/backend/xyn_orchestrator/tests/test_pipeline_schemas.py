@@ -2627,6 +2627,21 @@ class PipelineSchemaTests(TestCase):
         module_spec = data.get("module", {})
         self.assertIn("runtime.compose.apply_remote", module_spec.get("capabilitiesProvided", []))
 
+    def test_deploy_aws_ec2_sibling_module_spec_fields(self):
+        spec_path = (
+            Path(__file__).resolve().parents[2] / "registry" / "modules" / "deploy-aws-ec2-sibling.json"
+        )
+        data = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("kind"), "Module")
+        metadata = data.get("metadata", {})
+        self.assertEqual(metadata.get("name"), "deploy-aws-ec2-sibling")
+        self.assertEqual(metadata.get("namespace"), "provider")
+        module_spec = data.get("module", {})
+        capabilities = module_spec.get("capabilitiesProvided", [])
+        self.assertIn("runtime.sibling.ec2.preparation", capabilities)
+        self.assertIn("runtime.sibling.ec2.provision", capabilities)
+        self.assertIn("runtime.compose.apply_remote", capabilities)
+
     def test_compute_repo_name_slugify(self):
         self.assertEqual(_slugify("  XYENCE.Demo  "), "xyence-demo")
         repo_name = _compute_repo_name("XYN", "xyence.demo", "Subscriber Notes", "Web/API")

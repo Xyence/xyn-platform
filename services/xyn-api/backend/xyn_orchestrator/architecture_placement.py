@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 from .deployment_provider_contract import (
+    resolve_deployment_target_contract,
     ensure_default_deployment_provider_contracts,
     list_deployment_provider_contracts,
     resolve_deployment_provider_for_request,
@@ -183,9 +184,11 @@ def evaluate_architectural_placement(*, request_text: str, capability_domain: st
 
 def deployment_provider_contract_summary() -> Dict[str, object]:
     ensure_default_deployment_provider_contracts()
+    default_target_contract = resolve_deployment_target_contract(selected_provider_key="aws_ssm_route53")
     return {
         "policy_version": PLACEMENT_POLICY_VERSION,
         "domain": "deployment",
+        "default_deployment_target_contract": default_target_contract,
         "contracts": [
             {
                 "provider_key": contract.provider_key,

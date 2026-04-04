@@ -1,0 +1,42 @@
+{
+  "apiVersion": "xyn.module/v1",
+  "kind": "Module",
+  "metadata": {
+    "name": "deploy-aws-ec2-sibling",
+    "namespace": "provider",
+    "version": "0.1.0",
+    "labels": {
+      "capability": "runtime.sibling.ec2.provision"
+    }
+  },
+  "description": "AWS EC2 sibling deployment provider contract for seam-backed runtime preparation and DNS exposure.",
+  "module": {
+    "type": "provider",
+    "fqn": "provider.aws.deploy-ec2-sibling",
+    "capabilitiesProvided": [
+      "runtime.sibling.ec2.preparation",
+      "runtime.sibling.ec2.provision",
+      "runtime.compose.apply_remote",
+      "dns.route53.records"
+    ],
+    "interfaces": {
+      "config": {
+        "target_instance_id": "ProvisionedInstance UUID or AWS EC2 instance ID for sibling runtime.",
+        "aws_region": "AWS region for EC2/SSM operations.",
+        "instance_type": "Requested EC2 instance class for sibling environments (for example t3.small).",
+        "remote_root": "Remote root path on the target instance.",
+        "hostname": "Public hostname to expose (for example deal.xyence.io).",
+        "dns_provider": "DNS provider profile and credentials reference (Route53 expected for AWS)."
+      },
+      "operations": {
+        "prepare_runtime_target": "Validate target/profile inputs and produce execution-preflight metadata.",
+        "prepare_dns_target": "Validate DNS exposure requirements and derive DNS preparation actions.",
+        "execution_preflight": "Evaluate deploy-adjacent readiness without performing destructive apply."
+      }
+    },
+    "constraints": {
+      "execution_scope": "Non-destructive seam contract only; deploy/apply execution is out of scope in this slice.",
+      "seam_contract": "xyn_orchestrator.deployment_provider_contract.resolve_deployment_target_contract"
+    }
+  }
+}
