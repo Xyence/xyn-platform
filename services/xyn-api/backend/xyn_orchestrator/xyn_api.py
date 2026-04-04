@@ -20838,6 +20838,7 @@ def _serialize_solution_change_session_promotion_evidence(
         "promotion_status": str(evidence.promotion_status or "success"),
         "actor_source": str(evidence.actor_source or "human"),
         "actor_identity_id": str(evidence.actor_identity_id) if evidence.actor_identity_id else "",
+        "source_promotion_evidence_id": str(evidence.source_promotion_evidence_id) if evidence.source_promotion_evidence_id else "",
         "targeted_artifacts": evidence.targeted_artifacts_json if isinstance(evidence.targeted_artifacts_json, list) else [],
         "preview_target": evidence.preview_target_json if isinstance(evidence.preview_target_json, dict) else {},
         "root_target": evidence.root_target_json if isinstance(evidence.root_target_json, dict) else {},
@@ -20872,6 +20873,67 @@ def _latest_solution_change_session_promotion_evidence_ref(session: SolutionChan
         "status": str(latest.promotion_status or "success"),
         "created_at": latest.created_at.isoformat() if latest.created_at else "",
     }
+
+
+def _solution_change_session_rollback_source_evidence(
+    *,
+    session: SolutionChangeSession,
+    evidence_id: str = "",
+) -> Optional[SolutionChangeSessionPromotionEvidence]:
+    evidence_qs = SolutionChangeSessionPromotionEvidence.objects.filter(
+        solution_change_session=session,
+        operation="promotion",
+        promotion_status="success",
+    ).order_by("-created_at", "-updated_at")
+    if evidence_id:
+        return evidence_qs.filter(id=evidence_id).first()
+    return evidence_qs.first()
+
+
+def _solution_change_session_rollback_eligibility(
+    *,
+    session: SolutionChangeSession,
+    application: Application,
+    source_evidence: Optional[SolutionChangeSessionPromotionEvidence],
+) -> Dict[str, Any]:
+    execution_status = str(session.execution_status or "").strip().lower()
+    eligibility: Dict[str, Any] = {
+        "can_rollback": False,
+        "blocked_reason": "",
+        "recommended_action": "",
+        "next_allowed_actions": [],
+    }
+    if execution_status != "promoted":
+        eligibility["blocked_reason"] = "execution_not_promoted"
+        eligibility["recommended_action"] = "promote"
+        eligibility["next_allowed_actions"] = ["promote"]
+        return eligibility
+    if source_evidence is None:
+        eligibility["blocked_reason"] = "source_evidence_missing"
+        eligibility["recommended_action"] = "promote"
+        eligibility["next_allowed_actions"] = ["promote"]
+        return eligibility
+    superseded = (
+        source_evidence.superseded_active_state_json
+        if isinstance(source_evidence.superseded_active_state_json, dict)
+        else {}
+    )
+    if not superseded:
+        eligibility["blocked_reason"] = "superseded_state_missing"
+        eligibility["recommended_action"] = "select_evidence_with_superseded_state"
+        eligibility["next_allowed_actions"] = ["inspect"]
+        return eligibility
+    runtime_target_id = str(superseded.get("runtime_target_id") or "").strip()
+    runtime_base_url = str(superseded.get("runtime_base_url") or "").strip()
+    public_app_url = str(superseded.get("public_app_url") or "").strip()
+    if not runtime_target_id and not runtime_base_url and not public_app_url:
+        eligibility["blocked_reason"] = "superseded_state_incomplete"
+        eligibility["recommended_action"] = "select_evidence_with_complete_target_identity"
+        eligibility["next_allowed_actions"] = ["inspect"]
+        return eligibility
+    eligibility["can_rollback"] = True
+    eligibility["next_allowed_actions"] = ["rollback"]
+    return eligibility
 
 
 def _record_solution_change_session_promotion_evidence(
@@ -21011,6 +21073,13 @@ def _solution_change_session_control_status(
         else {}
     )
     can_promote = bool(promote_eligibility.get("can_promote"))
+    rollback_source = _solution_change_session_rollback_source_evidence(session=session)
+    rollback_eligibility = _solution_change_session_rollback_eligibility(
+        session=session,
+        application=app,
+        source_evidence=rollback_source,
+    )
+    can_rollback = bool(rollback_eligibility.get("can_rollback"))
     can_activate = bool(_solution_activation_memberships(app)[0] is not None)
     can_stage_apply = bool(can_run_execution)
     can_prepare_preview = bool(can_run_execution and artifact_states)
@@ -21043,6 +21112,8 @@ def _solution_change_session_control_status(
         next_allowed_actions.append("commit")
     if can_promote:
         next_allowed_actions.append("promote")
+    if can_rollback:
+        next_allowed_actions.append("rollback")
     elif execution_status in {"committed", "promoted"}:
         blocked_reason = str(promote_eligibility.get("blocked_reason") or blocked_reason or "")
         recommended_action = str(promote_eligibility.get("recommended_action") or recommended_action or "")
@@ -21107,6 +21178,8 @@ def _solution_change_session_control_status(
         "can_prepare_preview": bool(can_prepare_preview),
         "can_activate": bool(can_activate),
         "can_promote": bool(can_promote),
+        "can_rollback": bool(can_rollback),
+        "rollback_eligibility": rollback_eligibility,
         "blocked_reason": blocked_reason,
         "recommended_action": recommended_action,
         "next_allowed_actions": next_allowed_actions,
@@ -38202,6 +38275,7 @@ def application_solution_change_session_control_action(
         "commit",
         "activate_in_root",
         "promote",
+        "rollback",
         "finalize",
     ]
     if operation not in set(supported_operations):
@@ -38239,6 +38313,7 @@ def application_solution_change_session_control_action(
         "commit": application_solution_change_session_commit,
         "activate_in_root": application_activate,
         "promote": application_solution_change_session_promote,
+        "rollback": application_solution_change_session_rollback,
         "finalize": application_solution_change_session_finalize,
     }
     handler = operation_map.get(operation)
@@ -38938,6 +39013,144 @@ def application_solution_change_session_promote(
             "already_up_to_date": provision_status == "reused",
             "promotion_eligibility": _solution_change_session_promote_eligibility(session=session, application=application),
             "evidence_ref": {"promotion_evidence_id": str(evidence.id)},
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_rollback(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    payload = _parse_json(request)
+    source_evidence_id = str(payload.get("evidence_id") or "").strip()
+    source_evidence = _solution_change_session_rollback_source_evidence(session=session, evidence_id=source_evidence_id)
+    rollback_eligibility = _solution_change_session_rollback_eligibility(
+        session=session,
+        application=application,
+        source_evidence=source_evidence,
+    )
+    if not bool(rollback_eligibility.get("can_rollback")):
+        blocked_reason = str(rollback_eligibility.get("blocked_reason") or "").strip().lower()
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "rollback_performed": False,
+                "blocked_reason": blocked_reason,
+                "application_id": str(application.id),
+                "change_session_id": str(session.id),
+                "source_evidence_ref": {"promotion_evidence_id": str(source_evidence.id)} if source_evidence else {},
+                "warnings": [],
+                "next_allowed_actions": rollback_eligibility.get("next_allowed_actions")
+                if isinstance(rollback_eligibility.get("next_allowed_actions"), list)
+                else [],
+                "recommended_action": str(rollback_eligibility.get("recommended_action") or ""),
+            },
+            status=409,
+        )
+    if source_evidence is None:
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "rollback_performed": False,
+                "blocked_reason": "source_evidence_missing",
+                "application_id": str(application.id),
+                "change_session_id": str(session.id),
+                "source_evidence_ref": {},
+                "warnings": [],
+                "next_allowed_actions": ["inspect"],
+                "recommended_action": "select_source_evidence",
+            },
+            status=409,
+        )
+
+    superseded_target = (
+        source_evidence.superseded_active_state_json
+        if isinstance(source_evidence.superseded_active_state_json, dict)
+        else {}
+    )
+    selected_app_member, _selected_policy_member = _solution_activation_memberships(application)
+    app_slug = _artifact_runtime_app_slug(selected_app_member.artifact) if selected_app_member and selected_app_member.artifact else ""
+    current_root_target = _workspace_primary_runtime_target(application.workspace, app_slug)
+    binding, _created = SolutionRuntimeBinding.objects.get_or_create(
+        workspace=application.workspace,
+        application=application,
+        defaults={
+            "status": "active",
+            "runtime_target_json": superseded_target,
+            "last_activation_json": {},
+            "metadata_json": {},
+        },
+    )
+    binding.status = "active"
+    binding.runtime_target_json = superseded_target
+    binding.last_activation_json = {
+        "operation": "rollback",
+        "source_evidence_id": str(source_evidence.id),
+        "applied_at": timezone.now().isoformat(),
+    }
+    binding.save(update_fields=["status", "runtime_target_json", "last_activation_json", "updated_at"])
+
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    rollback_meta = {
+        "rolled_back_at": timezone.now().isoformat(),
+        "source_evidence_id": str(source_evidence.id),
+        "restored_target": superseded_target,
+    }
+    metadata["rollback"] = rollback_meta
+    session.metadata_json = metadata
+    session.execution_status = "committed"
+    session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
+    rollback_evidence = SolutionChangeSessionPromotionEvidence.objects.create(
+        workspace=session.workspace,
+        application=application,
+        solution_change_session=session,
+        operation="rollback",
+        promotion_status="success",
+        actor_source="human",
+        actor_identity=identity,
+        source_promotion_evidence=source_evidence,
+        targeted_artifacts_json=source_evidence.targeted_artifacts_json if isinstance(source_evidence.targeted_artifacts_json, list) else [],
+        preview_target_json=source_evidence.preview_target_json if isinstance(source_evidence.preview_target_json, dict) else {},
+        root_target_json=current_root_target if isinstance(current_root_target, dict) else {},
+        resulting_active_target_json=superseded_target,
+        superseded_active_state_json=current_root_target if isinstance(current_root_target, dict) else {},
+        control_result_json={"result": "success", "reason": "restored_superseded_active_target_pointer"},
+        provider_context_json=source_evidence.provider_context_json if isinstance(source_evidence.provider_context_json, dict) else {},
+        warnings_json=[],
+        blocked_context_json={},
+        rollback_link_json={"source_promotion_evidence_id": str(source_evidence.id)},
+    )
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    return JsonResponse(
+        {
+            "status": "succeeded",
+            "rollback_performed": True,
+            "blocked_reason": "",
+            "application_id": str(application.id),
+            "change_session_id": str(session.id),
+            "source_evidence_ref": {"promotion_evidence_id": str(source_evidence.id)},
+            "restored_target": superseded_target,
+            "superseded_target": current_root_target if isinstance(current_root_target, dict) else {},
+            "warnings": [],
+            "rollback_evidence_ref": {"promotion_evidence_id": str(rollback_evidence.id)},
             "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
         }
     )

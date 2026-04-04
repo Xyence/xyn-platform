@@ -5106,6 +5106,7 @@ class SolutionChangeSessionRepoCommit(models.Model):
 class SolutionChangeSessionPromotionEvidence(models.Model):
     OPERATION_CHOICES = [
         ("promotion", "Promotion"),
+        ("rollback", "Rollback"),
     ]
     STATUS_CHOICES = [
         ("success", "Success"),
@@ -5135,6 +5136,13 @@ class SolutionChangeSessionPromotionEvidence(models.Model):
         blank=True,
         on_delete=models.SET_NULL,
         related_name="solution_change_session_promotion_evidence",
+    )
+    source_promotion_evidence = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="rollback_evidence",
     )
     targeted_artifacts_json = models.JSONField(default=list, blank=True)
     preview_target_json = models.JSONField(default=dict, blank=True)

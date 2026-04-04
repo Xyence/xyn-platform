@@ -61,6 +61,7 @@ from xyn_orchestrator.xyn_api import (
     application_solution_change_session_stage_apply,
     application_solution_change_session_validate,
     application_solution_change_session_promote,
+    application_solution_change_session_rollback,
     application_solution_change_session_promotion_evidence,
     application_solution_change_session_finalize,
     application_solution_change_sessions_collection,
@@ -6005,6 +6006,7 @@ class GoalPlanningTests(TestCase):
             actor_source="human",
             actor_identity=self.identity,
             resulting_active_target_json={"target_runtime": "xyn-local"},
+            superseded_active_state_json={"runtime_base_url": "http://prior.localhost"},
         )
         request = self._request(
             f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control",
@@ -6017,6 +6019,163 @@ class GoalPlanningTests(TestCase):
         control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
         evidence_ref = control.get("evidence_ref") if isinstance(control.get("evidence_ref"), dict) else {}
         self.assertEqual(str(evidence_ref.get("promotion_evidence_id") or ""), str(evidence.id))
+        self.assertTrue(bool(control.get("can_rollback")))
+        self.assertIn("rollback", list(control.get("next_allowed_actions") or []))
+
+    def test_solution_change_session_rollback_restores_superseded_target_and_emits_evidence(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        current_instance = WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug=ui_artifact.slug[4:],
+            fqdn=f"{ui_artifact.slug[4:]}.current.local.test",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "primary",
+                    "runtime_base_url": "http://localhost",
+                    "public_app_url": "http://localhost",
+                    "compose_project": "xyn-local",
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Rollback test",
+            request_text="Rollback promoted change",
+            created_by=self.identity,
+            status="planned",
+            execution_status="promoted",
+        )
+        source_evidence = SolutionChangeSessionPromotionEvidence.objects.create(
+            workspace=self.workspace,
+            application=application,
+            solution_change_session=session,
+            operation="promotion",
+            promotion_status="success",
+            actor_source="human",
+            actor_identity=self.identity,
+            superseded_active_state_json={
+                "runtime_target_id": "prior-target-id",
+                "runtime_base_url": "http://prior.localhost",
+                "public_app_url": "http://prior.localhost",
+                "compose_project": "xyn-local-prior",
+            },
+            resulting_active_target_json={
+                "runtime_target_id": str(current_instance.id),
+                "runtime_base_url": "http://localhost",
+                "public_app_url": "http://localhost",
+                "compose_project": "xyn-local",
+            },
+        )
+        rollback_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/rollback",
+            method="post",
+            data=json.dumps({"evidence_id": str(source_evidence.id)}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            rolled_back = application_solution_change_session_rollback(rollback_request, str(application.id), str(session.id))
+        self.assertEqual(rolled_back.status_code, 200)
+        payload = json.loads(rolled_back.content)
+        self.assertTrue(bool(payload.get("rollback_performed")))
+        self.assertEqual(str(payload.get("status") or ""), "succeeded")
+        rollback_evidence_ref = payload.get("rollback_evidence_ref") if isinstance(payload.get("rollback_evidence_ref"), dict) else {}
+        rollback_evidence_id = str(rollback_evidence_ref.get("promotion_evidence_id") or "")
+        self.assertTrue(bool(rollback_evidence_id))
+        rollback_evidence = SolutionChangeSessionPromotionEvidence.objects.get(id=rollback_evidence_id)
+        self.assertEqual(str(rollback_evidence.operation), "rollback")
+        self.assertEqual(str(rollback_evidence.source_promotion_evidence_id), str(source_evidence.id))
+        session.refresh_from_db()
+        self.assertEqual(str(session.execution_status or ""), "committed")
+
+    def test_solution_change_session_rollback_blocks_when_superseded_state_missing(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Rollback blocked test",
+            request_text="Rollback promoted change",
+            created_by=self.identity,
+            status="planned",
+            execution_status="promoted",
+        )
+        source_evidence = SolutionChangeSessionPromotionEvidence.objects.create(
+            workspace=self.workspace,
+            application=application,
+            solution_change_session=session,
+            operation="promotion",
+            promotion_status="success",
+            actor_source="human",
+            actor_identity=self.identity,
+            superseded_active_state_json={},
+        )
+        rollback_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/rollback",
+            method="post",
+            data=json.dumps({"evidence_id": str(source_evidence.id)}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            blocked = application_solution_change_session_rollback(rollback_request, str(application.id), str(session.id))
+        self.assertEqual(blocked.status_code, 409)
+        payload = json.loads(blocked.content)
+        self.assertEqual(str(payload.get("blocked_reason") or ""), "superseded_state_missing")
+        self.assertFalse(bool(payload.get("rollback_performed")))
+        self.assertEqual(
+            SolutionChangeSessionPromotionEvidence.objects.filter(solution_change_session=session, operation="rollback").count(),
+            0,
+        )
 
     def test_solution_change_session_control_inspect_returns_machine_envelope(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
