@@ -115,6 +115,7 @@ from .models import (
     ReleaseTargetDeploymentPreparationEvidence,
     ReleaseTargetExecutionPreparationHandoff,
     ReleaseTargetExecutionPreparationEvidence,
+    ReleaseTargetExecutionStepEvidence,
     IdentityProvider,
     AppOIDCClient,
     SecretStore,
@@ -338,7 +339,7 @@ from .deployments import (
     maybe_trigger_rollback,
     load_release_plan_json,
 )
-from .worker_tasks import _download_artifact_json
+from .worker_tasks import _download_artifact_json, _ssm_fetch_runtime_marker
 from .oidc import (
     app_client_to_payload,
     generate_pkce_pair,
@@ -385,6 +386,7 @@ from .deployment_provider_contract import (
     derive_staged_execution_intent_from_deployment_plan,
     build_deployment_release_target_preparation_metadata,
     derive_deployment_dns_deprovision_preparation_actions,
+    evaluate_deployment_execution_preflight_readiness,
     evaluate_deployment_dns_deprovision_readiness,
     normalize_deployment_dns_provider_config,
     resolve_deployment_dns_deprovision_orchestration,
@@ -28490,6 +28492,197 @@ def release_target_execution_preparation_consume_action(request: HttpRequest, ta
     }
     status_code = 200 if status == "prepared" else 409
     return JsonResponse(response_payload, status=status_code)
+
+
+def _serialize_release_target_execution_step_evidence(
+    record: ReleaseTargetExecutionStepEvidence,
+) -> Dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "release_target_id": str(record.release_target_id),
+        "blueprint_id": str(record.blueprint_id),
+        "source_preparation_evidence_ref": {
+            "execution_preparation_evidence_id": str(record.source_preparation_evidence_id),
+        },
+        "action_key": str(record.action_key or ""),
+        "status": str(record.status or ""),
+        "blocked_reason": str(record.blocked_reason or ""),
+        "approval_granted": bool(record.approval_granted),
+        "mutation_performed": bool(record.mutation_performed),
+        "result": record.result_json or {},
+        "warnings": record.warnings_json or [],
+        "created_at": record.created_at.isoformat() if record.created_at else "",
+    }
+
+
+def _extract_execution_inputs_from_plan_snapshot(plan_snapshot: Dict[str, Any]) -> Dict[str, str]:
+    required_inputs = plan_snapshot.get("required_inputs") if isinstance(plan_snapshot.get("required_inputs"), list) else []
+    value_map: Dict[str, str] = {}
+    for item in required_inputs:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        raw_value = item.get("value")
+        if raw_value is None:
+            continue
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        value_map[key] = value
+    return {
+        "target_instance_id": str(value_map.get("release_target.target_instance_id") or "").strip(),
+        "aws_region": str(value_map.get("target_instance.aws_region") or "").strip(),
+        "runtime_transport": str(value_map.get("release_target.runtime.transport") or "").strip().lower(),
+        "remote_root": str(value_map.get("release_target.runtime.remote_root") or "").strip(),
+    }
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_step_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    if request.method == "GET":
+        limit = 10
+        try:
+            if request.GET.get("limit"):
+                limit = max(1, min(100, int(str(request.GET.get("limit")))))
+        except ValueError:
+            limit = 10
+        records = list(
+            ReleaseTargetExecutionStepEvidence.objects.filter(release_target=target).order_by("-created_at")[:limit]
+        )
+        latest = records[0] if records else None
+        return JsonResponse(
+            {
+                "release_target_id": str(target.id),
+                "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+                "latest_execution_step_ref": {"execution_step_evidence_id": str(latest.id)} if latest else {},
+                "execution_step_evidence": [_serialize_release_target_execution_step_evidence(item) for item in records],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    payload = _parse_json(request)
+    preparation_evidence_id = str(payload.get("execution_preparation_evidence_id") or "").strip() if isinstance(payload, dict) else ""
+    action_key = str(payload.get("action_key") or "runtime_marker_probe").strip().lower() if isinstance(payload, dict) else "runtime_marker_probe"
+    approval_granted = bool((payload or {}).get("approve_execution_step")) if isinstance(payload, dict) else False
+    if preparation_evidence_id:
+        prep_evidence = (
+            ReleaseTargetExecutionPreparationEvidence.objects.filter(id=preparation_evidence_id, release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    else:
+        prep_evidence = (
+            ReleaseTargetExecutionPreparationEvidence.objects.filter(release_target=target, status="prepared")
+            .order_by("-created_at")
+            .first()
+        )
+    if prep_evidence is None:
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "release_target_id": str(target.id),
+                "blocked_reason": "missing_prepared_execution_preparation_evidence",
+                "message": "Run execution_preparation_consume and obtain status=prepared before execution steps.",
+                "mutation_performed": False,
+            },
+            status=409,
+        )
+    status = "succeeded"
+    blocked_reason = ""
+    warnings: List[str] = []
+    result: Dict[str, Any] = {}
+    if not approval_granted:
+        status = "blocked"
+        blocked_reason = "approval_required"
+    elif str(prep_evidence.status or "").strip().lower() != "prepared":
+        status = "blocked"
+        blocked_reason = "preparation_evidence_not_prepared"
+    elif action_key != "runtime_marker_probe":
+        status = "blocked"
+        blocked_reason = "unsupported_action_key"
+    else:
+        prepared_payload = prep_evidence.prepared_payload_json if isinstance(prep_evidence.prepared_payload_json, dict) else {}
+        if str(prepared_payload.get("schema_version") or "").strip() != "xyn.execution_preparation_package.v1":
+            status = "blocked"
+            blocked_reason = "invalid_execution_preparation_package"
+        else:
+            source_handoff = prep_evidence.source_handoff
+            source_preparation_evidence = source_handoff.source_preparation_evidence if source_handoff else None
+            plan_snapshot = (
+                source_preparation_evidence.plan_snapshot_json
+                if source_preparation_evidence and isinstance(source_preparation_evidence.plan_snapshot_json, dict)
+                else {}
+            )
+            execution_inputs = _extract_execution_inputs_from_plan_snapshot(plan_snapshot)
+            provider_key = str(prepared_payload.get("provider_key") or "").strip()
+            preflight = evaluate_deployment_execution_preflight_readiness(
+                operation="check_drift",
+                runtime_config={"transport": execution_inputs.get("runtime_transport", ""), "remote_root": execution_inputs.get("remote_root", "")},
+                target_instance_id=execution_inputs.get("target_instance_id", ""),
+                aws_region=execution_inputs.get("aws_region", ""),
+                remote_root=execution_inputs.get("remote_root", ""),
+                selected_provider_key=provider_key,
+            )
+            if not bool(preflight.get("can_probe_runtime_marker")):
+                status = "blocked"
+                blocked_reason = "execution_preflight_blocked"
+                result = {"preflight": preflight, "execution_inputs": execution_inputs}
+            else:
+                try:
+                    marker = _ssm_fetch_runtime_marker(
+                        execution_inputs.get("target_instance_id", ""),
+                        execution_inputs.get("aws_region", ""),
+                        execution_inputs.get("remote_root", ""),
+                    )
+                    result = {
+                        "action": "runtime_marker_probe",
+                        "provider_key": provider_key,
+                        "execution_inputs": execution_inputs,
+                        "preflight": preflight,
+                        "runtime_marker": marker,
+                    }
+                except Exception as exc:
+                    status = "failed"
+                    blocked_reason = "runtime_marker_probe_failed"
+                    result = {"error": str(exc), "preflight": preflight, "execution_inputs": execution_inputs}
+    record = ReleaseTargetExecutionStepEvidence.objects.create(
+        release_target=target,
+        blueprint=target.blueprint,
+        source_preparation_evidence=prep_evidence,
+        action_key=action_key,
+        status=status,
+        blocked_reason=blocked_reason,
+        approval_granted=bool(approval_granted),
+        mutation_performed=False,
+        result_json=result,
+        warnings_json=warnings,
+        created_by=request.user,
+    )
+    response_payload = {
+        "status": "succeeded" if status == "succeeded" else "blocked",
+        "release_target_id": str(target.id),
+        "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+        "execution_step_ref": {"execution_step_evidence_id": str(record.id)},
+        "source_preparation_evidence_ref": {"execution_preparation_evidence_id": str(prep_evidence.id)},
+        "action_key": action_key,
+        "execution_status": status,
+        "blocked_reason": blocked_reason,
+        "approval_granted": bool(approval_granted),
+        "result": result,
+        "warnings": warnings,
+        "mutation_performed": False,
+    }
+    if status == "succeeded":
+        return JsonResponse(response_payload, status=200)
+    if status == "failed":
+        return JsonResponse(response_payload, status=500)
+    return JsonResponse(response_payload, status=409)
 
 
 @csrf_exempt

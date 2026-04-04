@@ -150,6 +150,7 @@ from xyn_orchestrator.api.runtime import (
     release_target_deployment_preparation_evidence_action,
     release_target_execution_preparation_handoff_action,
     release_target_execution_preparation_consume_action,
+    release_target_execution_step_action,
     map_collection,
     release_target_deploy_latest_action,
     release_target_rollback_last_success_action,
@@ -795,6 +796,10 @@ urlpatterns = [
     path(
         "xyn/api/release-targets/<uuid:target_id>/execution_preparation_consume",
         release_target_execution_preparation_consume_action,
+    ),
+    path(
+        "xyn/api/release-targets/<uuid:target_id>/execution_step",
+        release_target_execution_step_action,
     ),
     path("xyn/api/release-targets/<uuid:target_id>/deploy_latest", release_target_deploy_latest_action),
     path("xyn/api/release-targets/<uuid:target_id>/rollback_last_success", release_target_rollback_last_success_action),
