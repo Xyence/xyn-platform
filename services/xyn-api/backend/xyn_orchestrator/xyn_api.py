@@ -98,6 +98,7 @@ from .models import (
     SolutionPlanningTurn,
     SolutionPlanningCheckpoint,
     SolutionChangeSessionRepoCommit,
+    SolutionChangeSessionPromotionEvidence,
     ApplicationPlan,
     Environment,
     EnvironmentAppState,
@@ -20825,6 +20826,146 @@ def _solution_change_session_promote_blocked_error(eligibility: Dict[str, Any]) 
     return "promotion is currently blocked for this change session"
 
 
+def _serialize_solution_change_session_promotion_evidence(
+    evidence: SolutionChangeSessionPromotionEvidence,
+) -> Dict[str, Any]:
+    return {
+        "id": str(evidence.id),
+        "workspace_id": str(evidence.workspace_id),
+        "application_id": str(evidence.application_id),
+        "solution_change_session_id": str(evidence.solution_change_session_id),
+        "operation": str(evidence.operation or "promotion"),
+        "promotion_status": str(evidence.promotion_status or "success"),
+        "actor_source": str(evidence.actor_source or "human"),
+        "actor_identity_id": str(evidence.actor_identity_id) if evidence.actor_identity_id else "",
+        "targeted_artifacts": evidence.targeted_artifacts_json if isinstance(evidence.targeted_artifacts_json, list) else [],
+        "preview_target": evidence.preview_target_json if isinstance(evidence.preview_target_json, dict) else {},
+        "root_target": evidence.root_target_json if isinstance(evidence.root_target_json, dict) else {},
+        "resulting_active_target": (
+            evidence.resulting_active_target_json if isinstance(evidence.resulting_active_target_json, dict) else {}
+        ),
+        "superseded_active_state": (
+            evidence.superseded_active_state_json if isinstance(evidence.superseded_active_state_json, dict) else {}
+        ),
+        "control_result": evidence.control_result_json if isinstance(evidence.control_result_json, dict) else {},
+        "provider_context": evidence.provider_context_json if isinstance(evidence.provider_context_json, dict) else {},
+        "warnings": evidence.warnings_json if isinstance(evidence.warnings_json, list) else [],
+        "blocked_context": evidence.blocked_context_json if isinstance(evidence.blocked_context_json, dict) else {},
+        "rollback_link": evidence.rollback_link_json if isinstance(evidence.rollback_link_json, dict) else {},
+        "created_at": evidence.created_at,
+        "updated_at": evidence.updated_at,
+    }
+
+
+def _latest_solution_change_session_promotion_evidence_ref(session: SolutionChangeSession) -> Dict[str, Any]:
+    latest = (
+        SolutionChangeSessionPromotionEvidence.objects.filter(solution_change_session=session)
+        .order_by("-created_at", "-updated_at")
+        .first()
+    )
+    if not latest:
+        return {"session_id": str(session.id)}
+    return {
+        "session_id": str(session.id),
+        "promotion_evidence_id": str(latest.id),
+        "operation": str(latest.operation or "promotion"),
+        "status": str(latest.promotion_status or "success"),
+        "created_at": latest.created_at.isoformat() if latest.created_at else "",
+    }
+
+
+def _record_solution_change_session_promotion_evidence(
+    *,
+    session: SolutionChangeSession,
+    application: Application,
+    identity: Optional[UserIdentity],
+    promote_eligibility: Dict[str, Any],
+    promote_payload: Dict[str, Any],
+    promotion_meta: Dict[str, Any],
+    already_up_to_date: bool,
+) -> SolutionChangeSessionPromotionEvidence:
+    artifacts: List[Dict[str, Any]] = []
+    selected_ids = _solution_change_session_selected_artifact_ids(session)
+    if selected_ids:
+        members = {
+            str(member.artifact_id): member
+            for member in ApplicationArtifactMembership.objects.filter(application=application, artifact_id__in=selected_ids)
+            .select_related("artifact", "artifact__type")
+            .all()
+        }
+        for artifact_id in selected_ids:
+            member = members.get(str(artifact_id))
+            if not member:
+                continue
+            artifacts.append(
+                {
+                    "artifact_id": str(member.artifact_id),
+                    "artifact_slug": str(_artifact_slug(member.artifact) or ""),
+                    "artifact_title": str(member.artifact.title or ""),
+                    "role": str(member.role or ""),
+                }
+            )
+    preview = session.preview_json if isinstance(session.preview_json, dict) else {}
+    preview_target = {
+        "status": str(preview.get("status") or "").strip().lower() or "not_prepared",
+        "primary_url": str(preview.get("primary_url") or "").strip(),
+        "mode": str(preview.get("mode") or "").strip(),
+        "preview_urls": [
+            str(item).strip()
+            for item in (preview.get("preview_urls") if isinstance(preview.get("preview_urls"), list) else [])
+            if str(item).strip()
+        ],
+    }
+    root_target = (
+        promote_eligibility.get("root_target_identity")
+        if isinstance(promote_eligibility.get("root_target_identity"), dict)
+        else {}
+    )
+    provider_context: Dict[str, Any] = {}
+    release_target = root_target.get("release_target") if isinstance(root_target, dict) else {}
+    if isinstance(release_target, dict):
+        provider_context["release_target"] = {
+            "id": str(release_target.get("id") or ""),
+            "provider_profile": str(release_target.get("provider_profile") or ""),
+            "deployment_mode": str(release_target.get("deployment_mode") or ""),
+        }
+    evidence = SolutionChangeSessionPromotionEvidence.objects.create(
+        workspace=session.workspace,
+        application=application,
+        solution_change_session=session,
+        operation="promotion",
+        promotion_status="success",
+        actor_source="human",
+        actor_identity=identity,
+        targeted_artifacts_json=artifacts,
+        preview_target_json=preview_target,
+        root_target_json=root_target if isinstance(root_target, dict) else {},
+        resulting_active_target_json={
+            "target_runtime": str(promotion_meta.get("target_runtime") or "xyn-local"),
+            "compose_project": str(promotion_meta.get("compose_project") or ""),
+            "ui_url": str(promotion_meta.get("ui_url") or ""),
+            "api_url": str(promotion_meta.get("api_url") or ""),
+            "deployment_id": str(promotion_meta.get("deployment_id") or ""),
+            "provision_status": str(promotion_meta.get("provision_status") or ""),
+            "already_up_to_date": bool(already_up_to_date),
+        },
+        superseded_active_state_json=root_target if isinstance(root_target, dict) else {},
+        control_result_json={
+            "result": str(promotion_meta.get("result") or "success"),
+            "reason": str(promotion_meta.get("reason") or ""),
+            "promote_mode": str(promotion_meta.get("promote_mode") or "local_runtime_update"),
+            "promoted_at": str(promotion_meta.get("promoted_at") or ""),
+            "attempted_at": str(promotion_meta.get("attempted_at") or ""),
+            "provision_status": str((promote_payload or {}).get("status") or ""),
+        },
+        provider_context_json=provider_context,
+        warnings_json=["promotion_reused_existing_runtime"] if bool(already_up_to_date) else [],
+        blocked_context_json={},
+        rollback_link_json={},
+    )
+    return evidence
+
+
 # Canonical operator/agent-facing control contract for solution change execution.
 # Keep these helpers additive and stable so API-only control loops can rely on
 # machine-readable status/eligibility without coupling to UI-shaped flows.
@@ -20948,6 +21089,7 @@ def _solution_change_session_control_status(
     warnings: List[str] = []
     if str(preview_status) == "ready" and str((preview.get("session_build") or {}).get("status") or "").strip().lower() == "reused":
         warnings.append("preview_reused_existing_runtime")
+    evidence_ref = _latest_solution_change_session_promotion_evidence_ref(session)
     return {
         "change_session_id": str(session.id),
         "application_id": str(app.id),
@@ -20968,7 +21110,7 @@ def _solution_change_session_control_status(
         "blocked_reason": blocked_reason,
         "recommended_action": recommended_action,
         "next_allowed_actions": next_allowed_actions,
-        "evidence_ref": {"session_id": str(session.id)},
+        "evidence_ref": evidence_ref,
         "warnings": warnings,
         "session": session_payload,
     }
@@ -33108,6 +33250,7 @@ def _serialize_solution_change_session(
     commit_count = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).count()
     requires_commit_provenance = _solution_change_session_requires_commit_provenance(session)
     promote_eligibility = _solution_change_session_promote_eligibility(session=session, application=session.application)
+    evidence_ref = _latest_solution_change_session_promotion_evidence_ref(session)
     return {
         "id": str(session.id),
         "workspace_id": str(session.workspace_id),
@@ -33129,6 +33272,7 @@ def _serialize_solution_change_session(
         "repo_commit_count": int(commit_count),
         "requires_commit_provenance": bool(requires_commit_provenance),
         "promote_eligibility": promote_eligibility,
+        "evidence_ref": evidence_ref,
         "planning": planning_state,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
@@ -38659,6 +38803,16 @@ def application_solution_change_session_promote(
         if execution_status != "promoted":
             session.execution_status = "promoted"
             session.save(update_fields=["execution_status", "updated_at"])
+        idempotent_meta = promotion if isinstance(promotion, dict) else {}
+        evidence = _record_solution_change_session_promotion_evidence(
+            session=session,
+            application=application,
+            identity=identity,
+            promote_eligibility=promote_eligibility,
+            promote_payload={},
+            promotion_meta=idempotent_meta,
+            already_up_to_date=True,
+        )
         memberships_by_artifact_id = {
             str(member.artifact_id): member
             for member in ApplicationArtifactMembership.objects.filter(application=application)
@@ -38670,6 +38824,7 @@ def application_solution_change_session_promote(
                 "promoted": True,
                 "already_up_to_date": True,
                 "promotion_eligibility": promote_eligibility,
+                "evidence_ref": {"promotion_evidence_id": str(evidence.id)},
                 "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
             }
         )
@@ -38762,6 +38917,15 @@ def application_solution_change_session_promote(
     session.metadata_json = metadata
     session.execution_status = "promoted"
     session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
+    evidence = _record_solution_change_session_promotion_evidence(
+        session=session,
+        application=application,
+        identity=identity,
+        promote_eligibility=_solution_change_session_promote_eligibility(session=session, application=application),
+        promote_payload=promote_payload if isinstance(promote_payload, dict) else {},
+        promotion_meta=metadata.get("promotion") if isinstance(metadata.get("promotion"), dict) else {},
+        already_up_to_date=provision_status == "reused",
+    )
     memberships_by_artifact_id = {
         str(member.artifact_id): member
         for member in ApplicationArtifactMembership.objects.filter(application=application)
@@ -38773,7 +38937,44 @@ def application_solution_change_session_promote(
             "promoted": True,
             "already_up_to_date": provision_status == "reused",
             "promotion_eligibility": _solution_change_session_promote_eligibility(session=session, application=application),
+            "evidence_ref": {"promotion_evidence_id": str(evidence.id)},
             "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_promotion_evidence(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    evidence_id = str(request.GET.get("evidence_id") or "").strip()
+    evidence_qs = SolutionChangeSessionPromotionEvidence.objects.filter(
+        solution_change_session=session,
+        application=application,
+    ).order_by("-created_at", "-updated_at")
+    if evidence_id:
+        evidence = get_object_or_404(evidence_qs, id=evidence_id)
+        return JsonResponse(
+            {
+                "evidence": _serialize_solution_change_session_promotion_evidence(evidence),
+            }
+        )
+    return JsonResponse(
+        {
+            "evidence": [
+                _serialize_solution_change_session_promotion_evidence(item)
+                for item in evidence_qs[:50]
+            ]
         }
     )
 

@@ -5103,6 +5103,75 @@ class SolutionChangeSessionRepoCommit(models.Model):
         return f"{self.solution_change_session_id}:{self.repository_slug}:{self.commit_sha}"
 
 
+class SolutionChangeSessionPromotionEvidence(models.Model):
+    OPERATION_CHOICES = [
+        ("promotion", "Promotion"),
+    ]
+    STATUS_CHOICES = [
+        ("success", "Success"),
+        ("blocked", "Blocked"),
+        ("failed", "Failed"),
+    ]
+    ACTOR_SOURCE_CHOICES = [
+        ("human", "Human"),
+        ("agent", "Agent"),
+        ("system", "System"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_change_session_promotion_evidence")
+    application = models.ForeignKey("Application", on_delete=models.CASCADE, related_name="promotion_evidence")
+    solution_change_session = models.ForeignKey(
+        "SolutionChangeSession",
+        on_delete=models.CASCADE,
+        related_name="promotion_evidence",
+    )
+    operation = models.CharField(max_length=24, choices=OPERATION_CHOICES, default="promotion")
+    promotion_status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="success")
+    actor_source = models.CharField(max_length=20, choices=ACTOR_SOURCE_CHOICES, default="human")
+    actor_identity = models.ForeignKey(
+        "UserIdentity",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="solution_change_session_promotion_evidence",
+    )
+    targeted_artifacts_json = models.JSONField(default=list, blank=True)
+    preview_target_json = models.JSONField(default=dict, blank=True)
+    root_target_json = models.JSONField(default=dict, blank=True)
+    resulting_active_target_json = models.JSONField(default=dict, blank=True)
+    superseded_active_state_json = models.JSONField(default=dict, blank=True)
+    control_result_json = models.JSONField(default=dict, blank=True)
+    provider_context_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    blocked_context_json = models.JSONField(default=dict, blank=True)
+    rollback_link_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def clean(self):
+        if self.solution_change_session_id and self.workspace_id and self.solution_change_session.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match solution change session workspace")
+        if self.application_id and self.workspace_id and self.application.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match application workspace")
+        if self.solution_change_session_id and self.application_id and self.solution_change_session.application_id != self.application_id:
+            raise ValidationError("application must match solution change session application")
+
+    def save(self, *args, **kwargs):
+        if self.solution_change_session_id and not self.workspace_id:
+            self.workspace_id = self.solution_change_session.workspace_id
+        if self.solution_change_session_id and not self.application_id:
+            self.application_id = self.solution_change_session.application_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.solution_change_session_id}:{self.promotion_status}:{self.created_at.isoformat() if self.created_at else ''}"
+
+
 class ApplicationPlan(models.Model):
     STATUS_CHOICES = [
         ("review", "Review"),
