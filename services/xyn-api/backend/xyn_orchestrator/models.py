@@ -494,6 +494,71 @@ class ReleaseTargetDeploymentPreparationEvidence(models.Model):
         return f"{self.release_target_id}:{self.provider_key}:{self.created_at.isoformat() if self.created_at else ''}"
 
 
+class ReleaseTargetExecutionPreparationHandoff(models.Model):
+    STATUS_CHOICES = [
+        ("ready", "Ready"),
+        ("blocked", "Blocked"),
+        ("invalid", "Invalid"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    release_target = models.ForeignKey(
+        ReleaseTarget,
+        on_delete=models.CASCADE,
+        related_name="execution_preparation_handoffs",
+    )
+    blueprint = models.ForeignKey(
+        Blueprint,
+        on_delete=models.CASCADE,
+        related_name="release_target_execution_preparation_handoffs",
+    )
+    source_preparation_evidence = models.ForeignKey(
+        ReleaseTargetDeploymentPreparationEvidence,
+        on_delete=models.CASCADE,
+        related_name="execution_preparation_handoffs",
+    )
+    validation_status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="blocked")
+    blocked_reason = models.CharField(max_length=120, blank=True, default="")
+    mutation_performed = models.BooleanField(default=False)
+    handoff_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="release_target_execution_preparation_handoffs_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["release_target", "created_at"], name="ix_rt_exec_handoff_target_time"),
+            models.Index(fields=["validation_status", "created_at"], name="ix_rt_exec_handoff_status_time"),
+        ]
+
+    def clean(self):
+        if self.release_target_id and self.blueprint_id and str(self.release_target.blueprint_id) != str(self.blueprint_id):
+            raise ValidationError("blueprint must match release target blueprint")
+        if (
+            self.source_preparation_evidence_id
+            and self.release_target_id
+            and str(self.source_preparation_evidence.release_target_id) != str(self.release_target_id)
+        ):
+            raise ValidationError("source evidence must belong to the same release target")
+
+    def save(self, *args, **kwargs):
+        if self.release_target_id and not self.blueprint_id:
+            self.blueprint_id = self.release_target.blueprint_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.release_target_id}:{self.validation_status}:{self.created_at.isoformat() if self.created_at else ''}"
+
+
 class IdentityProvider(models.Model):
     id = models.CharField(primary_key=True, max_length=120)
     display_name = models.CharField(max_length=200)

@@ -76,6 +76,7 @@ from xyn_orchestrator.models import (
     Release,
     ReleaseTarget,
     ReleaseTargetDeploymentPreparationEvidence,
+    ReleaseTargetExecutionPreparationHandoff,
     RoleBinding,
     Run,
     RunArtifact,
@@ -1938,6 +1939,185 @@ class PipelineSchemaTests(TestCase):
         self.assertEqual(len(evidence), 2)
         self.assertEqual(str(evidence[0].get("id") or ""), str(second.id))
         self.assertEqual(str(evidence[1].get("id") or ""), str(first.id))
+
+    def test_execution_preparation_handoff_ready_from_valid_staged_intent(self):
+        staff_user = get_user_model().objects.create_user(
+            username="staff-handoff-ready",
+            email="staff-handoff-ready@example.com",
+            password="test-pass-123",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(staff_user)
+        blueprint = Blueprint.objects.create(name="real-estate-deal-finder", namespace="solutions")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="deal-finder-sibling",
+            fqdn="deal.xyence.io",
+            config_json={},
+        )
+        evidence = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            planning_mode="non_destructive",
+            operation="sibling_runtime_deployment_plan",
+            provider_key="aws_ssm_route53",
+            provider_module_contract_ref="backend/registry/modules/deploy-aws-ec2-sibling.json",
+            execution_ready_in_principle=True,
+            mutation_performed=False,
+            requested_config_json={"instance_type": "t3.small", "hostname": "deal.xyence.io"},
+            staged_execution_intent_json={
+                "schema_version": "xyn.deployment_staged_intent.v1",
+                "promotable_to_execution_in_principle": True,
+                "ready_steps": ["prepare.runtime_target", "prepare.dns_target", "prepare.execution_preflight"],
+                "blocked_steps": [],
+                "required_future_inputs": [],
+            },
+            plan_snapshot_json={"schema_version": "xyn.deployment_plan.v1", "operation": "sibling_runtime_deployment_plan"},
+            warnings_json=["non-destructive planning only"],
+            created_by=staff_user,
+        )
+        response = self.client.post(
+            f"/xyn/api/release-targets/{target.id}/execution_preparation_handoff",
+            data=json.dumps({"evidence_id": str(evidence.id)}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload.get("status"), "ready")
+        self.assertEqual(payload.get("validation_status"), "ready")
+        handoff_ref = payload.get("handoff_ref") if isinstance(payload.get("handoff_ref"), dict) else {}
+        handoff_id = str(handoff_ref.get("execution_preparation_handoff_id") or "")
+        self.assertTrue(bool(handoff_id))
+        record = ReleaseTargetExecutionPreparationHandoff.objects.get(id=handoff_id)
+        self.assertEqual(str(record.validation_status), "ready")
+        self.assertFalse(record.mutation_performed)
+        handoff = payload.get("handoff") if isinstance(payload.get("handoff"), dict) else {}
+        self.assertEqual(str(handoff.get("schema_version") or ""), "xyn.execution_preparation_handoff.v1")
+        self.assertEqual(str(handoff.get("provider_key") or ""), "aws_ssm_route53")
+        self.assertEqual(handoff.get("blocked_steps"), [])
+
+    def test_execution_preparation_handoff_blocks_when_staged_intent_has_missing_inputs(self):
+        staff_user = get_user_model().objects.create_user(
+            username="staff-handoff-blocked",
+            email="staff-handoff-blocked@example.com",
+            password="test-pass-123",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(staff_user)
+        blueprint = Blueprint.objects.create(name="real-estate-deal-finder", namespace="solutions")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="deal-finder-sibling",
+            fqdn="deal.xyence.io",
+            config_json={},
+        )
+        evidence = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            planning_mode="non_destructive",
+            operation="sibling_runtime_deployment_plan",
+            provider_key="aws_ssm_route53",
+            provider_module_contract_ref="backend/registry/modules/deploy-aws-ec2-sibling.json",
+            execution_ready_in_principle=False,
+            mutation_performed=False,
+            requested_config_json={"instance_type": "t3.small", "hostname": "deal.xyence.io"},
+            staged_execution_intent_json={
+                "schema_version": "xyn.deployment_staged_intent.v1",
+                "promotable_to_execution_in_principle": False,
+                "ready_steps": ["prepare.dns_target"],
+                "blocked_steps": ["prepare.runtime_target"],
+                "required_future_inputs": ["target_instance.aws_region"],
+            },
+            plan_snapshot_json={"schema_version": "xyn.deployment_plan.v1", "operation": "sibling_runtime_deployment_plan"},
+            warnings_json=["non-destructive planning only"],
+            created_by=staff_user,
+        )
+        response = self.client.post(
+            f"/xyn/api/release-targets/{target.id}/execution_preparation_handoff",
+            data=json.dumps({"evidence_id": str(evidence.id)}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload.get("status"), "blocked")
+        self.assertIn(payload.get("validation_status"), {"blocked", "invalid"})
+        self.assertTrue(bool(payload.get("blocked_reason")))
+        handoff_ref = payload.get("handoff_ref") if isinstance(payload.get("handoff_ref"), dict) else {}
+        handoff_id = str(handoff_ref.get("execution_preparation_handoff_id") or "")
+        self.assertTrue(bool(handoff_id))
+        record = ReleaseTargetExecutionPreparationHandoff.objects.get(id=handoff_id)
+        self.assertIn(str(record.validation_status), {"blocked", "invalid"})
+        self.assertFalse(record.mutation_performed)
+
+    def test_execution_preparation_handoff_get_returns_history(self):
+        staff_user = get_user_model().objects.create_user(
+            username="staff-handoff-read",
+            email="staff-handoff-read@example.com",
+            password="test-pass-123",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(staff_user)
+        blueprint = Blueprint.objects.create(name="real-estate-deal-finder", namespace="solutions")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="deal-finder-sibling",
+            fqdn="deal.xyence.io",
+            config_json={},
+        )
+        evidence = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            planning_mode="non_destructive",
+            operation="sibling_runtime_deployment_plan",
+            provider_key="aws_ssm_route53",
+            provider_module_contract_ref="backend/registry/modules/deploy-aws-ec2-sibling.json",
+            execution_ready_in_principle=True,
+            mutation_performed=False,
+            staged_execution_intent_json={
+                "schema_version": "xyn.deployment_staged_intent.v1",
+                "promotable_to_execution_in_principle": True,
+                "ready_steps": ["prepare.runtime_target"],
+                "blocked_steps": [],
+                "required_future_inputs": [],
+            },
+            plan_snapshot_json={"schema_version": "xyn.deployment_plan.v1"},
+            created_by=staff_user,
+        )
+        first = ReleaseTargetExecutionPreparationHandoff.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            source_preparation_evidence=evidence,
+            validation_status="blocked",
+            blocked_reason="staged_intent_missing_future_inputs",
+            mutation_performed=False,
+            handoff_json={"schema_version": "xyn.execution_preparation_handoff.v1"},
+            warnings_json=[],
+            created_by=staff_user,
+        )
+        second = ReleaseTargetExecutionPreparationHandoff.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            source_preparation_evidence=evidence,
+            validation_status="ready",
+            blocked_reason="",
+            mutation_performed=False,
+            handoff_json={"schema_version": "xyn.execution_preparation_handoff.v1"},
+            warnings_json=[],
+            created_by=staff_user,
+        )
+        self.assertNotEqual(str(first.id), str(second.id))
+        response = self.client.get(f"/xyn/api/release-targets/{target.id}/execution_preparation_handoff")
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        latest_ref = payload.get("latest_handoff_ref") if isinstance(payload.get("latest_handoff_ref"), dict) else {}
+        self.assertEqual(str(latest_ref.get("execution_preparation_handoff_id") or ""), str(second.id))
+        handoffs = payload.get("handoffs") if isinstance(payload.get("handoffs"), list) else []
+        self.assertEqual(len(handoffs), 2)
+        self.assertEqual(str(handoffs[0].get("id") or ""), str(second.id))
+        self.assertEqual(str(handoffs[1].get("id") or ""), str(first.id))
 
     def test_deploy_lock_blocks_concurrent_runs(self):
         os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"

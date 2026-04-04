@@ -113,6 +113,7 @@ from .models import (
     RunCommandExecution,
     ReleaseTarget,
     ReleaseTargetDeploymentPreparationEvidence,
+    ReleaseTargetExecutionPreparationHandoff,
     IdentityProvider,
     AppOIDCClient,
     SecretStore,
@@ -28140,6 +28141,174 @@ def release_target_deployment_preparation_evidence_action(request: HttpRequest, 
             "mutation_performed": False,
         }
     )
+
+
+def _serialize_release_target_execution_preparation_handoff(
+    record: ReleaseTargetExecutionPreparationHandoff,
+) -> Dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "release_target_id": str(record.release_target_id),
+        "blueprint_id": str(record.blueprint_id),
+        "source_evidence_ref": {
+            "deployment_preparation_evidence_id": str(record.source_preparation_evidence_id),
+        },
+        "validation_status": str(record.validation_status or ""),
+        "blocked_reason": str(record.blocked_reason or ""),
+        "mutation_performed": bool(record.mutation_performed),
+        "warnings": record.warnings_json or [],
+        "handoff": record.handoff_json or {},
+        "created_at": record.created_at.isoformat() if record.created_at else "",
+    }
+
+
+def _build_execution_preparation_handoff_from_evidence(
+    *,
+    evidence: ReleaseTargetDeploymentPreparationEvidence,
+) -> Dict[str, Any]:
+    intent = evidence.staged_execution_intent_json if isinstance(evidence.staged_execution_intent_json, dict) else {}
+    plan_snapshot = evidence.plan_snapshot_json if isinstance(evidence.plan_snapshot_json, dict) else {}
+    status = "ready"
+    blocked_reason = ""
+    warnings: List[str] = list(evidence.warnings_json or [])
+    now = timezone.now()
+    max_age_seconds = 21600
+    try:
+        max_age_seconds = int(str(os.environ.get("XYN_DEPLOYMENT_HANDOFF_MAX_AGE_SECONDS") or "21600"))
+    except ValueError:
+        max_age_seconds = 21600
+    if evidence.created_at:
+        age_seconds = int((now - evidence.created_at).total_seconds())
+        if max_age_seconds > 0 and age_seconds > max_age_seconds:
+            status = "blocked"
+            blocked_reason = "staged_intent_stale"
+            warnings.append(f"Source evidence is stale ({age_seconds}s old). Refresh deployment-preparation evidence.")
+    if status == "ready":
+        if str(intent.get("schema_version") or "").strip() != "xyn.deployment_staged_intent.v1":
+            status = "invalid"
+            blocked_reason = "missing_or_invalid_staged_intent"
+        elif not bool(intent.get("promotable_to_execution_in_principle")):
+            status = "blocked"
+            blocked_reason = "staged_intent_not_promotable"
+        elif list(intent.get("blocked_steps") or []):
+            status = "blocked"
+            blocked_reason = "staged_intent_blocked_steps"
+        elif list(intent.get("required_future_inputs") or []):
+            status = "blocked"
+            blocked_reason = "staged_intent_missing_future_inputs"
+    ready_steps = [str(item).strip() for item in (intent.get("ready_steps") or []) if str(item).strip()]
+    blocked_steps = [str(item).strip() for item in (intent.get("blocked_steps") or []) if str(item).strip()]
+    required_future_inputs = [str(item).strip() for item in (intent.get("required_future_inputs") or []) if str(item).strip()]
+    handoff = {
+        "schema_version": "xyn.execution_preparation_handoff.v1",
+        "handoff_type": "execution_preparation",
+        "planning_mode": str(evidence.planning_mode or ""),
+        "operation": str(evidence.operation or ""),
+        "source_evidence_ref": {"deployment_preparation_evidence_id": str(evidence.id)},
+        "release_target_id": str(evidence.release_target_id),
+        "provider_key": str(evidence.provider_key or ""),
+        "provider_module_contract_ref": str(evidence.provider_module_contract_ref or ""),
+        "requested_config": evidence.requested_config_json or {},
+        "ready_steps": ready_steps,
+        "blocked_steps": blocked_steps,
+        "required_future_inputs": required_future_inputs,
+        "promotable_to_execution_in_principle": bool(intent.get("promotable_to_execution_in_principle")),
+        "validation_status": status,
+        "blocked_reason": blocked_reason,
+        "warnings": warnings,
+        "mutation_performed": False,
+        "non_destructive_note": "No EC2, Route53, or remote runtime mutation has occurred.",
+        "derived_from_plan": {
+            "schema_version": str(plan_snapshot.get("schema_version") or ""),
+            "operation": str(plan_snapshot.get("operation") or ""),
+        },
+    }
+    return {
+        "validation_status": status,
+        "blocked_reason": blocked_reason,
+        "warnings": warnings,
+        "handoff": handoff,
+    }
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_preparation_handoff_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    if request.method == "GET":
+        limit = 10
+        try:
+            if request.GET.get("limit"):
+                limit = max(1, min(100, int(str(request.GET.get("limit")))))
+        except ValueError:
+            limit = 10
+        records = list(
+            ReleaseTargetExecutionPreparationHandoff.objects.filter(release_target=target).order_by("-created_at")[:limit]
+        )
+        latest = records[0] if records else None
+        return JsonResponse(
+            {
+                "release_target_id": str(target.id),
+                "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+                "latest_handoff_ref": {"execution_preparation_handoff_id": str(latest.id)} if latest else {},
+                "handoffs": [_serialize_release_target_execution_preparation_handoff(item) for item in records],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    payload = _parse_json(request)
+    evidence_id = str(payload.get("evidence_id") or "").strip() if isinstance(payload, dict) else ""
+    if evidence_id:
+        source_evidence = (
+            ReleaseTargetDeploymentPreparationEvidence.objects.filter(id=evidence_id, release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    else:
+        source_evidence = (
+            ReleaseTargetDeploymentPreparationEvidence.objects.filter(release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    if source_evidence is None:
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "release_target_id": str(target.id),
+                "blocked_reason": "missing_deployment_preparation_evidence",
+                "message": "Generate deployment-preparation evidence before requesting execution handoff.",
+                "mutation_performed": False,
+            },
+            status=409,
+        )
+    decision = _build_execution_preparation_handoff_from_evidence(evidence=source_evidence)
+    record = ReleaseTargetExecutionPreparationHandoff.objects.create(
+        release_target=target,
+        blueprint=target.blueprint,
+        source_preparation_evidence=source_evidence,
+        validation_status=str(decision.get("validation_status") or "blocked"),
+        blocked_reason=str(decision.get("blocked_reason") or ""),
+        mutation_performed=False,
+        warnings_json=list(decision.get("warnings") or []),
+        handoff_json=decision.get("handoff") if isinstance(decision.get("handoff"), dict) else {},
+        created_by=request.user,
+    )
+    response_payload = {
+        "status": "ready" if str(record.validation_status) == "ready" else "blocked",
+        "release_target_id": str(target.id),
+        "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+        "handoff_ref": {"execution_preparation_handoff_id": str(record.id)},
+        "source_evidence_ref": {"deployment_preparation_evidence_id": str(source_evidence.id)},
+        "validation_status": str(record.validation_status),
+        "blocked_reason": str(record.blocked_reason or ""),
+        "warnings": record.warnings_json or [],
+        "handoff": record.handoff_json or {},
+        "mutation_performed": False,
+    }
+    status_code = 200 if str(record.validation_status) == "ready" else 409
+    return JsonResponse(response_payload, status=status_code)
 
 
 @csrf_exempt
