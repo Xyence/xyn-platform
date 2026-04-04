@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -2612,6 +2613,46 @@ def _ssm_fetch_runtime_marker(instance_id: str, aws_region: str, root_dir: str) 
         "release_uuid": lines[1] if len(lines) > 1 else "",
         "manifest_sha256": lines[2] if len(lines) > 2 else "",
         "compose_sha256": lines[3] if len(lines) > 3 else "",
+    }
+
+
+def _ssm_prepare_runtime_root_marker(
+    instance_id: str,
+    aws_region: str,
+    root_dir: str,
+    *,
+    marker_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    root = str(root_dir or "").strip()
+    if not root:
+        raise RuntimeError("remote_root is required for runtime root marker preparation")
+    payload = json.dumps(marker_payload or {}, sort_keys=True)
+    marker_path = f"{root.rstrip('/')}/.xyn_execution_prepared.json"
+    result = _run_ssm_commands(
+        instance_id,
+        aws_region,
+        [
+            "set -euo pipefail",
+            f"ROOT={shlex.quote(root)}",
+            "mkdir -p \"$ROOT\"",
+            f"MARKER={shlex.quote(marker_path)}",
+            f"printf '%s' {shlex.quote(payload)} > \"$MARKER\"",
+            "wc -c < \"$MARKER\"",
+        ],
+    )
+    if result.get("invocation_status") != "Success":
+        raise RuntimeError(result.get("stderr") or "SSM runtime root marker write failed")
+    line = (result.get("stdout") or "").strip().splitlines()
+    bytes_written = 0
+    if line:
+        try:
+            bytes_written = int(line[-1].strip())
+        except ValueError:
+            bytes_written = 0
+    return {
+        "marker_path": marker_path,
+        "bytes_written": bytes_written,
+        "invocation_status": str(result.get("invocation_status") or ""),
     }
 
 

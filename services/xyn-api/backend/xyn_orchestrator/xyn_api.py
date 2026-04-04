@@ -339,7 +339,11 @@ from .deployments import (
     maybe_trigger_rollback,
     load_release_plan_json,
 )
-from .worker_tasks import _download_artifact_json, _ssm_fetch_runtime_marker
+from .worker_tasks import (
+    _download_artifact_json,
+    _ssm_fetch_runtime_marker,
+    _ssm_prepare_runtime_root_marker,
+)
 from .oidc import (
     app_client_to_payload,
     generate_pkce_pair,
@@ -28568,7 +28572,11 @@ def release_target_execution_step_action(request: HttpRequest, target_id: str) -
         return JsonResponse({"error": "GET or POST required"}, status=405)
     payload = _parse_json(request)
     preparation_evidence_id = str(payload.get("execution_preparation_evidence_id") or "").strip() if isinstance(payload, dict) else ""
-    action_key = str(payload.get("action_key") or "runtime_marker_probe").strip().lower() if isinstance(payload, dict) else "runtime_marker_probe"
+    action_key = (
+        str(payload.get("action_key") or "runtime_marker_probe").strip().lower()
+        if isinstance(payload, dict)
+        else "runtime_marker_probe"
+    )
     approval_granted = bool((payload or {}).get("approve_execution_step")) if isinstance(payload, dict) else False
     if preparation_evidence_id:
         prep_evidence = (
@@ -28603,7 +28611,7 @@ def release_target_execution_step_action(request: HttpRequest, target_id: str) -
     elif str(prep_evidence.status or "").strip().lower() != "prepared":
         status = "blocked"
         blocked_reason = "preparation_evidence_not_prepared"
-    elif action_key != "runtime_marker_probe":
+    elif action_key not in {"runtime_marker_probe", "runtime_prepare_root_marker"}:
         status = "blocked"
         blocked_reason = "unsupported_action_key"
     else:
@@ -28621,36 +28629,96 @@ def release_target_execution_step_action(request: HttpRequest, target_id: str) -
             )
             execution_inputs = _extract_execution_inputs_from_plan_snapshot(plan_snapshot)
             provider_key = str(prepared_payload.get("provider_key") or "").strip()
-            preflight = evaluate_deployment_execution_preflight_readiness(
-                operation="check_drift",
-                runtime_config={"transport": execution_inputs.get("runtime_transport", ""), "remote_root": execution_inputs.get("remote_root", "")},
-                target_instance_id=execution_inputs.get("target_instance_id", ""),
-                aws_region=execution_inputs.get("aws_region", ""),
-                remote_root=execution_inputs.get("remote_root", ""),
-                selected_provider_key=provider_key,
-            )
-            if not bool(preflight.get("can_probe_runtime_marker")):
-                status = "blocked"
-                blocked_reason = "execution_preflight_blocked"
-                result = {"preflight": preflight, "execution_inputs": execution_inputs}
+            if action_key == "runtime_marker_probe":
+                preflight = evaluate_deployment_execution_preflight_readiness(
+                    operation="check_drift",
+                    runtime_config={
+                        "transport": execution_inputs.get("runtime_transport", ""),
+                        "remote_root": execution_inputs.get("remote_root", ""),
+                    },
+                    target_instance_id=execution_inputs.get("target_instance_id", ""),
+                    aws_region=execution_inputs.get("aws_region", ""),
+                    remote_root=execution_inputs.get("remote_root", ""),
+                    selected_provider_key=provider_key,
+                )
+                if not bool(preflight.get("can_probe_runtime_marker")):
+                    status = "blocked"
+                    blocked_reason = "execution_preflight_blocked"
+                    result = {"preflight": preflight, "execution_inputs": execution_inputs}
+                else:
+                    try:
+                        marker = _ssm_fetch_runtime_marker(
+                            execution_inputs.get("target_instance_id", ""),
+                            execution_inputs.get("aws_region", ""),
+                            execution_inputs.get("remote_root", ""),
+                        )
+                        result = {
+                            "action": "runtime_marker_probe",
+                            "provider_key": provider_key,
+                            "execution_inputs": execution_inputs,
+                            "preflight": preflight,
+                            "runtime_marker": marker,
+                        }
+                    except Exception as exc:
+                        status = "failed"
+                        blocked_reason = "runtime_marker_probe_failed"
+                        result = {"error": str(exc), "preflight": preflight, "execution_inputs": execution_inputs}
             else:
-                try:
-                    marker = _ssm_fetch_runtime_marker(
-                        execution_inputs.get("target_instance_id", ""),
-                        execution_inputs.get("aws_region", ""),
-                        execution_inputs.get("remote_root", ""),
+                ready_steps = [
+                    str(item).strip()
+                    for item in (prepared_payload.get("ready_steps") or [])
+                    if str(item).strip()
+                ]
+                if "prepare.runtime_target" not in set(ready_steps):
+                    status = "blocked"
+                    blocked_reason = "runtime_target_preparation_not_ready"
+                    result = {"ready_steps": ready_steps, "execution_inputs": execution_inputs}
+                else:
+                    preflight = evaluate_deployment_execution_preflight_readiness(
+                        operation="prepare_runtime_root",
+                        runtime_config={
+                            "transport": execution_inputs.get("runtime_transport", ""),
+                            "remote_root": execution_inputs.get("remote_root", ""),
+                        },
+                        target_instance_id=execution_inputs.get("target_instance_id", ""),
+                        aws_region=execution_inputs.get("aws_region", ""),
+                        remote_root=execution_inputs.get("remote_root", ""),
+                        selected_provider_key=provider_key,
                     )
-                    result = {
-                        "action": "runtime_marker_probe",
-                        "provider_key": provider_key,
-                        "execution_inputs": execution_inputs,
-                        "preflight": preflight,
-                        "runtime_marker": marker,
-                    }
-                except Exception as exc:
-                    status = "failed"
-                    blocked_reason = "runtime_marker_probe_failed"
-                    result = {"error": str(exc), "preflight": preflight, "execution_inputs": execution_inputs}
+                    if not bool(preflight.get("can_prepare_runtime_root")):
+                        status = "blocked"
+                        blocked_reason = "execution_preflight_blocked"
+                        result = {"preflight": preflight, "execution_inputs": execution_inputs}
+                    else:
+                        try:
+                            marker_payload = {
+                                "schema_version": "xyn.execution_step.runtime_prepare_root_marker.v1",
+                                "provider_key": provider_key,
+                                "release_target_id": str(target.id),
+                                "source_preparation_evidence_ref": {
+                                    "execution_preparation_evidence_id": str(prep_evidence.id),
+                                },
+                                "action_key": action_key,
+                                "prepared_at": timezone.now().isoformat(),
+                            }
+                            marker_write = _ssm_prepare_runtime_root_marker(
+                                execution_inputs.get("target_instance_id", ""),
+                                execution_inputs.get("aws_region", ""),
+                                execution_inputs.get("remote_root", ""),
+                                marker_payload=marker_payload,
+                            )
+                            result = {
+                                "action": "runtime_prepare_root_marker",
+                                "provider_key": provider_key,
+                                "execution_inputs": execution_inputs,
+                                "preflight": preflight,
+                                "marker_write": marker_write,
+                            }
+                        except Exception as exc:
+                            status = "failed"
+                            blocked_reason = "runtime_prepare_root_marker_failed"
+                            result = {"error": str(exc), "preflight": preflight, "execution_inputs": execution_inputs}
+    mutation_performed = bool(status == "succeeded" and action_key == "runtime_prepare_root_marker")
     record = ReleaseTargetExecutionStepEvidence.objects.create(
         release_target=target,
         blueprint=target.blueprint,
@@ -28659,7 +28727,7 @@ def release_target_execution_step_action(request: HttpRequest, target_id: str) -
         status=status,
         blocked_reason=blocked_reason,
         approval_granted=bool(approval_granted),
-        mutation_performed=False,
+        mutation_performed=mutation_performed,
         result_json=result,
         warnings_json=warnings,
         created_by=request.user,
@@ -28676,7 +28744,7 @@ def release_target_execution_step_action(request: HttpRequest, target_id: str) -
         "approval_granted": bool(approval_granted),
         "result": result,
         "warnings": warnings,
-        "mutation_performed": False,
+        "mutation_performed": mutation_performed,
     }
     if status == "succeeded":
         return JsonResponse(response_payload, status=200)

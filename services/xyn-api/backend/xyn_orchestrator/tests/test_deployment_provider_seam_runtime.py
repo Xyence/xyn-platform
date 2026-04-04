@@ -160,6 +160,18 @@ class DeploymentProviderSeamRuntimeTests(SimpleTestCase):
         )
         self.assertTrue(ready.get("can_probe_runtime_marker"))
         self.assertEqual(ready.get("blocked_reason"), "")
+        self.assertFalse(bool(ready.get("can_prepare_runtime_root")))
+
+        prepare_ready = evaluate_deployment_execution_preflight_readiness(
+            operation="prepare_runtime_root",
+            selected_provider_key="aws_ssm_route53",
+            runtime_config={"transport": "ssm"},
+            target_instance_id="i-123",
+            aws_region="us-west-2",
+            remote_root="/opt/xyn/apps/demo",
+        )
+        self.assertTrue(bool(prepare_ready.get("can_prepare_runtime_root")))
+        self.assertFalse(bool(prepare_ready.get("can_probe_runtime_marker")))
 
         blocked = evaluate_deployment_execution_preflight_readiness(
             operation="check_drift",

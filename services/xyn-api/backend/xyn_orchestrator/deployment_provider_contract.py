@@ -369,12 +369,18 @@ class LegacyAwsSsmRoute53ProviderStub:
         if not root:
             missing_inputs.append("runtime.remote_root")
         can_probe_runtime_marker = not blocked_reason and not missing_inputs and op in {"check_drift", "drift_check"}
+        can_prepare_runtime_root = not blocked_reason and not missing_inputs and op in {
+            "prepare_runtime_root",
+            "runtime_prepare_root",
+            "prepare_root",
+        }
         return {
             "provider_key": self.provider_key,
             "seam_source": "deployment_provider_contract",
             "operation": op,
             "runtime_transport": transport or "ssm",
             "can_probe_runtime_marker": bool(can_probe_runtime_marker),
+            "can_prepare_runtime_root": bool(can_prepare_runtime_root),
             "blocked_reason": blocked_reason,
             "missing_inputs": missing_inputs,
         }
@@ -691,6 +697,7 @@ def evaluate_deployment_execution_preflight_readiness(
             "operation": str(operation or "").strip().lower(),
             "runtime_transport": str((runtime_config or {}).get("transport") or "").strip().lower(),
             "can_probe_runtime_marker": False,
+            "can_prepare_runtime_root": False,
             "blocked_reason": "deployment provider implementation not found",
             "missing_inputs": [],
         }
