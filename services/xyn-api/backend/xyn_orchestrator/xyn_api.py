@@ -20607,6 +20607,317 @@ def _workspace_runtime_target(workspace: Workspace, app_slug: str) -> Optional[D
     }
 
 
+def _artifact_runtime_app_slug(artifact: Artifact) -> str:
+    slug = str(getattr(artifact, "slug", "") or "").strip()
+    if slug.startswith("app."):
+        return slug[4:]
+    metadata: Dict[str, Any] = {}
+    metadata_json = getattr(artifact, "metadata_json", None)
+    if isinstance(metadata_json, dict):
+        metadata.update(metadata_json)
+    scope_json = getattr(artifact, "scope_json", None)
+    if isinstance(scope_json, dict):
+        scope_metadata = scope_json.get("metadata")
+        if isinstance(scope_metadata, dict):
+            metadata.update(scope_metadata)
+    runtime = metadata.get("runtime_target") if isinstance(metadata.get("runtime_target"), dict) else {}
+    runtime_app_slug = str(
+        runtime.get("app_slug")
+        or metadata.get("app_slug")
+        or (scope_json.get("app_slug") if isinstance(scope_json, dict) else "")
+        or ""
+    ).strip()
+    if not runtime_app_slug and slug in {"core.workbench", "xyn-ui", "xyn-api"}:
+        return slug
+    return runtime_app_slug
+
+
+def _workspace_primary_runtime_target(workspace: Workspace, app_slug: str) -> Optional[Dict[str, Any]]:
+    token = str(app_slug or "").strip()
+    if not token:
+        return None
+    instances = list(
+        WorkspaceAppInstance.objects.filter(workspace=workspace, app_slug=token, status="active")
+        .exclude(dns_config_json={})
+        .order_by("-updated_at", "-created_at")
+    )
+    for instance in instances:
+        runtime_target = instance.dns_config_json.get("runtime_target") if isinstance(instance.dns_config_json, dict) else {}
+        if not isinstance(runtime_target, dict):
+            continue
+        runtime_owner = str(runtime_target.get("runtime_owner") or "").strip().lower()
+        if runtime_owner and runtime_owner != "primary":
+            continue
+        runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip()
+        public_app_url = str(runtime_target.get("public_app_url") or "").strip()
+        if not runtime_base_url and not public_app_url:
+            continue
+        return {
+            "app_slug": token,
+            "runtime_owner": runtime_owner or "primary",
+            "runtime_target_id": str(instance.id),
+            "runtime_base_url": runtime_base_url,
+            "public_app_url": public_app_url,
+            "compose_project": str(runtime_target.get("compose_project") or "").strip(),
+        }
+    env_mode = str(os.getenv("XYN_ENV", "") or "").strip().lower()
+    local_public_base_url = str(os.getenv("XYN_PUBLIC_BASE_URL", "http://localhost") or "http://localhost").strip().rstrip("/")
+    local_compose_project = str(os.getenv("XYN_LOCAL_COMPOSE_PROJECT", "xyn-local") or "xyn-local").strip() or "xyn-local"
+    if token in {"core.workbench", "xyn-ui", "xyn-api"} and env_mode in {"local", "dev", ""} and local_public_base_url:
+        return {
+            "app_slug": token,
+            "runtime_owner": "primary",
+            "runtime_target_id": "",
+            "runtime_base_url": local_public_base_url,
+            "public_app_url": local_public_base_url,
+            "compose_project": local_compose_project,
+        }
+    return None
+
+
+def _solution_change_session_promote_eligibility(
+    *,
+    session: SolutionChangeSession,
+    application: Optional[Application] = None,
+) -> Dict[str, Any]:
+    app = application or session.application
+    execution_status = str(session.execution_status or "").strip().lower()
+    requires_commit_provenance = _solution_change_session_requires_commit_provenance(session)
+    commit_count = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).count()
+    eligibility: Dict[str, Any] = {
+        "can_promote": False,
+        "blocked_reason": "",
+        "root_target_present": False,
+        "root_target_identity": {},
+        "recommended_action": "",
+        "next_allowed_actions": [],
+    }
+    if execution_status not in {"committed", "promoted"}:
+        eligibility["blocked_reason"] = "execution_not_committed"
+        eligibility["recommended_action"] = "commit_changes"
+        eligibility["next_allowed_actions"] = ["commit_changes"]
+        return eligibility
+    if requires_commit_provenance and commit_count < 1:
+        eligibility["blocked_reason"] = "commit_provenance_missing"
+        eligibility["recommended_action"] = "record_repository_commit"
+        eligibility["next_allowed_actions"] = ["commit_changes"]
+        return eligibility
+    selected_app_member, _selected_policy_member = _solution_activation_memberships(app)
+    if selected_app_member is None or selected_app_member.artifact is None:
+        eligibility["blocked_reason"] = "primary_artifact_missing"
+        eligibility["recommended_action"] = "configure_primary_solution_artifact"
+        eligibility["next_allowed_actions"] = ["update_solution_memberships"]
+        return eligibility
+    primary_artifact = selected_app_member.artifact
+    app_slug = _artifact_runtime_app_slug(primary_artifact)
+    if not app_slug:
+        eligibility["blocked_reason"] = "root_target_unresolved"
+        eligibility["recommended_action"] = "activate_solution_in_root"
+        eligibility["next_allowed_actions"] = ["activate_in_root"]
+        return eligibility
+    installed_in_root = _workspace_has_installed_artifact_slug(app.workspace, str(primary_artifact.slug or "").strip())
+    root_target = _workspace_primary_runtime_target(app.workspace, app_slug)
+    if not root_target:
+        eligibility["blocked_reason"] = "solution_not_installed_in_root" if not installed_in_root else "root_target_missing"
+        eligibility["recommended_action"] = "install_in_root" if not installed_in_root else "activate_in_root"
+        eligibility["next_allowed_actions"] = ["install_in_root", "activate_in_root"] if not installed_in_root else ["activate_in_root"]
+        return eligibility
+    eligibility["can_promote"] = True
+    eligibility["root_target_present"] = True
+    eligibility["root_target_identity"] = root_target
+    eligibility["next_allowed_actions"] = ["promote", "finalize"]
+    return eligibility
+
+
+def _solution_change_session_promote_blocked_error(eligibility: Dict[str, Any]) -> str:
+    blocked_reason = str((eligibility or {}).get("blocked_reason") or "").strip().lower()
+    if blocked_reason == "execution_not_committed":
+        return "change session can only be promoted after commit (execution_status=committed)"
+    if blocked_reason == "commit_provenance_missing":
+        return "code-changing sessions require at least one recorded repository commit before promote"
+    if blocked_reason == "solution_not_installed_in_root":
+        return "solution is not installed in the primary root environment; install and activate it in root before promote"
+    if blocked_reason == "root_target_missing":
+        return "solution has no active primary runtime target in root environment; activate it in root before promote"
+    if blocked_reason == "primary_artifact_missing":
+        return "solution has no primary application artifact membership configured for promotion"
+    if blocked_reason == "root_target_unresolved":
+        return "unable to resolve root runtime target for selected solution artifact"
+    return "promotion is currently blocked for this change session"
+
+
+# Canonical operator/agent-facing control contract for solution change execution.
+# Keep these helpers additive and stable so API-only control loops can rely on
+# machine-readable status/eligibility without coupling to UI-shaped flows.
+def _solution_change_session_control_status(
+    *,
+    session: SolutionChangeSession,
+    application: Optional[Application] = None,
+) -> Dict[str, Any]:
+    app = application or session.application
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=app)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    session_payload = _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id)
+    staged_changes = session_payload.get("staged_changes") if isinstance(session_payload.get("staged_changes"), dict) else {}
+    preview = session_payload.get("preview") if isinstance(session_payload.get("preview"), dict) else {}
+    validation = session_payload.get("validation") if isinstance(session_payload.get("validation"), dict) else {}
+    execution_status = str(session_payload.get("execution_status") or "").strip().lower()
+    planning_state = session_payload.get("planning") if isinstance(session_payload.get("planning"), dict) else {}
+    has_pending_prompt = bool(planning_state.get("pending_question") or planning_state.get("pending_option_set"))
+    has_draft_plan = bool(planning_state.get("latest_draft_plan") or session_payload.get("plan"))
+    pending_checkpoints = planning_state.get("pending_checkpoints") if isinstance(planning_state.get("pending_checkpoints"), list) else []
+    all_checkpoints = planning_state.get("checkpoints") if isinstance(planning_state.get("checkpoints"), list) else []
+    has_pending_checkpoint = len(pending_checkpoints) > 0
+    stage_checkpoint = next(
+        (
+            item
+            for item in all_checkpoints
+            if isinstance(item, dict) and str(item.get("checkpoint_key") or "") == "plan_scope_confirmed"
+        ),
+        None,
+    )
+    has_approved_stage_checkpoint = not isinstance(stage_checkpoint, dict) or str(stage_checkpoint.get("status") or "") == "approved"
+    can_run_execution = bool(has_draft_plan and not has_pending_prompt and has_approved_stage_checkpoint and not has_pending_checkpoint)
+    artifact_states = staged_changes.get("artifact_states") if isinstance(staged_changes.get("artifact_states"), list) else []
+    preview_status = str(preview.get("status") or "").strip().lower()
+    validation_status = str(validation.get("status") or "").strip().lower()
+    promote_eligibility = (
+        session_payload.get("promote_eligibility")
+        if isinstance(session_payload.get("promote_eligibility"), dict)
+        else {}
+    )
+    can_promote = bool(promote_eligibility.get("can_promote"))
+    can_activate = bool(_solution_activation_memberships(app)[0] is not None)
+    can_stage_apply = bool(can_run_execution)
+    can_prepare_preview = bool(can_run_execution and artifact_states)
+    blocked_reason = ""
+    recommended_action = ""
+    next_allowed_actions: List[str] = []
+    if has_pending_prompt:
+        blocked_reason = "planning_prompt_pending"
+        recommended_action = "resolve_planner_prompt"
+        next_allowed_actions = ["respond_to_planner_prompt"]
+    elif not has_draft_plan:
+        blocked_reason = "draft_plan_missing"
+        recommended_action = "generate_draft_plan"
+        next_allowed_actions = ["generate_plan"]
+    elif has_pending_checkpoint:
+        blocked_reason = "checkpoint_pending"
+        recommended_action = "approve_checkpoint"
+        next_allowed_actions = ["decide_checkpoint"]
+    elif not has_approved_stage_checkpoint:
+        blocked_reason = "checkpoint_not_approved"
+        recommended_action = "approve_checkpoint"
+        next_allowed_actions = ["decide_checkpoint"]
+    elif execution_status in {"not_started", "staged", "failed"} and can_stage_apply:
+        next_allowed_actions.append("stage_apply")
+    if artifact_states:
+        next_allowed_actions.append("prepare_preview")
+    if preview_status == "ready":
+        next_allowed_actions.append("validate")
+    if execution_status == "ready_for_promotion":
+        next_allowed_actions.append("commit")
+    if can_promote:
+        next_allowed_actions.append("promote")
+    elif execution_status in {"committed", "promoted"}:
+        blocked_reason = str(promote_eligibility.get("blocked_reason") or blocked_reason or "")
+        recommended_action = str(promote_eligibility.get("recommended_action") or recommended_action or "")
+        for action in (promote_eligibility.get("next_allowed_actions") if isinstance(promote_eligibility.get("next_allowed_actions"), list) else []):
+            token = str(action or "").strip()
+            if token:
+                next_allowed_actions.append(token)
+        if recommended_action in {"activate_in_root", "install_in_root"} and can_activate:
+            next_allowed_actions.append("activate_in_root")
+    if execution_status == "promoted":
+        next_allowed_actions.append("finalize")
+    if not blocked_reason and str(validation_status) in {"failed"}:
+        blocked_reason = "validation_failed"
+        recommended_action = "resolve_validation_failures"
+    targeted_artifacts: List[Dict[str, Any]] = []
+    for artifact_id in (session_payload.get("selected_artifact_ids") if isinstance(session_payload.get("selected_artifact_ids"), list) else []):
+        member = memberships_by_artifact_id.get(str(artifact_id))
+        if not member:
+            continue
+        targeted_artifacts.append(
+            {
+                "artifact_id": str(member.artifact_id),
+                "artifact_slug": str(_artifact_slug(member.artifact) or ""),
+                "artifact_title": str(member.artifact.title or ""),
+                "role": str(member.role or ""),
+            }
+        )
+    per_repo_results = (
+        staged_changes.get("per_repo_results")
+        if isinstance(staged_changes.get("per_repo_results"), list)
+        else (
+            staged_changes.get("stage_apply_result", {}).get("per_repo_results")
+            if isinstance(staged_changes.get("stage_apply_result"), dict)
+            else []
+        )
+    )
+    preview_target = {
+        "status": preview_status or "not_prepared",
+        "primary_url": str(preview.get("primary_url") or ""),
+        "urls": [str(url).strip() for url in (preview.get("preview_urls") if isinstance(preview.get("preview_urls"), list) else []) if str(url).strip()],
+        "mode": str(preview.get("mode") or ""),
+    }
+    next_allowed_actions = [item for item in dict.fromkeys([str(action).strip() for action in next_allowed_actions if str(action).strip()])]
+    warnings: List[str] = []
+    if str(preview_status) == "ready" and str((preview.get("session_build") or {}).get("status") or "").strip().lower() == "reused":
+        warnings.append("preview_reused_existing_runtime")
+    return {
+        "change_session_id": str(session.id),
+        "application_id": str(app.id),
+        "execution_status": execution_status or "not_started",
+        "targeted_artifacts": targeted_artifacts,
+        "per_repo_results": per_repo_results if isinstance(per_repo_results, list) else [],
+        "preview_target": preview_target,
+        "root_target_present": bool(promote_eligibility.get("root_target_present")),
+        "root_target_identity": (
+            promote_eligibility.get("root_target_identity")
+            if isinstance(promote_eligibility.get("root_target_identity"), dict)
+            else {}
+        ),
+        "can_stage_apply": can_stage_apply,
+        "can_prepare_preview": bool(can_prepare_preview),
+        "can_activate": bool(can_activate),
+        "can_promote": bool(can_promote),
+        "blocked_reason": blocked_reason,
+        "recommended_action": recommended_action,
+        "next_allowed_actions": next_allowed_actions,
+        "evidence_ref": {"session_id": str(session.id)},
+        "warnings": warnings,
+        "session": session_payload,
+    }
+
+
+def _solution_change_session_control_envelope(
+    *,
+    operation: str,
+    session: SolutionChangeSession,
+    application: Application,
+    operation_status: str = "ready",
+    operation_payload: Optional[Dict[str, Any]] = None,
+    http_status: int = 200,
+) -> JsonResponse:
+    control = _solution_change_session_control_status(session=session, application=application)
+    return JsonResponse(
+        {
+            "operation": str(operation or "").strip() or "inspect",
+            "status": str(operation_status or "").strip() or "ready",
+            "change_session_id": str(session.id),
+            "application_id": str(application.id),
+            "control": control,
+            "operation_result": operation_payload or {},
+        },
+        status=http_status,
+    )
+
+
 def _docker_container_published_port(container_name: str, container_port: str = "8080/tcp") -> str:
     name = str(container_name or "").strip()
     if not name:
@@ -32706,6 +33017,7 @@ def _serialize_solution_change_session(
     planning_state = _solution_planning_state(session)
     commit_count = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).count()
     requires_commit_provenance = _solution_change_session_requires_commit_provenance(session)
+    promote_eligibility = _solution_change_session_promote_eligibility(session=session, application=session.application)
     return {
         "id": str(session.id),
         "workspace_id": str(session.workspace_id),
@@ -32726,6 +33038,7 @@ def _serialize_solution_change_session(
         "metadata": session.metadata_json if isinstance(session.metadata_json, dict) else {},
         "repo_commit_count": int(commit_count),
         "requires_commit_provenance": bool(requires_commit_provenance),
+        "promote_eligibility": promote_eligibility,
         "planning": planning_state,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
@@ -33812,30 +34125,6 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             "source_build_job_id": "",
         }
 
-    def _artifact_preview_app_slug(artifact: Artifact) -> str:
-        slug = str(getattr(artifact, "slug", "") or "").strip()
-        if slug.startswith("app."):
-            return slug[4:]
-        metadata: Dict[str, Any] = {}
-        metadata_json = getattr(artifact, "metadata_json", None)
-        if isinstance(metadata_json, dict):
-            metadata.update(metadata_json)
-        scope_json = getattr(artifact, "scope_json", None)
-        if isinstance(scope_json, dict):
-            scope_metadata = scope_json.get("metadata")
-            if isinstance(scope_metadata, dict):
-                metadata.update(scope_metadata)
-        runtime = metadata.get("runtime_target") if isinstance(metadata.get("runtime_target"), dict) else {}
-        runtime_app_slug = str(
-            runtime.get("app_slug")
-            or metadata.get("app_slug")
-            or (scope_json.get("app_slug") if isinstance(scope_json, dict) else "")
-            or ""
-        ).strip()
-        if not runtime_app_slug and slug in {"core.workbench", "xyn-ui", "xyn-api"}:
-            return slug
-        return runtime_app_slug
-
     def _probe_runtime(base_url: str) -> Dict[str, Any]:
         probe_paths = ["/healthz", "/health", "/xyn/api/health"]
         last_error = ""
@@ -34004,7 +34293,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 }
             )
             continue
-        app_slug = _artifact_preview_app_slug(artifact)
+        app_slug = _artifact_runtime_app_slug(artifact)
         if not app_slug:
             all_bound = False
             artifact_rows.append(
@@ -37632,6 +37921,126 @@ def application_solution_change_session_detail(
 
 @csrf_exempt
 @login_required
+def application_solution_change_session_control(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    return _solution_change_session_control_envelope(
+        operation="inspect",
+        session=session,
+        application=application,
+        operation_status="ready",
+        operation_payload={"inspected": True},
+        http_status=200,
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_control_action(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    payload = _parse_json(request)
+    operation = str(payload.get("operation") or "").strip().lower()
+    supported_operations = [
+        "inspect",
+        "stage_apply",
+        "prepare_preview",
+        "inspect_preview",
+        "validate",
+        "commit",
+        "activate_in_root",
+        "promote",
+        "finalize",
+    ]
+    if operation not in set(supported_operations):
+        return JsonResponse(
+            {
+                "error": "unsupported operation",
+                "supported_operations": supported_operations,
+            },
+            status=400,
+        )
+    if operation == "inspect":
+        return _solution_change_session_control_envelope(
+            operation="inspect",
+            session=session,
+            application=application,
+            operation_status="ready",
+            operation_payload={"inspected": True},
+            http_status=200,
+        )
+    if operation == "inspect_preview":
+        preview = session.preview_json if isinstance(session.preview_json, dict) else {}
+        preview_status = str(preview.get("status") or "").strip().lower()
+        return _solution_change_session_control_envelope(
+            operation="inspect_preview",
+            session=session,
+            application=application,
+            operation_status="ready" if preview_status == "ready" else "blocked",
+            operation_payload={"preview_status": preview_status or "not_prepared"},
+            http_status=200,
+        )
+    operation_map = {
+        "stage_apply": application_solution_change_session_stage_apply,
+        "prepare_preview": application_solution_change_session_prepare_preview,
+        "validate": application_solution_change_session_validate,
+        "commit": application_solution_change_session_commit,
+        "activate_in_root": application_activate,
+        "promote": application_solution_change_session_promote,
+        "finalize": application_solution_change_session_finalize,
+    }
+    handler = operation_map.get(operation)
+    if handler is None:
+        return JsonResponse({"error": "unsupported operation"}, status=400)
+    if operation == "activate_in_root":
+        response = handler(request, str(application.id))
+    else:
+        response = handler(request, str(application.id), str(session.id))
+    try:
+        operation_payload = json.loads(response.content.decode("utf-8")) if response.content else {}
+    except Exception:
+        operation_payload = {}
+    session.refresh_from_db()
+    if response.status_code >= 400:
+        operation_status = "blocked" if response.status_code in {400, 401, 403, 404, 409} else "failed"
+        return _solution_change_session_control_envelope(
+            operation=operation,
+            session=session,
+            application=application,
+            operation_status=operation_status,
+            operation_payload=operation_payload if isinstance(operation_payload, dict) else {"raw": operation_payload},
+            http_status=response.status_code,
+        )
+    return _solution_change_session_control_envelope(
+        operation=operation,
+        session=session,
+        application=application,
+        operation_status="succeeded",
+        operation_payload=operation_payload if isinstance(operation_payload, dict) else {"raw": operation_payload},
+        http_status=200,
+    )
+
+
+@csrf_exempt
+@login_required
 def application_solution_change_session_reply(
     request: HttpRequest, application_id: str, session_id: str
 ) -> JsonResponse:
@@ -38140,22 +38549,19 @@ def application_solution_change_session_promote(
         return JsonResponse({"error": "forbidden"}, status=403)
     session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
     execution_status = str(session.execution_status or "").strip().lower()
-    if execution_status not in {"committed", "promoted"}:
+    promote_eligibility = _solution_change_session_promote_eligibility(session=session, application=application)
+    if not bool(promote_eligibility.get("can_promote")):
+        blocked_reason = str(promote_eligibility.get("blocked_reason") or "").strip().lower()
         return JsonResponse(
             {
-                "error": "change session can only be promoted after commit (execution_status=committed)",
+                "error": _solution_change_session_promote_blocked_error(promote_eligibility),
+                "blocked_reason": blocked_reason,
+                "promotion_eligibility": promote_eligibility,
+                "recommended_action": str(promote_eligibility.get("recommended_action") or ""),
+                "next_allowed_actions": promote_eligibility.get("next_allowed_actions") if isinstance(promote_eligibility.get("next_allowed_actions"), list) else [],
             },
             status=409,
         )
-    if _solution_change_session_requires_commit_provenance(session):
-        has_commit_provenance = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).exists()
-        if not has_commit_provenance:
-            return JsonResponse(
-                {
-                    "error": "code-changing sessions require at least one recorded repository commit before promote",
-                },
-                status=409,
-            )
 
     metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
     promotion = metadata.get("promotion") if isinstance(metadata.get("promotion"), dict) else {}
@@ -38173,6 +38579,7 @@ def application_solution_change_session_promote(
             {
                 "promoted": True,
                 "already_up_to_date": True,
+                "promotion_eligibility": promote_eligibility,
                 "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
             }
         )
@@ -38275,6 +38682,7 @@ def application_solution_change_session_promote(
         {
             "promoted": True,
             "already_up_to_date": provision_status == "reused",
+            "promotion_eligibility": _solution_change_session_promote_eligibility(session=session, application=application),
             "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
         }
     )

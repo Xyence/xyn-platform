@@ -48,6 +48,8 @@ from xyn_orchestrator.xyn_api import (
     application_artifact_membership_detail,
     application_artifact_memberships_collection,
     application_solution_change_session_detail,
+    application_solution_change_session_control,
+    application_solution_change_session_control_action,
     application_solution_change_session_reply,
     application_solution_change_session_continue,
     application_solution_change_session_regenerate_options,
@@ -5617,6 +5619,22 @@ class GoalPlanningTests(TestCase):
             artifact=ui_artifact,
             role="primary_ui",
         )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug=ui_artifact.slug[4:],
+            fqdn=f"{ui_artifact.slug[4:]}.local.test",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "primary",
+                    "runtime_base_url": "http://localhost",
+                    "public_app_url": "http://localhost",
+                    "compose_project": "xyn-local",
+                }
+            },
+        )
         session = SolutionChangeSession.objects.create(
             workspace=self.workspace,
             application=application,
@@ -5649,6 +5667,14 @@ class GoalPlanningTests(TestCase):
         payload = json.loads(promoted.content)
         self.assertTrue(payload.get("promoted"))
         self.assertFalse(payload.get("already_up_to_date"))
+        session_payload = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+        eligibility_payload = (
+            session_payload.get("promote_eligibility")
+            if isinstance(session_payload.get("promote_eligibility"), dict)
+            else {}
+        )
+        self.assertTrue(bool(eligibility_payload.get("can_promote")))
+        self.assertTrue(bool(eligibility_payload.get("root_target_present")))
         mocked_seed.assert_called_once()
         session.refresh_from_db()
         promotion_meta = (session.metadata_json or {}).get("promotion") if isinstance(session.metadata_json, dict) else {}
@@ -5683,6 +5709,22 @@ class GoalPlanningTests(TestCase):
             artifact=ui_artifact,
             role="primary_ui",
         )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug=ui_artifact.slug[4:],
+            fqdn=f"{ui_artifact.slug[4:]}.local.test",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "primary",
+                    "runtime_base_url": "http://localhost",
+                    "public_app_url": "http://localhost",
+                    "compose_project": "xyn-local",
+                }
+            },
+        )
         session = SolutionChangeSession.objects.create(
             workspace=self.workspace,
             application=application,
@@ -5713,6 +5755,285 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(payload.get("promoted"))
         self.assertTrue(payload.get("already_up_to_date"))
         mocked_seed.assert_not_called()
+
+    def test_solution_change_session_promote_blocks_when_root_target_missing(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Promote campaign UX update",
+            request_text="Promote validated campaign UX",
+            created_by=self.identity,
+            status="planned",
+            execution_status="committed",
+        )
+        promote_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/promote",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            with mock.patch("xyn_orchestrator.xyn_api._seed_api_request") as mocked_seed:
+                blocked = application_solution_change_session_promote(promote_request, str(application.id), str(session.id))
+        self.assertEqual(blocked.status_code, 409)
+        payload = json.loads(blocked.content)
+        self.assertEqual(str(payload.get("blocked_reason") or ""), "solution_not_installed_in_root")
+        eligibility = payload.get("promotion_eligibility") if isinstance(payload.get("promotion_eligibility"), dict) else {}
+        self.assertFalse(bool(eligibility.get("can_promote")))
+        self.assertFalse(bool(eligibility.get("root_target_present")))
+        self.assertIn("install_in_root", list(eligibility.get("next_allowed_actions") or []))
+        mocked_seed.assert_not_called()
+
+    def test_solution_change_session_control_inspect_returns_machine_envelope(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Inspect control",
+            request_text="Inspect status",
+            created_by=self.identity,
+            status="planned",
+            execution_status="committed",
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control",
+            method="get",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_session_control(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(str(payload.get("operation") or ""), "inspect")
+        self.assertEqual(str(payload.get("status") or ""), "ready")
+        control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        self.assertEqual(str(control.get("change_session_id") or ""), str(session.id))
+        self.assertIn("can_stage_apply", control)
+        self.assertIn("can_prepare_preview", control)
+        self.assertIn("can_activate", control)
+        self.assertIn("can_promote", control)
+        self.assertEqual(str(control.get("blocked_reason") or ""), "solution_not_installed_in_root")
+        self.assertIn("install_in_root", list(control.get("next_allowed_actions") or []))
+
+    def test_solution_change_session_control_action_promote_blocked_returns_envelope(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Promote control",
+            request_text="Promote",
+            created_by=self.identity,
+            status="planned",
+            execution_status="committed",
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control/actions",
+            method="post",
+            data=json.dumps({"operation": "promote"}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_session_control_action(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertEqual(str(payload.get("operation") or ""), "promote")
+        self.assertEqual(str(payload.get("status") or ""), "blocked")
+        control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        self.assertEqual(str(control.get("blocked_reason") or ""), "solution_not_installed_in_root")
+        operation_result = payload.get("operation_result") if isinstance(payload.get("operation_result"), dict) else {}
+        self.assertEqual(str(operation_result.get("blocked_reason") or ""), "solution_not_installed_in_root")
+
+    def test_solution_change_session_control_inspect_reports_stage_preview_progress(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Stage preview control",
+            request_text="Run stage and preview",
+            created_by=self.identity,
+            status="planned",
+            execution_status="staged",
+            plan_json={"per_artifact_work": []},
+            staged_changes_json={
+                "artifact_states": [{"artifact_id": str(ui_artifact.id), "state": "staged"}],
+                "per_repo_results": [{"repo_slug": "xyn-platform", "status": "ready"}],
+            },
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control",
+            method="get",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_session_control(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        self.assertTrue(bool(control.get("can_prepare_preview")))
+        self.assertIn("prepare_preview", list(control.get("next_allowed_actions") or []))
+        self.assertEqual(len(list(control.get("per_repo_results") or [])), 1)
+
+    def test_solution_change_session_control_inspect_promotable_when_root_target_present(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Deal Finder UI",
+            slug=f"app.deal-finder-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="Deal finder app",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Build an AI real estate deal finder",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug=ui_artifact.slug[4:],
+            fqdn=f"{ui_artifact.slug[4:]}.local.test",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "primary",
+                    "runtime_base_url": "http://localhost",
+                    "public_app_url": "http://localhost",
+                    "compose_project": "xyn-local",
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Promotable control",
+            request_text="Promote validated change",
+            created_by=self.identity,
+            status="planned",
+            execution_status="committed",
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control",
+            method="get",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_session_control(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        self.assertTrue(bool(control.get("root_target_present")))
+        self.assertTrue(bool(control.get("can_promote")))
+        self.assertIn("promote", list(control.get("next_allowed_actions") or []))
 
     def test_workspace_linked_change_session_returns_active_matching_session(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")

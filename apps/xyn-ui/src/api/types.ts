@@ -2927,9 +2927,47 @@ export type SolutionChangeSession = {
   metadata?: Record<string, unknown>;
   repo_commit_count?: number;
   requires_commit_provenance?: boolean;
+  promote_eligibility?: {
+    can_promote?: boolean;
+    blocked_reason?: string;
+    root_target_present?: boolean;
+    root_target_identity?: Record<string, unknown>;
+    recommended_action?: string;
+    next_allowed_actions?: string[];
+  };
   planning?: SolutionPlanningState;
   created_at: string;
   updated_at: string;
+};
+
+export type SolutionChangeSessionControlStatus = {
+  change_session_id: string;
+  application_id: string;
+  execution_status?: string;
+  targeted_artifacts?: Array<Record<string, unknown>>;
+  per_repo_results?: Array<Record<string, unknown>>;
+  preview_target?: Record<string, unknown>;
+  root_target_present?: boolean;
+  root_target_identity?: Record<string, unknown>;
+  can_stage_apply?: boolean;
+  can_prepare_preview?: boolean;
+  can_activate?: boolean;
+  can_promote?: boolean;
+  blocked_reason?: string;
+  recommended_action?: string;
+  next_allowed_actions?: string[];
+  evidence_ref?: Record<string, unknown>;
+  warnings?: string[];
+  session?: SolutionChangeSession;
+};
+
+export type SolutionChangeSessionControlEnvelope = {
+  operation: string;
+  status: string;
+  change_session_id: string;
+  application_id: string;
+  control: SolutionChangeSessionControlStatus;
+  operation_result?: Record<string, unknown>;
 };
 
 export type WorkspaceLinkedChangeSession = {

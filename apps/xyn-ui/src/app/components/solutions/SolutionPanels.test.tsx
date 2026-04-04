@@ -442,6 +442,23 @@ describe("Solution panels", () => {
     await waitFor(() => expect(apiMocks.listArtifacts).toHaveBeenLastCalledWith({ limit: 200 }));
   });
 
+  it("renders requested change input full width in new change session form", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    expect(screen.getByRole("textbox", { name: "Requested change" })).toHaveClass("solution-requested-change-input");
+  });
+
   it("shows guided next-step callout when impacted artifact analysis is missing", async () => {
     apiMocks.getApplication.mockResolvedValue({
       id: "app-1",

@@ -33,11 +33,8 @@ import {
   listRuntimeRunsCanvasApi,
   listWorkspacesCanvasApi,
   decideSolutionPlanningCheckpoint,
-  commitSolutionChangeSession,
-  finalizeSolutionChangeSession,
   generateSolutionChangePlan,
-  prepareSolutionChangePreview,
-  promoteSolutionChangeSession,
+  getSolutionChangeSessionControl,
   publishDevTask,
   queryArtifactCanvasTable,
   queryEmsDevicesCanvasTable,
@@ -48,12 +45,11 @@ import {
   reviewCoordinationThread,
   reviewGoal,
   retryDevTask,
+  runSolutionChangeSessionControlAction,
   selectSolutionPlanningOption,
-  stageSolutionChangeApply,
   updateApplication,
   updateApplicationPlan,
   updateCampaign,
-  validateSolutionChangeSession,
   updateWorkItem,
 } from "../../../api/xyn";
 import type {
@@ -87,6 +83,7 @@ import type {
   WorkItemDetail,
   WorkItemSummary,
   WorkspaceSummary,
+  SolutionChangeSessionControlEnvelope,
 } from "../../../api/types";
 import CanvasRenderer from "../../../components/canvas/CanvasRenderer";
 import InlineMessage from "../../../components/InlineMessage";
@@ -261,6 +258,47 @@ function defaultPrimaryActionForPhase(phase: ComposerExecutionPhase): ComposerEx
   if (phase === "committed") return "promote";
   if (phase === "promoted") return "finalize";
   return "stage-apply";
+}
+
+function promoteBlockedMessage(blockedReason: string, recommendedAction: string): string {
+  const reason = String(blockedReason || "").trim().toLowerCase();
+  if (reason === "solution_not_installed_in_root") {
+    return "Blocked: this solution is not installed in the root environment. Install and activate it in root before promoting.";
+  }
+  if (reason === "root_target_missing") {
+    return "Blocked: root runtime target is missing for this solution. Activate it in root before promoting.";
+  }
+  if (reason === "primary_artifact_missing") {
+    return "Blocked: this solution has no primary application artifact configured for promotion.";
+  }
+  if (reason === "root_target_unresolved") {
+    return "Blocked: unable to resolve a root runtime target for this solution.";
+  }
+  if (reason === "execution_not_committed") {
+    return "Blocked: commit repository changes before promoting.";
+  }
+  if (reason === "commit_provenance_missing") {
+    return "Blocked: at least one repository commit is required before promoting.";
+  }
+  const action = String(recommendedAction || "").trim();
+  if (action) return `Blocked: ${action.replace(/_/g, " ")} is required before promoting.`;
+  return "Blocked: promotion is not currently eligible for this session.";
+}
+
+function controlActionLabel(action: string): string {
+  const token = String(action || "").trim().toLowerCase();
+  if (token === "respond_to_planner_prompt") return "Respond to planner prompt";
+  if (token === "generate_plan") return "Generate draft plan";
+  if (token === "decide_checkpoint") return "Approve planning checkpoint";
+  if (token === "stage_apply") return "Apply planned changes";
+  if (token === "prepare_preview") return "Prepare preview environment";
+  if (token === "validate") return "Validate staged changes";
+  if (token === "commit") return "Commit repository changes";
+  if (token === "activate_in_root") return "Activate solution in root";
+  if (token === "promote") return "Promote committed changes";
+  if (token === "finalize") return "Finalize session";
+  if (!token) return "";
+  return token.replace(/_/g, " ");
 }
 
 function briefReviewLabel(item: Pick<WorkItemSummary, "execution_brief_review" | "execution_queue">): string {
@@ -4396,6 +4434,7 @@ function ComposerDetailPanel({
   const [showApprovalNoteByCheckpoint, setShowApprovalNoteByCheckpoint] = useState<Record<string, boolean>>({});
   const [selectedOptionByTurn, setSelectedOptionByTurn] = useState<Record<string, string>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [sessionControlEnvelope, setSessionControlEnvelope] = useState<SolutionChangeSessionControlEnvelope | null>(null);
   const [planningRoutingStatus, setPlanningRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
   const [availableAgents, setAvailableAgents] = useState<AiAgent[]>([]);
   const latestTurnRef = useRef<HTMLLIElement | null>(null);
@@ -4507,10 +4546,49 @@ function ComposerDetailPanel({
     });
   };
 
+  const applyControlEnvelope = (
+    envelope: SolutionChangeSessionControlEnvelope | null,
+    options?: { mergeSession?: boolean }
+  ) => {
+    setSessionControlEnvelope(envelope);
+    const shouldMergeSession = Boolean(options?.mergeSession);
+    const controlSession = shouldMergeSession ? envelope?.control?.session : null;
+    if (controlSession && typeof controlSession === "object") {
+      mergeUpdatedSession(controlSession);
+    }
+  };
+
   const selectedSession = payload?.solution_change_session
     || payload?.solution_change_sessions?.find((session) => String(session.id) === String(solutionChangeSessionId || ""))
     || null;
   const selectedSessionId = selectedSession ? String(selectedSession.id) : "";
+  const selectedApplicationId = selectedSession ? String(selectedSession.application_id || "") : "";
+  const controlStatus = (
+    sessionControlEnvelope?.control
+    && String(sessionControlEnvelope.control.change_session_id || "") === selectedSessionId
+  ) ? sessionControlEnvelope.control : null;
+  useEffect(() => {
+    let active = true;
+    if (!selectedApplicationId || !selectedSessionId) {
+      setSessionControlEnvelope(null);
+      return () => {
+        active = false;
+      };
+    }
+    (async () => {
+      try {
+        const envelope = await getSolutionChangeSessionControl(selectedApplicationId, selectedSessionId);
+        if (!active) return;
+        applyControlEnvelope(envelope, { mergeSession: false });
+      } catch {
+        if (!active) return;
+        setSessionControlEnvelope(null);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [selectedApplicationId, selectedSessionId]);
   const planning = selectedSession?.planning || null;
   const planningTurns = Array.isArray(planning?.turns) ? planning.turns : [];
   const pendingQuestion = planning?.pending_question || null;
@@ -4554,16 +4632,38 @@ function ComposerDetailPanel({
   const promotionSucceeded = promotionResult === "success";
   const promotionTarget = String(promotionState?.target_runtime || "").trim() || "xyn-local";
   const promotionUrl = String(promotionState?.ui_url || "").trim();
+  const controlBlockedReason = String(controlStatus?.blocked_reason || "").trim();
+  const controlRecommendedAction = String(controlStatus?.recommended_action || "").trim();
+  const controlNextActions = Array.isArray(controlStatus?.next_allowed_actions)
+    ? controlStatus?.next_allowed_actions?.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const promoteEligibility = selectedSession?.promote_eligibility
+    && typeof selectedSession.promote_eligibility === "object"
+    ? selectedSession.promote_eligibility as Record<string, unknown>
+    : null;
+  const promoteEligibilityAllows =
+    promoteEligibility && typeof promoteEligibility.can_promote === "boolean"
+      ? Boolean(promoteEligibility.can_promote)
+      : true;
+  const promoteBlockedReason = String(promoteEligibility?.blocked_reason || "").trim();
+  const promoteRecommendedAction = String(promoteEligibility?.recommended_action || "").trim();
   const repoCommitCount = Number(selectedSession?.repo_commit_count || 0);
   const requiresCommitProvenance = Boolean(selectedSession?.requires_commit_provenance);
   const commitRequiredAndMissing = requiresCommitProvenance && repoCommitCount < 1;
-  const derivedExecutionNextAction = executionPhase === "ready_for_promotion"
-    ? "Commit repository changes for this validated session."
-    : executionPhase === "committed"
-      ? "Promote committed changes to the primary runtime."
-      : executionPhase === "promoted"
-        ? "Finalize the promoted session."
-        : baseExecutionNextAction;
+  // Self-development execution should be contract-driven: when control state is
+  // available, use its normalized next-action contract over local heuristics.
+  const hasControlExecutionContract = Boolean(controlStatus);
+  const controlAllowsAction = (action: string): boolean => controlNextActions.includes(action);
+  const normalizedNextAction = controlActionLabel(controlNextActions[0] || "");
+  const derivedExecutionNextAction = hasControlExecutionContract && normalizedNextAction
+    ? normalizedNextAction
+    : executionPhase === "ready_for_promotion"
+      ? "Commit repository changes for this validated session."
+      : executionPhase === "committed"
+        ? "Promote committed changes to the primary runtime."
+        : executionPhase === "promoted"
+          ? "Finalize the promoted session."
+          : normalizedNextAction || baseExecutionNextAction;
   const latestExecutionResult = (() => {
     if (executionPhase === "promoted") {
       if (promotionSucceeded) return "Changes promoted to the primary local runtime — ready to finalize.";
@@ -4601,16 +4701,35 @@ function ComposerDetailPanel({
   const canPreparePreview = canRunExecution && (executionPhase === "staged" || executionPhase === "failed");
   const canValidate = canRunExecution && (executionPhase === "preview_ready" || executionPhase === "failed");
   const canCommit = canRunExecution && !isSessionFinalized && executionPhase === "ready_for_promotion";
-  const canPromote =
+  const canPromoteByPhase =
     canRunExecution
     && !isSessionFinalized
     && executionPhase === "committed"
     && (!requiresCommitProvenance || repoCommitCount > 0);
-  const canFinalize =
+  const canStageApplyNormalized = hasControlExecutionContract
+    ? Boolean(controlStatus?.can_stage_apply) && controlAllowsAction("stage_apply")
+    : canStageApply;
+  const canPreparePreviewNormalized = hasControlExecutionContract
+    ? Boolean(controlStatus?.can_prepare_preview) && controlAllowsAction("prepare_preview")
+    : canPreparePreview;
+  const canValidateNormalized = hasControlExecutionContract
+    ? controlAllowsAction("validate")
+    : canValidate;
+  const canCommitNormalized = hasControlExecutionContract
+    ? controlAllowsAction("commit")
+    : canCommit;
+  const canPromote = hasControlExecutionContract
+    ? controlAllowsAction("promote")
+      && (typeof controlStatus?.can_promote === "boolean" ? Boolean(controlStatus?.can_promote) : true)
+    : canPromoteByPhase && promoteEligibilityAllows;
+  const canFinalizeByPhase =
     canRunExecution
     && !isSessionFinalized
     && executionPhase === "promoted"
     && (!requiresCommitProvenance || repoCommitCount > 0);
+  const canFinalize = hasControlExecutionContract
+    ? controlAllowsAction("finalize")
+    : canFinalizeByPhase;
   const hasExecutionProgress = ["staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion", "committed", "promoted", "completed", "applied"].includes(
     String(selectedSession?.execution_status || "").toLowerCase()
   );
@@ -4682,11 +4801,35 @@ function ComposerDetailPanel({
     try {
       await action();
       await reloadComposerState();
+      if (selectedSession && selectedSessionId) {
+        try {
+          const refreshed = await getSolutionChangeSessionControl(
+            String(selectedSession.application_id),
+            String(selectedSession.id)
+          );
+          applyControlEnvelope(refreshed, { mergeSession: false });
+        } catch {
+          setSessionControlEnvelope(null);
+        }
+      }
     } catch (err) {
       setMessage(err instanceof Error ? err.message : "Composer action failed");
     } finally {
       setBusyAction(null);
     }
+  };
+
+  const runControlOperation = async (operation: string): Promise<SolutionChangeSessionControlEnvelope> => {
+    if (!selectedSession || !selectedSessionId) {
+      throw new Error("Open a solution change session to continue planning.");
+    }
+    const envelope = await runSolutionChangeSessionControlAction(
+      String(selectedSession.application_id),
+      String(selectedSession.id),
+      { operation }
+    );
+    applyControlEnvelope(envelope, { mergeSession: true });
+    return envelope;
   };
 
   const selectedOptionTurnPayload = (turn: any) =>
@@ -5499,18 +5642,15 @@ function ComposerDetailPanel({
                     <button
                       type="button"
                       className={`${primaryExecutionAction === "stage-apply" ? "primary" : "ghost"} sm`}
-                      disabled={!canStageApply || busyAction === "stage-apply"}
+                      disabled={!canStageApplyNormalized || busyAction === "stage-apply"}
                       onClick={() => {
                         setBusyAction("stage-apply");
                         void withSessionGuard(async () => {
-                          const response = await stageSolutionChangeApply(
-                            String(selectedSession.application_id),
-                            String(selectedSession.id)
-                          );
-                          mergeUpdatedSession(response.session);
-                          const summary = response.session?.staged_changes?.execution_summary
-                            && typeof response.session.staged_changes.execution_summary === "object"
-                            ? response.session.staged_changes.execution_summary as Record<string, unknown>
+                          const envelope = await runControlOperation("stage_apply");
+                          const controlSession = envelope.control?.session;
+                          const summary = controlSession?.staged_changes?.execution_summary
+                            && typeof controlSession.staged_changes.execution_summary === "object"
+                            ? controlSession.staged_changes.execution_summary as Record<string, unknown>
                             : null;
                           const queuedCount = Number(summary?.queued_artifacts ?? summary?.queued ?? 0);
                           const failedCount = Number(summary?.failed_artifacts ?? summary?.failed ?? 0);
@@ -5531,16 +5671,12 @@ function ComposerDetailPanel({
                     <button
                       type="button"
                       className={`${primaryExecutionAction === "prepare-preview" ? "primary" : "ghost"} sm`}
-                      disabled={!canPreparePreview || busyAction === "prepare-preview"}
+                      disabled={!canPreparePreviewNormalized || busyAction === "prepare-preview"}
                       onClick={() => {
                         setBusyAction("prepare-preview");
                         void withSessionGuard(async () => {
-                          const response = await prepareSolutionChangePreview(
-                            String(selectedSession.application_id),
-                            String(selectedSession.id)
-                          );
-                          mergeUpdatedSession(response.session);
-                          const preview = response.session?.preview;
+                          const envelope = await runControlOperation("prepare_preview");
+                          const preview = envelope.control?.session?.preview;
                           const previewUrl = String(preview?.primary_url || "").trim();
                           const previewSource = String(preview?.source || preview?.mode || "").trim().toLowerCase();
                           if (previewSource.includes("reused")) {
@@ -5568,16 +5704,13 @@ function ComposerDetailPanel({
                     <button
                       type="button"
                       className={`${primaryExecutionAction === "validate" ? "primary" : "ghost"} sm`}
-                      disabled={!canValidate || busyAction === "validate"}
+                      disabled={!canValidateNormalized || busyAction === "validate"}
                       onClick={() => {
                         setBusyAction("validate");
                         void withSessionGuard(async () => {
-                          const response = await validateSolutionChangeSession(
-                            String(selectedSession.application_id),
-                            String(selectedSession.id)
-                          );
-                          mergeUpdatedSession(response.session);
-                          if (String(response.session?.execution_status || "").toLowerCase() === "ready_for_promotion") {
+                          const envelope = await runControlOperation("validate");
+                          const executionStatus = String(envelope.control?.session?.execution_status || "").toLowerCase();
+                          if (executionStatus === "ready_for_promotion") {
                             setMessage("Validation complete — commit repository changes before promotion.");
                             return;
                           }
@@ -5595,16 +5728,15 @@ function ComposerDetailPanel({
                         onClick={() => {
                           setBusyAction("promote");
                           void withSessionGuard(async () => {
-                            const response = await promoteSolutionChangeSession(
-                              String(selectedSession.application_id),
-                              String(selectedSession.id)
-                            );
-                            mergeUpdatedSession(response.session);
-                            const promotedState = response.session?.metadata?.promotion;
+                            const envelope = await runControlOperation("promote");
+                            const operationResult = envelope.operation_result && typeof envelope.operation_result === "object"
+                              ? envelope.operation_result as Record<string, unknown>
+                              : {};
+                            const promotedState = envelope.control?.session?.metadata?.promotion;
                             const promotedUiUrl = String(
                               promotedState && typeof promotedState === "object" ? (promotedState as Record<string, unknown>).ui_url || "" : ""
                             ).trim();
-                            if (response.already_up_to_date) {
+                            if (Boolean(operationResult.already_up_to_date)) {
                               setMessage("Primary local runtime is already up to date.");
                               return;
                             }
@@ -5631,25 +5763,24 @@ function ComposerDetailPanel({
                       <button
                         type="button"
                         className={`${primaryExecutionAction === "commit" ? "primary" : "ghost"} sm`}
-                        disabled={!canCommit || busyAction === "commit"}
+                        disabled={!canCommitNormalized || busyAction === "commit"}
                         onClick={() => {
                           setBusyAction("commit");
                           void withSessionGuard(async () => {
-                            const response = await commitSolutionChangeSession(
-                              String(selectedSession.application_id),
-                              String(selectedSession.id)
-                            );
-                            mergeUpdatedSession(response.session);
-                            const commits = Array.isArray(response.commits) ? response.commits : [];
+                            const envelope = await runControlOperation("commit");
+                            const operationResult = envelope.operation_result && typeof envelope.operation_result === "object"
+                              ? envelope.operation_result as Record<string, unknown>
+                              : {};
+                            const commits = Array.isArray(operationResult.commits) ? operationResult.commits : [];
                             const latestCommit = commits.length > 0 && commits[0] && typeof commits[0] === "object"
                               ? commits[0] as Record<string, unknown>
                               : null;
                             const latestSha = String(latestCommit?.commit_sha || "").trim();
-                            if (response.already_committed) {
+                            if (Boolean(operationResult.already_committed)) {
                               setMessage(latestSha ? `Repository changes already committed (${latestSha.slice(0, 12)}).` : "Repository changes already committed.");
                               return;
                             }
-                            if (response.no_changes) {
+                            if (Boolean(operationResult.no_changes)) {
                               setMessage("No changes to commit.");
                               return;
                             }
@@ -5672,11 +5803,7 @@ function ComposerDetailPanel({
                         onClick={() => {
                           setBusyAction("finalize");
                           void withSessionGuard(async () => {
-                            const response = await finalizeSolutionChangeSession(
-                              String(selectedSession.application_id),
-                              String(selectedSession.id)
-                            );
-                            mergeUpdatedSession(response.session);
+                            await runControlOperation("finalize");
                             window.dispatchEvent(new Event(LINKED_SESSION_UPDATED_EVENT));
                             setMessage("Session finalized.");
                           });
@@ -5696,8 +5823,15 @@ function ComposerDetailPanel({
                         ? "Blocked: checkpoint approval pending."
                         : !hasApprovedStageCheckpoint
                           ? "Blocked: required checkpoint is not approved."
-                          : executionPhase === "ready_for_promotion"
-                            ? "Blocked: commit repository changes before promoting."
+                        : executionPhase === "ready_for_promotion"
+                            ? (controlBlockedReason
+                              ? promoteBlockedMessage(controlBlockedReason, controlRecommendedAction)
+                              : "Blocked: commit repository changes before promoting.")
+                            : executionPhase === "committed" && !canPromote
+                              ? promoteBlockedMessage(
+                                controlBlockedReason || promoteBlockedReason,
+                                controlRecommendedAction || promoteRecommendedAction
+                              )
                             : executionPhase === "committed"
                               ? "Blocked: promote committed changes before finalizing."
                               : executionPhase === "promoted" && commitRequiredAndMissing

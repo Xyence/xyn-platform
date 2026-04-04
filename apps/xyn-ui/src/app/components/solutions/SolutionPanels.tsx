@@ -882,6 +882,7 @@ export function SolutionDetailPanel({
               <label className="field">
                 <span className="field-label">Requested change</span>
                 <textarea
+                  className="solution-requested-change-input"
                   aria-label="Requested change"
                   rows={3}
                   value={changeRequest}

@@ -43,6 +43,8 @@ const apiMocks = vi.hoisted(() => ({
   getAiRoutingStatus: vi.fn(),
   listAiAgents: vi.fn(),
   getExecutionPlan: vi.fn(),
+  getSolutionChangeSessionControl: vi.fn(),
+  runSolutionChangeSessionControlAction: vi.fn(),
   generateSolutionChangePlan: vi.fn(),
   stageSolutionChangeApply: vi.fn(),
   prepareSolutionChangePreview: vi.fn(),
@@ -115,6 +117,8 @@ vi.mock("../../../api/xyn", async () => {
     getAiRoutingStatus: apiMocks.getAiRoutingStatus,
     listAiAgents: apiMocks.listAiAgents,
     getExecutionPlan: apiMocks.getExecutionPlan,
+    getSolutionChangeSessionControl: apiMocks.getSolutionChangeSessionControl,
+    runSolutionChangeSessionControlAction: apiMocks.runSolutionChangeSessionControlAction,
     generateSolutionChangePlan: apiMocks.generateSolutionChangePlan,
     stageSolutionChangeApply: apiMocks.stageSolutionChangeApply,
     prepareSolutionChangePreview: apiMocks.prepareSolutionChangePreview,
@@ -245,6 +249,47 @@ function createComposerState(session: Record<string, any>) {
   };
 }
 
+function createControlEnvelope(
+  session: Record<string, any>,
+  overrides: Record<string, any> = {}
+) {
+  const executionStatus = String(session.execution_status || "not_started");
+  const normalizedExecutionStatus = executionStatus.trim().toLowerCase();
+  const defaultNextActions =
+    normalizedExecutionStatus === "not_started" ? ["stage_apply"]
+    : normalizedExecutionStatus === "staged" ? ["prepare_preview"]
+    : normalizedExecutionStatus === "preview_ready" ? ["validate"]
+    : normalizedExecutionStatus === "ready_for_promotion" ? ["commit"]
+    : normalizedExecutionStatus === "committed" ? ["promote"]
+    : normalizedExecutionStatus === "promoted" ? ["finalize"]
+    : [];
+  const defaultControl = {
+    change_session_id: String(session.id || "session-1"),
+    application_id: String(session.application_id || "app-1"),
+    execution_status: executionStatus,
+    can_stage_apply: defaultNextActions.includes("stage_apply"),
+    can_prepare_preview: defaultNextActions.includes("prepare_preview"),
+    can_activate: true,
+    can_promote: defaultNextActions.includes("promote"),
+    blocked_reason: "",
+    recommended_action: "",
+    next_allowed_actions: defaultNextActions,
+    session,
+  };
+  return {
+    operation: "inspect",
+    status: "ready",
+    change_session_id: String(session.id || "session-1"),
+    application_id: String(session.application_id || "app-1"),
+    control: {
+      ...defaultControl,
+      ...(overrides.control || {}),
+    },
+    operation_result: {},
+    ...overrides,
+  };
+}
+
 describe("WorkbenchPanelHost entity refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -353,6 +398,10 @@ describe("WorkbenchPanelHost entity refresh", () => {
         },
       ],
     });
+    apiMocks.getSolutionChangeSessionControl.mockRejectedValue(new Error("control endpoint not mocked for this test"));
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(createComposerSession(), { operation: "inspect", status: "ready" })
+    );
   });
 
   it("does not append global ai routing/readiness cards inside panel content", async () => {
@@ -5415,7 +5464,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
     apiMocks.getComposerState
       .mockResolvedValueOnce(createComposerState(stagedSession))
       .mockResolvedValueOnce(createComposerState(previewReadySession));
-    apiMocks.prepareSolutionChangePreview.mockResolvedValue({ session: previewReadySession });
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(previewReadySession, {
+        operation: "prepare_preview",
+        status: "succeeded",
+        operation_result: { prepared: true, session: previewReadySession },
+      })
+    );
 
     render(
       <MemoryRouter>
@@ -5438,7 +5493,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
       screen.getByRole("button", { name: "Prepare Preview" }).click();
     });
 
-    await waitFor(() => expect(apiMocks.prepareSolutionChangePreview).toHaveBeenCalledWith("app-1", "session-1"));
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "prepare_preview",
+      })
+    );
     await waitFor(() => expect(screen.getAllByText("Preview ready (reused runtime).").length).toBeGreaterThan(0));
     expect(screen.getByText("Preview URL")).toBeInTheDocument();
     expect(screen.getByText("http://localhost:32932/app/")).toBeInTheDocument();
@@ -5449,6 +5508,62 @@ describe("WorkbenchPanelHost entity refresh", () => {
     expect(screen.getAllByText("Preview Ready").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Validate changes").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Validate" })).toHaveClass("primary");
+  });
+
+  it("routes stage apply through the control contract and does not call legacy stage endpoint", async () => {
+    const onOpenPanel = vi.fn();
+    const initialSession = createComposerSession({
+      execution_status: "not_started",
+    });
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+          skipped_artifacts: 0,
+          total_artifacts: 1,
+        },
+      },
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(initialSession))
+      .mockResolvedValueOnce(createComposerState(stagedSession));
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(stagedSession, {
+        operation: "stage_apply",
+        status: "succeeded",
+        operation_result: { staged: true, session: stagedSession },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stage Apply" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Stage Apply" }).click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "stage_apply",
+      })
+    );
+    expect(apiMocks.stageSolutionChangeApply).not.toHaveBeenCalled();
   });
 
   it("renders preview-ready message with clickable URL when preview is newly prepared", async () => {
@@ -5476,7 +5591,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
     apiMocks.getComposerState
       .mockResolvedValueOnce(createComposerState(stagedSession))
       .mockResolvedValueOnce(createComposerState(previewReadySession));
-    apiMocks.prepareSolutionChangePreview.mockResolvedValue({ session: previewReadySession });
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(previewReadySession, {
+        operation: "prepare_preview",
+        status: "succeeded",
+        operation_result: { prepared: true, session: previewReadySession },
+      })
+    );
 
     render(
       <MemoryRouter>
@@ -5567,7 +5688,13 @@ describe("WorkbenchPanelHost entity refresh", () => {
     apiMocks.getComposerState
       .mockResolvedValueOnce(createComposerState(promotedSession))
       .mockResolvedValueOnce(createComposerState(finalizedSession));
-    apiMocks.finalizeSolutionChangeSession.mockResolvedValue({ finalized: true, session: finalizedSession });
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(finalizedSession, {
+        operation: "finalize",
+        status: "succeeded",
+        operation_result: { finalized: true, session: finalizedSession },
+      })
+    );
     const linkedSessionUpdatedSpy = vi.spyOn(window, "dispatchEvent");
 
     render(
@@ -5591,7 +5718,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
       screen.getByRole("button", { name: "Finalize Session" }).click();
     });
 
-    await waitFor(() => expect(apiMocks.finalizeSolutionChangeSession).toHaveBeenCalledWith("app-1", "session-1"));
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "finalize",
+      })
+    );
     await waitFor(() => expect(screen.getAllByText("Session finalized.").length).toBeGreaterThan(0));
     expect(screen.getByText("Session finalized. Execution controls are hidden.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
@@ -5631,11 +5762,17 @@ describe("WorkbenchPanelHost entity refresh", () => {
     apiMocks.getComposerState
       .mockResolvedValueOnce(createComposerState(committedSession))
       .mockResolvedValueOnce(createComposerState(promotedSession));
-    apiMocks.promoteSolutionChangeSession.mockResolvedValue({
-      promoted: true,
-      already_up_to_date: false,
-      session: promotedSession,
-    });
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(promotedSession, {
+        operation: "promote",
+        status: "succeeded",
+        operation_result: {
+          promoted: true,
+          already_up_to_date: false,
+          session: promotedSession,
+        },
+      })
+    );
 
     render(
       <MemoryRouter>
@@ -5658,11 +5795,68 @@ describe("WorkbenchPanelHost entity refresh", () => {
       screen.getByRole("button", { name: "Promote" }).click();
     });
 
-    await waitFor(() => expect(apiMocks.promoteSolutionChangeSession).toHaveBeenCalledWith("app-1", "session-1"));
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "promote",
+      })
+    );
     await waitFor(() =>
       expect(screen.getByRole("link", { name: "http://localhost" })).toHaveAttribute("href", "http://localhost")
     );
     expect(screen.getByRole("button", { name: "Finalize Session" })).toBeEnabled();
+  });
+
+  it("disables promote when root target is missing and shows explicit reason", async () => {
+    const onOpenPanel = vi.fn();
+    const committedSession = createComposerSession({
+      execution_status: "committed",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      promote_eligibility: {
+        can_promote: false,
+        blocked_reason: "solution_not_installed_in_root",
+        recommended_action: "install_in_root",
+      },
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-123.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(committedSession));
+    apiMocks.getSolutionChangeSessionControl.mockResolvedValue(
+      createControlEnvelope(committedSession, {
+        control: {
+          can_promote: false,
+          blocked_reason: "solution_not_installed_in_root",
+          recommended_action: "install_in_root",
+          next_allowed_actions: ["install_in_root", "activate_in_root"],
+        },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Promote" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Promote" })).toBeDisabled();
+    expect(screen.getByText(/not installed in the root environment/i)).toBeInTheDocument();
   });
 
   it("requires commit before promote when commit provenance is required", async () => {
@@ -5691,13 +5885,19 @@ describe("WorkbenchPanelHost entity refresh", () => {
     apiMocks.getComposerState
       .mockResolvedValueOnce(createComposerState(readyForCommitSession))
       .mockResolvedValueOnce(createComposerState(committedSession));
-    apiMocks.commitSolutionChangeSession.mockResolvedValue({
-      committed: true,
-      already_committed: false,
-      no_changes: false,
-      commits: [{ commit_sha: "abc123def4567890", repository_slug: "xyn-platform", branch: "main", changed_files: ["apps/xyn-ui/src/a.tsx"] }],
-      session: committedSession,
-    });
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(committedSession, {
+        operation: "commit",
+        status: "succeeded",
+        operation_result: {
+          committed: true,
+          already_committed: false,
+          no_changes: false,
+          commits: [{ commit_sha: "abc123def4567890", repository_slug: "xyn-platform", branch: "main", changed_files: ["apps/xyn-ui/src/a.tsx"] }],
+          session: committedSession,
+        },
+      })
+    );
 
     render(
       <MemoryRouter>
@@ -5722,7 +5922,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
       screen.getByRole("button", { name: "Commit Changes" }).click();
     });
 
-    await waitFor(() => expect(apiMocks.commitSolutionChangeSession).toHaveBeenCalledWith("app-1", "session-1"));
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "commit",
+      })
+    );
     await waitFor(() => expect(screen.getAllByText(/Committed repository changes/i).length).toBeGreaterThan(0));
     expect(screen.getByRole("button", { name: "Promote" })).toBeEnabled();
   });

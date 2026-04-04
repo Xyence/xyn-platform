@@ -52,6 +52,7 @@ import type {
   ApplicationDetail,
   ApplicationArtifactMembership,
   SolutionChangeSession,
+  SolutionChangeSessionControlEnvelope,
   WorkspaceLinkedChangeSession,
   CampaignTypeDefinition,
   CampaignListResponse,
@@ -4738,6 +4739,34 @@ export async function prepareSolutionChangePreview(
   return handle<{ prepared: boolean; session: SolutionChangeSession }>(response);
 }
 
+export async function getSolutionChangeSessionControl(
+  applicationId: string,
+  sessionId: string
+): Promise<SolutionChangeSessionControlEnvelope> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/control`, {
+    method: "GET",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<SolutionChangeSessionControlEnvelope>(response);
+}
+
+export async function runSolutionChangeSessionControlAction(
+  applicationId: string,
+  sessionId: string,
+  payload: { operation: string }
+): Promise<SolutionChangeSessionControlEnvelope> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/control/actions`, {
+    method: "POST",
+    headers: buildHeaders(),
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  return handle<SolutionChangeSessionControlEnvelope>(response);
+}
+
 export async function validateSolutionChangeSession(
   applicationId: string,
   sessionId: string
@@ -4754,14 +4783,24 @@ export async function validateSolutionChangeSession(
 export async function promoteSolutionChangeSession(
   applicationId: string,
   sessionId: string
-): Promise<{ promoted: boolean; already_up_to_date?: boolean; session: SolutionChangeSession }> {
+): Promise<{
+  promoted: boolean;
+  already_up_to_date?: boolean;
+  promotion_eligibility?: Record<string, unknown>;
+  session: SolutionChangeSession;
+}> {
   const apiBaseUrl = resolveApiBaseUrl();
   const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/promote`, {
     method: "POST",
     headers: buildHeaders(),
     credentials: "include",
   });
-  return handle<{ promoted: boolean; already_up_to_date?: boolean; session: SolutionChangeSession }>(response);
+  return handle<{
+    promoted: boolean;
+    already_up_to_date?: boolean;
+    promotion_eligibility?: Record<string, unknown>;
+    session: SolutionChangeSession;
+  }>(response);
 }
 
 export async function commitSolutionChangeSession(
