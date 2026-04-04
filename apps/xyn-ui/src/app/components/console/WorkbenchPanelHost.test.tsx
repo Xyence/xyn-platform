@@ -44,6 +44,7 @@ const apiMocks = vi.hoisted(() => ({
   listAiAgents: vi.fn(),
   getExecutionPlan: vi.fn(),
   getSolutionChangeSessionControl: vi.fn(),
+  getSolutionChangeSessionPromotionEvidence: vi.fn(),
   runSolutionChangeSessionControlAction: vi.fn(),
   generateSolutionChangePlan: vi.fn(),
   stageSolutionChangeApply: vi.fn(),
@@ -118,6 +119,7 @@ vi.mock("../../../api/xyn", async () => {
     listAiAgents: apiMocks.listAiAgents,
     getExecutionPlan: apiMocks.getExecutionPlan,
     getSolutionChangeSessionControl: apiMocks.getSolutionChangeSessionControl,
+    getSolutionChangeSessionPromotionEvidence: apiMocks.getSolutionChangeSessionPromotionEvidence,
     runSolutionChangeSessionControlAction: apiMocks.runSolutionChangeSessionControlAction,
     generateSolutionChangePlan: apiMocks.generateSolutionChangePlan,
     stageSolutionChangeApply: apiMocks.stageSolutionChangeApply,
@@ -292,6 +294,24 @@ function createControlEnvelope(
   };
 }
 
+function createPromotionEvidenceEntry(overrides: Record<string, any> = {}) {
+  return {
+    id: "evidence-1",
+    workspace_id: "ws-1",
+    application_id: "app-1",
+    solution_change_session_id: "session-1",
+    operation: "promotion",
+    promotion_status: "success",
+    actor_source: "human",
+    source_promotion_evidence_id: "",
+    resulting_active_target: { public_app_url: "http://localhost" },
+    superseded_active_state: { public_app_url: "http://prior.localhost" },
+    created_at: "2026-04-04T12:00:00Z",
+    updated_at: "2026-04-04T12:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("WorkbenchPanelHost entity refresh", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -401,6 +421,7 @@ describe("WorkbenchPanelHost entity refresh", () => {
       ],
     });
     apiMocks.getSolutionChangeSessionControl.mockRejectedValue(new Error("control endpoint not mocked for this test"));
+    apiMocks.getSolutionChangeSessionPromotionEvidence.mockResolvedValue({ evidence: [] });
     apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
       createControlEnvelope(createComposerSession(), { operation: "inspect", status: "ready" })
     );
@@ -5983,6 +6004,238 @@ describe("WorkbenchPanelHost entity refresh", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Rollback" })).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "Rollback" })).toBeDisabled();
     expect(screen.getByText(/does not contain a prior active state to restore/i)).toBeInTheDocument();
+  });
+
+  it("surfaces a self-development safeguard note when control contract status is unavailable", async () => {
+    const onOpenPanel = vi.fn();
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      repo_commit_count: 0,
+      requires_commit_provenance: true,
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+        },
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(stagedSession));
+    apiMocks.getSolutionChangeSessionControl.mockRejectedValue(new Error("control offline"));
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getSolutionChangeSessionControl).toHaveBeenCalled());
+    const preparePreview = screen.getByRole("button", { name: "Prepare Preview" });
+    expect(preparePreview).toBeEnabled();
+    expect(
+      screen.getByText(/self-development safeguard: execution actions are contract-driven/i)
+    ).toBeInTheDocument();
+  });
+
+  it("renders promotion and rollback evidence history for the selected session", async () => {
+    const onOpenPanel = vi.fn();
+    const promotedSession = createComposerSession({
+      execution_status: "promoted",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      evidence_ref: {
+        promotion_evidence_id: "evidence-rollback-1",
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(promotedSession));
+    apiMocks.getSolutionChangeSessionControl.mockResolvedValue(createControlEnvelope(promotedSession));
+    apiMocks.getSolutionChangeSessionPromotionEvidence.mockResolvedValue({
+      evidence: [
+        createPromotionEvidenceEntry({
+          id: "evidence-rollback-1",
+          operation: "rollback",
+          source_promotion_evidence_id: "evidence-promote-1",
+          resulting_active_target: { public_app_url: "http://prior.localhost" },
+          superseded_active_state: { public_app_url: "http://localhost" },
+        }),
+        createPromotionEvidenceEntry({
+          id: "evidence-promote-1",
+          operation: "promotion",
+          resulting_active_target: { public_app_url: "http://localhost" },
+          superseded_active_state: {},
+        }),
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getSolutionChangeSessionPromotionEvidence).toHaveBeenCalled());
+    expect(screen.getByText("Promotion / Rollback History")).toBeInTheDocument();
+    expect(screen.getAllByText(/evidence-rollback-1/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/source evidence-promote-1/)).toBeInTheDocument();
+    expect(screen.getByText(/restored http:\/\/prior\.localhost/i)).toBeInTheDocument();
+  });
+
+  it("refreshes evidence history after a rollback control action", async () => {
+    const onOpenPanel = vi.fn();
+    const promotedSession = createComposerSession({
+      execution_status: "promoted",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+      },
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-123.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+      evidence_ref: {
+        promotion_evidence_id: "evidence-promote-1",
+      },
+    });
+    const rolledBackSession = createComposerSession({
+      execution_status: "committed",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: {
+        rollback: {
+          rolled_back_at: "2026-04-04T12:00:00Z",
+          restored_target: {
+            runtime_base_url: "http://prior.localhost",
+            public_app_url: "http://prior.localhost",
+          },
+        },
+      },
+      evidence_ref: {
+        promotion_evidence_id: "evidence-rollback-1",
+      },
+      preview: promotedSession.preview,
+      validation: promotedSession.validation,
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(promotedSession))
+      .mockResolvedValueOnce(createComposerState(rolledBackSession));
+    apiMocks.getSolutionChangeSessionControl.mockResolvedValue(
+      createControlEnvelope(promotedSession, {
+        control: {
+          can_rollback: true,
+          rollback_eligibility: {
+            can_rollback: true,
+            blocked_reason: "",
+          },
+          next_allowed_actions: ["rollback", "finalize"],
+        },
+      })
+    );
+    apiMocks.getSolutionChangeSessionPromotionEvidence
+      .mockResolvedValueOnce({
+        evidence: [
+          createPromotionEvidenceEntry({
+            id: "evidence-promote-1",
+            operation: "promotion",
+            resulting_active_target: { public_app_url: "http://localhost" },
+            superseded_active_state: {},
+          }),
+        ],
+      })
+      .mockResolvedValueOnce({
+        evidence: [
+          createPromotionEvidenceEntry({
+            id: "evidence-rollback-1",
+            operation: "rollback",
+            source_promotion_evidence_id: "evidence-promote-1",
+            resulting_active_target: { public_app_url: "http://prior.localhost" },
+            superseded_active_state: { public_app_url: "http://localhost" },
+          }),
+          createPromotionEvidenceEntry({
+            id: "evidence-promote-1",
+            operation: "promotion",
+            resulting_active_target: { public_app_url: "http://localhost" },
+            superseded_active_state: {},
+          }),
+        ],
+      });
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(rolledBackSession, {
+        operation: "rollback",
+        status: "succeeded",
+        control: {
+          can_rollback: false,
+          rollback_eligibility: {
+            can_rollback: false,
+            blocked_reason: "execution_not_promoted",
+          },
+          next_allowed_actions: ["promote"],
+        },
+        operation_result: {
+          status: "succeeded",
+          rollback_performed: true,
+          restored_target: {
+            runtime_base_url: "http://prior.localhost",
+            public_app_url: "http://prior.localhost",
+          },
+          rollback_evidence_ref: {
+            promotion_evidence_id: "evidence-rollback-1",
+          },
+          session: rolledBackSession,
+        },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Rollback" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Rollback" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.getSolutionChangeSessionPromotionEvidence).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getAllByText(/evidence-rollback-1/).length).toBeGreaterThan(0));
   });
 
   it("disables promote when root target is missing and shows explicit reason", async () => {

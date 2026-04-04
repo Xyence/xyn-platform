@@ -53,6 +53,7 @@ import type {
   ApplicationArtifactMembership,
   SolutionChangeSession,
   SolutionChangeSessionControlEnvelope,
+  SolutionChangeSessionPromotionEvidenceResponse,
   WorkspaceLinkedChangeSession,
   CampaignTypeDefinition,
   CampaignListResponse,
@@ -4765,6 +4766,19 @@ export async function runSolutionChangeSessionControlAction(
     body: JSON.stringify(payload),
   });
   return handle<SolutionChangeSessionControlEnvelope>(response);
+}
+
+export async function getSolutionChangeSessionPromotionEvidence(
+  applicationId: string,
+  sessionId: string,
+): Promise<SolutionChangeSessionPromotionEvidenceResponse> {
+  const apiBaseUrl = resolveApiBaseUrl();
+  const response = await apiFetch(`${apiBaseUrl}/xyn/api/applications/${applicationId}/change-sessions/${sessionId}/promotion-evidence`, {
+    method: "GET",
+    headers: buildHeaders(),
+    credentials: "include",
+  });
+  return handle<SolutionChangeSessionPromotionEvidenceResponse>(response);
 }
 
 export async function validateSolutionChangeSession(

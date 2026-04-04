@@ -2973,6 +2973,34 @@ export type SolutionChangeSessionControlEnvelope = {
   operation_result?: Record<string, unknown>;
 };
 
+export type SolutionChangeSessionPromotionEvidence = {
+  id: string;
+  workspace_id: string;
+  application_id: string;
+  solution_change_session_id: string;
+  operation: "promotion" | "rollback" | string;
+  promotion_status: string;
+  actor_source?: string;
+  actor_identity_id?: string;
+  source_promotion_evidence_id?: string;
+  targeted_artifacts?: Array<Record<string, unknown>>;
+  preview_target?: Record<string, unknown>;
+  root_target?: Record<string, unknown>;
+  resulting_active_target?: Record<string, unknown>;
+  superseded_active_state?: Record<string, unknown>;
+  control_result?: Record<string, unknown>;
+  provider_context?: Record<string, unknown>;
+  warnings?: string[];
+  blocked_context?: Record<string, unknown>;
+  rollback_link?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type SolutionChangeSessionPromotionEvidenceResponse = {
+  evidence: SolutionChangeSessionPromotionEvidence[] | SolutionChangeSessionPromotionEvidence;
+};
+
 export type WorkspaceLinkedChangeSession = {
   workspace_id: string;
   application_id: string;

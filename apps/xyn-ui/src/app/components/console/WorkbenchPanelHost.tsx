@@ -35,6 +35,7 @@ import {
   decideSolutionPlanningCheckpoint,
   generateSolutionChangePlan,
   getSolutionChangeSessionControl,
+  getSolutionChangeSessionPromotionEvidence,
   publishDevTask,
   queryArtifactCanvasTable,
   queryEmsDevicesCanvasTable,
@@ -84,6 +85,7 @@ import type {
   WorkItemSummary,
   WorkspaceSummary,
   SolutionChangeSessionControlEnvelope,
+  SolutionChangeSessionPromotionEvidence,
 } from "../../../api/types";
 import CanvasRenderer from "../../../components/canvas/CanvasRenderer";
 import InlineMessage from "../../../components/InlineMessage";
@@ -302,6 +304,18 @@ function rollbackBlockedMessage(blockedReason: string, recommendedAction: string
   const action = String(recommendedAction || "").trim();
   if (action) return `Blocked: ${action.replace(/_/g, " ")} is required before rollback.`;
   return "Blocked: rollback is not currently eligible for this session.";
+}
+
+function evidenceOperationLabel(value: string): string {
+  const token = String(value || "").trim().toLowerCase();
+  if (token === "rollback") return "Rollback";
+  if (token === "promotion") return "Promotion";
+  return titleCaseLabel(token || "promotion");
+}
+
+function summarizeTargetUrl(value: unknown): string {
+  const target = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return String(target.public_app_url || target.runtime_base_url || target.runtime_url || target.url || "").trim();
 }
 
 function controlActionLabel(action: string): string {
@@ -4455,6 +4469,7 @@ function ComposerDetailPanel({
   const [selectedOptionByTurn, setSelectedOptionByTurn] = useState<Record<string, string>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [sessionControlEnvelope, setSessionControlEnvelope] = useState<SolutionChangeSessionControlEnvelope | null>(null);
+  const [promotionEvidenceHistory, setPromotionEvidenceHistory] = useState<SolutionChangeSessionPromotionEvidence[]>([]);
   const [planningRoutingStatus, setPlanningRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
   const [availableAgents, setAvailableAgents] = useState<AiAgent[]>([]);
   const latestTurnRef = useRef<HTMLLIElement | null>(null);
@@ -4584,22 +4599,51 @@ function ComposerDetailPanel({
   const selectedSessionId = selectedSession ? String(selectedSession.id) : "";
   const selectedApplicationId = selectedSession ? String(selectedSession.application_id || "") : "";
   const controlStatus = sessionControlEnvelope?.control || null;
+
+  const loadPromotionEvidenceHistory = async (
+    appId: string,
+    sessionId: string,
+  ): Promise<void> => {
+    try {
+      const response = await getSolutionChangeSessionPromotionEvidence(appId, sessionId);
+      const evidence = Array.isArray(response?.evidence)
+        ? response.evidence
+        : response?.evidence && typeof response.evidence === "object"
+          ? [response.evidence]
+          : [];
+      setPromotionEvidenceHistory(evidence.slice(0, 10));
+    } catch {
+      setPromotionEvidenceHistory([]);
+    }
+  };
+
   useEffect(() => {
     let active = true;
     if (!selectedApplicationId || !selectedSessionId) {
       setSessionControlEnvelope(null);
+      setPromotionEvidenceHistory([]);
       return () => {
         active = false;
       };
     }
     (async () => {
       try {
-        const envelope = await getSolutionChangeSessionControl(selectedApplicationId, selectedSessionId);
+        const [envelope, evidenceResponse] = await Promise.all([
+          getSolutionChangeSessionControl(selectedApplicationId, selectedSessionId),
+          getSolutionChangeSessionPromotionEvidence(selectedApplicationId, selectedSessionId),
+        ]);
         if (!active) return;
         applyControlEnvelope(envelope, { mergeSession: false });
+        const evidence = Array.isArray(evidenceResponse?.evidence)
+          ? evidenceResponse.evidence
+          : evidenceResponse?.evidence && typeof evidenceResponse.evidence === "object"
+            ? [evidenceResponse.evidence]
+            : [];
+        setPromotionEvidenceHistory(evidence.slice(0, 10));
       } catch {
         if (!active) return;
         setSessionControlEnvelope(null);
+        setPromotionEvidenceHistory([]);
       }
     })();
     return () => {
@@ -4662,10 +4706,6 @@ function ComposerDetailPanel({
     && typeof controlStatus.rollback_eligibility === "object"
     ? controlStatus.rollback_eligibility as Record<string, unknown>
     : null;
-  const promoteEligibilityAllows =
-    promoteEligibility && typeof promoteEligibility.can_promote === "boolean"
-      ? Boolean(promoteEligibility.can_promote)
-      : true;
   const promoteBlockedReason = String(promoteEligibility?.blocked_reason || "").trim();
   const promoteRecommendedAction = String(promoteEligibility?.recommended_action || "").trim();
   const rollbackBlockedReason = String(rollbackEligibility?.blocked_reason || "").trim();
@@ -4677,8 +4717,9 @@ function ComposerDetailPanel({
   const repoCommitCount = Number(selectedSession?.repo_commit_count || 0);
   const requiresCommitProvenance = Boolean(selectedSession?.requires_commit_provenance);
   const commitRequiredAndMissing = requiresCommitProvenance && repoCommitCount < 1;
-  // Self-development execution should be contract-driven: when control state is
-  // available, use its normalized next-action contract over local heuristics.
+  // Self-development execution is intentionally contract-driven. If control
+  // state is unavailable, treat execution as blocked platform debt instead of
+  // inferring readiness from local phase heuristics.
   const hasControlExecutionContract = Boolean(controlStatus);
   const controlAllowsAction = (action: string): boolean => controlNextActions.includes(action);
   const normalizedNextAction = controlActionLabel(controlNextActions[0] || "");
@@ -4749,7 +4790,7 @@ function ComposerDetailPanel({
   const canPromote = hasControlExecutionContract
     ? controlAllowsAction("promote")
       && (typeof controlStatus?.can_promote === "boolean" ? Boolean(controlStatus?.can_promote) : true)
-    : canPromoteByPhase && promoteEligibilityAllows;
+    : canPromoteByPhase;
   const canRollback = hasControlExecutionContract
     ? controlAllowsAction("rollback")
       && (typeof controlStatus?.can_rollback === "boolean" ? Boolean(controlStatus?.can_rollback) : false)
@@ -4840,8 +4881,13 @@ function ComposerDetailPanel({
             String(selectedSession.id)
           );
           applyControlEnvelope(refreshed, { mergeSession: false });
+          await loadPromotionEvidenceHistory(
+            String(selectedSession.application_id),
+            String(selectedSession.id),
+          );
         } catch {
           setSessionControlEnvelope(null);
+          setPromotionEvidenceHistory([]);
         }
       }
     } catch (err) {
@@ -5885,6 +5931,9 @@ function ComposerDetailPanel({
                     ) : null}
                   </div>
                 )}
+                <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
+                  Self-development safeguard: execution actions are contract-driven (`/control`, `/control/actions`) and promotion/rollback history is evidence-backed.
+                </p>
                 <p className="muted small" style={{ marginTop: 8 }}>
                   {hasPendingPrompt
                     ? "Blocked: unresolved planner question or option set."
@@ -5969,6 +6018,35 @@ function ComposerDetailPanel({
                     <p>{String((selectedSession.evidence_ref as Record<string, unknown>).promotion_evidence_id || "").trim() || "Session-linked"}</p>
                   </div>
                 ) : null}
+                <div>
+                  <span className="field-label">Promotion / Rollback History</span>
+                  {promotionEvidenceHistory.length < 1 ? (
+                    <p className="muted small">No promotion or rollback evidence recorded yet.</p>
+                  ) : (
+                    <ul className="list-compact muted small" style={{ margin: 0, paddingLeft: 16 }}>
+                      {promotionEvidenceHistory.slice(0, 5).map((item) => {
+                        const itemId = String(item.id || "").trim();
+                        const itemStatus = String(item.promotion_status || "").trim() || "unknown";
+                        const itemTimestamp = String(item.created_at || item.updated_at || "").trim();
+                        const sourceEvidenceId = String(item.source_promotion_evidence_id || "").trim();
+                        const restoredUrl = summarizeTargetUrl(item.resulting_active_target);
+                        const supersededUrl = summarizeTargetUrl(item.superseded_active_state);
+                        return (
+                          <li key={itemId || `${item.operation}:${itemTimestamp}`}>
+                            {evidenceOperationLabel(String(item.operation || "promotion"))}
+                            {" · "}
+                            {titleCaseLabel(itemStatus)}
+                            {itemTimestamp ? ` · ${formatPanelTimestamp(itemTimestamp)}` : ""}
+                            {itemId ? ` · ${itemId}` : ""}
+                            {sourceEvidenceId ? ` · source ${sourceEvidenceId}` : ""}
+                            {restoredUrl ? ` · restored ${restoredUrl}` : ""}
+                            {supersededUrl ? ` · superseded ${supersededUrl}` : ""}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
                 <div>
                   <span className="field-label">Repository Commits</span>
                   <p>
