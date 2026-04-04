@@ -376,6 +376,7 @@ from .architecture_placement import (
     deployment_provider_contract_summary,
     evaluate_architectural_placement,
 )
+from .deployment_provider_contract import resolve_deployment_dns_profile
 from .solution_bundles import (
     SolutionBundleError,
     install_solution_bundle,
@@ -1958,6 +1959,10 @@ def _normalize_release_target_payload(
     runtime = payload.get("runtime") or {}
     tls = payload.get("tls") or {}
     ingress = payload.get("ingress") or {}
+    dns_provider_payload = payload.get("dns_provider") if isinstance(payload.get("dns_provider"), dict) else {}
+    requested_dns_provider = str((dns or {}).get("provider") or "").strip().lower()
+    dns_provider_profile = resolve_deployment_dns_profile(requested_provider=requested_dns_provider)
+    default_dns_provider = str(dns_provider_profile.get("default_dns_provider") or "route53").strip().lower() or "route53"
     normalized = {
         "schema_version": "release_target.v1",
         "id": target_id or payload.get("id") or str(uuid.uuid4()),
@@ -1968,7 +1973,7 @@ def _normalize_release_target_payload(
         "instance_ref": payload.get("instance_ref") if isinstance(payload.get("instance_ref"), dict) else {},
         "fqdn": payload.get("fqdn") or "",
         "dns": {
-            "provider": dns.get("provider") or "route53",
+            "provider": dns.get("provider") or default_dns_provider,
             "zone_name": dns.get("zone_name") or "",
             "zone_id": dns.get("zone_id") or "",
             "record_type": dns.get("record_type") or "A",
@@ -1995,7 +2000,8 @@ def _normalize_release_target_payload(
         },
         "env": payload.get("env") or {},
         "secret_refs": payload.get("secret_refs") or [],
-        "dns_provider": payload.get("dns_provider") if isinstance(payload.get("dns_provider"), dict) else {},
+        "dns_provider": dns_provider_payload,
+        "deployment_provider_profile": dns_provider_profile,
         "auto_generated": bool(payload.get("auto_generated", False)),
         "editable": bool(payload.get("editable", True)),
         "created_at": payload.get("created_at") or timezone.now().isoformat(),

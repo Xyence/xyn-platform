@@ -25,6 +25,9 @@ class DeploymentProviderImplementation(Protocol):
     def describe(self) -> Dict[str, object]:
         ...
 
+    def default_dns_provider(self) -> str:
+        ...
+
 
 @dataclass(frozen=True)
 class LegacyAwsSsmRoute53ProviderStub:
@@ -42,6 +45,9 @@ class LegacyAwsSsmRoute53ProviderStub:
                 "New provider-specific behavior should be implemented through seam-registered modules.",
             ],
         }
+
+    def default_dns_provider(self) -> str:
+        return "route53"
 
 
 def register_deployment_provider_contract(contract: DeploymentProviderContract) -> None:
@@ -103,6 +109,28 @@ def resolve_deployment_provider_for_request(request_text: str, *, capability_dom
             "artifact_extension_expected": bool(contract.artifact_extension_expected) if contract else True,
         },
         "implementation": implementation.describe() if implementation else {},
+    }
+
+
+def resolve_deployment_dns_profile(*, requested_provider: str = "") -> Dict[str, object]:
+    ensure_default_deployment_provider_contracts()
+    requested = str(requested_provider or "").strip().lower()
+    selected_key = "aws_ssm_route53"
+    if requested in {"route53", "aws_ssm_route53", "aws"}:
+        selected_key = "aws_ssm_route53"
+    contract = resolve_deployment_provider_contract(selected_key)
+    implementation = resolve_deployment_provider_implementation(selected_key)
+    default_provider = implementation.default_dns_provider() if implementation is not None else "route53"
+    return {
+        "resolved": bool(contract and implementation),
+        "selected_provider_key": selected_key,
+        "requested_provider": requested,
+        "default_dns_provider": str(default_provider or "route53"),
+        "contract": {
+            "provider_key": contract.provider_key if contract else selected_key,
+            "execution_path": contract.execution_path if contract else "",
+            "implementation_kind": contract.implementation_kind if contract else "",
+        },
     }
 
 

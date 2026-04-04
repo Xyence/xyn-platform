@@ -6,6 +6,7 @@ from xyn_orchestrator.architecture_placement import (
 )
 from xyn_orchestrator.deployment_provider_contract import (
     resolve_deployment_provider_contract,
+    resolve_deployment_dns_profile,
     resolve_deployment_provider_for_request,
     resolve_deployment_provider_implementation,
 )
@@ -76,3 +77,9 @@ class ArchitecturePlacementContractTests(SimpleTestCase):
         self.assertEqual(resolved.get("selected_provider_key"), "aws_ssm_route53")
         implementation_payload = resolved.get("implementation") if isinstance(resolved.get("implementation"), dict) else {}
         self.assertEqual(implementation_payload.get("resolution_mode"), "seam_stub")
+
+    def test_dns_profile_resolution_uses_registered_provider_stub(self):
+        profile = resolve_deployment_dns_profile(requested_provider="route53")
+        self.assertTrue(bool(profile.get("resolved")))
+        self.assertEqual(profile.get("selected_provider_key"), "aws_ssm_route53")
+        self.assertEqual(profile.get("default_dns_provider"), "route53")
