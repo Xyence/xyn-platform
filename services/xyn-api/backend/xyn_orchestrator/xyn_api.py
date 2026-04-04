@@ -372,6 +372,10 @@ from .artifact_activation import (
     runtime_record_matches_revision_anchor,
     submit_artifact_activation,
 )
+from .architecture_placement import (
+    deployment_provider_contract_summary,
+    evaluate_architectural_placement,
+)
 from .solution_bundles import (
     SolutionBundleError,
     install_solution_bundle,
@@ -23070,6 +23074,7 @@ def _intent_apply_provision_xyn_remote(
             "api_url": urls.get("api_url"),
             "dns": dns_action,
             "driver_state": deployment_payload.get("driver_state"),
+            "provider_contract": deployment_provider_contract_summary(),
         },
         "next_actions": [
             {"label": "Open deployment details", "action": "OpenPanel", "panel_key": "artifact_detail", "params": {"slug": deployment_artifact.slug}},
@@ -31495,6 +31500,10 @@ def _build_solution_impacted_analysis(
     else:
         analysis_status = "no_confident_matches"
     analysis["analysis_status"] = analysis_status
+    analysis["placement_guidance"] = evaluate_architectural_placement(
+        request_text=request_text,
+        capability_domain="auto",
+    )
     analysis["analyzed_at"] = timezone.now().isoformat()
     return analysis
 

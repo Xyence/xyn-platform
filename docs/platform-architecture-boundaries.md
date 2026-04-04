@@ -2,6 +2,10 @@
 
 This is the concise boundary reference for platform primitives that are most vulnerable to accidental parallel implementations.
 
+For core-vs-artifact placement decisions (especially provider-extensible
+domains such as deployment providers), see:
+`docs/platform-architecture-placement-contract.md`.
+
 ## Canonical seams
 
 - Orchestration/scheduler: `xyn_orchestrator.orchestration` + orchestration models/APIs.

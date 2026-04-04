@@ -8,6 +8,11 @@ IGNORED_PATH_PARTS = {"tests", "migrations", "__pycache__"}
 MODEL_DECL_RE = re.compile(r"^\s*class\s+([A-Za-z0-9_]+)\(models\.Model\):")
 SEQUENCE_MATCHER_RE = re.compile(r"\bSequenceMatcher\b")
 POSTGIS_SQL_RE = re.compile(r"\bST_[A-Za-z_]+\s*\(")
+DEPLOYMENT_PROVIDER_MARKER_RE = re.compile(
+    r"(boto3|botocore|route53|AWS-RunShellScript|amazonaws\.com|aws_access_key_id|aws_secret_access_key)",
+    re.IGNORECASE,
+)
+DEPLOYMENT_DOMAIN_RE = re.compile(r"(deploy|deployment|provision|release_target|compose)", re.IGNORECASE)
 
 KEYWORD_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("watch", ("xyn_orchestrator/watching/", "xyn_orchestrator/models.py")),
@@ -26,6 +31,20 @@ ALLOWED_SEQUENCE_MATCHER_PATHS = (
 
 ALLOWED_POSTGIS_SQL_PATHS = (
     "xyn_orchestrator/geospatial/repository.py",
+)
+
+ALLOWED_DEPLOYMENT_PROVIDER_CORE_PATHS = (
+    "xyn_orchestrator/deployments.py",
+    "xyn_orchestrator/xyn_api.py",
+    "xyn_orchestrator/instance_drivers.py",
+    "xyn_orchestrator/dns_providers.py",
+    "xyn_orchestrator/provisioning.py",
+    "xyn_orchestrator/provisioning_views.py",
+    "xyn_orchestrator/blueprints.py",
+    "xyn_orchestrator/worker_tasks.py",
+    "xyn_orchestrator/instances/",
+    "xyn_orchestrator/deployment_provider_contract.py",
+    "xyn_orchestrator/architecture_placement.py",
 )
 
 
@@ -70,5 +89,11 @@ def scan_backend_canonical_drift(backend_root: Path) -> list[str]:
                     findings.append(
                         f"{relpath}:{line_number} uses raw PostGIS SQL outside geospatial repository"
                     )
+
+        if DEPLOYMENT_PROVIDER_MARKER_RE.search(contents) and DEPLOYMENT_DOMAIN_RE.search(contents):
+            if not _is_allowed(relpath, allowed_prefixes=ALLOWED_DEPLOYMENT_PROVIDER_CORE_PATHS):
+                findings.append(
+                    f"{relpath}: provider-specific deployment markers found outside approved deployment seams"
+                )
 
     return findings
