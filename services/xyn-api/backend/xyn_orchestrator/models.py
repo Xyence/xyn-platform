@@ -438,6 +438,62 @@ class ReleaseTarget(models.Model):
         return f"{self.blueprint} target {self.name}"
 
 
+class ReleaseTargetDeploymentPreparationEvidence(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    release_target = models.ForeignKey(
+        ReleaseTarget,
+        on_delete=models.CASCADE,
+        related_name="deployment_preparation_evidence",
+    )
+    blueprint = models.ForeignKey(
+        Blueprint,
+        on_delete=models.CASCADE,
+        related_name="release_target_deployment_preparation_evidence",
+    )
+    planning_mode = models.CharField(max_length=40, blank=True, default="")
+    operation = models.CharField(max_length=120, blank=True, default="")
+    provider_key = models.CharField(max_length=120, blank=True, default="")
+    provider_module_contract_ref = models.CharField(max_length=255, blank=True, default="")
+    execution_ready_in_principle = models.BooleanField(default=False)
+    mutation_performed = models.BooleanField(default=False)
+    requested_config_json = models.JSONField(default=dict, blank=True)
+    discovered_inputs_json = models.JSONField(default=list, blank=True)
+    missing_inputs_json = models.JSONField(default=list, blank=True)
+    steps_json = models.JSONField(default=list, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    staged_execution_intent_json = models.JSONField(default=dict, blank=True)
+    plan_snapshot_json = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="release_target_deployment_preparation_evidence_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["release_target", "created_at"], name="ix_rt_prep_target_time"),
+            models.Index(fields=["provider_key", "created_at"], name="ix_rt_prep_provider_time"),
+        ]
+
+    def clean(self):
+        if self.release_target_id and self.blueprint_id and str(self.release_target.blueprint_id) != str(self.blueprint_id):
+            raise ValidationError("blueprint must match release target blueprint")
+
+    def save(self, *args, **kwargs):
+        if self.release_target_id and not self.blueprint_id:
+            self.blueprint_id = self.release_target.blueprint_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.release_target_id}:{self.provider_key}:{self.created_at.isoformat() if self.created_at else ''}"
+
+
 class IdentityProvider(models.Model):
     id = models.CharField(primary_key=True, max_length=120)
     display_name = models.CharField(max_length=200)

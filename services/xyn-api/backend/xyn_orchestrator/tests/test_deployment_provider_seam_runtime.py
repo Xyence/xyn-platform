@@ -3,7 +3,9 @@ from unittest import mock
 from django.test import SimpleTestCase
 
 from xyn_orchestrator.deployment_provider_contract import (
+    build_non_destructive_deployment_plan,
     build_deployment_release_target_preparation_metadata,
+    derive_staged_execution_intent_from_deployment_plan,
     derive_deployment_dns_deploy_preparation_actions,
     derive_deployment_dns_deprovision_preparation_actions,
     evaluate_deployment_execution_preflight_readiness,
@@ -182,6 +184,80 @@ class DeploymentProviderSeamRuntimeTests(SimpleTestCase):
             module_contract.get("module_manifest_ref"),
             "backend/registry/modules/deploy-aws-ec2-sibling.json",
         )
+
+    @mock.patch("xyn_orchestrator.deployment_provider_contract.subprocess.run")
+    def test_non_destructive_deployment_plan_is_seam_backed_and_machine_readable(self, mock_run):
+        mock_run.return_value = mock.Mock(
+            returncode=0,
+            stdout='{"Account":"123456789012"}',
+            stderr="",
+        )
+        plan = build_non_destructive_deployment_plan(
+            selected_provider_key="aws_ssm_route53",
+            release_target_id="target-1",
+            blueprint_ref="blueprint-1",
+            solution_name="real-estate-deal-finder",
+            target_instance_id="i-123",
+            aws_region="us-west-2",
+            runtime_config={"transport": "ssm", "remote_root": "/opt/xyn/apps/deal-finder"},
+            dns_provider="route53",
+            dns_config={
+                "hosted_zone_id": "Z123",
+                "credentials_ref": {"context_pack_id": "11111111-1111-1111-1111-111111111111"},
+            },
+            fqdn="deal.xyence.io",
+            instance_type="t3.small",
+            discover_environment=True,
+        )
+
+        self.assertEqual(plan.get("planning_mode"), "non_destructive")
+        self.assertTrue(plan.get("execution_ready_in_principle"))
+        self.assertEqual(plan.get("provider_key"), "aws_ssm_route53")
+        provider_contract = plan.get("provider_contract") or {}
+        deployment_contract = provider_contract.get("deployment_target_contract") or {}
+        self.assertEqual(deployment_contract.get("runtime_target_kind"), "ec2_instance")
+        module_contract = provider_contract.get("provider_module_contract") or {}
+        self.assertEqual(module_contract.get("module_id"), "deploy-aws-ec2-sibling")
+        self.assertEqual((plan.get("environment_discovery") or {}).get("account_id"), "123456789012")
+        self.assertEqual((plan.get("requested_config") or {}).get("instance_type"), "t3.small")
+        step_statuses = {str(step.get("id") or ""): str(step.get("status") or "") for step in (plan.get("steps") or [])}
+        self.assertEqual(step_statuses.get("prepare.runtime_target"), "ready")
+        self.assertEqual(step_statuses.get("prepare.dns_target"), "ready")
+        self.assertEqual(step_statuses.get("prepare.execution_preflight"), "ready")
+
+    def test_staged_execution_intent_derives_ready_and_blocked_steps(self):
+        plan = {
+            "planning_mode": "non_destructive",
+            "operation": "sibling_runtime_deployment_plan",
+            "provider_key": "aws_ssm_route53",
+            "execution_ready_in_principle": False,
+            "provider_contract": {"module_manifest_ref": "backend/registry/modules/deploy-aws-ec2-sibling.json"},
+            "warnings": ["non-destructive only"],
+            "steps": [
+                {
+                    "id": "prepare.runtime_target",
+                    "title": "Prepare runtime",
+                    "status": "blocked",
+                    "capability_category": "prepare_runtime_target",
+                    "blocked_reason": "missing runtime inputs",
+                    "missing_inputs": ["target_instance.aws_region"],
+                },
+                {
+                    "id": "prepare.dns_target",
+                    "title": "Prepare dns",
+                    "status": "ready",
+                    "capability_category": "prepare_dns_target",
+                    "blocked_reason": "",
+                    "missing_inputs": [],
+                },
+            ],
+        }
+        intent = derive_staged_execution_intent_from_deployment_plan(plan)
+        self.assertEqual(intent.get("schema_version"), "xyn.deployment_staged_intent.v1")
+        self.assertFalse(intent.get("promotable_to_execution_in_principle"))
+        self.assertIn("prepare.runtime_target", intent.get("blocked_steps") or [])
+        self.assertIn("prepare.dns_target", intent.get("ready_steps") or [])
+        self.assertIn("target_instance.aws_region", intent.get("required_future_inputs") or [])
 
     def test_release_target_normalization_uses_seam_dns_profile_resolution(self):
         profile = {

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Protocol
 
 
@@ -697,6 +701,415 @@ def evaluate_deployment_execution_preflight_readiness(
         aws_region=str(aws_region or "").strip(),
         remote_root=str(remote_root or "").strip(),
     )
+
+
+def _load_provider_module_manifest(module_manifest_ref: str) -> Dict[str, Any]:
+    reference = str(module_manifest_ref or "").strip()
+    if not reference:
+        return {}
+    normalized = reference.replace("\\", "/")
+    if normalized.startswith("backend/"):
+        normalized = normalized[len("backend/"):]
+    backend_root = Path(__file__).resolve().parents[1]
+    manifest_path = (backend_root / normalized).resolve()
+    try:
+        if not manifest_path.exists() or not manifest_path.is_file():
+            return {}
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _discover_aws_account_context(*, enabled: bool) -> Dict[str, Any]:
+    if not enabled:
+        return {"attempted": False, "discovered": False, "source": "", "account_id": "", "warning": ""}
+    disabled = str(os.environ.get("XYN_DISABLE_AWS_ACCOUNT_DISCOVERY") or "").strip().lower()
+    if disabled in {"1", "true", "yes", "on"}:
+        return {
+            "attempted": False,
+            "discovered": False,
+            "source": "env_guardrail",
+            "account_id": "",
+            "warning": "AWS account discovery disabled by XYN_DISABLE_AWS_ACCOUNT_DISCOVERY.",
+        }
+    try:
+        result = subprocess.run(
+            ["aws", "sts", "get-caller-identity", "--output", "json"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=6,
+        )
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "discovered": False,
+            "source": "aws_cli",
+            "account_id": "",
+            "warning": f"AWS CLI discovery failed: {exc}",
+        }
+    if result.returncode != 0:
+        warning = str(result.stderr or result.stdout or "").strip() or "aws sts get-caller-identity failed"
+        return {
+            "attempted": True,
+            "discovered": False,
+            "source": "aws_cli",
+            "account_id": "",
+            "warning": warning,
+        }
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return {
+            "attempted": True,
+            "discovered": False,
+            "source": "aws_cli",
+            "account_id": "",
+            "warning": "aws sts get-caller-identity returned non-JSON output",
+        }
+    account_id = str(payload.get("Account") or "").strip()
+    return {
+        "attempted": True,
+        "discovered": bool(account_id),
+        "source": "aws_cli_sts",
+        "account_id": account_id,
+        "warning": "" if account_id else "AWS account id unavailable from aws sts get-caller-identity",
+    }
+
+
+def _lookup_input_value(context: Dict[str, Any], dotted_key: str) -> tuple[bool, Any]:
+    current: Any = context
+    for token in str(dotted_key or "").split("."):
+        if not isinstance(current, dict) or token not in current:
+            return False, None
+        current = current[token]
+    if current is None:
+        return False, None
+    if isinstance(current, str) and not current.strip():
+        return False, current
+    if isinstance(current, (list, dict)) and not current:
+        return False, current
+    return True, current
+
+
+def build_non_destructive_deployment_plan(
+    *,
+    selected_provider_key: str = "",
+    release_target_id: str = "",
+    blueprint_ref: str = "",
+    solution_name: str = "",
+    target_instance_id: str = "",
+    aws_region: str = "",
+    runtime_config: Dict[str, Any] | None = None,
+    dns_provider: str = "",
+    dns_config: Dict[str, Any] | None = None,
+    fqdn: str = "",
+    instance_type: str = "",
+    discover_environment: bool = False,
+) -> Dict[str, Any]:
+    ensure_default_deployment_provider_contracts()
+    selected_key = str(selected_provider_key or "").strip().lower() or "aws_ssm_route53"
+    target_contract = resolve_deployment_target_contract(selected_provider_key=selected_key)
+    module_contract = target_contract.get("provider_module_contract") if isinstance(target_contract, dict) else {}
+    module_contract = module_contract if isinstance(module_contract, dict) else {}
+    module_manifest_ref = str(module_contract.get("module_manifest_ref") or "").strip()
+    module_manifest = _load_provider_module_manifest(module_manifest_ref)
+    module_interfaces = module_manifest.get("module", {}).get("interfaces", {}) if isinstance(module_manifest, dict) else {}
+    module_config_interface = module_interfaces.get("config") if isinstance(module_interfaces, dict) else {}
+    module_config_interface = module_config_interface if isinstance(module_config_interface, dict) else {}
+    module_operations = module_interfaces.get("operations") if isinstance(module_interfaces, dict) else {}
+    module_operations = module_operations if isinstance(module_operations, dict) else {}
+    capability_categories = target_contract.get("capability_categories") if isinstance(target_contract, dict) else []
+    declared_capabilities = {str(item).strip() for item in capability_categories or [] if str(item).strip()}
+    provider_identity = target_contract.get("provider_identity") if isinstance(target_contract, dict) else {}
+    provider_identity = provider_identity if isinstance(provider_identity, dict) else {}
+    provider_cloud = str(provider_identity.get("cloud") or "").strip().lower()
+    provider_dns_default = str(provider_identity.get("dns_provider_default") or "").strip().lower() or "route53"
+    effective_dns_provider = str(dns_provider or "").strip().lower() or provider_dns_default
+    effective_runtime = dict(runtime_config or {})
+    effective_dns_config = dict(dns_config or {})
+    effective_instance_type = str(instance_type or "").strip() or str(
+        ((module_contract.get("deployment_target_defaults") or {}).get("instance_type") if isinstance(module_contract, dict) else "")
+        or ""
+    ).strip()
+    effective_fqdn = str(fqdn or "").strip()
+    aws_context = _discover_aws_account_context(enabled=bool(discover_environment and provider_cloud == "aws"))
+
+    input_context: Dict[str, Any] = {
+        "release_target": {
+            "target_instance_id": str(target_instance_id or "").strip(),
+            "fqdn": effective_fqdn,
+            "runtime": {
+                "transport": str((effective_runtime or {}).get("transport") or "").strip().lower(),
+                "remote_root": str((effective_runtime or {}).get("remote_root") or "").strip(),
+            },
+            "dns_provider": effective_dns_config,
+        },
+        "target_instance": {
+            "aws_region": str(aws_region or "").strip(),
+            "aws_account_id": str(aws_context.get("account_id") or "").strip(),
+        },
+        "requested": {
+            "instance_type": effective_instance_type,
+            "hostname": effective_fqdn,
+            "solution_name": str(solution_name or "").strip(),
+        },
+    }
+
+    required_inputs: List[Dict[str, Any]] = []
+    missing_inputs: List[str] = []
+    contract_required = target_contract.get("required_configuration") if isinstance(target_contract, dict) else []
+    dns_expectations = target_contract.get("dns_exposure_expectations") if isinstance(target_contract, dict) else {}
+    dns_required = dns_expectations.get("required_inputs") if isinstance(dns_expectations, dict) else []
+    all_required_keys: List[str] = []
+    all_required_keys.extend([str(key).strip() for key in contract_required or [] if str(key).strip()])
+    all_required_keys.extend([str(key).strip() for key in dns_required or [] if str(key).strip()])
+    seen_required: set[str] = set()
+    for required_key in all_required_keys:
+        if required_key in seen_required:
+            continue
+        seen_required.add(required_key)
+        present, value = _lookup_input_value(input_context, required_key)
+        if not present:
+            missing_inputs.append(required_key)
+        required_inputs.append(
+            {
+                "key": required_key,
+                "provided": bool(present),
+                "value": value if present else None,
+            }
+        )
+
+    dns_readiness = evaluate_deployment_dns_deploy_preparation_readiness(
+        dns_provider=effective_dns_provider,
+        fqdn=effective_fqdn,
+        target_instance_id=str(target_instance_id or "").strip(),
+        dns_config=effective_dns_config,
+        selected_provider_key=selected_key,
+    )
+    dns_actions = derive_deployment_dns_deploy_preparation_actions(
+        dns_provider=effective_dns_provider,
+        fqdn=effective_fqdn,
+        target_instance_id=str(target_instance_id or "").strip(),
+        selected_provider_key=selected_key,
+    )
+    execution_preflight = evaluate_deployment_execution_preflight_readiness(
+        operation="check_drift",
+        runtime_config=effective_runtime,
+        target_instance_id=str(target_instance_id or "").strip(),
+        aws_region=str(aws_region or "").strip(),
+        remote_root=str((effective_runtime or {}).get("remote_root") or "").strip(),
+        selected_provider_key=selected_key,
+    )
+
+    steps: List[Dict[str, Any]] = []
+    contract_ready = bool(module_contract)
+    steps.append(
+        {
+            "id": "resolve.provider_module_contract",
+            "title": "Resolve provider module contract",
+            "capability_category": "module_contract_resolution",
+            "status": "ready" if contract_ready else "blocked",
+            "blocked_reason": "" if contract_ready else "provider module contract is missing",
+            "notes": "Non-destructive planning uses the seam + module contract as the source of truth.",
+        }
+    )
+
+    runtime_missing = [
+        key
+        for key in [
+            "release_target.target_instance_id",
+            "target_instance.aws_region",
+            "release_target.runtime.transport",
+            "release_target.runtime.remote_root",
+        ]
+        if key in missing_inputs
+    ]
+    if "prepare_runtime_target" in declared_capabilities:
+        steps.append(
+            {
+                "id": "prepare.runtime_target",
+                "title": "Prepare sibling runtime target prerequisites",
+                "capability_category": "prepare_runtime_target",
+                "status": "ready" if not runtime_missing else "blocked",
+                "blocked_reason": "" if not runtime_missing else "missing required runtime target inputs",
+                "missing_inputs": runtime_missing,
+                "notes": module_operations.get("prepare_runtime_target")
+                or "Validate target/profile inputs without mutating infrastructure.",
+            }
+        )
+    else:
+        steps.append(
+            {
+                "id": "prepare.runtime_target",
+                "title": "Prepare sibling runtime target prerequisites",
+                "capability_category": "prepare_runtime_target",
+                "status": "not_executed",
+                "blocked_reason": "capability category is not declared by provider contract",
+                "missing_inputs": runtime_missing,
+                "notes": "",
+            }
+        )
+
+    if "prepare_dns_target" in declared_capabilities:
+        steps.append(
+            {
+                "id": "prepare.dns_target",
+                "title": "Prepare DNS exposure prerequisites",
+                "capability_category": "prepare_dns_target",
+                "status": "ready" if bool(dns_readiness.get("can_prepare")) else "blocked",
+                "blocked_reason": str(dns_readiness.get("blocked_reason") or "").strip(),
+                "missing_inputs": list(dns_readiness.get("missing_inputs") or []),
+                "planned_actions": dns_actions,
+                "notes": module_operations.get("prepare_dns_target")
+                or "Derive DNS preparation actions without applying DNS changes.",
+            }
+        )
+    else:
+        steps.append(
+            {
+                "id": "prepare.dns_target",
+                "title": "Prepare DNS exposure prerequisites",
+                "capability_category": "prepare_dns_target",
+                "status": "not_executed",
+                "blocked_reason": "capability category is not declared by provider contract",
+                "missing_inputs": list(dns_readiness.get("missing_inputs") or []),
+                "planned_actions": dns_actions,
+                "notes": "",
+            }
+        )
+
+    preflight_missing = list(execution_preflight.get("missing_inputs") or [])
+    preflight_blocked_reason = str(execution_preflight.get("blocked_reason") or "").strip()
+    if "execution_preflight" in declared_capabilities:
+        steps.append(
+            {
+                "id": "prepare.execution_preflight",
+                "title": "Evaluate execution-adjacent preflight readiness",
+                "capability_category": "execution_preflight",
+                "status": "ready" if (not preflight_missing and not preflight_blocked_reason) else "blocked",
+                "blocked_reason": preflight_blocked_reason,
+                "missing_inputs": preflight_missing,
+                "preflight": execution_preflight,
+                "notes": module_operations.get("execution_preflight")
+                or "Run non-destructive preflight checks only.",
+            }
+        )
+    else:
+        steps.append(
+            {
+                "id": "prepare.execution_preflight",
+                "title": "Evaluate execution-adjacent preflight readiness",
+                "capability_category": "execution_preflight",
+                "status": "not_executed",
+                "blocked_reason": "capability category is not declared by provider contract",
+                "missing_inputs": preflight_missing,
+                "preflight": execution_preflight,
+                "notes": "",
+            }
+        )
+
+    warnings: List[str] = []
+    aws_warning = str(aws_context.get("warning") or "").strip()
+    if aws_warning:
+        warnings.append(aws_warning)
+    warnings.append("This is a non-destructive deployment plan only; no AWS, Route53, or remote runtime mutation was performed.")
+
+    actionable_steps = [step for step in steps if str(step.get("status") or "") != "not_executed"]
+    execution_ready = bool(actionable_steps) and all(str(step.get("status") or "") == "ready" for step in actionable_steps)
+
+    discovered_inputs: List[Dict[str, Any]] = []
+    if str(aws_context.get("account_id") or "").strip():
+        discovered_inputs.append(
+            {
+                "key": "target_instance.aws_account_id",
+                "value": str(aws_context.get("account_id") or "").strip(),
+                "source": str(aws_context.get("source") or "aws_cli_sts"),
+            }
+        )
+
+    return {
+        "schema_version": "xyn.deployment_plan.v1",
+        "planning_mode": "non_destructive",
+        "operation": "sibling_runtime_deployment_plan",
+        "release_target_id": str(release_target_id or "").strip(),
+        "blueprint_ref": str(blueprint_ref or "").strip(),
+        "solution_name": str(solution_name or "").strip(),
+        "provider_key": selected_key,
+        "target_profile_kind": str(target_contract.get("target_profile_kind") or "").strip(),
+        "runtime_target_kind": str(target_contract.get("runtime_target_kind") or "").strip(),
+        "provider_contract": {
+            "deployment_target_contract": target_contract,
+            "provider_module_contract": module_contract,
+            "module_manifest_ref": module_manifest_ref,
+            "module_config_interface": module_config_interface,
+        },
+        "requested_config": {
+            "instance_type": effective_instance_type,
+            "hostname": effective_fqdn,
+            "dns_provider": effective_dns_provider,
+        },
+        "required_inputs": required_inputs,
+        "discovered_inputs": discovered_inputs,
+        "missing_inputs": sorted(set(missing_inputs)),
+        "environment_discovery": aws_context,
+        "steps": steps,
+        "execution_ready_in_principle": bool(execution_ready),
+        "warnings": warnings,
+    }
+
+
+def derive_staged_execution_intent_from_deployment_plan(plan: Dict[str, Any] | None) -> Dict[str, Any]:
+    payload = dict(plan or {})
+    steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+    blocked_steps = [step for step in steps if str((step or {}).get("status") or "").strip().lower() == "blocked"]
+    ready_steps = [step for step in steps if str((step or {}).get("status") or "").strip().lower() == "ready"]
+    staged_steps: List[Dict[str, Any]] = []
+    required_future_inputs: List[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        missing = [str(item).strip() for item in (step.get("missing_inputs") or []) if str(item).strip()]
+        required_future_inputs.extend(missing)
+        staged_steps.append(
+            {
+                "id": str(step.get("id") or "").strip(),
+                "title": str(step.get("title") or "").strip(),
+                "status": str(step.get("status") or "").strip().lower() or "not_executed",
+                "capability_category": str(step.get("capability_category") or "").strip(),
+                "blocked_reason": str(step.get("blocked_reason") or "").strip(),
+                "missing_inputs": missing,
+            }
+        )
+    unique_future_inputs: List[str] = []
+    seen: set[str] = set()
+    for item in required_future_inputs:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique_future_inputs.append(item)
+    return {
+        "schema_version": "xyn.deployment_staged_intent.v1",
+        "intent_type": "staged_execution_intent",
+        "mutation_performed": False,
+        "provider_key": str(payload.get("provider_key") or "").strip(),
+        "provider_module_contract_ref": str(
+            (
+                (payload.get("provider_contract") or {}).get("module_manifest_ref")
+                if isinstance(payload.get("provider_contract"), dict)
+                else ""
+            )
+            or ""
+        ).strip(),
+        "planning_mode": str(payload.get("planning_mode") or "").strip(),
+        "operation": str(payload.get("operation") or "").strip(),
+        "promotable_to_execution_in_principle": bool(payload.get("execution_ready_in_principle")),
+        "blocked_steps": [str((step or {}).get("id") or "").strip() for step in blocked_steps if str((step or {}).get("id") or "").strip()],
+        "ready_steps": [str((step or {}).get("id") or "").strip() for step in ready_steps if str((step or {}).get("id") or "").strip()],
+        "required_future_inputs": unique_future_inputs,
+        "staged_steps": staged_steps,
+        "warnings": list(payload.get("warnings") or []),
+    }
 
 
 def ensure_default_deployment_provider_contracts() -> None:

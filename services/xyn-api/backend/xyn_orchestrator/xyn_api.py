@@ -112,6 +112,7 @@ from .models import (
     RunArtifact,
     RunCommandExecution,
     ReleaseTarget,
+    ReleaseTargetDeploymentPreparationEvidence,
     IdentityProvider,
     AppOIDCClient,
     SecretStore,
@@ -378,6 +379,8 @@ from .architecture_placement import (
     evaluate_architectural_placement,
 )
 from .deployment_provider_contract import (
+    build_non_destructive_deployment_plan,
+    derive_staged_execution_intent_from_deployment_plan,
     build_deployment_release_target_preparation_metadata,
     derive_deployment_dns_deprovision_preparation_actions,
     evaluate_deployment_dns_deprovision_readiness,
@@ -27976,6 +27979,167 @@ def release_target_check_drift_action(request: HttpRequest, target_id: str) -> J
     internal_request.method = "GET"
     internal_request.META["HTTP_X_INTERNAL_TOKEN"] = token
     return internal_release_target_check_drift(internal_request, target_id)
+
+
+@csrf_exempt
+@login_required
+def release_target_deployment_plan_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method not in {"GET", "POST"}:
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    payload = _parse_json(request) if request.method == "POST" else {}
+    plan = _build_release_target_deployment_plan_payload(
+        target=target,
+        payload=payload if isinstance(payload, dict) else {},
+        discover_environment_override=request.GET.get("discover_environment"),
+    )
+    return JsonResponse(
+        {
+            "release_target_id": str(target.id),
+            "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+            "deployment_plan": plan,
+        }
+    )
+
+
+def _build_release_target_deployment_plan_payload(
+    *,
+    target: ReleaseTarget,
+    payload: Dict[str, Any],
+    discover_environment_override: str | None = None,
+) -> Dict[str, Any]:
+    deployment_request = payload.get("deployment_request") if isinstance(payload.get("deployment_request"), dict) else {}
+    discover_environment = _parse_bool_param(
+        str(payload.get("discover_environment")) if payload.get("discover_environment") is not None else discover_environment_override,
+        default=False,
+    )
+    target_payload = _serialize_release_target(target)
+    runtime_payload = target_payload.get("runtime") if isinstance(target_payload.get("runtime"), dict) else {}
+    dns_payload = target_payload.get("dns") if isinstance(target_payload.get("dns"), dict) else {}
+    dns_provider_payload = target_payload.get("dns_provider") if isinstance(target_payload.get("dns_provider"), dict) else {}
+    deployment_profile = (
+        target_payload.get("deployment_provider_profile")
+        if isinstance(target_payload.get("deployment_provider_profile"), dict)
+        else {}
+    )
+    selected_provider_key = str(deployment_profile.get("selected_provider_key") or "").strip().lower()
+    target_instance_id = str(target_payload.get("target_instance_id") or "").strip()
+    target_instance = ProvisionedInstance.objects.filter(id=target_instance_id).first() if target_instance_id else None
+    aws_region = (
+        str(deployment_request.get("aws_region") or "").strip()
+        or str((target_instance.aws_region if target_instance else "") or "").strip()
+    )
+    fqdn = str(deployment_request.get("hostname") or "").strip() or str(target_payload.get("fqdn") or "").strip()
+    dns_provider = str(dns_payload.get("provider") or "").strip().lower()
+    solution_name = str(deployment_request.get("solution_name") or "").strip()
+    if not solution_name and target.blueprint:
+        solution_name = f"{target.blueprint.namespace}.{target.blueprint.name}"
+    return build_non_destructive_deployment_plan(
+        selected_provider_key=selected_provider_key,
+        release_target_id=str(target.id),
+        blueprint_ref=str(target.blueprint_id or ""),
+        solution_name=solution_name,
+        target_instance_id=target_instance_id,
+        aws_region=aws_region,
+        runtime_config=runtime_payload,
+        dns_provider=dns_provider,
+        dns_config=dns_provider_payload,
+        fqdn=fqdn,
+        instance_type=str(deployment_request.get("instance_type") or "").strip(),
+        discover_environment=bool(discover_environment),
+    )
+
+
+def _serialize_release_target_deployment_preparation_evidence(
+    record: ReleaseTargetDeploymentPreparationEvidence,
+) -> Dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "release_target_id": str(record.release_target_id),
+        "blueprint_id": str(record.blueprint_id),
+        "planning_mode": str(record.planning_mode or ""),
+        "operation": str(record.operation or ""),
+        "provider_key": str(record.provider_key or ""),
+        "provider_module_contract_ref": str(record.provider_module_contract_ref or ""),
+        "execution_ready_in_principle": bool(record.execution_ready_in_principle),
+        "mutation_performed": bool(record.mutation_performed),
+        "requested_config": record.requested_config_json or {},
+        "discovered_inputs": record.discovered_inputs_json or [],
+        "missing_inputs": record.missing_inputs_json or [],
+        "steps": record.steps_json or [],
+        "warnings": record.warnings_json or [],
+        "staged_execution_intent": record.staged_execution_intent_json or {},
+        "plan_snapshot": record.plan_snapshot_json or {},
+        "created_at": record.created_at.isoformat() if record.created_at else "",
+    }
+
+
+@csrf_exempt
+@login_required
+def release_target_deployment_preparation_evidence_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    if request.method == "GET":
+        limit = 10
+        try:
+            if request.GET.get("limit"):
+                limit = max(1, min(100, int(str(request.GET.get("limit")))))
+        except ValueError:
+            limit = 10
+        records = list(
+            ReleaseTargetDeploymentPreparationEvidence.objects.filter(release_target=target).order_by("-created_at")[:limit]
+        )
+        latest = records[0] if records else None
+        return JsonResponse(
+            {
+                "release_target_id": str(target.id),
+                "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+                "latest_evidence_ref": {"deployment_preparation_evidence_id": str(latest.id)} if latest else {},
+                "evidence": [_serialize_release_target_deployment_preparation_evidence(item) for item in records],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    payload = _parse_json(request)
+    plan = _build_release_target_deployment_plan_payload(
+        target=target,
+        payload=payload if isinstance(payload, dict) else {},
+        discover_environment_override=request.GET.get("discover_environment"),
+    )
+    staged_intent = derive_staged_execution_intent_from_deployment_plan(plan)
+    provider_contract = plan.get("provider_contract") if isinstance(plan.get("provider_contract"), dict) else {}
+    record = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+        release_target=target,
+        blueprint=target.blueprint,
+        planning_mode=str(plan.get("planning_mode") or "").strip(),
+        operation=str(plan.get("operation") or "").strip(),
+        provider_key=str(plan.get("provider_key") or "").strip(),
+        provider_module_contract_ref=str(provider_contract.get("module_manifest_ref") or "").strip(),
+        execution_ready_in_principle=bool(plan.get("execution_ready_in_principle")),
+        mutation_performed=False,
+        requested_config_json=plan.get("requested_config") if isinstance(plan.get("requested_config"), dict) else {},
+        discovered_inputs_json=plan.get("discovered_inputs") if isinstance(plan.get("discovered_inputs"), list) else [],
+        missing_inputs_json=plan.get("missing_inputs") if isinstance(plan.get("missing_inputs"), list) else [],
+        steps_json=plan.get("steps") if isinstance(plan.get("steps"), list) else [],
+        warnings_json=plan.get("warnings") if isinstance(plan.get("warnings"), list) else [],
+        staged_execution_intent_json=staged_intent,
+        plan_snapshot_json=plan,
+        created_by=request.user,
+    )
+    return JsonResponse(
+        {
+            "status": "recorded",
+            "release_target_id": str(target.id),
+            "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+            "evidence_ref": {"deployment_preparation_evidence_id": str(record.id)},
+            "deployment_plan": plan,
+            "staged_execution_intent": staged_intent,
+            "mutation_performed": False,
+        }
+    )
 
 
 @csrf_exempt

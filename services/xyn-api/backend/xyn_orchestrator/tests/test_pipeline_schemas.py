@@ -75,6 +75,7 @@ from xyn_orchestrator.models import (
     ProvisionedInstance,
     Release,
     ReleaseTarget,
+    ReleaseTargetDeploymentPreparationEvidence,
     RoleBinding,
     Run,
     RunArtifact,
@@ -1751,6 +1752,192 @@ class PipelineSchemaTests(TestCase):
         self.assertIn("preflight", payload)
         self.assertTrue(preflight.called)
         mock_marker.assert_not_called()
+
+    def test_release_target_deployment_plan_action_returns_non_destructive_plan(self):
+        staff_user = get_user_model().objects.create_user(
+            username="staff-plan",
+            email="staff-plan@example.com",
+            password="test-pass-123",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(staff_user)
+        blueprint = Blueprint.objects.create(name="real-estate-deal-finder", namespace="solutions")
+        instance = ProvisionedInstance.objects.create(
+            name="deal-finder-preview",
+            status="running",
+            instance_id="i-123",
+            aws_region="",
+        )
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="deal-finder-sibling",
+            target_instance=instance,
+            fqdn="deal.xyence.io",
+            config_json={
+                "target_instance_id": str(instance.id),
+                "deployment_provider_profile": {"selected_provider_key": "aws_ssm_route53"},
+                "dns_provider": {
+                    "hosted_zone_id": "Z123",
+                    "credentials_ref": {"context_pack_id": "11111111-1111-1111-1111-111111111111"},
+                },
+            },
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            runtime_json={"type": "docker-compose", "transport": "ssm", "remote_root": "/opt/xyn/apps/deal-finder"},
+            tls_json={"mode": "none"},
+        )
+
+        response = self.client.post(
+            f"/xyn/api/release-targets/{target.id}/deployment_plan",
+            data=json.dumps(
+                {
+                    "deployment_request": {
+                        "instance_type": "t3.small",
+                        "hostname": "deal.xyence.io",
+                        "solution_name": "Real Estate Deal Finder",
+                    }
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        plan = payload.get("deployment_plan") or {}
+        self.assertEqual(plan.get("planning_mode"), "non_destructive")
+        self.assertEqual((plan.get("requested_config") or {}).get("instance_type"), "t3.small")
+        self.assertIn("target_instance.aws_region", plan.get("missing_inputs") or [])
+        runtime_step = next((step for step in (plan.get("steps") or []) if step.get("id") == "prepare.runtime_target"), {})
+        self.assertEqual(runtime_step.get("status"), "blocked")
+        self.assertIn("missing required runtime target inputs", str(runtime_step.get("blocked_reason") or ""))
+
+    def test_release_target_deployment_preparation_evidence_post_creates_durable_record(self):
+        staff_user = get_user_model().objects.create_user(
+            username="staff-evidence",
+            email="staff-evidence@example.com",
+            password="test-pass-123",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(staff_user)
+        blueprint = Blueprint.objects.create(name="real-estate-deal-finder", namespace="solutions")
+        instance = ProvisionedInstance.objects.create(
+            name="deal-finder-preview",
+            status="running",
+            instance_id="i-123",
+            aws_region="us-west-2",
+        )
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="deal-finder-sibling",
+            target_instance=instance,
+            fqdn="deal.xyence.io",
+            config_json={
+                "target_instance_id": str(instance.id),
+                "deployment_provider_profile": {"selected_provider_key": "aws_ssm_route53"},
+                "dns_provider": {
+                    "hosted_zone_id": "Z123",
+                    "credentials_ref": {"context_pack_id": "11111111-1111-1111-1111-111111111111"},
+                },
+            },
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            runtime_json={"type": "docker-compose", "transport": "ssm", "remote_root": "/opt/xyn/apps/deal-finder"},
+            tls_json={"mode": "none"},
+        )
+        response = self.client.post(
+            f"/xyn/api/release-targets/{target.id}/deployment_preparation_evidence",
+            data=json.dumps(
+                {
+                    "deployment_request": {
+                        "instance_type": "t3.small",
+                        "hostname": "deal.xyence.io",
+                        "solution_name": "Real Estate Deal Finder",
+                    }
+                }
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload.get("status"), "recorded")
+        evidence_ref = payload.get("evidence_ref") if isinstance(payload.get("evidence_ref"), dict) else {}
+        evidence_id = str(evidence_ref.get("deployment_preparation_evidence_id") or "")
+        self.assertTrue(bool(evidence_id))
+        record = ReleaseTargetDeploymentPreparationEvidence.objects.get(id=evidence_id)
+        self.assertFalse(record.mutation_performed)
+        self.assertEqual(str(record.provider_key), "aws_ssm_route53")
+        self.assertIsInstance(record.staged_execution_intent_json, dict)
+        self.assertEqual(
+            str((record.staged_execution_intent_json or {}).get("schema_version") or ""),
+            "xyn.deployment_staged_intent.v1",
+        )
+
+    def test_release_target_deployment_preparation_evidence_get_returns_latest_first(self):
+        staff_user = get_user_model().objects.create_user(
+            username="staff-evidence-read",
+            email="staff-evidence-read@example.com",
+            password="test-pass-123",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(staff_user)
+        blueprint = Blueprint.objects.create(name="real-estate-deal-finder", namespace="solutions")
+        instance = ProvisionedInstance.objects.create(
+            name="deal-finder-preview",
+            status="running",
+            instance_id="i-123",
+            aws_region="us-west-2",
+        )
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="deal-finder-sibling",
+            target_instance=instance,
+            fqdn="deal.xyence.io",
+            config_json={
+                "target_instance_id": str(instance.id),
+                "deployment_provider_profile": {"selected_provider_key": "aws_ssm_route53"},
+                "dns_provider": {
+                    "hosted_zone_id": "Z123",
+                    "credentials_ref": {"context_pack_id": "11111111-1111-1111-1111-111111111111"},
+                },
+            },
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            runtime_json={"type": "docker-compose", "transport": "ssm", "remote_root": "/opt/xyn/apps/deal-finder"},
+            tls_json={"mode": "none"},
+        )
+        first = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            planning_mode="non_destructive",
+            operation="sibling_runtime_deployment_plan",
+            provider_key="aws_ssm_route53",
+            execution_ready_in_principle=False,
+            mutation_performed=False,
+            staged_execution_intent_json={"schema_version": "xyn.deployment_staged_intent.v1"},
+            plan_snapshot_json={"schema_version": "xyn.deployment_plan.v1"},
+            created_by=staff_user,
+        )
+        second = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            planning_mode="non_destructive",
+            operation="sibling_runtime_deployment_plan",
+            provider_key="aws_ssm_route53",
+            execution_ready_in_principle=True,
+            mutation_performed=False,
+            staged_execution_intent_json={"schema_version": "xyn.deployment_staged_intent.v1"},
+            plan_snapshot_json={"schema_version": "xyn.deployment_plan.v1"},
+            created_by=staff_user,
+        )
+        self.assertNotEqual(str(first.id), str(second.id))
+        response = self.client.get(f"/xyn/api/release-targets/{target.id}/deployment_preparation_evidence")
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        latest_ref = payload.get("latest_evidence_ref") if isinstance(payload.get("latest_evidence_ref"), dict) else {}
+        self.assertEqual(str(latest_ref.get("deployment_preparation_evidence_id") or ""), str(second.id))
+        evidence = payload.get("evidence") if isinstance(payload.get("evidence"), list) else []
+        self.assertEqual(len(evidence), 2)
+        self.assertEqual(str(evidence[0].get("id") or ""), str(second.id))
+        self.assertEqual(str(evidence[1].get("id") or ""), str(first.id))
 
     def test_deploy_lock_blocks_concurrent_runs(self):
         os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
