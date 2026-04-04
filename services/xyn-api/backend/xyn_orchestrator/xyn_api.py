@@ -376,7 +376,15 @@ from .architecture_placement import (
     deployment_provider_contract_summary,
     evaluate_architectural_placement,
 )
-from .deployment_provider_contract import resolve_deployment_dns_profile
+from .deployment_provider_contract import (
+    build_deployment_release_target_preparation_metadata,
+    derive_deployment_dns_deprovision_preparation_actions,
+    evaluate_deployment_dns_deprovision_readiness,
+    normalize_deployment_dns_provider_config,
+    resolve_deployment_dns_deprovision_orchestration,
+    resolve_deployment_dns_profile,
+    validate_deployment_dns_provider_config,
+)
 from .solution_bundles import (
     SolutionBundleError,
     install_solution_bundle,
@@ -1745,6 +1753,18 @@ def _validate_release_target_payload(payload: Dict[str, Any]) -> list[str]:
             errors.append(
                 f"secret_refs[{idx}].ref: must start with ssm:/, ssm-arn:, secretsmanager:/, or secretsmanager-arn:"
             )
+    dns = payload.get("dns") if isinstance(payload.get("dns"), dict) else {}
+    requested_dns_provider = str(dns.get("provider") or "").strip().lower()
+    dns_provider_profile = resolve_deployment_dns_profile(requested_provider=requested_dns_provider)
+    selected_provider_key = str(dns_provider_profile.get("selected_provider_key") or "").strip().lower()
+    dns_provider_payload = payload.get("dns_provider") if isinstance(payload.get("dns_provider"), dict) else {}
+    errors.extend(
+        validate_deployment_dns_provider_config(
+            dns_provider=requested_dns_provider,
+            config=dns_provider_payload,
+            selected_provider_key=selected_provider_key,
+        )
+    )
     return errors
 
 
@@ -1963,6 +1983,19 @@ def _normalize_release_target_payload(
     requested_dns_provider = str((dns or {}).get("provider") or "").strip().lower()
     dns_provider_profile = resolve_deployment_dns_profile(requested_provider=requested_dns_provider)
     default_dns_provider = str(dns_provider_profile.get("default_dns_provider") or "route53").strip().lower() or "route53"
+    selected_provider_key = str(dns_provider_profile.get("selected_provider_key") or "").strip().lower()
+    normalized_dns_provider_payload = normalize_deployment_dns_provider_config(
+        dns_provider=requested_dns_provider or default_dns_provider,
+        config=dns_provider_payload,
+        selected_provider_key=selected_provider_key,
+    )
+    deployment_preparation = build_deployment_release_target_preparation_metadata(
+        dns_provider=requested_dns_provider or default_dns_provider,
+        dns_config=normalized_dns_provider_payload,
+        runtime_config=runtime,
+        tls_config=tls,
+        selected_provider_key=selected_provider_key,
+    )
     normalized = {
         "schema_version": "release_target.v1",
         "id": target_id or payload.get("id") or str(uuid.uuid4()),
@@ -2000,8 +2033,9 @@ def _normalize_release_target_payload(
         },
         "env": payload.get("env") or {},
         "secret_refs": payload.get("secret_refs") or [],
-        "dns_provider": dns_provider_payload,
+        "dns_provider": normalized_dns_provider_payload,
         "deployment_provider_profile": dns_provider_profile,
+        "deployment_preparation": deployment_preparation,
         "auto_generated": bool(payload.get("auto_generated", False)),
         "editable": bool(payload.get("editable", True)),
         "created_at": payload.get("created_at") or timezone.now().isoformat(),
@@ -2101,11 +2135,31 @@ def _build_blueprint_deprovision_plan(
         zone_id = str((dns_cfg or {}).get("zone_id") or "").strip()
         zone_name = str((dns_cfg or {}).get("zone_name") or "").strip()
         dns_provider = str((dns_cfg or {}).get("provider") or "").strip().lower()
+        dns_provider_payload = target_payload.get("dns_provider") if isinstance(target_payload.get("dns_provider"), dict) else {}
+        dns_provider_profile = target_payload.get("deployment_provider_profile") if isinstance(target_payload.get("deployment_provider_profile"), dict) else {}
+        selected_provider_key = str(dns_provider_profile.get("selected_provider_key") or "").strip().lower()
         fqdn = str(target.fqdn or "").strip()
         ownership_proven = bool((target.config_json or {}).get("dns_record_snapshot")) or bool(
             (target.config_json or {}).get("xyn_dns_managed")
         )
         if delete_dns and fqdn:
+            dns_delete_readiness = evaluate_deployment_dns_deprovision_readiness(
+                dns_provider=dns_provider or "route53",
+                dns_config=dns_provider_payload,
+                selected_provider_key=selected_provider_key,
+            )
+            dns_delete_orchestration = resolve_deployment_dns_deprovision_orchestration(
+                dns_provider=dns_provider or "route53",
+                fqdn=fqdn,
+                release_target_id=target_id,
+                selected_provider_key=selected_provider_key,
+            )
+            dns_preparation_actions = derive_deployment_dns_deprovision_preparation_actions(
+                dns_provider=dns_provider or "route53",
+                fqdn=fqdn,
+                release_target_id=target_id,
+                selected_provider_key=selected_provider_key,
+            )
             dns_records.append(
                 {
                     "release_target_id": target_id,
@@ -2114,11 +2168,19 @@ def _build_blueprint_deprovision_plan(
                     "zone_id": zone_id,
                     "zone_name": zone_name,
                     "ownership_proven": ownership_proven,
+                    "deprovision_readiness": dns_delete_readiness,
+                    "deprovision_orchestration": dns_delete_orchestration,
+                    "preparation_actions": dns_preparation_actions,
                 }
             )
-            if dns_provider and dns_provider != "route53":
+            if not bool(dns_delete_readiness.get("can_delete_dns_record")):
                 can_execute = False
-                warnings.append(f"{fqdn}: DNS provider '{dns_provider}' is not supported for deprovision delete.")
+                blocked_reason = str(dns_delete_readiness.get("blocked_reason") or "").strip()
+                warnings.append(f"{fqdn}: {blocked_reason or 'DNS provider is not supported for deprovision delete.'}")
+            if not bool(dns_delete_orchestration.get("can_orchestrate")):
+                can_execute = False
+                blocked_reason = str(dns_delete_orchestration.get("blocked_reason") or "").strip()
+                warnings.append(f"{fqdn}: {blocked_reason or 'DNS provider has no deprovision orchestration mapping.'}")
             if not ownership_proven and not force_mode:
                 can_execute = False
                 warnings.append(
@@ -2196,18 +2258,25 @@ def _build_blueprint_deprovision_plan(
                     },
                 }
             )
-        if delete_dns and fqdn:
+        if delete_dns and fqdn and bool(dns_delete_orchestration.get("can_orchestrate")):
+            action_capabilities = [
+                str((action or {}).get("capability") or "").strip()
+                for action in (dns_preparation_actions or [])
+                if str((action or {}).get("capability") or "").strip()
+            ]
+            dns_capability = str(dns_delete_orchestration.get("step_capability") or "dns.route53.delete_record")
+            required_capabilities = sorted({value for value in ([dns_capability] + action_capabilities) if value})
             steps.append(
                 {
-                    "id": f"dns.delete_record.route53.{target_id}",
-                    "title": f"Delete Route53 record for {fqdn}",
-                    "capability": "dns.route53.delete_record",
+                    "id": str(dns_delete_orchestration.get("step_id") or f"dns.delete_record.route53.{target_id}"),
+                    "title": str(dns_delete_orchestration.get("step_title") or f"Delete Route53 record for {fqdn}"),
+                    "capability": dns_capability,
                     "work_item": {
-                        "id": f"dns.delete_record.route53.{target_id}",
-                        "title": f"Delete Route53 record for {fqdn}",
+                        "id": str(dns_delete_orchestration.get("step_id") or f"dns.delete_record.route53.{target_id}"),
+                        "title": str(dns_delete_orchestration.get("step_title") or f"Delete Route53 record for {fqdn}"),
                         "type": "deploy",
                         "context_purpose_override": "operator",
-                        "capabilities_required": ["dns.route53.delete_record"],
+                        "capabilities_required": required_capabilities,
                         "config": {
                             "release_target_id": target_id,
                             "target_instance_id": str(target.target_instance_id) if target.target_instance_id else "",

@@ -66,6 +66,7 @@ from xyn_orchestrator.worker_tasks import (
     _run_remote_deploy,
     _work_item_capabilities,
 )
+from xyn_orchestrator.managed_storage import load_local_artifact_json
 from xyn_orchestrator.models import (
     Blueprint,
     ContextPack,
@@ -76,6 +77,7 @@ from xyn_orchestrator.models import (
     ReleaseTarget,
     RoleBinding,
     Run,
+    RunArtifact,
     UserIdentity,
     Tenant,
     TenantMembership,
@@ -1706,6 +1708,49 @@ class PipelineSchemaTests(TestCase):
         )
         drift_response = internal_release_target_check_drift(drift_request, str(target.id))
         self.assertEqual(drift_response.status_code, 200)
+        drift_payload = json.loads(drift_response.content.decode("utf-8"))
+        self.assertIn("preflight", drift_payload)
+        self.assertTrue((drift_payload.get("preflight") or {}).get("can_probe_runtime_marker"))
+
+    @mock.patch("xyn_orchestrator.blueprints._ssm_fetch_runtime_marker")
+    def test_check_drift_blocks_when_provider_execution_preflight_fails(self, mock_marker):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        instance = ProvisionedInstance.objects.create(
+            name="seed-1",
+            status="running",
+            instance_id="i-123",
+            aws_region="us-west-2",
+        )
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="demo",
+            target_instance=instance,
+            fqdn="ems.xyence.io",
+            config_json={},
+        )
+        request = factory.get(
+            f"/xyn/internal/release-targets/{target.id}/check_drift",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        with mock.patch(
+            "xyn_orchestrator.blueprints.evaluate_deployment_execution_preflight_readiness",
+            return_value={
+                "provider_key": "aws_ssm_route53",
+                "operation": "check_drift",
+                "can_probe_runtime_marker": False,
+                "blocked_reason": "provider execution preflight blocked for test",
+                "missing_inputs": ["runtime.remote_root"],
+            },
+        ) as preflight:
+            response = internal_release_target_check_drift(request, str(target.id))
+        self.assertEqual(response.status_code, 400)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload.get("error"), "execution_preflight_blocked")
+        self.assertIn("preflight", payload)
+        self.assertTrue(preflight.called)
+        mock_marker.assert_not_called()
 
     def test_deploy_lock_blocks_concurrent_runs(self):
         os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
@@ -1760,6 +1805,153 @@ class PipelineSchemaTests(TestCase):
             deploy_release.return_value = JsonResponse({"run_id": "x"}, status=200)
             internal_release_target_deploy_latest(deploy_request, str(target.id))
             deploy_release.assert_called()
+
+    def test_deploy_manifest_uses_provider_seam_deploy_preparation_action_derivation(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="demo",
+            target_instance_ref=str(uuid.uuid4()),
+            fqdn="ems.xyence.io",
+            config_json={
+                "dns_provider": {
+                    "hosted_zone_id": "Z123",
+                    "credentials_ref": {"context_pack_id": "11111111-1111-1111-1111-111111111111"},
+                }
+            },
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            runtime_json={"type": "docker-compose", "transport": "ssm"},
+            tls_json={"mode": "none"},
+        )
+        source_run = Run.objects.create(
+            entity_type="blueprint",
+            entity_id=blueprint.id,
+            status="succeeded",
+            summary="manifest source",
+        )
+        RunArtifact.objects.create(
+            run=source_run,
+            name="release_manifest.json",
+            kind="release_manifest",
+            url="memory://release_manifest.json",
+        )
+        RunArtifact.objects.create(
+            run=source_run,
+            name="compose.release.yml",
+            kind="compose",
+            url="memory://compose.release.yml",
+        )
+        seam_action = {
+            "provider_key": "aws_ssm_route53",
+            "action_key": "dns_ensure_record",
+            "required": True,
+            "capability": "dns.route53.records",
+            "step_id": "dns.ensure_record.route53",
+            "title": "Ensure Route53 DNS record",
+            "reason": "provider_mapped_dns_record_deploy_preparation",
+        }
+        request = factory.post(
+            f"/xyn/internal/release-targets/{target.id}/deploy_manifest",
+            data=json.dumps({"manifest_run_id": str(source_run.id)}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        with mock.patch(
+            "xyn_orchestrator.blueprints.derive_deployment_dns_deploy_preparation_actions",
+            return_value=[seam_action],
+        ) as derivation:
+            response = internal_release_target_deploy_manifest(request, str(target.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        run = Run.objects.get(id=payload.get("run_id"))
+        implementation_plan_artifact = RunArtifact.objects.filter(run=run, name="implementation_plan.json").first()
+        self.assertIsNotNone(implementation_plan_artifact)
+        implementation_plan = load_local_artifact_json(url=implementation_plan_artifact.url)
+        self.assertIsInstance(implementation_plan, dict)
+        work_items = implementation_plan.get("work_items") or []
+        dns_item = next((item for item in work_items if item.get("id") == "dns.ensure_record.route53"), {})
+        self.assertTrue(dns_item)
+        self.assertEqual((dns_item.get("provider_preparation_action") or {}).get("reason"), seam_action.get("reason"))
+        self.assertIn("capability:dns.route53.records", dns_item.get("labels") or [])
+        self.assertTrue(derivation.called)
+
+    def test_deploy_manifest_gates_dns_action_when_provider_readiness_is_blocked(self):
+        os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
+        factory = RequestFactory()
+        blueprint = Blueprint.objects.create(name="ems.platform", namespace="core")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="demo",
+            target_instance_ref=str(uuid.uuid4()),
+            fqdn="ems.xyence.io",
+            config_json={},
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            runtime_json={"type": "docker-compose", "transport": "ssm"},
+            tls_json={"mode": "none"},
+        )
+        source_run = Run.objects.create(
+            entity_type="blueprint",
+            entity_id=blueprint.id,
+            status="succeeded",
+            summary="manifest source",
+        )
+        RunArtifact.objects.create(
+            run=source_run,
+            name="release_manifest.json",
+            kind="release_manifest",
+            url="memory://release_manifest.json",
+        )
+        RunArtifact.objects.create(
+            run=source_run,
+            name="compose.release.yml",
+            kind="compose",
+            url="memory://compose.release.yml",
+        )
+        seam_action = {
+            "provider_key": "aws_ssm_route53",
+            "action_key": "dns_ensure_record",
+            "required": True,
+            "capability": "dns.route53.records",
+            "step_id": "dns.ensure_record.route53",
+            "title": "Ensure Route53 DNS record",
+            "reason": "provider_mapped_dns_record_deploy_preparation",
+        }
+        request = factory.post(
+            f"/xyn/internal/release-targets/{target.id}/deploy_manifest",
+            data=json.dumps({"manifest_run_id": str(source_run.id)}),
+            content_type="application/json",
+            HTTP_X_INTERNAL_TOKEN="test-token",
+        )
+        with mock.patch(
+            "xyn_orchestrator.blueprints.derive_deployment_dns_deploy_preparation_actions",
+            return_value=[seam_action],
+        ), mock.patch(
+            "xyn_orchestrator.blueprints.evaluate_deployment_dns_deploy_preparation_readiness",
+            return_value={
+                "provider_key": "aws_ssm_route53",
+                "can_prepare": False,
+                "blocked_reason": "provider readiness blocked for test",
+                "missing_inputs": ["release_target.dns_provider.hosted_zone_id"],
+            },
+        ) as readiness:
+            response = internal_release_target_deploy_manifest(request, str(target.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        run = Run.objects.get(id=payload.get("run_id"))
+        implementation_plan_artifact = RunArtifact.objects.filter(run=run, name="implementation_plan.json").first()
+        self.assertIsNotNone(implementation_plan_artifact)
+        implementation_plan = load_local_artifact_json(url=implementation_plan_artifact.url)
+        self.assertIsInstance(implementation_plan, dict)
+        work_items = implementation_plan.get("work_items") or []
+        self.assertFalse(any(item.get("id") == "dns.ensure_record.route53" for item in work_items))
+        provider_preparation = implementation_plan.get("provider_preparation") or {}
+        readiness_payload = provider_preparation.get("dns_deploy_readiness") or {}
+        self.assertFalse(readiness_payload.get("can_prepare"))
+        why_next = ((implementation_plan.get("plan_rationale") or {}).get("why_next") or [])
+        self.assertTrue(any("DNS ensure action gated" in str(entry) for entry in why_next))
+        self.assertTrue(readiness.called)
 
     def test_rollback_last_success_selects_prior_release(self):
         os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"
@@ -3007,3 +3199,66 @@ class BlueprintLifecycleApiTests(TestCase):
         payload = response.json()
         self.assertFalse(payload["flags"]["can_execute"])
         self.assertTrue(payload["warnings"])
+
+    def test_deprovision_plan_uses_provider_seam_dns_delete_readiness(self):
+        with mock.patch(
+            "xyn_orchestrator.xyn_api.evaluate_deployment_dns_deprovision_readiness",
+            return_value={
+                "provider_key": "aws_ssm_route53",
+                "seam_source": "deployment_provider_contract",
+                "dns_provider": "route53",
+                "can_delete_dns_record": False,
+                "blocked_reason": "provider readiness blocked for test",
+            },
+        ) as evaluator:
+            response = self.client.get(f"/xyn/api/blueprints/{self.blueprint.id}/deprovision_plan")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["flags"]["can_execute"])
+        self.assertTrue(any("provider readiness blocked for test" in warning for warning in payload.get("warnings") or []))
+        self.assertTrue(evaluator.called)
+
+    def test_deprovision_plan_uses_provider_seam_dns_delete_orchestration(self):
+        with mock.patch(
+            "xyn_orchestrator.xyn_api.resolve_deployment_dns_deprovision_orchestration",
+            return_value={
+                "provider_key": "aws_ssm_route53",
+                "seam_source": "deployment_provider_contract",
+                "dns_provider": "route53",
+                "can_orchestrate": False,
+                "blocked_reason": "provider orchestration mapping blocked for test",
+                "step_capability": "",
+                "step_id": "",
+                "step_title": "",
+            },
+        ) as resolver:
+            response = self.client.get(f"/xyn/api/blueprints/{self.blueprint.id}/deprovision_plan")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["flags"]["can_execute"])
+        self.assertTrue(any("provider orchestration mapping blocked for test" in warning for warning in payload.get("warnings") or []))
+        self.assertTrue(resolver.called)
+
+    def test_deprovision_plan_uses_provider_seam_preparation_action_derivation(self):
+        action = {
+            "provider_key": "aws_ssm_route53",
+            "action_key": "dns_delete_record",
+            "required": True,
+            "capability": "dns.route53.delete_record",
+            "step_id": f"dns.delete_record.route53.{self.target.id}",
+            "title": f"Delete Route53 record for {self.target.fqdn}",
+            "reason": "provider_mapped_dns_record_deprovision",
+        }
+        with mock.patch(
+            "xyn_orchestrator.xyn_api.derive_deployment_dns_deprovision_preparation_actions",
+            return_value=[action],
+        ) as derivation:
+            response = self.client.get(f"/xyn/api/blueprints/{self.blueprint.id}/deprovision_plan")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        first_dns_record = (payload.get("dns_records") or [{}])[0]
+        self.assertEqual(first_dns_record.get("preparation_actions"), [action])
+        dns_steps = [step for step in payload.get("steps") or [] if str(step.get("id") or "").startswith("dns.delete_record.")]
+        self.assertTrue(dns_steps)
+        self.assertIn("dns.route53.delete_record", (dns_steps[0].get("work_item") or {}).get("capabilities_required") or [])
+        self.assertTrue(derivation.called)
