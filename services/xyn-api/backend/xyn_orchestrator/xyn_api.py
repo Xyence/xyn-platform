@@ -32981,6 +32981,7 @@ def _git_changed_files_for_paths(
         ["ls-files", "--others", "--exclude-standard", "--", *scoped],
     ]
     changed: List[str] = []
+    seen_keys: set[str] = set()
     for args in commands:
         code, out, _err = _git_repo_command(repo_root=repo_root, args=args)
         if code != 0:
@@ -32989,9 +32990,11 @@ def _git_changed_files_for_paths(
             token = str(line or "").strip()
             if not token:
                 continue
-            normalized = _normalized_repo_path(token)
-            if normalized and normalized not in changed:
-                changed.append(normalized)
+            normalized_display = str(token).replace("\\", "/").strip()
+            normalized_key = normalized_display.lower()
+            if normalized_display and normalized_key not in seen_keys:
+                seen_keys.add(normalized_key)
+                changed.append(normalized_display)
     return changed
 
 

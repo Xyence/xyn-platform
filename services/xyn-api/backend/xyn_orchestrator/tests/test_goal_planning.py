@@ -5403,6 +5403,27 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(str(args[2]).startswith("safe.directory="))
         self.assertIn("branch", args)
 
+    def test_git_changed_files_for_paths_preserves_filename_case(self):
+        repo_root = Path(tempfile.gettempdir())
+
+        def _mock_git_repo_command(*, repo_root: Path, args: List[str], timeout_seconds: int = 20):
+            joined = " ".join(args)
+            if "diff --name-only" in joined:
+                return 0, "apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx\n", ""
+            if "diff --cached --name-only" in joined:
+                return 0, "", ""
+            if "ls-files --others" in joined:
+                return 0, "", ""
+            return 1, "", "unsupported"
+
+        with mock.patch("xyn_orchestrator.xyn_api._git_repo_command", side_effect=_mock_git_repo_command):
+            changed = xyn_api._git_changed_files_for_paths(
+                repo_root=repo_root,
+                pathspecs=["apps/xyn-ui/"],
+            )
+
+        self.assertEqual(changed, ["apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx"])
+
     def test_solution_change_session_continue_requires_iteration_linkage(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
