@@ -285,6 +285,25 @@ function promoteBlockedMessage(blockedReason: string, recommendedAction: string)
   return "Blocked: promotion is not currently eligible for this session.";
 }
 
+function rollbackBlockedMessage(blockedReason: string, recommendedAction: string): string {
+  const reason = String(blockedReason || "").trim().toLowerCase();
+  if (reason === "execution_not_promoted") {
+    return "Blocked: rollback is only available after promotion.";
+  }
+  if (reason === "source_evidence_missing") {
+    return "Blocked: no promotion evidence is available for rollback.";
+  }
+  if (reason === "superseded_state_missing") {
+    return "Blocked: source evidence does not contain a prior active state to restore.";
+  }
+  if (reason === "superseded_state_incomplete") {
+    return "Blocked: source evidence prior state is incomplete and cannot be restored safely.";
+  }
+  const action = String(recommendedAction || "").trim();
+  if (action) return `Blocked: ${action.replace(/_/g, " ")} is required before rollback.`;
+  return "Blocked: rollback is not currently eligible for this session.";
+}
+
 function controlActionLabel(action: string): string {
   const token = String(action || "").trim().toLowerCase();
   if (token === "respond_to_planner_prompt") return "Respond to planner prompt";
@@ -296,6 +315,7 @@ function controlActionLabel(action: string): string {
   if (token === "commit") return "Commit repository changes";
   if (token === "activate_in_root") return "Activate solution in root";
   if (token === "promote") return "Promote committed changes";
+  if (token === "rollback") return "Rollback promoted changes";
   if (token === "finalize") return "Finalize session";
   if (!token) return "";
   return token.replace(/_/g, " ");
@@ -4563,10 +4583,7 @@ function ComposerDetailPanel({
     || null;
   const selectedSessionId = selectedSession ? String(selectedSession.id) : "";
   const selectedApplicationId = selectedSession ? String(selectedSession.application_id || "") : "";
-  const controlStatus = (
-    sessionControlEnvelope?.control
-    && String(sessionControlEnvelope.control.change_session_id || "") === selectedSessionId
-  ) ? sessionControlEnvelope.control : null;
+  const controlStatus = sessionControlEnvelope?.control || null;
   useEffect(() => {
     let active = true;
     if (!selectedApplicationId || !selectedSessionId) {
@@ -4641,12 +4658,22 @@ function ComposerDetailPanel({
     && typeof selectedSession.promote_eligibility === "object"
     ? selectedSession.promote_eligibility as Record<string, unknown>
     : null;
+  const rollbackEligibility = controlStatus?.rollback_eligibility
+    && typeof controlStatus.rollback_eligibility === "object"
+    ? controlStatus.rollback_eligibility as Record<string, unknown>
+    : null;
   const promoteEligibilityAllows =
     promoteEligibility && typeof promoteEligibility.can_promote === "boolean"
       ? Boolean(promoteEligibility.can_promote)
       : true;
   const promoteBlockedReason = String(promoteEligibility?.blocked_reason || "").trim();
   const promoteRecommendedAction = String(promoteEligibility?.recommended_action || "").trim();
+  const rollbackBlockedReason = String(rollbackEligibility?.blocked_reason || "").trim();
+  const rollbackRecommendedAction = String(rollbackEligibility?.recommended_action || "").trim();
+  const rollbackState = selectedSession?.metadata?.rollback
+    && typeof selectedSession.metadata.rollback === "object"
+    ? selectedSession.metadata.rollback as Record<string, unknown>
+    : null;
   const repoCommitCount = Number(selectedSession?.repo_commit_count || 0);
   const requiresCommitProvenance = Boolean(selectedSession?.requires_commit_provenance);
   const commitRequiredAndMissing = requiresCommitProvenance && repoCommitCount < 1;
@@ -4666,6 +4693,7 @@ function ComposerDetailPanel({
           : normalizedNextAction || baseExecutionNextAction;
   const latestExecutionResult = (() => {
     if (executionPhase === "promoted") {
+      if (rollbackState) return "Rollback completed — prior active target restored from promotion evidence.";
       if (promotionSucceeded) return "Changes promoted to the primary local runtime — ready to finalize.";
       return "Changes promoted — ready to finalize.";
     }
@@ -4722,6 +4750,10 @@ function ComposerDetailPanel({
     ? controlAllowsAction("promote")
       && (typeof controlStatus?.can_promote === "boolean" ? Boolean(controlStatus?.can_promote) : true)
     : canPromoteByPhase && promoteEligibilityAllows;
+  const canRollback = hasControlExecutionContract
+    ? controlAllowsAction("rollback")
+      && (typeof controlStatus?.can_rollback === "boolean" ? Boolean(controlStatus?.can_rollback) : false)
+    : false;
   const canFinalizeByPhase =
     canRunExecution
     && !isSessionFinalized
@@ -5795,6 +5827,45 @@ function ComposerDetailPanel({
                         Commit Changes
                       </button>
                     ) : null}
+                    {executionPhase === "promoted" && hasControlExecutionContract ? (
+                      <button
+                        type="button"
+                        className="ghost sm"
+                        disabled={!canRollback || busyAction === "rollback"}
+                        onClick={() => {
+                          setBusyAction("rollback");
+                          void withSessionGuard(async () => {
+                            const envelope = await runControlOperation("rollback");
+                            const operationResult = envelope.operation_result && typeof envelope.operation_result === "object"
+                              ? envelope.operation_result as Record<string, unknown>
+                              : {};
+                            const restoredTarget = operationResult.restored_target && typeof operationResult.restored_target === "object"
+                              ? operationResult.restored_target as Record<string, unknown>
+                              : null;
+                            const restoredUrl = String(
+                              restoredTarget?.public_app_url
+                              || restoredTarget?.runtime_base_url
+                              || ""
+                            ).trim();
+                            if (restoredUrl) {
+                              setMessage(
+                                <>
+                                  Rollback completed (
+                                  <a href={restoredUrl} target="_blank" rel="noreferrer">
+                                    {restoredUrl}
+                                  </a>
+                                  ).
+                                </>
+                              );
+                              return;
+                            }
+                            setMessage("Rollback completed.");
+                          });
+                        }}
+                      >
+                        Rollback
+                      </button>
+                    ) : null}
                     {executionPhase === "promoted" ? (
                       <button
                         type="button"
@@ -5834,6 +5905,11 @@ function ComposerDetailPanel({
                               )
                             : executionPhase === "committed"
                               ? "Blocked: promote committed changes before finalizing."
+                            : executionPhase === "promoted" && !canRollback && Boolean(rollbackBlockedReason)
+                                ? rollbackBlockedMessage(
+                                  rollbackBlockedReason,
+                                  rollbackRecommendedAction
+                                )
                               : executionPhase === "promoted" && commitRequiredAndMissing
                                 ? "Blocked: commit provenance is required before finalizing."
                           : isSessionFinalized
@@ -5885,6 +5961,12 @@ function ComposerDetailPanel({
                   <div>
                     <span className="field-label">Promoted URL</span>
                     <p>{promotionUrl}</p>
+                  </div>
+                ) : null}
+                {selectedSession?.evidence_ref && typeof selectedSession.evidence_ref === "object" ? (
+                  <div>
+                    <span className="field-label">Latest Evidence</span>
+                    <p>{String((selectedSession.evidence_ref as Record<string, unknown>).promotion_evidence_id || "").trim() || "Session-linked"}</p>
                   </div>
                 ) : null}
                 <div>

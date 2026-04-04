@@ -2925,6 +2925,7 @@ export type SolutionChangeSession = {
   preview?: Record<string, unknown>;
   validation?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  evidence_ref?: Record<string, unknown>;
   repo_commit_count?: number;
   requires_commit_provenance?: boolean;
   promote_eligibility?: {
@@ -2953,6 +2954,8 @@ export type SolutionChangeSessionControlStatus = {
   can_prepare_preview?: boolean;
   can_activate?: boolean;
   can_promote?: boolean;
+  can_rollback?: boolean;
+  rollback_eligibility?: Record<string, unknown>;
   blocked_reason?: string;
   recommended_action?: string;
   next_allowed_actions?: string[];
