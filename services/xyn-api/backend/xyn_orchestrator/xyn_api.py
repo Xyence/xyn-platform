@@ -31500,9 +31500,15 @@ def _build_solution_impacted_analysis(
     else:
         analysis_status = "no_confident_matches"
     analysis["analysis_status"] = analysis_status
-    analysis["placement_guidance"] = evaluate_architectural_placement(
+    placement_guidance = evaluate_architectural_placement(
         request_text=request_text,
         capability_domain="auto",
+    )
+    analysis["placement_guidance"] = placement_guidance
+    analysis["architectural_placement"] = (
+        placement_guidance.get("architectural_placement")
+        if isinstance(placement_guidance, dict) and isinstance(placement_guidance.get("architectural_placement"), dict)
+        else {}
     )
     analysis["analyzed_at"] = timezone.now().isoformat()
     return analysis

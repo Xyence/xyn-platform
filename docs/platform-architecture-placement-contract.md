@@ -45,3 +45,10 @@ The backend exposes placement helpers for planner/self-development workflows:
 
 Impacted-artifact analysis now includes `placement_guidance` so planners and
 operator contracts can consume this policy without UI-specific logic.
+For deployment/provider requests this guidance is structured to include:
+- `architectural_placement`
+- `provider_strategy`
+- `required_core_abstraction_change`
+- `provider_specific_implementation_target`
+- `forbidden_core_targets`
+- `recommended_next_step`

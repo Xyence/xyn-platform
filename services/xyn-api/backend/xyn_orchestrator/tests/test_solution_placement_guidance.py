@@ -34,3 +34,11 @@ class SolutionPlacementGuidanceTests(SimpleTestCase):
         self.assertEqual(guidance.get("policy_version"), "xyn.architecture_placement.v1")
         self.assertEqual(guidance.get("capability_domain"), "deployment")
         self.assertEqual(guidance.get("recommendation"), "provider_artifact_module")
+        self.assertEqual(guidance.get("provider_strategy"), "provider_module_required")
+        self.assertEqual(
+            guidance.get("provider_specific_implementation_target"),
+            "xyn_orchestrator.deployment_provider_contract",
+        )
+        placement = analysis.get("architectural_placement") if isinstance(analysis, dict) else {}
+        self.assertIsInstance(placement, dict)
+        self.assertEqual(placement.get("classification"), "provider_artifact_module")

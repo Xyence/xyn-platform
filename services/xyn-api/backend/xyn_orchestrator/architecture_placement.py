@@ -32,6 +32,25 @@ _PROVIDER_TOKENS = {
     "vmware",
 }
 
+_CORE_COUPLING_TOKENS = {
+    "core",
+    "orchestration",
+    "orchestrator",
+    "xyn_api",
+    "deployments",
+    "instance_drivers",
+    "directly",
+}
+
+_NEUTRAL_ABSTRACTION_TOKENS = {
+    "abstraction",
+    "interface",
+    "provider-neutral",
+    "provider_neutral",
+    "contract",
+    "lifecycle",
+}
+
 
 @dataclass(frozen=True)
 class PlacementDecision:
@@ -72,18 +91,48 @@ def evaluate_architectural_placement(*, request_text: str, capability_domain: st
 
     provider_specific = bool(tokens.intersection(_PROVIDER_TOKENS))
     rationale: List[str] = []
+    warnings: List[str] = []
     recommendation = "core_or_artifact_review"
     core_allowed = "provider_neutral_only"
     next_step = "confirm_capability_domain"
+    provider_strategy = "not_applicable"
+    required_core_abstraction_change = False
+    provider_specific_implementation_target = ""
+    forbidden_core_targets: List[str] = []
+    seam_summary = deployment_provider_contract_summary()
 
     if domain == "deployment":
-        if provider_specific:
+        has_core_coupling_signal = bool(tokens.intersection(_CORE_COUPLING_TOKENS))
+        has_neutral_abstraction_signal = bool(tokens.intersection(_NEUTRAL_ABSTRACTION_TOKENS))
+        if provider_specific and has_core_coupling_signal and not has_neutral_abstraction_signal:
+            recommendation = "forbidden_core_coupling"
+            provider_strategy = "provider_module_required"
+            next_step = "route_provider_logic_to_deployment_provider_seam"
+            provider_specific_implementation_target = "xyn_orchestrator.deployment_provider_contract"
+            forbidden_core_targets = [
+                "xyn_orchestrator/xyn_api.py",
+                "xyn_orchestrator/deployments.py",
+                "xyn_orchestrator/instance_drivers.py",
+            ]
+            warnings.append("provider_specific_core_coupling_detected")
+            rationale.append("Request combines provider-specific deployment intent with core-coupling language.")
+            rationale.append("Provider-specific deployment logic should be implemented at the deployment-provider seam.")
+        elif provider_specific:
             recommendation = "provider_artifact_module"
+            provider_strategy = "provider_module_required"
             next_step = "implement_provider_behavior_in_artifact_module"
+            provider_specific_implementation_target = "xyn_orchestrator.deployment_provider_contract"
+            forbidden_core_targets = [
+                "xyn_orchestrator/xyn_api.py",
+                "xyn_orchestrator/deployments.py",
+                "xyn_orchestrator/instance_drivers.py",
+            ]
             rationale.append("Request contains provider-specific deployment signals.")
             rationale.append("Core should keep orchestration and provider-neutral contracts only.")
         else:
             recommendation = "core_abstraction_orchestration"
+            provider_strategy = "neutral_core_abstraction"
+            required_core_abstraction_change = True
             next_step = "extend_provider_neutral_deployment_abstraction"
             rationale.append("Deployment request appears provider-neutral.")
             rationale.append("Core may host provider-neutral orchestration/state and artifact lifecycle coordination.")
@@ -100,7 +149,21 @@ def evaluate_architectural_placement(*, request_text: str, capability_domain: st
         core_allowed=core_allowed,
         rationale=rationale,
         next_step=next_step,
-    ).to_dict()
+    ).to_dict() | {
+        "architectural_placement": {
+            "classification": recommendation,
+            "capability_domain": domain,
+            "provider_specific": provider_specific,
+            "core_allowed": core_allowed,
+        },
+        "provider_strategy": provider_strategy,
+        "required_core_abstraction_change": required_core_abstraction_change,
+        "provider_specific_implementation_target": provider_specific_implementation_target,
+        "forbidden_core_targets": forbidden_core_targets,
+        "recommended_next_step": next_step,
+        "deployment_provider_seam": seam_summary,
+        "warnings": warnings,
+    }
 
 
 def deployment_provider_contract_summary() -> Dict[str, object]:
