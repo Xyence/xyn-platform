@@ -77,6 +77,7 @@ from xyn_orchestrator.models import (
     ReleaseTarget,
     ReleaseTargetDeploymentPreparationEvidence,
     ReleaseTargetExecutionPreparationHandoff,
+    ReleaseTargetExecutionPreparationEvidence,
     RoleBinding,
     Run,
     RunArtifact,
@@ -2118,6 +2119,190 @@ class PipelineSchemaTests(TestCase):
         self.assertEqual(len(handoffs), 2)
         self.assertEqual(str(handoffs[0].get("id") or ""), str(second.id))
         self.assertEqual(str(handoffs[1].get("id") or ""), str(first.id))
+
+    def test_execution_preparation_consume_prepares_package_from_ready_handoff(self):
+        staff_user = get_user_model().objects.create_user(
+            username="staff-consume-ready",
+            email="staff-consume-ready@example.com",
+            password="test-pass-123",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(staff_user)
+        blueprint = Blueprint.objects.create(name="real-estate-deal-finder", namespace="solutions")
+        target = ReleaseTarget.objects.create(blueprint=blueprint, name="deal-finder-sibling", fqdn="deal.xyence.io", config_json={})
+        prep = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            planning_mode="non_destructive",
+            operation="sibling_runtime_deployment_plan",
+            provider_key="aws_ssm_route53",
+            provider_module_contract_ref="backend/registry/modules/deploy-aws-ec2-sibling.json",
+            execution_ready_in_principle=True,
+            mutation_performed=False,
+            created_by=staff_user,
+            staged_execution_intent_json={"schema_version": "xyn.deployment_staged_intent.v1"},
+            plan_snapshot_json={"schema_version": "xyn.deployment_plan.v1"},
+        )
+        handoff = ReleaseTargetExecutionPreparationHandoff.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            source_preparation_evidence=prep,
+            validation_status="ready",
+            blocked_reason="",
+            mutation_performed=False,
+            handoff_json={
+                "schema_version": "xyn.execution_preparation_handoff.v1",
+                "provider_key": "aws_ssm_route53",
+                "provider_module_contract_ref": "backend/registry/modules/deploy-aws-ec2-sibling.json",
+                "requested_config": {"instance_type": "t3.small", "hostname": "deal.xyence.io"},
+                "ready_steps": ["prepare.runtime_target", "prepare.dns_target", "prepare.execution_preflight"],
+                "blocked_steps": [],
+                "required_future_inputs": [],
+            },
+            created_by=staff_user,
+        )
+        response = self.client.post(
+            f"/xyn/api/release-targets/{target.id}/execution_preparation_consume",
+            data=json.dumps({"handoff_id": str(handoff.id), "approve_execution_preparation": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload.get("status"), "prepared")
+        ref = payload.get("execution_preparation_ref") if isinstance(payload.get("execution_preparation_ref"), dict) else {}
+        evidence_id = str(ref.get("execution_preparation_evidence_id") or "")
+        self.assertTrue(bool(evidence_id))
+        evidence = ReleaseTargetExecutionPreparationEvidence.objects.get(id=evidence_id)
+        self.assertEqual(str(evidence.status), "prepared")
+        self.assertFalse(evidence.mutation_performed)
+        prepared_payload = payload.get("prepared_payload") if isinstance(payload.get("prepared_payload"), dict) else {}
+        self.assertEqual(str(prepared_payload.get("schema_version") or ""), "xyn.execution_preparation_package.v1")
+        self.assertEqual(str(prepared_payload.get("provider_key") or ""), "aws_ssm_route53")
+        self.assertTrue(isinstance(payload.get("prepared_actions"), list))
+
+    def test_execution_preparation_consume_blocks_without_approval(self):
+        staff_user = get_user_model().objects.create_user(
+            username="staff-consume-blocked",
+            email="staff-consume-blocked@example.com",
+            password="test-pass-123",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(staff_user)
+        blueprint = Blueprint.objects.create(name="real-estate-deal-finder", namespace="solutions")
+        target = ReleaseTarget.objects.create(blueprint=blueprint, name="deal-finder-sibling", fqdn="deal.xyence.io", config_json={})
+        prep = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            planning_mode="non_destructive",
+            operation="sibling_runtime_deployment_plan",
+            provider_key="aws_ssm_route53",
+            execution_ready_in_principle=True,
+            mutation_performed=False,
+            created_by=staff_user,
+            staged_execution_intent_json={"schema_version": "xyn.deployment_staged_intent.v1"},
+            plan_snapshot_json={"schema_version": "xyn.deployment_plan.v1"},
+        )
+        handoff = ReleaseTargetExecutionPreparationHandoff.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            source_preparation_evidence=prep,
+            validation_status="ready",
+            blocked_reason="",
+            mutation_performed=False,
+            handoff_json={
+                "schema_version": "xyn.execution_preparation_handoff.v1",
+                "provider_key": "aws_ssm_route53",
+                "ready_steps": ["prepare.runtime_target"],
+                "blocked_steps": [],
+                "required_future_inputs": [],
+            },
+            created_by=staff_user,
+        )
+        response = self.client.post(
+            f"/xyn/api/release-targets/{target.id}/execution_preparation_consume",
+            data=json.dumps({"handoff_id": str(handoff.id), "approve_execution_preparation": False}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content.decode("utf-8"))
+        self.assertEqual(payload.get("status"), "blocked")
+        self.assertEqual(str(payload.get("blocked_reason") or ""), "approval_required")
+        ref = payload.get("execution_preparation_ref") if isinstance(payload.get("execution_preparation_ref"), dict) else {}
+        evidence_id = str(ref.get("execution_preparation_evidence_id") or "")
+        self.assertTrue(bool(evidence_id))
+        evidence = ReleaseTargetExecutionPreparationEvidence.objects.get(id=evidence_id)
+        self.assertEqual(str(evidence.status), "blocked")
+        self.assertFalse(evidence.mutation_performed)
+
+    def test_execution_preparation_consume_get_returns_history(self):
+        staff_user = get_user_model().objects.create_user(
+            username="staff-consume-history",
+            email="staff-consume-history@example.com",
+            password="test-pass-123",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(staff_user)
+        blueprint = Blueprint.objects.create(name="real-estate-deal-finder", namespace="solutions")
+        target = ReleaseTarget.objects.create(blueprint=blueprint, name="deal-finder-sibling", fqdn="deal.xyence.io", config_json={})
+        prep = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            planning_mode="non_destructive",
+            operation="sibling_runtime_deployment_plan",
+            provider_key="aws_ssm_route53",
+            execution_ready_in_principle=True,
+            mutation_performed=False,
+            created_by=staff_user,
+            staged_execution_intent_json={"schema_version": "xyn.deployment_staged_intent.v1"},
+            plan_snapshot_json={"schema_version": "xyn.deployment_plan.v1"},
+        )
+        handoff = ReleaseTargetExecutionPreparationHandoff.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            source_preparation_evidence=prep,
+            validation_status="ready",
+            blocked_reason="",
+            mutation_performed=False,
+            handoff_json={"schema_version": "xyn.execution_preparation_handoff.v1", "provider_key": "aws_ssm_route53"},
+            created_by=staff_user,
+        )
+        first = ReleaseTargetExecutionPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            source_handoff=handoff,
+            status="blocked",
+            blocked_reason="approval_required",
+            approval_granted=False,
+            mutation_performed=False,
+            prepared_actions_json=[],
+            prepared_payload_json={},
+            created_by=staff_user,
+        )
+        second = ReleaseTargetExecutionPreparationEvidence.objects.create(
+            release_target=target,
+            blueprint=blueprint,
+            source_handoff=handoff,
+            status="prepared",
+            blocked_reason="",
+            approval_granted=True,
+            mutation_performed=False,
+            prepared_actions_json=[{"action_id": "prepare.runtime_target"}],
+            prepared_payload_json={"schema_version": "xyn.execution_preparation_package.v1"},
+            created_by=staff_user,
+        )
+        self.assertNotEqual(str(first.id), str(second.id))
+        response = self.client.get(f"/xyn/api/release-targets/{target.id}/execution_preparation_consume")
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content.decode("utf-8"))
+        latest_ref = payload.get("latest_execution_preparation_ref") if isinstance(payload.get("latest_execution_preparation_ref"), dict) else {}
+        self.assertEqual(str(latest_ref.get("execution_preparation_evidence_id") or ""), str(second.id))
+        items = payload.get("execution_preparation_evidence") if isinstance(payload.get("execution_preparation_evidence"), list) else []
+        self.assertEqual(len(items), 2)
+        self.assertEqual(str(items[0].get("id") or ""), str(second.id))
+        self.assertEqual(str(items[1].get("id") or ""), str(first.id))
 
     def test_deploy_lock_blocks_concurrent_runs(self):
         os.environ["XYENCE_INTERNAL_TOKEN"] = "test-token"

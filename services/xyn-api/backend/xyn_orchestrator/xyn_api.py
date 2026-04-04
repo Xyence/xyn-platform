@@ -114,6 +114,7 @@ from .models import (
     ReleaseTarget,
     ReleaseTargetDeploymentPreparationEvidence,
     ReleaseTargetExecutionPreparationHandoff,
+    ReleaseTargetExecutionPreparationEvidence,
     IdentityProvider,
     AppOIDCClient,
     SecretStore,
@@ -388,6 +389,7 @@ from .deployment_provider_contract import (
     normalize_deployment_dns_provider_config,
     resolve_deployment_dns_deprovision_orchestration,
     resolve_deployment_dns_profile,
+    resolve_deployment_target_contract,
     validate_deployment_dns_provider_config,
 )
 from .solution_bundles import (
@@ -28308,6 +28310,185 @@ def release_target_execution_preparation_handoff_action(request: HttpRequest, ta
         "mutation_performed": False,
     }
     status_code = 200 if str(record.validation_status) == "ready" else 409
+    return JsonResponse(response_payload, status=status_code)
+
+
+def _serialize_release_target_execution_preparation_evidence(
+    record: ReleaseTargetExecutionPreparationEvidence,
+) -> Dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "release_target_id": str(record.release_target_id),
+        "blueprint_id": str(record.blueprint_id),
+        "source_handoff_ref": {"execution_preparation_handoff_id": str(record.source_handoff_id)},
+        "status": str(record.status or ""),
+        "blocked_reason": str(record.blocked_reason or ""),
+        "approval_granted": bool(record.approval_granted),
+        "mutation_performed": bool(record.mutation_performed),
+        "prepared_actions": record.prepared_actions_json or [],
+        "prepared_payload": record.prepared_payload_json or {},
+        "warnings": record.warnings_json or [],
+        "created_at": record.created_at.isoformat() if record.created_at else "",
+    }
+
+
+def _build_execution_preparation_package_from_handoff(
+    *,
+    handoff: ReleaseTargetExecutionPreparationHandoff,
+) -> Dict[str, Any]:
+    payload = handoff.handoff_json if isinstance(handoff.handoff_json, dict) else {}
+    requested = payload.get("requested_config") if isinstance(payload.get("requested_config"), dict) else {}
+    ready_steps = [str(item).strip() for item in (payload.get("ready_steps") or []) if str(item).strip()]
+    blocked_steps = [str(item).strip() for item in (payload.get("blocked_steps") or []) if str(item).strip()]
+    required_future_inputs = [str(item).strip() for item in (payload.get("required_future_inputs") or []) if str(item).strip()]
+    provider_key = str(payload.get("provider_key") or "").strip()
+    contract = resolve_deployment_target_contract(selected_provider_key=provider_key)
+    module_contract = contract.get("provider_module_contract") if isinstance(contract, dict) else {}
+    module_contract = module_contract if isinstance(module_contract, dict) else {}
+    capabilities_expected = [
+        str(item).strip()
+        for item in (module_contract.get("capabilities_expected") or [])
+        if str(item).strip()
+    ]
+    prepared_actions: List[Dict[str, Any]] = []
+    for step_id in ready_steps:
+        capability = ""
+        if step_id.startswith("prepare.runtime_target"):
+            capability = "runtime.sibling.ec2.preparation"
+        elif step_id.startswith("prepare.dns_target"):
+            capability = "dns.route53.records"
+        elif step_id.startswith("prepare.execution_preflight"):
+            capability = "runtime.compose.apply_remote"
+        prepared_actions.append(
+            {
+                "action_id": f"prepare.{step_id}",
+                "source_step_id": step_id,
+                "capability_hint": capability,
+                "execution_mode": "preparation_only",
+                "mutation_performed": False,
+            }
+        )
+    package = {
+        "schema_version": "xyn.execution_preparation_package.v1",
+        "operation": "execution_preparation_consume",
+        "release_target_id": str(handoff.release_target_id),
+        "provider_key": provider_key,
+        "provider_module_contract_ref": str(payload.get("provider_module_contract_ref") or "").strip(),
+        "requested_config": requested,
+        "module_capabilities_expected": capabilities_expected,
+        "ready_steps": ready_steps,
+        "blocked_steps": blocked_steps,
+        "required_future_inputs": required_future_inputs,
+        "prepared_actions": prepared_actions,
+        "non_destructive_note": "Prepared package only; no EC2, Route53, or remote runtime mutation performed.",
+        "source_handoff_ref": {"execution_preparation_handoff_id": str(handoff.id)},
+    }
+    return {"prepared_actions": prepared_actions, "prepared_payload": package}
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_preparation_consume_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    if request.method == "GET":
+        limit = 10
+        try:
+            if request.GET.get("limit"):
+                limit = max(1, min(100, int(str(request.GET.get("limit")))))
+        except ValueError:
+            limit = 10
+        records = list(
+            ReleaseTargetExecutionPreparationEvidence.objects.filter(release_target=target).order_by("-created_at")[:limit]
+        )
+        latest = records[0] if records else None
+        return JsonResponse(
+            {
+                "release_target_id": str(target.id),
+                "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+                "latest_execution_preparation_ref": {"execution_preparation_evidence_id": str(latest.id)} if latest else {},
+                "execution_preparation_evidence": [
+                    _serialize_release_target_execution_preparation_evidence(item) for item in records
+                ],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    payload = _parse_json(request)
+    handoff_id = str(payload.get("handoff_id") or "").strip() if isinstance(payload, dict) else ""
+    approval_granted = bool((payload or {}).get("approve_execution_preparation")) if isinstance(payload, dict) else False
+    if handoff_id:
+        handoff = (
+            ReleaseTargetExecutionPreparationHandoff.objects.filter(id=handoff_id, release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    else:
+        handoff = (
+            ReleaseTargetExecutionPreparationHandoff.objects.filter(release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    if handoff is None:
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "release_target_id": str(target.id),
+                "blocked_reason": "missing_execution_preparation_handoff",
+                "message": "Generate an execution-preparation handoff before consuming execution-preparation.",
+                "mutation_performed": False,
+            },
+            status=409,
+        )
+    status = "prepared"
+    blocked_reason = ""
+    warnings: List[str] = []
+    prepared_actions: List[Dict[str, Any]] = []
+    prepared_payload: Dict[str, Any] = {}
+    if not approval_granted:
+        status = "blocked"
+        blocked_reason = "approval_required"
+    elif str(handoff.validation_status or "").strip().lower() != "ready":
+        status = "blocked"
+        blocked_reason = "handoff_not_ready"
+        warnings.append(f"Handoff status is {handoff.validation_status}.")
+    elif str((handoff.handoff_json or {}).get("schema_version") or "").strip() != "xyn.execution_preparation_handoff.v1":
+        status = "invalid"
+        blocked_reason = "invalid_handoff_schema"
+    else:
+        package = _build_execution_preparation_package_from_handoff(handoff=handoff)
+        prepared_actions = package.get("prepared_actions") if isinstance(package.get("prepared_actions"), list) else []
+        prepared_payload = package.get("prepared_payload") if isinstance(package.get("prepared_payload"), dict) else {}
+        warnings.extend([str(item) for item in ((handoff.handoff_json or {}).get("warnings") or []) if str(item).strip()])
+    record = ReleaseTargetExecutionPreparationEvidence.objects.create(
+        release_target=target,
+        blueprint=target.blueprint,
+        source_handoff=handoff,
+        status=status,
+        blocked_reason=blocked_reason,
+        approval_granted=bool(approval_granted),
+        mutation_performed=False,
+        prepared_actions_json=prepared_actions,
+        prepared_payload_json=prepared_payload,
+        warnings_json=warnings,
+        created_by=request.user,
+    )
+    response_payload = {
+        "status": "prepared" if status == "prepared" else "blocked",
+        "release_target_id": str(target.id),
+        "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+        "execution_preparation_ref": {"execution_preparation_evidence_id": str(record.id)},
+        "source_handoff_ref": {"execution_preparation_handoff_id": str(handoff.id)},
+        "validation_status": str(status),
+        "blocked_reason": str(blocked_reason),
+        "approval_granted": bool(approval_granted),
+        "prepared_actions": prepared_actions,
+        "prepared_payload": prepared_payload,
+        "warnings": warnings,
+        "mutation_performed": False,
+    }
+    status_code = 200 if status == "prepared" else 409
     return JsonResponse(response_payload, status=status_code)
 
 
