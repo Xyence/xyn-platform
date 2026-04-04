@@ -52,3 +52,4 @@ For deployment/provider requests this guidance is structured to include:
 - `provider_specific_implementation_target`
 - `forbidden_core_targets`
 - `recommended_next_step`
+- `resolved_provider` (seam-backed provider selection summary)

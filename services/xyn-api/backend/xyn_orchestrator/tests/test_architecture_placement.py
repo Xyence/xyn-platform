@@ -4,6 +4,11 @@ from xyn_orchestrator.architecture_placement import (
     deployment_provider_contract_summary,
     evaluate_architectural_placement,
 )
+from xyn_orchestrator.deployment_provider_contract import (
+    resolve_deployment_provider_contract,
+    resolve_deployment_provider_for_request,
+    resolve_deployment_provider_implementation,
+)
 
 
 class ArchitecturePlacementContractTests(SimpleTestCase):
@@ -23,6 +28,9 @@ class ArchitecturePlacementContractTests(SimpleTestCase):
             "xyn_orchestrator.deployment_provider_contract",
         )
         self.assertTrue(bool(decision.get("forbidden_core_targets")))
+        resolved_provider = decision.get("resolved_provider") if isinstance(decision.get("resolved_provider"), dict) else {}
+        self.assertTrue(bool(resolved_provider.get("resolved")))
+        self.assertEqual(resolved_provider.get("selected_provider_key"), "aws_ssm_route53")
 
     def test_provider_neutral_deployment_abstraction_request_allows_minimal_core_abstraction(self):
         decision = evaluate_architectural_placement(
@@ -54,3 +62,17 @@ class ArchitecturePlacementContractTests(SimpleTestCase):
         )
         self.assertIsNotNone(aws_contract)
         self.assertTrue(bool((aws_contract or {}).get("artifact_extension_expected")))
+
+    def test_provider_seam_resolution_exposes_registered_stub(self):
+        contract = resolve_deployment_provider_contract("aws_ssm_route53")
+        implementation = resolve_deployment_provider_implementation("aws_ssm_route53")
+        self.assertIsNotNone(contract)
+        self.assertIsNotNone(implementation)
+        resolved = resolve_deployment_provider_for_request(
+            "prepare deployment provider summary",
+            capability_domain="deployment",
+        )
+        self.assertTrue(bool(resolved.get("resolved")))
+        self.assertEqual(resolved.get("selected_provider_key"), "aws_ssm_route53")
+        implementation_payload = resolved.get("implementation") if isinstance(resolved.get("implementation"), dict) else {}
+        self.assertEqual(implementation_payload.get("resolution_mode"), "seam_stub")

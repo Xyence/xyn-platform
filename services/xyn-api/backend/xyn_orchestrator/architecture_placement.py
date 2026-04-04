@@ -4,7 +4,11 @@ import re
 from dataclasses import dataclass
 from typing import Dict, List
 
-from .deployment_provider_contract import ensure_default_deployment_provider_contracts, list_deployment_provider_contracts
+from .deployment_provider_contract import (
+    ensure_default_deployment_provider_contracts,
+    list_deployment_provider_contracts,
+    resolve_deployment_provider_for_request,
+)
 
 
 PLACEMENT_POLICY_VERSION = "xyn.architecture_placement.v1"
@@ -100,6 +104,10 @@ def evaluate_architectural_placement(*, request_text: str, capability_domain: st
     provider_specific_implementation_target = ""
     forbidden_core_targets: List[str] = []
     seam_summary = deployment_provider_contract_summary()
+    resolved_provider = resolve_deployment_provider_for_request(
+        request_text=request_text,
+        capability_domain=domain if domain != "auto" else "deployment",
+    )
 
     if domain == "deployment":
         has_core_coupling_signal = bool(tokens.intersection(_CORE_COUPLING_TOKENS))
@@ -108,7 +116,10 @@ def evaluate_architectural_placement(*, request_text: str, capability_domain: st
             recommendation = "forbidden_core_coupling"
             provider_strategy = "provider_module_required"
             next_step = "route_provider_logic_to_deployment_provider_seam"
-            provider_specific_implementation_target = "xyn_orchestrator.deployment_provider_contract"
+            provider_specific_implementation_target = str(
+                ((resolved_provider.get("implementation") if isinstance(resolved_provider, dict) else {}) or {}).get("implementation_target")
+                or "xyn_orchestrator.deployment_provider_contract"
+            )
             forbidden_core_targets = [
                 "xyn_orchestrator/xyn_api.py",
                 "xyn_orchestrator/deployments.py",
@@ -121,7 +132,10 @@ def evaluate_architectural_placement(*, request_text: str, capability_domain: st
             recommendation = "provider_artifact_module"
             provider_strategy = "provider_module_required"
             next_step = "implement_provider_behavior_in_artifact_module"
-            provider_specific_implementation_target = "xyn_orchestrator.deployment_provider_contract"
+            provider_specific_implementation_target = str(
+                ((resolved_provider.get("implementation") if isinstance(resolved_provider, dict) else {}) or {}).get("implementation_target")
+                or "xyn_orchestrator.deployment_provider_contract"
+            )
             forbidden_core_targets = [
                 "xyn_orchestrator/xyn_api.py",
                 "xyn_orchestrator/deployments.py",
@@ -162,6 +176,7 @@ def evaluate_architectural_placement(*, request_text: str, capability_domain: st
         "forbidden_core_targets": forbidden_core_targets,
         "recommended_next_step": next_step,
         "deployment_provider_seam": seam_summary,
+        "resolved_provider": resolved_provider,
         "warnings": warnings,
     }
 

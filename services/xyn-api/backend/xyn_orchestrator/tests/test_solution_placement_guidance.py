@@ -39,6 +39,9 @@ class SolutionPlacementGuidanceTests(SimpleTestCase):
             guidance.get("provider_specific_implementation_target"),
             "xyn_orchestrator.deployment_provider_contract",
         )
+        resolved_provider = guidance.get("resolved_provider") if isinstance(guidance.get("resolved_provider"), dict) else {}
+        self.assertTrue(bool(resolved_provider.get("resolved")))
+        self.assertEqual(resolved_provider.get("selected_provider_key"), "aws_ssm_route53")
         placement = analysis.get("architectural_placement") if isinstance(analysis, dict) else {}
         self.assertIsInstance(placement, dict)
         self.assertEqual(placement.get("classification"), "provider_artifact_module")
