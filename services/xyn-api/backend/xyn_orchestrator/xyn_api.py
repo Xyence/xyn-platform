@@ -1706,6 +1706,25 @@ def _validate_release_target_payload(payload: Dict[str, Any]) -> list[str]:
     fqdn = payload.get("fqdn") or ""
     if " " in fqdn or "." not in fqdn:
         errors.append("fqdn: must be a valid hostname")
+    topology = payload.get("topology") if isinstance(payload.get("topology"), dict) else {}
+    topology_kind = str((topology or {}).get("kind") or "").strip().lower()
+    if topology_kind and topology_kind not in {"sibling", "root"}:
+        errors.append("topology.kind: must be one of sibling, root")
+    provider_binding = payload.get("provider_binding") if isinstance(payload.get("provider_binding"), dict) else {}
+    if provider_binding and not (
+        str(provider_binding.get("provider_key") or "").strip()
+        or str(provider_binding.get("module_fqn") or "").strip()
+    ):
+        errors.append("provider_binding: provider_key or module_fqn is required when provider_binding is present")
+    artifact_binding = payload.get("artifact_binding") if isinstance(payload.get("artifact_binding"), dict) else {}
+    if artifact_binding and not (
+        str(artifact_binding.get("artifact_id") or "").strip()
+        or str(artifact_binding.get("artifact_slug") or "").strip()
+        or str(artifact_binding.get("artifact_family_id") or "").strip()
+    ):
+        errors.append(
+            "artifact_binding: artifact_id, artifact_slug, or artifact_family_id is required when artifact_binding is present"
+        )
     secret_refs = payload.get("secret_refs") or []
     name_re = re.compile(r"^[A-Z0-9_]+$")
     for idx, ref in enumerate(secret_refs):
@@ -1936,6 +1955,14 @@ def _normalize_release_target_payload(
     runtime = payload.get("runtime") or {}
     tls = payload.get("tls") or {}
     ingress = payload.get("ingress") or {}
+    topology = payload.get("topology") if isinstance(payload.get("topology"), dict) else {}
+    artifact_binding = payload.get("artifact_binding") if isinstance(payload.get("artifact_binding"), dict) else {}
+    provider_binding = payload.get("provider_binding") if isinstance(payload.get("provider_binding"), dict) else {}
+    topology_kind = (
+        str(topology.get("kind") or "").strip().lower()
+        or str(payload.get("topology_kind") or "").strip().lower()
+        or "sibling"
+    )
     normalized = {
         "schema_version": "release_target.v1",
         "id": target_id or payload.get("id") or str(uuid.uuid4()),
@@ -1955,13 +1982,14 @@ def _normalize_release_target_payload(
         "runtime": {
             "type": runtime.get("type") or "docker-compose",
             "transport": runtime.get("transport") or "ssm",
+            "mode": runtime.get("mode") or "compose_build",
             "remote_root": runtime.get("remote_root") or "",
             "compose_file_path": runtime.get("compose_file_path") or "",
         },
         "tls": {
             "mode": tls.get("mode") or "none",
-            "termination": tls.get("termination") or "",
-            "provider": tls.get("provider") or "",
+            "termination": tls.get("termination") or "host",
+            "provider": tls.get("provider") or "traefik",
             "acme_email": tls.get("acme_email") or "",
             "expose_http": bool(tls.get("expose_http", True)),
             "expose_https": bool(tls.get("expose_https", True)),
@@ -1973,6 +2001,21 @@ def _normalize_release_target_payload(
         },
         "env": payload.get("env") or {},
         "secret_refs": payload.get("secret_refs") or [],
+        "topology": {
+            "kind": topology_kind,
+            "lineage_origin_target_id": str(topology.get("lineage_origin_target_id") or "").strip(),
+        },
+        "artifact_binding": {
+            "artifact_id": str(artifact_binding.get("artifact_id") or payload.get("artifact_id") or "").strip(),
+            "artifact_slug": str(artifact_binding.get("artifact_slug") or payload.get("artifact_slug") or "").strip(),
+            "artifact_family_id": str(
+                artifact_binding.get("artifact_family_id") or payload.get("artifact_family_id") or ""
+            ).strip(),
+        },
+        "provider_binding": {
+            "provider_key": str(provider_binding.get("provider_key") or payload.get("provider_key") or "").strip(),
+            "module_fqn": str(provider_binding.get("module_fqn") or payload.get("module_fqn") or "").strip(),
+        },
         "dns_provider": payload.get("dns_provider") if isinstance(payload.get("dns_provider"), dict) else {},
         "auto_generated": bool(payload.get("auto_generated", False)),
         "editable": bool(payload.get("editable", True)),
@@ -2006,6 +2049,13 @@ def _serialize_release_target(target: ReleaseTarget) -> Dict[str, Any]:
             "ingress": (target.config_json or {}).get("ingress") or {},
             "env": target.env_json or {},
             "secret_refs": target.secret_refs_json or [],
+            "topology": (target.config_json or {}).get("topology") if isinstance(target.config_json, dict) else {},
+            "artifact_binding": (target.config_json or {}).get("artifact_binding")
+            if isinstance(target.config_json, dict)
+            else {},
+            "provider_binding": (target.config_json or {}).get("provider_binding")
+            if isinstance(target.config_json, dict)
+            else {},
             "auto_generated": bool(target.auto_generated),
             "editable": bool((target.config_json or {}).get("editable", True)),
             "created_at": target.created_at.isoformat() if target.created_at else "",
@@ -2014,6 +2064,37 @@ def _serialize_release_target(target: ReleaseTarget) -> Dict[str, Any]:
     payload.setdefault("auto_generated", bool(target.auto_generated))
     payload.setdefault("editable", bool((target.config_json or {}).get("editable", True)))
     return payload
+
+
+def _resolve_blueprint_for_release_target_payload(payload: Dict[str, Any]) -> Optional[Blueprint]:
+    blueprint_id = str(payload.get("blueprint_id") or "").strip()
+    if blueprint_id:
+        return Blueprint.objects.filter(id=blueprint_id).first()
+
+    artifact_id = str(payload.get("artifact_id") or "").strip()
+    artifact_slug = str(payload.get("artifact_slug") or "").strip()
+    artifact_binding = payload.get("artifact_binding") if isinstance(payload.get("artifact_binding"), dict) else {}
+    if not artifact_id:
+        artifact_id = str(artifact_binding.get("artifact_id") or "").strip()
+    if not artifact_slug:
+        artifact_slug = str(artifact_binding.get("artifact_slug") or "").strip()
+    if not artifact_id and not artifact_slug:
+        return None
+
+    artifact_qs = Artifact.objects.all()
+    artifact = None
+    if artifact_id:
+        artifact = artifact_qs.filter(id=artifact_id).first()
+    if artifact is None and artifact_slug:
+        artifact = artifact_qs.filter(slug=artifact_slug).first()
+    if artifact is None:
+        return None
+
+    if str(artifact.source_ref_type or "") == "Blueprint" and str(artifact.source_ref_id or "").strip():
+        return Blueprint.objects.filter(id=str(artifact.source_ref_id)).first()
+    if getattr(artifact, "source_blueprint_id", None):
+        return Blueprint.objects.filter(id=str(artifact.source_blueprint_id)).first()
+    return None
 
 
 def _deployment_provider_capabilities_for_module(module: Module) -> List[str]:
@@ -25974,10 +26055,15 @@ def release_targets_collection(request: HttpRequest) -> JsonResponse:
         return staff_error
     if request.method == "POST":
         payload = _parse_json(request)
-        blueprint_id = payload.get("blueprint_id")
-        if not blueprint_id:
-            return JsonResponse({"error": "blueprint_id is required"}, status=400)
-        blueprint = get_object_or_404(Blueprint, id=blueprint_id)
+        blueprint = _resolve_blueprint_for_release_target_payload(payload)
+        if blueprint is None:
+            return JsonResponse(
+                {
+                    "error": "release_target_blueprint_unresolved",
+                    "details": "Provide blueprint_id, or artifact_id/artifact_slug bound to a Blueprint.",
+                },
+                status=400,
+            )
         normalized = _normalize_release_target_payload(payload, str(blueprint.id))
         errors = _validate_release_target_payload(normalized)
         if errors:

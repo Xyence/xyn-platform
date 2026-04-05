@@ -136,6 +136,31 @@
         "additionalProperties": false
       }
     },
+    "topology": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["sibling", "root"] },
+        "lineage_origin_target_id": { "type": "string", "format": "uuid" }
+      },
+      "additionalProperties": false
+    },
+    "artifact_binding": {
+      "type": "object",
+      "properties": {
+        "artifact_id": { "type": "string", "format": "uuid" },
+        "artifact_slug": { "type": "string" },
+        "artifact_family_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "provider_binding": {
+      "type": "object",
+      "properties": {
+        "provider_key": { "type": "string" },
+        "module_fqn": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
     "auto_generated": { "type": "boolean", "default": false },
     "editable": { "type": "boolean", "default": true },
     "created_at": { "type": "string", "format": "date-time" },
