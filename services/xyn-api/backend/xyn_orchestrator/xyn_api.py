@@ -2016,6 +2016,72 @@ def _serialize_release_target(target: ReleaseTarget) -> Dict[str, Any]:
     return payload
 
 
+def _deployment_provider_capabilities_for_module(module: Module) -> List[str]:
+    spec = module.latest_module_spec_json or {}
+    spec_module = spec.get("module") if isinstance(spec.get("module"), dict) else {}
+    capabilities = module.capabilities_provided_json
+    if not isinstance(capabilities, list):
+        capabilities = spec_module.get("capabilitiesProvided") if isinstance(spec_module.get("capabilitiesProvided"), list) else []
+    normalized: List[str] = []
+    for value in capabilities or []:
+        capability = str(value or "").strip()
+        if capability:
+            normalized.append(capability)
+    return normalized
+
+
+def _deployment_provider_supported_operations(module: Module, capabilities: Sequence[str]) -> List[str]:
+    operations: List[str] = ["plan"]
+    if capabilities:
+        operations.append("prepare")
+    if any(cap.startswith(("deploy.", "runtime.", "dns.")) for cap in capabilities):
+        operations.append("execute")
+    return list(dict.fromkeys(operations))
+
+
+def _deployment_provider_supported_topologies(module: Module) -> List[str]:
+    spec = module.latest_module_spec_json or {}
+    metadata = spec.get("metadata") if isinstance(spec.get("metadata"), dict) else {}
+    labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+    raw = labels.get("topology")
+    if isinstance(raw, str):
+        value = raw.strip()
+        return [value] if value else []
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return []
+
+
+def _is_deployment_provider_module(module: Module) -> bool:
+    capabilities = _deployment_provider_capabilities_for_module(module)
+    if any(cap.startswith(("deploy.", "dns.", "runtime.")) for cap in capabilities):
+        return True
+    name = str(module.name or "").strip().lower()
+    return bool(name.startswith("deploy-") or name.startswith("dns-") or "runtime" in name)
+
+
+def _serialize_deployment_provider(module: Module) -> Dict[str, Any]:
+    spec = module.latest_module_spec_json or {}
+    description = str(spec.get("description") or "").strip()
+    capabilities = _deployment_provider_capabilities_for_module(module)
+    return {
+        "provider_key": str(module.name),
+        "module_fqn": str(module.fqn),
+        "module_version": str(module.current_version or ""),
+        "supported_operations": _deployment_provider_supported_operations(module, capabilities),
+        "known_capabilities": capabilities,
+        "supported_topologies": _deployment_provider_supported_topologies(module),
+        "description": description,
+        "status": str(module.status or ""),
+    }
+
+
+def _deployment_provider_rows() -> List[Dict[str, Any]]:
+    maybe_sync_modules_from_registry()
+    modules = Module.objects.all().order_by("namespace", "name")
+    return [_serialize_deployment_provider(module) for module in modules if _is_deployment_provider_module(module)]
+
+
 def _blueprint_identifier(blueprint: Blueprint) -> str:
     return f"{blueprint.namespace}.{blueprint.name}"
 
@@ -25989,6 +26055,40 @@ def release_target_detail(request: HttpRequest, target_id: str) -> JsonResponse:
     target.updated_by = request.user
     target.save()
     return JsonResponse({"id": str(target.id)})
+
+
+@csrf_exempt
+@login_required
+def deployment_providers_collection(request: HttpRequest) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    rows = _deployment_provider_rows()
+    return JsonResponse({"providers": rows, "count": len(rows)})
+
+
+@csrf_exempt
+@login_required
+def deployment_provider_detail(request: HttpRequest, provider_key: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    target_key = str(provider_key or "").strip().lower()
+    rows = _deployment_provider_rows()
+    row = next(
+        (
+            item
+            for item in rows
+            if str(item.get("provider_key") or "").strip().lower() == target_key
+            or str(item.get("module_fqn") or "").strip().lower() == target_key
+        ),
+        None,
+    )
+    if not row:
+        return JsonResponse({"error": "provider_not_found", "provider_key": provider_key}, status=404)
+    return JsonResponse({"provider": row})
 
 
 @login_required
