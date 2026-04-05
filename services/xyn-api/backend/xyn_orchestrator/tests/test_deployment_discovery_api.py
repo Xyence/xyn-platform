@@ -50,6 +50,40 @@ class DeploymentDiscoveryApiTests(TestCase):
         self.assertGreaterEqual(len(artifacts), 1)
         self.assertTrue(all(isinstance(row, dict) for row in artifacts))
 
+    def test_release_target_discovery_id_is_addressable_for_detail_and_plan(self):
+        blueprint = Blueprint.objects.create(name="Xyn Runtime", namespace="xyn")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="Xyn Sibling Target",
+            fqdn="deal.xyence.io",
+            environment="dev",
+            target_instance_ref="d8d51bd3-4b13-4c3b-9a2d-f1b723f68862",
+            runtime_json={"transport": "ssm", "type": "docker-compose"},
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            config_json={
+                "id": "11111111-2222-3333-4444-555555555555",
+                "name": "stale-config-id",
+                "runtime": {"transport": "ssm", "type": "docker-compose"},
+                "dns": {"provider": "route53"},
+                "topology": {"kind": "sibling"},
+            },
+        )
+
+        listing = self.client.get("/xyn/api/release-targets")
+        self.assertEqual(listing.status_code, 200, listing.content.decode())
+        rows = listing.json().get("release_targets") or []
+        self.assertEqual(len(rows), 1)
+        listed_id = rows[0].get("id")
+        self.assertEqual(listed_id, str(target.id))
+
+        detail = self.client.get(f"/xyn/api/release-targets/{listed_id}")
+        self.assertEqual(detail.status_code, 200, detail.content.decode())
+        self.assertEqual(detail.json().get("id"), str(target.id))
+
+        plan = self.client.get(f"/xyn/api/release-targets/{listed_id}/deployment_plan")
+        self.assertEqual(plan.status_code, 200, plan.content.decode())
+        self.assertEqual(plan.json().get("release_target_id"), str(target.id))
+
     @mock.patch("xyn_orchestrator.xyn_api.maybe_sync_modules_from_registry")
     def test_deployment_provider_discovery_empty_and_non_empty(self, sync_mock: mock.Mock):
         sync_mock.return_value = 0

@@ -2063,6 +2063,9 @@ def _serialize_release_target(target: ReleaseTarget) -> Dict[str, Any]:
         }
     payload.setdefault("auto_generated", bool(target.auto_generated))
     payload.setdefault("editable", bool((target.config_json or {}).get("editable", True)))
+    # Always emit canonical model identity for downstream read paths.
+    payload["id"] = str(target.id)
+    payload["blueprint_id"] = str(target.blueprint_id)
     return payload
 
 
@@ -26574,6 +26577,79 @@ def release_target_check_drift_action(request: HttpRequest, target_id: str) -> J
     internal_request.method = "GET"
     internal_request.META["HTTP_X_INTERNAL_TOKEN"] = token
     return internal_release_target_check_drift(internal_request, target_id)
+
+
+@login_required
+def release_target_deployment_plan(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    target_payload = _serialize_release_target(target)
+    runtime = target_payload.get("runtime") if isinstance(target_payload.get("runtime"), dict) else {}
+    dns = target_payload.get("dns") if isinstance(target_payload.get("dns"), dict) else {}
+    topology = target_payload.get("topology") if isinstance(target_payload.get("topology"), dict) else {}
+
+    target_instance_id = str(target_payload.get("target_instance_id") or "").strip()
+    fqdn = str(target_payload.get("fqdn") or "").strip()
+    runtime_transport = str(runtime.get("transport") or "").strip()
+    runtime_type = str(runtime.get("type") or "").strip()
+
+    missing_inputs: List[str] = []
+    if not target_instance_id:
+        missing_inputs.append("target_instance_id")
+    if not fqdn:
+        missing_inputs.append("fqdn")
+    if not runtime_transport:
+        missing_inputs.append("runtime.transport")
+    if not runtime_type:
+        missing_inputs.append("runtime.type")
+
+    execution_ready = not missing_inputs
+    plan_status = "ready" if execution_ready else "blocked"
+    steps = [
+        {
+            "id": "resolve_release_target",
+            "status": "ready",
+            "details": {"release_target_id": str(target.id), "blueprint_id": str(target.blueprint_id)},
+        },
+        {
+            "id": "validate_runtime_binding",
+            "status": "ready" if runtime_transport and runtime_type else "blocked",
+            "missing_inputs": [item for item in ["runtime.transport", "runtime.type"] if item in missing_inputs],
+            "details": {"runtime_transport": runtime_transport, "runtime_type": runtime_type},
+        },
+        {
+            "id": "validate_target_identity",
+            "status": "ready" if target_instance_id and fqdn else "blocked",
+            "missing_inputs": [item for item in ["target_instance_id", "fqdn"] if item in missing_inputs],
+            "details": {"target_instance_id": target_instance_id, "fqdn": fqdn},
+        },
+        {
+            "id": "plan_dns_exposure",
+            "status": "ready" if str(dns.get("provider") or "").strip() else "blocked",
+            "missing_inputs": [] if str(dns.get("provider") or "").strip() else ["dns.provider"],
+            "details": {"provider": str(dns.get("provider") or "").strip(), "zone_name": str(dns.get("zone_name") or "").strip()},
+        },
+    ]
+    return JsonResponse(
+        {
+            "release_target_id": str(target.id),
+            "status": plan_status,
+            "execution_ready_in_principle": execution_ready,
+            "missing_inputs": missing_inputs,
+            "target": target_payload,
+            "plan": {
+                "operation": "deployment_plan",
+                "mode": "non_destructive",
+                "provider_key": str((target_payload.get("provider_binding") or {}).get("provider_key") or ""),
+                "topology_kind": str(topology.get("kind") or ""),
+                "steps": steps,
+                "warnings": [] if execution_ready else ["deployment plan is blocked until required inputs are populated"],
+            },
+        }
+    )
 
 
 @csrf_exempt
