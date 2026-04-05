@@ -970,6 +970,7 @@ if ENABLE_BLUEPRINTS_LEGACY:
 
 urlpatterns += [
     path("xyn/api/blueprints", blueprints_collection),
+    path("xyn/api/blueprints/<uuid:blueprint_id>", blueprint_detail),
     path("xyn/api/blueprints/<uuid:blueprint_id>/submit", blueprint_submit),
     path("xyn/api/blueprints/<uuid:blueprint_id>/runs", blueprint_runs),
     path("xyn/api/blueprints/<uuid:blueprint_id>/draft-sessions", blueprint_draft_sessions),
