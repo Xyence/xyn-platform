@@ -3,7 +3,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from xyn_orchestrator.models import ArtifactType, Blueprint, Module, ReleaseTarget, Workspace
+from xyn_orchestrator.models import ArtifactType, Blueprint, Module, ProvisionedInstance, ReleaseTarget, Workspace
 
 
 class DeploymentDiscoveryApiTests(TestCase):
@@ -83,6 +83,363 @@ class DeploymentDiscoveryApiTests(TestCase):
         plan = self.client.get(f"/xyn/api/release-targets/{listed_id}/deployment_plan")
         self.assertEqual(plan.status_code, 200, plan.content.decode())
         self.assertEqual(plan.json().get("release_target_id"), str(target.id))
+
+    def test_release_target_deployment_preparation_evidence_create_and_read(self):
+        blueprint = Blueprint.objects.create(name="Xyn Runtime", namespace="xyn")
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="Xyn Sibling Target",
+            fqdn="deal.xyence.io",
+            environment="dev",
+            target_instance_ref="d8d51bd3-4b13-4c3b-9a2d-f1b723f68862",
+            runtime_json={"transport": "ssm", "type": "docker-compose"},
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            config_json={},
+        )
+        target_id = str(target.id)
+
+        create = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/deployment_preparation_evidence",
+            data={},
+            content_type="application/json",
+        )
+        self.assertEqual(create.status_code, 200, create.content.decode())
+        created = create.json().get("evidence") or {}
+        self.assertEqual(created.get("release_target_id"), target_id)
+        self.assertEqual(created.get("status"), "ready")
+        self.assertFalse(created.get("mutation_performed", True))
+
+        read = self.client.get(
+            f"/xyn/api/release-targets/{target_id}/deployment_preparation_evidence",
+            {"limit": 10},
+        )
+        self.assertEqual(read.status_code, 200, read.content.decode())
+        evidence_rows = read.json().get("evidence") or []
+        self.assertEqual(len(evidence_rows), 1)
+        self.assertEqual((evidence_rows[0] or {}).get("evidence_id"), created.get("evidence_id"))
+
+    def test_release_target_execution_handoff_consume_and_step_flow(self):
+        blueprint = Blueprint.objects.create(name="Xyn Runtime", namespace="xyn")
+        instance = ProvisionedInstance.objects.create(
+            name="xyn-sibling-1",
+            aws_region="us-east-1",
+            instance_id="i-1234567890abcdef0",
+            instance_type="t3.small",
+            ami_id="ami-test",
+            runtime_substrate="aws-ec2",
+            status="running",
+            created_by=self.staff,
+            updated_by=self.staff,
+        )
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="Xyn Sibling Target",
+            fqdn="deal.xyence.io",
+            environment="dev",
+            target_instance=instance,
+            target_instance_ref=str(instance.id),
+            runtime_json={
+                "transport": "ssm",
+                "type": "docker-compose",
+                "remote_root": "/var/lib/xyn/ems",
+                "compose_file_path": "docker-compose.yml",
+            },
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            config_json={
+                "id": "11111111-2222-3333-4444-555555555556",
+                "blueprint_id": str(blueprint.id),
+                "name": "Xyn Sibling Target",
+                "environment": "dev",
+                "target_instance_id": str(instance.id),
+                "fqdn": "deal.xyence.io",
+                "runtime": {
+                    "transport": "ssm",
+                    "type": "docker-compose",
+                    "remote_root": "/var/lib/xyn/ems",
+                    "compose_file_path": "docker-compose.yml",
+                },
+                "dns": {"provider": "route53", "zone_name": "xyence.io"},
+                "topology": {"kind": "sibling"},
+                "provider_binding": {
+                    "provider_key": "deploy-ssm-compose",
+                    "module_fqn": "core.deploy-ssm-compose",
+                },
+            },
+        )
+        Module.objects.create(
+            namespace="core",
+            name="deploy-ssm-compose",
+            fqn="core.deploy-ssm-compose",
+            type="lib",
+            current_version="0.1.0",
+            capabilities_provided_json=["deploy.ssm.run_shell", "runtime.compose.apply_remote"],
+            interfaces_json={"operations": {"ensure_remote_runtime": "desc"}},
+            latest_module_spec_json={
+                "description": "Remote docker-compose deployment via AWS SSM RunCommand.",
+                "metadata": {"labels": {"topology": "sibling"}},
+                "module": {"capabilitiesProvided": ["deploy.ssm.run_shell", "runtime.compose.apply_remote"]},
+            },
+        )
+        target_id = str(target.id)
+
+        create_prep = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/deployment_preparation_evidence",
+            data={},
+            content_type="application/json",
+        )
+        self.assertEqual(create_prep.status_code, 200, create_prep.content.decode())
+        prep_evidence_id = ((create_prep.json().get("evidence") or {}).get("evidence_id"))
+        self.assertTrue(prep_evidence_id)
+
+        create_handoff = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_preparation_handoff",
+            data={"evidence_id": prep_evidence_id},
+            content_type="application/json",
+        )
+        self.assertEqual(create_handoff.status_code, 200, create_handoff.content.decode())
+        handoff = create_handoff.json().get("handoff") or {}
+        self.assertEqual(handoff.get("status"), "ready")
+        handoff_id = handoff.get("handoff_id")
+        self.assertTrue(handoff_id)
+
+        read_handoffs = self.client.get(f"/xyn/api/release-targets/{target_id}/execution_preparation_handoff", {"limit": 10})
+        self.assertEqual(read_handoffs.status_code, 200, read_handoffs.content.decode())
+        rows = read_handoffs.json().get("handoffs") or []
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0] or {}).get("handoff_id"), handoff_id)
+
+        consume_blocked = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_preparation_consume",
+            data={"handoff_id": handoff_id},
+            content_type="application/json",
+        )
+        self.assertEqual(consume_blocked.status_code, 409, consume_blocked.content.decode())
+        consume_blocked_payload = consume_blocked.json()
+        self.assertEqual(consume_blocked_payload.get("blocked_reason"), "approval_required")
+        self.assertIn("approve_release_target_execution_preparation", consume_blocked_payload.get("next_allowed_actions") or [])
+
+        approve = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_preparation_approval",
+            data={"handoff_id": handoff_id, "approved_by": "test-suite"},
+            content_type="application/json",
+        )
+        self.assertEqual(approve.status_code, 200, approve.content.decode())
+        approval_payload = approve.json().get("approval") or {}
+        self.assertEqual(approval_payload.get("source_handoff_ref"), handoff_id)
+        self.assertTrue(approval_payload.get("approved"))
+
+        consume = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_preparation_consume",
+            data={"handoff_id": handoff_id},
+            content_type="application/json",
+        )
+        self.assertEqual(consume.status_code, 200, consume.content.decode())
+        consume_evidence = consume.json().get("evidence") or {}
+        self.assertEqual(consume_evidence.get("status"), "prepared")
+        self.assertEqual(consume_evidence.get("approval_source"), "recorded_approval")
+        prepared_actions = consume_evidence.get("prepared_execution_actions") or []
+        self.assertIn("runtime_marker_probe", prepared_actions)
+        self.assertIn("runtime.compose.apply_remote", prepared_actions)
+        readiness = (consume_evidence.get("execution_action_readiness") or {}).get("runtime.compose.apply_remote") or {}
+        self.assertTrue(readiness.get("can_apply_remote"))
+        self.assertEqual(readiness.get("blocked_reason"), "")
+        checked = readiness.get("checked_preconditions") or []
+        self.assertTrue(any((item or {}).get("name") == "provider_capability.runtime.compose.apply_remote" for item in checked))
+        prep_exec_id = consume_evidence.get("preparation_evidence_id")
+        self.assertTrue(prep_exec_id)
+
+        step_blocked = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_step",
+            data={
+                "preparation_evidence_id": prep_exec_id,
+                "action_key": "runtime_marker_probe",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(step_blocked.status_code, 409, step_blocked.content.decode())
+        blocked_payload = step_blocked.json()
+        self.assertEqual(blocked_payload.get("blocked_reason"), "approval_required")
+        self.assertIn("approve_release_target_execution_step", blocked_payload.get("next_allowed_actions") or [])
+
+        approve_step = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_step_approval",
+            data={
+                "preparation_evidence_id": prep_exec_id,
+                "action_key": "runtime_marker_probe",
+                "reason": "explicit_operator_approval",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(approve_step.status_code, 200, approve_step.content.decode())
+        approval_payload = approve_step.json().get("approval") or {}
+        self.assertEqual(approval_payload.get("action_key"), "runtime_marker_probe")
+        self.assertTrue(approval_payload.get("approved"))
+
+        step = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_step",
+            data={
+                "preparation_evidence_id": prep_exec_id,
+                "action_key": "runtime_marker_probe",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(step.status_code, 200, step.content.decode())
+        step_payload = step.json().get("step") or {}
+        self.assertEqual(step_payload.get("status"), "succeeded")
+        self.assertEqual(step_payload.get("action_key"), "runtime_marker_probe")
+        self.assertEqual(step_payload.get("approval_source"), "recorded_approval")
+        self.assertFalse(step_payload.get("mutation_performed", True))
+
+        approve_apply = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_step_approval",
+            data={
+                "preparation_evidence_id": prep_exec_id,
+                "action_key": "runtime.compose.apply_remote",
+                "reason": "explicit_operator_approval",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(approve_apply.status_code, 200, approve_apply.content.decode())
+        self.assertTrue((approve_apply.json().get("approval") or {}).get("approved"))
+
+        with mock.patch("xyn_orchestrator.xyn_api._run_ssm_commands") as run_ssm:
+            run_ssm.return_value = {
+                "ssm_command_id": "cmd-apply-1",
+                "invocation_status": "Success",
+                "response_code": 0,
+                "stdout": "apply complete",
+                "stderr": "",
+            }
+            run_apply = self.client.post(
+                f"/xyn/api/release-targets/{target_id}/execution_step",
+                data={
+                    "preparation_evidence_id": prep_exec_id,
+                    "action_key": "runtime.compose.apply_remote",
+                },
+                content_type="application/json",
+            )
+        self.assertEqual(run_apply.status_code, 200, run_apply.content.decode())
+        run_apply_step = run_apply.json().get("step") or {}
+        self.assertEqual(run_apply_step.get("status"), "succeeded")
+        self.assertEqual(run_apply_step.get("action_key"), "runtime.compose.apply_remote")
+        self.assertEqual(run_apply_step.get("approval_source"), "recorded_approval")
+        self.assertTrue(run_apply_step.get("mutation_performed"))
+        self.assertEqual(((run_apply_step.get("result") or {}).get("ssm_command_id")), "cmd-apply-1")
+
+        step_history = self.client.get(f"/xyn/api/release-targets/{target_id}/execution_step", {"limit": 10})
+        self.assertEqual(step_history.status_code, 200, step_history.content.decode())
+        step_rows = step_history.json().get("steps") or []
+        self.assertGreaterEqual(len(step_rows), 2)
+        action_keys = [str((item or {}).get("action_key") or "") for item in step_rows]
+        self.assertIn("runtime_marker_probe", action_keys)
+        self.assertIn("runtime.compose.apply_remote", action_keys)
+
+    def test_runtime_compose_apply_remote_step_blocks_on_preflight_probe_failure(self):
+        blueprint = Blueprint.objects.create(name="Xyn Runtime", namespace="xyn")
+        instance = ProvisionedInstance.objects.create(
+            name="xyn-sibling-preflight",
+            aws_region="us-east-1",
+            instance_id="i-preflight",
+            instance_type="t3.small",
+            ami_id="ami-test",
+            runtime_substrate="aws-ec2",
+            status="running",
+            created_by=self.staff,
+            updated_by=self.staff,
+        )
+        target = ReleaseTarget.objects.create(
+            blueprint=blueprint,
+            name="Xyn Sibling Target",
+            fqdn="deal.xyence.io",
+            environment="dev",
+            target_instance=instance,
+            target_instance_ref=str(instance.id),
+            runtime_json={
+                "transport": "ssm",
+                "type": "docker-compose",
+                "remote_root": "/var/lib/xyn/ems",
+                "compose_file_path": "docker-compose.yml",
+            },
+            dns_json={"provider": "route53", "zone_name": "xyence.io"},
+            config_json={
+                "id": "11111111-2222-3333-4444-555555555557",
+                "blueprint_id": str(blueprint.id),
+                "name": "Xyn Sibling Target",
+                "environment": "dev",
+                "target_instance_id": str(instance.id),
+                "fqdn": "deal.xyence.io",
+                "runtime": {
+                    "transport": "ssm",
+                    "type": "docker-compose",
+                    "remote_root": "/var/lib/xyn/ems",
+                    "compose_file_path": "docker-compose.yml",
+                },
+                "dns": {"provider": "route53", "zone_name": "xyence.io"},
+                "topology": {"kind": "sibling"},
+                "provider_binding": {
+                    "provider_key": "deploy-ssm-compose",
+                    "module_fqn": "core.deploy-ssm-compose",
+                },
+            },
+        )
+        Module.objects.create(
+            namespace="core",
+            name="deploy-ssm-compose",
+            fqn="core.deploy-ssm-compose",
+            type="lib",
+            current_version="0.1.0",
+            capabilities_provided_json=["deploy.ssm.run_shell", "runtime.compose.apply_remote"],
+            interfaces_json={"operations": {"ensure_remote_runtime": "desc"}},
+            latest_module_spec_json={
+                "description": "Remote docker-compose deployment via AWS SSM RunCommand.",
+                "metadata": {"labels": {"topology": "sibling"}},
+                "module": {"capabilitiesProvided": ["deploy.ssm.run_shell", "runtime.compose.apply_remote"]},
+            },
+        )
+        target_id = str(target.id)
+
+        prep = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/deployment_preparation_evidence",
+            data={},
+            content_type="application/json",
+        ).json()
+        evidence_id = ((prep.get("evidence") or {}).get("evidence_id"))
+        handoff = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_preparation_handoff",
+            data={"evidence_id": evidence_id},
+            content_type="application/json",
+        ).json()
+        handoff_id = ((handoff.get("handoff") or {}).get("handoff_id"))
+        self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_preparation_approval",
+            data={"handoff_id": handoff_id},
+            content_type="application/json",
+        )
+        consume = self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_preparation_consume",
+            data={"handoff_id": handoff_id},
+            content_type="application/json",
+        ).json()
+        prep_exec_id = ((consume.get("evidence") or {}).get("preparation_evidence_id"))
+        self.client.post(
+            f"/xyn/api/release-targets/{target_id}/execution_step_approval",
+            data={"preparation_evidence_id": prep_exec_id, "action_key": "runtime.compose.apply_remote"},
+            content_type="application/json",
+        )
+
+        with mock.patch("xyn_orchestrator.xyn_api._run_ssm_commands", side_effect=RuntimeError("ssm probe failed")):
+            run_apply = self.client.post(
+                f"/xyn/api/release-targets/{target_id}/execution_step",
+                data={"preparation_evidence_id": prep_exec_id, "action_key": "runtime.compose.apply_remote"},
+                content_type="application/json",
+            )
+        self.assertEqual(run_apply.status_code, 409, run_apply.content.decode())
+        step = run_apply.json().get("step") or {}
+        self.assertEqual(step.get("status"), "blocked")
+        self.assertFalse(step.get("mutation_performed", True))
+        result = step.get("result") or {}
+        self.assertEqual(result.get("blocked_reason"), "apply_remote_preflight_error")
+        self.assertTrue(((result.get("readiness") or {}).get("checked_preconditions") or []))
 
     @mock.patch("xyn_orchestrator.xyn_api.maybe_sync_modules_from_registry")
     def test_deployment_provider_discovery_empty_and_non_empty(self, sync_mock: mock.Mock):
