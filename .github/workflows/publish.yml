@@ -72,40 +72,71 @@ jobs:
         run: |
           SHORT_SHA="${GITHUB_SHA::7}"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "sha_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "sha_tag=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+          BRANCH_TAG=""
+          COMPAT_TAG=""
+          if [[ "${GITHUB_REF}" == "refs/heads/develop" ]]; then
+            BRANCH_TAG="develop"
+            # Temporary compatibility alias for existing consumers.
+            COMPAT_TAG="dev"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            BRANCH_TAG="main"
+          fi
+          echo "branch_tag=${BRANCH_TAG}" >> "$GITHUB_OUTPUT"
+          echo "compat_tag=${COMPAT_TAG}" >> "$GITHUB_OUTPUT"
+
+          UI_TAGS="${UI_IMAGE}:${SHORT_SHA}"
+          API_TAGS="${API_IMAGE}:${SHORT_SHA}"
+          NET_TAGS="${NET_INVENTORY_IMAGE}:${SHORT_SHA}"
+          if [[ -n "${BRANCH_TAG}" ]]; then
+            UI_TAGS="${UI_TAGS}"$'\n'"${UI_IMAGE}:${BRANCH_TAG}"
+            API_TAGS="${API_TAGS}"$'\n'"${API_IMAGE}:${BRANCH_TAG}"
+            NET_TAGS="${NET_TAGS}"$'\n'"${NET_INVENTORY_IMAGE}:${BRANCH_TAG}"
+          fi
+          if [[ -n "${COMPAT_TAG}" ]]; then
+            UI_TAGS="${UI_TAGS}"$'\n'"${UI_IMAGE}:${COMPAT_TAG}"
+            API_TAGS="${API_TAGS}"$'\n'"${API_IMAGE}:${COMPAT_TAG}"
+            NET_TAGS="${NET_TAGS}"$'\n'"${NET_INVENTORY_IMAGE}:${COMPAT_TAG}"
+          fi
+          {
+            echo "ui_tags<<EOF"
+            echo "${UI_TAGS}"
+            echo "EOF"
+            echo "api_tags<<EOF"
+            echo "${API_TAGS}"
+            echo "EOF"
+            echo "net_inventory_tags<<EOF"
+            echo "${NET_TAGS}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             echo "version_tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build and push xyn-ui (dev + sha)
+      - name: Build and push xyn-ui (sha + branch)
         uses: docker/build-push-action@v6
         with:
           context: apps/xyn-ui
           file: apps/xyn-ui/Dockerfile
           push: true
-          tags: |
-            ${{ env.UI_IMAGE }}:dev
-            ${{ env.UI_IMAGE }}:${{ steps.vars.outputs.sha_tag }}
+          tags: ${{ steps.vars.outputs.ui_tags }}
 
-      - name: Build and push xyn-api (dev + sha)
+      - name: Build and push xyn-api (sha + branch)
         uses: docker/build-push-action@v6
         with:
           context: services/xyn-api
           file: services/xyn-api/Dockerfile
           push: true
-          tags: |
-            ${{ env.API_IMAGE }}:dev
-            ${{ env.API_IMAGE }}:${{ steps.vars.outputs.sha_tag }}
+          tags: ${{ steps.vars.outputs.api_tags }}
 
-      - name: Build and push net-inventory-api (dev + sha)
+      - name: Build and push net-inventory-api (sha + branch)
         uses: docker/build-push-action@v6
         with:
           context: services/net-inventory-api
           file: services/net-inventory-api/Dockerfile
           push: true
-          tags: |
-            ${{ env.NET_INVENTORY_IMAGE }}:dev
-            ${{ env.NET_INVENTORY_IMAGE }}:${{ steps.vars.outputs.sha_tag }}
+          tags: ${{ steps.vars.outputs.net_inventory_tags }}
 
       - name: Build and push xyn-ui (version + stable)
         if: startsWith(github.ref, 'refs/tags/v')
