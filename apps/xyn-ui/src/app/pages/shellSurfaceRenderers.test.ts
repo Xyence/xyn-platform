@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveShellSurfaceRenderer } from "./shellSurfaceRenderers";
+import { isCompatibilityFallbackSurface, resolveShellSurfaceRenderer } from "./shellSurfaceRenderers";
 
 describe("resolveShellSurfaceRenderer", () => {
   it("resolves registered shell renderer keys from surface metadata", () => {
@@ -46,5 +46,20 @@ describe("resolveShellSurfaceRenderer", () => {
     expect(target?.kind).toBe("unknown_shell_renderer");
     expect((target as any).rendererKey).toBe("unsupported_key");
   });
-});
 
+  it("classifies unmapped generic dashboards as compatibility fallback surfaces", () => {
+    expect(
+      isCompatibilityFallbackSurface({
+        renderer: { type: "generic_dashboard" },
+      } as any)
+    ).toBe(true);
+  });
+
+  it("does not classify shell-renderer-backed workflows as compatibility fallback", () => {
+    expect(
+      isCompatibilityFallbackSurface({
+        renderer: { type: "generic_editor", payload: { shell_renderer_key: "campaign_map_workflow" } },
+      } as any)
+    ).toBe(false);
+  });
+});

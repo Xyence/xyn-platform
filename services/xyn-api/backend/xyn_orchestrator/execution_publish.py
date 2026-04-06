@@ -47,6 +47,7 @@ def _set_publish_metadata(
     push_status: Optional[str],
     message: str,
     repository_slug: Optional[str],
+    changed_files: Optional[List[str]] = None,
     published_at: Optional[str] = None,
     pushed_at: Optional[str] = None,
     last_error: Optional[str] = None,
@@ -60,6 +61,7 @@ def _set_publish_metadata(
         "push_status": push_status,
         "message": message,
         "repository_slug": repository_slug,
+        "changed_files": changed_files if isinstance(changed_files, list) else previous.get("changed_files") or [],
         "published_at": published_at or previous.get("published_at"),
         "pushed_at": pushed_at or previous.get("pushed_at"),
         "last_error": last_error,
@@ -152,12 +154,31 @@ def _has_workspace_changes(repo_dir: Path) -> bool:
     return bool(_git_output(["git", "status", "--porcelain"], cwd=repo_dir))
 
 
+def _changed_files_for_commit(repo_dir: Path, commit_sha: Optional[str]) -> List[str]:
+    token = str(commit_sha or "").strip()
+    if not token:
+        return []
+    output = _git_output(["git", "show", "--pretty=format:", "--name-only", token], cwd=repo_dir)
+    if not output:
+        return []
+    seen: set[str] = set()
+    files: List[str] = []
+    for line in output.splitlines():
+        path = str(line or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        files.append(path)
+    return files
+
+
 def publish_dev_task(task: DevTask, *, user, push: bool = False) -> Dict[str, Any]:
     repo_dir, repository, repo_slug = _workspace_repo(task)
     branch = task_publish_branch(task)
     metadata = _publish_metadata(task)
     has_changes = _has_workspace_changes(repo_dir)
     commit_sha = str(metadata.get("commit") or "").strip() or None
+    changed_files = metadata.get("changed_files") if isinstance(metadata.get("changed_files"), list) else []
     published_at: Optional[str] = None
 
     if has_changes:
@@ -169,6 +190,7 @@ def publish_dev_task(task: DevTask, *, user, push: bool = False) -> Dict[str, An
         else:
             _run_git(["git", "commit", "-m", task_publish_commit_message(task)], cwd=repo_dir)
             commit_sha = _git_output(["git", "rev-parse", "HEAD"], cwd=repo_dir) or None
+            changed_files = _changed_files_for_commit(repo_dir, commit_sha)
             published_at = timezone.now().isoformat()
 
     if push:
@@ -187,6 +209,7 @@ def publish_dev_task(task: DevTask, *, user, push: bool = False) -> Dict[str, An
                 push_status="failed",
                 message="Failed to push the task branch.",
                 repository_slug=repo_slug,
+                changed_files=changed_files,
                 published_at=published_at,
                 last_error=str(exc),
             )
@@ -202,6 +225,7 @@ def publish_dev_task(task: DevTask, *, user, push: bool = False) -> Dict[str, An
             push_status="pushed",
             message="Committed changes and pushed the task branch.",
             repository_slug=repo_slug,
+            changed_files=changed_files,
             published_at=published_at,
             pushed_at=pushed_at,
         )
@@ -218,6 +242,7 @@ def publish_dev_task(task: DevTask, *, user, push: bool = False) -> Dict[str, An
             push_status="not_pushed",
             message="Committed workspace changes to the task branch.",
             repository_slug=repo_slug,
+            changed_files=changed_files,
             published_at=published_at,
         )
     else:
@@ -229,6 +254,7 @@ def publish_dev_task(task: DevTask, *, user, push: bool = False) -> Dict[str, An
             push_status=str(metadata.get("push_status") or "").strip() or None,
             message="No changes to publish from the managed workspace.",
             repository_slug=repo_slug,
+            changed_files=changed_files,
             last_error=None,
         )
     task.updated_by = user
@@ -263,5 +289,6 @@ def serialize_dev_task_publish_state(task: DevTask, *, change_set: Optional[Dict
         "pushed_at": metadata.get("pushed_at"),
         "last_error": metadata.get("last_error"),
         "message": message,
+        "changed_files": metadata.get("changed_files") if isinstance(metadata.get("changed_files"), list) else [],
         "available_actions": available_actions,
     }

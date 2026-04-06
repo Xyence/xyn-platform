@@ -6,7 +6,7 @@ import { useNotifications } from "../state/notificationsStore";
 
 const AI_ROUTING_UPDATED_EVENT = "xyn:ai-routing-updated";
 
-type RoutingPurpose = "default" | "planning" | "coding";
+type RoutingPurpose = "default" | "planning" | "coding" | "palette";
 
 const PURPOSE_ROWS: Array<{ purpose: RoutingPurpose; label: string; helper: string }> = [
   {
@@ -23,6 +23,11 @@ const PURPOSE_ROWS: Array<{ purpose: RoutingPurpose; label: string; helper: stri
     purpose: "coding",
     label: "Coding",
     helper: "Used for coding flows. Leave unset to inherit the default agent.",
+  },
+  {
+    purpose: "palette",
+    label: "Palette",
+    helper: "Used for palette/assistant command interpretation. Leave unset to inherit the default agent.",
   },
 ];
 
@@ -96,6 +101,7 @@ export default function AIAgentRoutingPage() {
       default: [...agents],
       planning: agents.filter((agent) => (agent.purposes || []).includes("planning") || agent.is_default),
       coding: agents.filter((agent) => (agent.purposes || []).includes("coding") || agent.is_default),
+      palette: agents.filter((agent) => (agent.purposes || []).includes("palette") || agent.is_default),
     };
     return byPurpose;
   }, [agents]);
@@ -109,13 +115,20 @@ export default function AIAgentRoutingPage() {
   };
 
   const applyUpdate = async (purpose: RoutingPurpose, value: string | null) => {
-    const payload: { default_agent_id?: string; planning_agent_id?: string | null; coding_agent_id?: string | null } = {};
+    const payload: {
+      default_agent_id?: string;
+      planning_agent_id?: string | null;
+      coding_agent_id?: string | null;
+      palette_agent_id?: string | null;
+    } = {};
     if (purpose === "default") {
       payload.default_agent_id = String(value || "").trim();
     } else if (purpose === "planning") {
       payload.planning_agent_id = value;
-    } else {
+    } else if (purpose === "coding") {
       payload.coding_agent_id = value;
+    } else {
+      payload.palette_agent_id = value;
     }
 
     try {

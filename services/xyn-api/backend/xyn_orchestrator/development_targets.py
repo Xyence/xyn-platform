@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
 
 from .managed_repositories import ManagedRepositoryError, resolve_managed_repository
-from .models import Application, ApplicationPlan, DevTask, Goal, ManagedRepository
+from .models import Application, ApplicationPlan, Artifact, DevTask, Goal, ManagedRepository
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,7 @@ class DevelopmentTargetResolution:
     repository: Optional[ManagedRepository]
     repository_slug: Optional[str]
     branch: Optional[str]
+    allowed_paths: tuple[str, ...]
     source_kind: str
     application_id: Optional[str]
     application_plan_id: Optional[str]
@@ -70,6 +71,152 @@ def _work_item_repo_candidates(work_item: Optional[Dict[str, Any]]) -> list[tupl
     return candidates
 
 
+def _artifact_ids_from_work_item(work_item: Optional[Dict[str, Any]]) -> set[str]:
+    if not isinstance(work_item, dict):
+        return set()
+    candidate_ids: set[str] = set()
+    for key in ("artifact_id",):
+        token = str(work_item.get(key) or "").strip()
+        if token:
+            candidate_ids.add(token)
+    for key in ("artifact_ids", "selected_artifact_ids", "related_artifact_ids"):
+        values = work_item.get(key)
+        if isinstance(values, list):
+            for value in values:
+                token = str(value or "").strip()
+                if token:
+                    candidate_ids.add(token)
+    artifact_payload = work_item.get("artifact")
+    if isinstance(artifact_payload, dict):
+        token = str(artifact_payload.get("id") or "").strip()
+        if token:
+            candidate_ids.add(token)
+    per_artifact_work = work_item.get("per_artifact_work")
+    if isinstance(per_artifact_work, list):
+        for row in per_artifact_work:
+            if not isinstance(row, dict):
+                continue
+            token = str(row.get("artifact_id") or "").strip()
+            if token:
+                candidate_ids.add(token)
+    return candidate_ids
+
+
+def _artifacts_from_context(
+    *,
+    application: Optional[Application],
+    task: Optional[DevTask],
+    work_item: Optional[Dict[str, Any]],
+) -> list[Artifact]:
+    candidate_ids = _artifact_ids_from_work_item(work_item)
+    if task is not None and str(task.source_entity_type or "").strip().lower() == "artifact":
+        token = str(task.source_entity_id or "").strip()
+        if token:
+            candidate_ids.add(token)
+    if candidate_ids:
+        return list(Artifact.objects.filter(id__in=candidate_ids).order_by("created_at"))
+    if application is not None:
+        return [
+            membership.artifact
+            for membership in application.artifact_memberships.select_related("artifact").all().order_by("sort_order", "created_at")
+            if membership.artifact is not None
+        ]
+    return []
+
+
+def _ownership_resolution_for_artifacts(
+    *,
+    artifacts: Iterable[Artifact],
+    application: Optional[Application],
+    application_plan: Optional[ApplicationPlan],
+    goal: Optional[Goal],
+    task: Optional[DevTask],
+) -> DevelopmentTargetResolution:
+    artifact_rows = [artifact for artifact in artifacts if artifact is not None]
+    if not artifact_rows:
+        return DevelopmentTargetResolution(
+            repository=None,
+            repository_slug=None,
+            branch=None,
+            allowed_paths=(),
+            source_kind="unresolved",
+            application_id=str(application.id) if application is not None else None,
+            application_plan_id=str(application_plan.id) if application_plan is not None else None,
+            goal_id=str(goal.id) if goal is not None else None,
+            unresolved_reason="artifact_context_missing",
+        )
+    repo_by_artifact: dict[str, str] = {}
+    unresolved = False
+    for artifact in artifact_rows:
+        repo_slug = str(getattr(artifact, "owner_repo_slug", "") or "").strip()
+        if not repo_slug:
+            unresolved = True
+            continue
+        repo_by_artifact[str(artifact.id)] = repo_slug
+    if unresolved or not repo_by_artifact:
+        return DevelopmentTargetResolution(
+            repository=None,
+            repository_slug=None,
+            branch=None,
+            allowed_paths=(),
+            source_kind="unresolved",
+            application_id=str(application.id) if application is not None else None,
+            application_plan_id=str(application_plan.id) if application_plan is not None else None,
+            goal_id=str(goal.id) if goal is not None else None,
+            unresolved_reason="artifact_owner_repo_missing",
+        )
+    repo_slugs = sorted(set(repo_by_artifact.values()))
+    if len(repo_slugs) > 1:
+        return DevelopmentTargetResolution(
+            repository=None,
+            repository_slug=None,
+            branch=None,
+            allowed_paths=(),
+            source_kind="unresolved",
+            application_id=str(application.id) if application is not None else None,
+            application_plan_id=str(application_plan.id) if application_plan is not None else None,
+            goal_id=str(goal.id) if goal is not None else None,
+            unresolved_reason="multiple_artifact_repositories",
+        )
+    repo_slug = repo_slugs[0]
+    repository = _resolve_registered_repository(repo_slug)
+    explicit_repo = str(getattr(task, "target_repo", "") or "").strip()
+    if explicit_repo and explicit_repo != repo_slug:
+        return DevelopmentTargetResolution(
+            repository=None,
+            repository_slug=None,
+            branch=None,
+            allowed_paths=(),
+            source_kind="unresolved",
+            application_id=str(application.id) if application is not None else None,
+            application_plan_id=str(application_plan.id) if application_plan is not None else None,
+            goal_id=str(goal.id) if goal is not None else None,
+            unresolved_reason="artifact_explicit_repo_mismatch",
+        )
+    allowed_paths: list[str] = []
+    seen_paths: set[str] = set()
+    for artifact in artifact_rows:
+        prefixes = artifact.owner_path_prefixes_json if isinstance(artifact.owner_path_prefixes_json, list) else []
+        for value in prefixes:
+            token = str(value or "").strip()
+            if not token or token in seen_paths:
+                continue
+            seen_paths.add(token)
+            allowed_paths.append(token)
+    branch = str(getattr(task, "target_branch", "") or "").strip() or (repository.default_branch if repository else None)
+    return DevelopmentTargetResolution(
+        repository=repository,
+        repository_slug=repo_slug,
+        branch=branch,
+        allowed_paths=tuple(allowed_paths),
+        source_kind="artifact_ownership",
+        application_id=str(application.id) if application is not None else None,
+        application_plan_id=str(application_plan.id) if application_plan is not None else None,
+        goal_id=str(goal.id) if goal is not None else None,
+        unresolved_reason=None,
+    )
+
+
 def resolve_development_target(
     *,
     application: Optional[Application] = None,
@@ -79,83 +226,18 @@ def resolve_development_target(
     work_item: Optional[Dict[str, Any]] = None,
 ) -> DevelopmentTargetResolution:
     if task is not None:
-        explicit_repo = str(task.target_repo or "").strip()
-        explicit_branch = str(task.target_branch or "").strip()
-        if explicit_repo:
-            repository = _resolve_registered_repository(explicit_repo)
-            return DevelopmentTargetResolution(
-                repository=repository,
-                repository_slug=repository.slug if repository else explicit_repo,
-                branch=explicit_branch or (repository.default_branch if repository else None),
-                source_kind="task_explicit",
-                application_id=str(getattr(_goal_application(_task_goal(task)) if _task_goal(task) else None, "id", "") or "") or None,
-                application_plan_id=None,
-                goal_id=str(getattr(_task_goal(task), "id", "") or "") or None,
-            )
         goal = goal or _task_goal(task)
 
     if goal is not None:
         application = application or _goal_application(goal)
 
-    if application is not None and application.target_repository_id:
-        repository = getattr(application, "target_repository", None) or ManagedRepository.objects.filter(id=application.target_repository_id).first()
-        if repository is not None:
-            return DevelopmentTargetResolution(
-                repository=repository,
-                repository_slug=repository.slug,
-                branch=repository.default_branch,
-                source_kind="application",
-                application_id=str(application.id),
-                application_plan_id=None,
-                goal_id=str(goal.id) if goal is not None else None,
-            )
-
-    if application_plan is not None and application_plan.target_repository_id:
-        repository = getattr(application_plan, "target_repository", None) or ManagedRepository.objects.filter(id=application_plan.target_repository_id).first()
-        if repository is not None:
-            return DevelopmentTargetResolution(
-                repository=repository,
-                repository_slug=repository.slug,
-                branch=repository.default_branch,
-                source_kind="application_plan",
-                application_id=None,
-                application_plan_id=str(application_plan.id),
-                goal_id=str(goal.id) if goal is not None else None,
-            )
-
-    candidates = _work_item_repo_candidates(work_item)
-    if len(candidates) == 1:
-        repo_name, branch, repository = candidates[0]
-        return DevelopmentTargetResolution(
-            repository=repository,
-            repository_slug=repository.slug if repository else repo_name,
-            branch=branch or (repository.default_branch if repository else None),
-            source_kind="work_item_repo_target",
-            application_id=str(application.id) if application is not None else None,
-            application_plan_id=str(application_plan.id) if application_plan is not None else None,
-            goal_id=str(goal.id) if goal is not None else None,
-        )
-    if len(candidates) > 1:
-        return DevelopmentTargetResolution(
-            repository=None,
-            repository_slug=None,
-            branch=None,
-            source_kind="unresolved",
-            application_id=str(application.id) if application is not None else None,
-            application_plan_id=str(application_plan.id) if application_plan is not None else None,
-            goal_id=str(goal.id) if goal is not None else None,
-            unresolved_reason="ambiguous_repo_targets",
-        )
-
-    return DevelopmentTargetResolution(
-        repository=None,
-        repository_slug=None,
-        branch=None,
-        source_kind="unresolved",
-        application_id=str(application.id) if application is not None else None,
-        application_plan_id=str(application_plan.id) if application_plan is not None else None,
-        goal_id=str(goal.id) if goal is not None else None,
-        unresolved_reason="target_missing",
+    artifacts = _artifacts_from_context(application=application, task=task, work_item=work_item)
+    return _ownership_resolution_for_artifacts(
+        artifacts=artifacts,
+        application=application,
+        application_plan=application_plan,
+        goal=goal,
+        task=task,
     )
 
 

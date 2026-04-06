@@ -1,6 +1,7 @@
 import type { ArtifactSurface } from "../../api/types";
 import type { NavGroup, NavItem } from "./nav.config";
 import { withWorkspaceInNavPath } from "../routing/workspaceRouting";
+import { isCompatibilityFallbackSurface } from "../pages/shellSurfaceRenderers";
 
 function mapNavPath(path: string, workspaceId: string, scope?: string): string {
   if (String(scope || "").trim().toLowerCase() === "global") return path;
@@ -36,6 +37,7 @@ export function withArtifactSurfaceNav(
   const appItems: Array<{ sortOrder: number; item: NavItem }> = [];
   (surfaceNavItems || [])
     .filter((surface) => String(surface.nav_visibility || "").toLowerCase() === "always")
+    .filter((surface) => !isCompatibilityFallbackSurface(surface))
     .forEach((surface) => {
       const route = String(surface.route || "").trim();
       if (!route || pathSeen.has(route)) return;
@@ -65,4 +67,3 @@ export function withArtifactSurfaceNav(
 
   return mapped;
 }
-

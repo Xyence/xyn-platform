@@ -26,7 +26,7 @@ from django.conf import settings
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.validators import validate_email
 from django.core.paginator import Paginator
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, connection, models, transaction
 from django.db.models import Count, Q
 from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -93,9 +93,12 @@ from .models import (
     Goal,
     Application,
     ApplicationArtifactMembership,
+    SolutionRuntimeBinding,
     SolutionChangeSession,
     SolutionPlanningTurn,
     SolutionPlanningCheckpoint,
+    SolutionChangeSessionRepoCommit,
+    SolutionChangeSessionPromotionEvidence,
     ApplicationPlan,
     Environment,
     EnvironmentAppState,
@@ -109,6 +112,10 @@ from .models import (
     RunArtifact,
     RunCommandExecution,
     ReleaseTarget,
+    ReleaseTargetDeploymentPreparationEvidence,
+    ReleaseTargetExecutionPreparationHandoff,
+    ReleaseTargetExecutionPreparationEvidence,
+    ReleaseTargetExecutionStepEvidence,
     IdentityProvider,
     AppOIDCClient,
     SecretStore,
@@ -218,6 +225,7 @@ from .orchestration.schedule_policy import supported_schedule_kinds, unsupported
 from .orchestration.interfaces import ExecutionScope, RunCreateRequest, RunTrigger
 from .orchestration.lifecycle import OrchestrationLifecycleService
 from .jurisdiction import require_canonical_jurisdiction
+from .bootstrap_guard import DEFAULT_BOOTSTRAP_REQUIRED_TABLES, schema_bootstrap_readiness
 from .xco import (
     THREAD_PRIORITY_ORDER,
     active_run_count,
@@ -247,8 +255,9 @@ from .application_factories import (
     get_application_factory,
     list_application_factories,
 )
-from .development_targets import repo_target_payload_for_resolution, resolve_development_target
+from .development_targets import DevelopmentTargetResolution, repo_target_payload_for_resolution, resolve_development_target
 from .execution_briefs import (
+    build_execution_brief,
     ensure_execution_brief_ready,
     normalize_execution_brief_review_state,
     regenerate_execution_brief,
@@ -332,7 +341,12 @@ from .deployments import (
     maybe_trigger_rollback,
     load_release_plan_json,
 )
-from .worker_tasks import _download_artifact_json
+from .worker_tasks import (
+    _download_artifact_json,
+    _ssm_fetch_runtime_marker,
+    _ssm_stage_execution_manifest,
+    _ssm_prepare_runtime_root_marker,
+)
 from .oidc import (
     app_client_to_payload,
     generate_pkce_pair,
@@ -361,6 +375,37 @@ from .dns_providers import Route53DnsProvider
 from .instance_drivers import (
     SshDockerComposeInstanceDriver,
     compute_base_urls,
+)
+from .artifact_activation import (
+    ArtifactActivationError,
+    build_activation_payload,
+    find_completed_activation,
+    find_inflight_activation,
+    runtime_record_matches_revision_anchor,
+    submit_artifact_activation,
+)
+from .architecture_placement import (
+    deployment_provider_contract_summary,
+    evaluate_architectural_placement,
+)
+from .deployment_provider_contract import (
+    build_non_destructive_deployment_plan,
+    derive_staged_execution_intent_from_deployment_plan,
+    build_deployment_release_target_preparation_metadata,
+    derive_deployment_dns_deprovision_preparation_actions,
+    evaluate_deployment_execution_preflight_readiness,
+    evaluate_deployment_dns_deprovision_readiness,
+    normalize_deployment_dns_provider_config,
+    resolve_deployment_dns_deprovision_orchestration,
+    resolve_deployment_dns_profile,
+    resolve_deployment_target_contract,
+    validate_deployment_dns_provider_config,
+)
+from .solution_bundles import (
+    SolutionBundleError,
+    install_solution_bundle,
+    load_solution_bundle_from_source,
+    normalize_solution_bundle,
 )
 from .ai_runtime import (
     AiConfigError,
@@ -1743,6 +1788,18 @@ def _validate_release_target_payload(payload: Dict[str, Any]) -> list[str]:
             errors.append(
                 f"secret_refs[{idx}].ref: must start with ssm:/, ssm-arn:, secretsmanager:/, or secretsmanager-arn:"
             )
+    dns = payload.get("dns") if isinstance(payload.get("dns"), dict) else {}
+    requested_dns_provider = str(dns.get("provider") or "").strip().lower()
+    dns_provider_profile = resolve_deployment_dns_profile(requested_provider=requested_dns_provider)
+    selected_provider_key = str(dns_provider_profile.get("selected_provider_key") or "").strip().lower()
+    dns_provider_payload = payload.get("dns_provider") if isinstance(payload.get("dns_provider"), dict) else {}
+    errors.extend(
+        validate_deployment_dns_provider_config(
+            dns_provider=requested_dns_provider,
+            config=dns_provider_payload,
+            selected_provider_key=selected_provider_key,
+        )
+    )
     return errors
 
 
@@ -1957,6 +2014,23 @@ def _normalize_release_target_payload(
     runtime = payload.get("runtime") or {}
     tls = payload.get("tls") or {}
     ingress = payload.get("ingress") or {}
+    dns_provider_payload = payload.get("dns_provider") if isinstance(payload.get("dns_provider"), dict) else {}
+    requested_dns_provider = str((dns or {}).get("provider") or "").strip().lower()
+    dns_provider_profile = resolve_deployment_dns_profile(requested_provider=requested_dns_provider)
+    default_dns_provider = str(dns_provider_profile.get("default_dns_provider") or "route53").strip().lower() or "route53"
+    selected_provider_key = str(dns_provider_profile.get("selected_provider_key") or "").strip().lower()
+    normalized_dns_provider_payload = normalize_deployment_dns_provider_config(
+        dns_provider=requested_dns_provider or default_dns_provider,
+        config=dns_provider_payload,
+        selected_provider_key=selected_provider_key,
+    )
+    deployment_preparation = build_deployment_release_target_preparation_metadata(
+        dns_provider=requested_dns_provider or default_dns_provider,
+        dns_config=normalized_dns_provider_payload,
+        runtime_config=runtime,
+        tls_config=tls,
+        selected_provider_key=selected_provider_key,
+    )
     topology = payload.get("topology") if isinstance(payload.get("topology"), dict) else {}
     artifact_binding = payload.get("artifact_binding") if isinstance(payload.get("artifact_binding"), dict) else {}
     provider_binding = payload.get("provider_binding") if isinstance(payload.get("provider_binding"), dict) else {}
@@ -1975,7 +2049,7 @@ def _normalize_release_target_payload(
         "instance_ref": payload.get("instance_ref") if isinstance(payload.get("instance_ref"), dict) else {},
         "fqdn": payload.get("fqdn") or "",
         "dns": {
-            "provider": dns.get("provider") or "route53",
+            "provider": dns.get("provider") or default_dns_provider,
             "zone_name": dns.get("zone_name") or "",
             "zone_id": dns.get("zone_id") or "",
             "record_type": dns.get("record_type") or "A",
@@ -2003,6 +2077,9 @@ def _normalize_release_target_payload(
         },
         "env": payload.get("env") or {},
         "secret_refs": payload.get("secret_refs") or [],
+        "dns_provider": normalized_dns_provider_payload,
+        "deployment_provider_profile": dns_provider_profile,
+        "deployment_preparation": deployment_preparation,
         "topology": {
             "kind": topology_kind,
             "lineage_origin_target_id": str(topology.get("lineage_origin_target_id") or "").strip(),
@@ -2018,7 +2095,6 @@ def _normalize_release_target_payload(
             "provider_key": str(provider_binding.get("provider_key") or payload.get("provider_key") or "").strip(),
             "module_fqn": str(provider_binding.get("module_fqn") or payload.get("module_fqn") or "").strip(),
         },
-        "dns_provider": payload.get("dns_provider") if isinstance(payload.get("dns_provider"), dict) else {},
         "auto_generated": bool(payload.get("auto_generated", False)),
         "editable": bool(payload.get("editable", True)),
         "created_at": payload.get("created_at") or timezone.now().isoformat(),
@@ -2225,11 +2301,31 @@ def _build_blueprint_deprovision_plan(
         zone_id = str((dns_cfg or {}).get("zone_id") or "").strip()
         zone_name = str((dns_cfg or {}).get("zone_name") or "").strip()
         dns_provider = str((dns_cfg or {}).get("provider") or "").strip().lower()
+        dns_provider_payload = target_payload.get("dns_provider") if isinstance(target_payload.get("dns_provider"), dict) else {}
+        dns_provider_profile = target_payload.get("deployment_provider_profile") if isinstance(target_payload.get("deployment_provider_profile"), dict) else {}
+        selected_provider_key = str(dns_provider_profile.get("selected_provider_key") or "").strip().lower()
         fqdn = str(target.fqdn or "").strip()
         ownership_proven = bool((target.config_json or {}).get("dns_record_snapshot")) or bool(
             (target.config_json or {}).get("xyn_dns_managed")
         )
         if delete_dns and fqdn:
+            dns_delete_readiness = evaluate_deployment_dns_deprovision_readiness(
+                dns_provider=dns_provider or "route53",
+                dns_config=dns_provider_payload,
+                selected_provider_key=selected_provider_key,
+            )
+            dns_delete_orchestration = resolve_deployment_dns_deprovision_orchestration(
+                dns_provider=dns_provider or "route53",
+                fqdn=fqdn,
+                release_target_id=target_id,
+                selected_provider_key=selected_provider_key,
+            )
+            dns_preparation_actions = derive_deployment_dns_deprovision_preparation_actions(
+                dns_provider=dns_provider or "route53",
+                fqdn=fqdn,
+                release_target_id=target_id,
+                selected_provider_key=selected_provider_key,
+            )
             dns_records.append(
                 {
                     "release_target_id": target_id,
@@ -2238,11 +2334,19 @@ def _build_blueprint_deprovision_plan(
                     "zone_id": zone_id,
                     "zone_name": zone_name,
                     "ownership_proven": ownership_proven,
+                    "deprovision_readiness": dns_delete_readiness,
+                    "deprovision_orchestration": dns_delete_orchestration,
+                    "preparation_actions": dns_preparation_actions,
                 }
             )
-            if dns_provider and dns_provider != "route53":
+            if not bool(dns_delete_readiness.get("can_delete_dns_record")):
                 can_execute = False
-                warnings.append(f"{fqdn}: DNS provider '{dns_provider}' is not supported for deprovision delete.")
+                blocked_reason = str(dns_delete_readiness.get("blocked_reason") or "").strip()
+                warnings.append(f"{fqdn}: {blocked_reason or 'DNS provider is not supported for deprovision delete.'}")
+            if not bool(dns_delete_orchestration.get("can_orchestrate")):
+                can_execute = False
+                blocked_reason = str(dns_delete_orchestration.get("blocked_reason") or "").strip()
+                warnings.append(f"{fqdn}: {blocked_reason or 'DNS provider has no deprovision orchestration mapping.'}")
             if not ownership_proven and not force_mode:
                 can_execute = False
                 warnings.append(
@@ -2320,18 +2424,25 @@ def _build_blueprint_deprovision_plan(
                     },
                 }
             )
-        if delete_dns and fqdn:
+        if delete_dns and fqdn and bool(dns_delete_orchestration.get("can_orchestrate")):
+            action_capabilities = [
+                str((action or {}).get("capability") or "").strip()
+                for action in (dns_preparation_actions or [])
+                if str((action or {}).get("capability") or "").strip()
+            ]
+            dns_capability = str(dns_delete_orchestration.get("step_capability") or "dns.route53.delete_record")
+            required_capabilities = sorted({value for value in ([dns_capability] + action_capabilities) if value})
             steps.append(
                 {
-                    "id": f"dns.delete_record.route53.{target_id}",
-                    "title": f"Delete Route53 record for {fqdn}",
-                    "capability": "dns.route53.delete_record",
+                    "id": str(dns_delete_orchestration.get("step_id") or f"dns.delete_record.route53.{target_id}"),
+                    "title": str(dns_delete_orchestration.get("step_title") or f"Delete Route53 record for {fqdn}"),
+                    "capability": dns_capability,
                     "work_item": {
-                        "id": f"dns.delete_record.route53.{target_id}",
-                        "title": f"Delete Route53 record for {fqdn}",
+                        "id": str(dns_delete_orchestration.get("step_id") or f"dns.delete_record.route53.{target_id}"),
+                        "title": str(dns_delete_orchestration.get("step_title") or f"Delete Route53 record for {fqdn}"),
                         "type": "deploy",
                         "context_purpose_override": "operator",
-                        "capabilities_required": ["dns.route53.delete_record"],
+                        "capabilities_required": required_capabilities,
                         "config": {
                             "release_target_id": target_id,
                             "target_instance_id": str(target.target_instance_id) if target.target_instance_id else "",
@@ -8058,6 +8169,60 @@ def auth_session_check(request: HttpRequest) -> HttpResponse:
     return redirect(login_url)
 
 
+def _manifest_claims_global_root(manifest: Dict[str, Any]) -> bool:
+    if _manifest_ui_mount_scope(manifest) != "global":
+        return False
+    roles = manifest.get("roles") if isinstance(manifest.get("roles"), list) else []
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        if str(role.get("role") or "").strip().lower() != "ui_mount":
+            continue
+        mount_path = _normalize_surface_path(str(role.get("mount_path") or ""))
+        if mount_path == "/":
+            return True
+    for surface_key in ("nav", "manage", "docs"):
+        rows = _manifest_surface_entries(manifest, surface_key)
+        if any(_normalize_surface_path(str(row.get("path") or "")) == "/" for row in rows):
+            return True
+    return False
+
+
+def _resolve_public_root_owner() -> Optional[Artifact]:
+    bindings = (
+        WorkspaceArtifactBinding.objects.filter(enabled=True, installed_state="installed")
+        .select_related("artifact", "artifact__type")
+        .order_by("-updated_at", "-created_at")
+    )
+    for binding in bindings:
+        artifact = binding.artifact
+        if not artifact:
+            continue
+        try:
+            manifest = _load_artifact_manifest(artifact)
+        except Exception:
+            continue
+        if _manifest_claims_global_root(manifest):
+            return artifact
+    return None
+
+
+@csrf_exempt
+def public_root_resolution(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    owner = _resolve_public_root_owner()
+    if owner is None:
+        return JsonResponse({"mode": "private"})
+    return JsonResponse(
+        {
+            "mode": "public",
+            "owner_artifact_slug": str(_artifact_slug(owner) or ""),
+            "owner_artifact_id": str(owner.id),
+        }
+    )
+
+
 def _serialize_preview_status(identity: UserIdentity, request: HttpRequest) -> Dict[str, Any]:
     actor_roles = getattr(request, "actor_roles", None)
     if not isinstance(actor_roles, list):
@@ -8355,6 +8520,87 @@ DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES: tuple[tuple[str, str, str, int], ...] = (
     ("xyn-api", "runtime_service", "Default API runtime artifact.", 30),
 )
 
+DEFAULT_RUNTIME_ARTIFACT_OWNERSHIP: Dict[str, Dict[str, Any]] = {
+    "core.workbench": {
+        "repo_slug": "xyn-platform",
+        "allowed_paths": [],
+        "edit_mode": "repo_backed",
+    },
+    "xyn-ui": {
+        "repo_slug": "xyn-platform",
+        "allowed_paths": ["apps/xyn-ui/"],
+        "edit_mode": "repo_backed",
+    },
+    "xyn-api": {
+        "repo_slug": "xyn-platform",
+        "allowed_paths": ["services/xyn-api/backend/"],
+        "edit_mode": "repo_backed",
+    },
+    "core.xyn-runtime": {
+        "repo_slug": "xyn",
+        "allowed_paths": [],
+        "edit_mode": "repo_backed",
+    },
+}
+
+
+def _runtime_artifact_ownership_for_slug(slug: str) -> Dict[str, Any]:
+    token = str(slug or "").strip().lower()
+    ownership = DEFAULT_RUNTIME_ARTIFACT_OWNERSHIP.get(token)
+    if ownership:
+        return {
+            "repo_slug": str(ownership.get("repo_slug") or "").strip(),
+            "allowed_paths": [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()],
+            "edit_mode": str(ownership.get("edit_mode") or "generated").strip().lower() or "generated",
+        }
+    if token.startswith("core.xyn-"):
+        return {"repo_slug": "xyn", "allowed_paths": [], "edit_mode": "repo_backed"}
+    return {"repo_slug": "", "allowed_paths": [], "edit_mode": "generated"}
+
+
+def resolve_artifact_ownership(artifact: Artifact) -> Dict[str, Any]:
+    allowed_paths = (
+        artifact.owner_path_prefixes_json
+        if isinstance(getattr(artifact, "owner_path_prefixes_json", None), list)
+        else []
+    )
+    normalized_paths = [str(item).strip() for item in allowed_paths if str(item).strip()]
+    edit_mode = str(getattr(artifact, "edit_mode", "") or "").strip().lower() or "generated"
+    if edit_mode not in {"repo_backed", "generated", "read_only"}:
+        edit_mode = "generated"
+    return {
+        "repo_slug": str(getattr(artifact, "owner_repo_slug", "") or "").strip() or None,
+        "allowed_paths": normalized_paths,
+        "edit_mode": edit_mode,
+    }
+
+
+def _bootstrap_runtime_db_ready() -> bool:
+    readiness = schema_bootstrap_readiness(required_tables=DEFAULT_BOOTSTRAP_REQUIRED_TABLES)
+    if not readiness.ready:
+        logger.info("Runtime bootstrap readiness check deferred: %s", readiness.reason)
+    return readiness.ready
+
+
+def _run_runtime_bootstrap(*, reason: str) -> None:
+    if str(os.environ.get("XYENCE_BOOTSTRAP_DISABLE") or "").strip() == "1":
+        return
+    if not _bootstrap_runtime_db_ready():
+        logger.info("Skipping runtime bootstrap (%s): DB/schema not ready.", reason)
+        return
+    try:
+        ensure_default_ai_seeds()
+    except Exception as exc:
+        logger.warning("Runtime bootstrap (%s) AI seed step failed: %s", reason, exc)
+    try:
+        bootstrap_instance_registration()
+    except Exception as exc:
+        logger.warning("Runtime bootstrap (%s) instance registration step failed: %s", reason, exc)
+    try:
+        auto_apply_core_seed_packs()
+    except Exception as exc:
+        logger.warning("Runtime bootstrap (%s) core seed-pack step failed: %s", reason, exc)
+
 
 def _default_dev_workspace_slug() -> str:
     raw = str(os.getenv("XYN_WORKSPACE_SLUG", "development") or "").strip().lower()
@@ -8388,52 +8634,111 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
         return None
     if not _workspace_matches_default_xyn_solution_target(workspace):
         return None
-    application = (
-        Application.objects.filter(workspace=workspace, metadata_json__system_solution_key=DEFAULT_XYN_SOLUTION_KEY)
-        .order_by("-updated_at", "-created_at")
-        .first()
-    )
-    if application is None:
+    with transaction.atomic():
+        locked_workspace = Workspace.objects.select_for_update().get(id=workspace.id)
         application = (
-            Application.objects.filter(workspace=workspace, source_factory_key="xyn_platform_default")
+            Application.objects.filter(workspace=locked_workspace, metadata_json__system_solution_key=DEFAULT_XYN_SOLUTION_KEY)
             .order_by("-updated_at", "-created_at")
             .first()
         )
-    if application is None:
-        application = Application.objects.create(
-            workspace=workspace,
-            name=DEFAULT_XYN_SOLUTION_NAME,
-            summary="Default Xyn platform solution workspace.",
-            source_factory_key="xyn_platform_default",
-            source_conversation_id="",
-            status="active",
-            request_objective="",
-            metadata_json={"system_solution_key": DEFAULT_XYN_SOLUTION_KEY, "origin": "bootstrap_default"},
+        if application is None:
+            application = (
+                Application.objects.filter(workspace=locked_workspace, source_factory_key="xyn_platform_default")
+                .order_by("-updated_at", "-created_at")
+                .first()
+            )
+        if application is None:
+            application = Application.objects.create(
+                workspace=locked_workspace,
+                name=DEFAULT_XYN_SOLUTION_NAME,
+                summary="Default Xyn platform solution workspace.",
+                source_factory_key="xyn_platform_default",
+                source_conversation_id="",
+                status="active",
+                request_objective="",
+                metadata_json={"system_solution_key": DEFAULT_XYN_SOLUTION_KEY, "origin": "bootstrap_default"},
+            )
+        else:
+            metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
+            metadata_changed = False
+            if metadata.get("system_solution_key") != DEFAULT_XYN_SOLUTION_KEY:
+                metadata = dict(metadata)
+                metadata["system_solution_key"] = DEFAULT_XYN_SOLUTION_KEY
+                metadata_changed = True
+            if metadata.get("origin") != "bootstrap_default":
+                metadata = dict(metadata)
+                metadata["origin"] = "bootstrap_default"
+                metadata_changed = True
+            update_fields: List[str] = []
+            if application.source_factory_key != "xyn_platform_default":
+                application.source_factory_key = "xyn_platform_default"
+                update_fields.append("source_factory_key")
+            if application.name != DEFAULT_XYN_SOLUTION_NAME:
+                application.name = DEFAULT_XYN_SOLUTION_NAME
+                update_fields.append("name")
+            if metadata_changed:
+                application.metadata_json = metadata
+                update_fields.append("metadata_json")
+            if update_fields:
+                update_fields.append("updated_at")
+                application.save(update_fields=update_fields)
+
+    runtime_artifacts_by_slug: Dict[str, tuple[str, str, str]] = {
+        slug: (title, manifest_ref, summary)
+        for slug, title, manifest_ref, summary in DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS
+    }
+
+    def _materialize_solution_artifact(slug: str) -> Optional[Artifact]:
+        token = str(slug or "").strip().lower()
+        if not token:
+            return None
+        local = (
+            Artifact.objects.filter(workspace=workspace, slug=token)
+            .select_related("type")
+            .order_by("-updated_at", "-created_at")
+            .first()
         )
-    else:
-        metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
-        metadata_changed = False
-        if metadata.get("system_solution_key") != DEFAULT_XYN_SOLUTION_KEY:
-            metadata = dict(metadata)
-            metadata["system_solution_key"] = DEFAULT_XYN_SOLUTION_KEY
-            metadata_changed = True
-        if metadata.get("origin") != "bootstrap_default":
-            metadata = dict(metadata)
-            metadata["origin"] = "bootstrap_default"
-            metadata_changed = True
-        update_fields: List[str] = []
-        if application.source_factory_key != "xyn_platform_default":
-            application.source_factory_key = "xyn_platform_default"
-            update_fields.append("source_factory_key")
-        if application.name != DEFAULT_XYN_SOLUTION_NAME:
-            application.name = DEFAULT_XYN_SOLUTION_NAME
-            update_fields.append("name")
-        if metadata_changed:
-            application.metadata_json = metadata
-            update_fields.append("metadata_json")
-        if update_fields:
-            update_fields.append("updated_at")
-            application.save(update_fields=update_fields)
+        if local is not None:
+            return local
+        runtime_entry = runtime_artifacts_by_slug.get(token)
+        if runtime_entry is not None:
+            title, manifest_ref, summary = runtime_entry
+            return _ensure_runtime_artifact(
+                workspace=workspace,
+                slug=token,
+                title=title,
+                manifest_ref=manifest_ref,
+                summary=summary,
+            )
+        source = (
+            Artifact.objects.filter(slug=token)
+            .exclude(workspace=workspace)
+            .select_related("type")
+            .order_by("-updated_at", "-created_at")
+            .first()
+        )
+        if source is None:
+            return None
+        return Artifact.objects.create(
+            workspace=workspace,
+            type=source.type,
+            title=source.title,
+            slug=source.slug,
+            status=source.status,
+            visibility=source.visibility,
+            summary=source.summary,
+            scope_json=dict(source.scope_json or {}),
+            owner_repo_slug=str(source.owner_repo_slug or "").strip(),
+            owner_path_prefixes_json=list(source.owner_path_prefixes_json or []),
+            edit_mode=str(source.edit_mode or "generated").strip().lower() or "generated",
+            provenance_json={
+                **(source.provenance_json if isinstance(source.provenance_json, dict) else {}),
+                "materialized_for_workspace": str(workspace.id),
+                "materialized_from_artifact_id": str(source.id),
+                "materialized_from_workspace_id": str(source.workspace_id),
+                "materialized_by": "default_xyn_solution_bootstrap",
+            },
+        )
 
     artifact_by_slug: Dict[str, Artifact] = {}
     bindings = (
@@ -8447,20 +8752,11 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
     for binding in bindings:
         slug = str(getattr(binding.artifact, "slug", "") or "").strip().lower()
         if slug and slug not in artifact_by_slug:
-            artifact_by_slug[slug] = binding.artifact
+            artifact_by_slug[slug] = _materialize_solution_artifact(slug) or binding.artifact
 
     for slug, role, responsibility_summary, sort_order in DEFAULT_XYN_SOLUTION_ARTIFACT_ROLES:
-        artifact = artifact_by_slug.get(slug)
+        artifact = artifact_by_slug.get(slug) or _materialize_solution_artifact(slug)
         if artifact is None:
-            artifact = (
-                Artifact.objects.filter(workspace=workspace, slug=slug)
-                .select_related("type")
-                .order_by("-updated_at", "-created_at")
-                .first()
-            )
-        if artifact is None:
-            continue
-        if artifact.workspace_id != workspace.id:
             continue
         ApplicationArtifactMembership.objects.update_or_create(
             application=application,
@@ -8472,6 +8768,13 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
                 "metadata_json": {"origin": "bootstrap_default_xyn_solution"},
                 "sort_order": sort_order,
             },
+        )
+    solution_count = Application.objects.filter(workspace=workspace, metadata_json__system_solution_key=DEFAULT_XYN_SOLUTION_KEY).count()
+    if solution_count != 1:
+        logger.warning(
+            "Default Xyn solution bootstrap expected exactly one system solution for workspace=%s but found=%s",
+            workspace.slug,
+            solution_count,
         )
     return application
 
@@ -8490,9 +8793,6 @@ def _runtime_artifact_host_workspace(fallback_workspace: Workspace) -> Workspace
     host_workspace = Workspace.objects.filter(slug="platform-builder").first()
     if host_workspace is not None:
         return host_workspace
-    first_workspace = Workspace.objects.order_by("created_at").first()
-    if first_workspace is not None:
-        return first_workspace
     return fallback_workspace
 
 
@@ -8530,32 +8830,37 @@ def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspac
     if not _is_platform_admin(identity):
         return None
     workspace_slug = _default_dev_workspace_slug()
-    workspace, _ = Workspace.objects.get_or_create(
-        slug=workspace_slug,
-        defaults={
-            "name": _workspace_title_from_slug(workspace_slug),
-            "org_name": _workspace_title_from_slug(workspace_slug),
-            "description": f"Default {workspace_slug} workspace for local bootstrap.",
-            "status": "active",
-            "kind": "internal",
-            "lifecycle_stage": "internal",
-            "auth_mode": "local",
-            "metadata_json": {"bootstrap": "dev_default"},
-        },
-    )
-    metadata = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
-    if metadata.get("xyn_system_workspace") is True:
-        metadata = dict(metadata)
-        metadata.pop("xyn_system_workspace", None)
-        workspace.metadata_json = metadata
-        workspace.save(update_fields=["metadata_json", "updated_at"])
-    WorkspaceMembership.objects.update_or_create(
-        workspace=workspace,
-        user_identity=identity,
-        defaults={"role": "admin", "termination_authority": True},
-    )
-    _ensure_default_workspace_artifact_bindings(workspace)
-    _ensure_default_xyn_solution_for_workspace(workspace=workspace)
+    with transaction.atomic():
+        workspace, _ = Workspace.objects.get_or_create(
+            slug=workspace_slug,
+            defaults={
+                "name": _workspace_title_from_slug(workspace_slug),
+                "org_name": _workspace_title_from_slug(workspace_slug),
+                "description": f"Default {workspace_slug} workspace for local bootstrap.",
+                "status": "active",
+                "kind": "internal",
+                "lifecycle_stage": "internal",
+                "auth_mode": "local",
+                "metadata_json": {"bootstrap": "dev_default"},
+            },
+        )
+        workspace = Workspace.objects.select_for_update().get(id=workspace.id)
+        metadata = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
+        if metadata.get("xyn_system_workspace") is True:
+            metadata = dict(metadata)
+            metadata.pop("xyn_system_workspace", None)
+            workspace.metadata_json = metadata
+            workspace.save(update_fields=["metadata_json", "updated_at"])
+        WorkspaceMembership.objects.update_or_create(
+            workspace=workspace,
+            user_identity=identity,
+            defaults={"role": "admin", "termination_authority": True},
+        )
+        _ensure_default_workspace_artifact_bindings(workspace)
+        _ensure_default_xyn_solution_for_workspace(workspace=workspace)
+    workspace_rows = Workspace.objects.filter(slug=workspace_slug).count()
+    if workspace_rows != 1:
+        logger.warning("Dev bootstrap expected exactly one workspace for slug=%s but found=%s", workspace_slug, workspace_rows)
     return workspace
 
 
@@ -8638,6 +8943,7 @@ def api_me(request: HttpRequest) -> JsonResponse:
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     include_system = str(request.GET.get("include_system") or "").strip().lower() in {"1", "true", "yes"}
+    _run_runtime_bootstrap(reason="api_me")
     roles = _get_roles(identity)
     bootstrap_workspace = _ensure_dev_bootstrap_workspace(identity)
     _ensure_default_xyn_solution()
@@ -9460,6 +9766,7 @@ def _serialize_artifact_summary(artifact: Artifact) -> Dict[str, Any]:
         "last_touched_by_agent": _artifact_last_touched_by_agent(artifact),
         "published_at": artifact.published_at,
         "updated_at": artifact.updated_at,
+        "ownership": resolve_artifact_ownership(artifact),
         "content": {
             "summary": content.get("summary") or "",
             "tags": content.get("tags") or [],
@@ -9493,6 +9800,7 @@ def _serialize_workspace_artifact_binding(binding: WorkspaceArtifactBinding) -> 
         "manifest_summary": manifest_summary,
         "capability": capability,
         "suggestions": suggestions if isinstance(suggestions, list) else [],
+        "ownership": resolve_artifact_ownership(artifact),
         "updated_at": artifact.updated_at,
     }
 
@@ -9594,6 +9902,7 @@ def _serialize_unified_artifact(artifact: Artifact, source_record: Any = None) -
         "parent_artifact_id": str(artifact.parent_artifact_id) if artifact.parent_artifact_id else None,
         "lineage_root_id": str(artifact.lineage_root_id) if artifact.lineage_root_id else None,
         "tags": artifact.tags_json or [],
+        "source_created_at": artifact.source_created_at,
         "created_at": artifact.created_at,
         "updated_at": artifact.updated_at,
     }
@@ -9793,6 +10102,8 @@ def _artifact_table_row(artifact: Artifact, *, workspace_id: Optional[str], inst
     manage = surfaces.get("manage") if isinstance(surfaces.get("manage"), list) else []
     docs = surfaces.get("docs") if isinstance(surfaces.get("docs"), list) else []
     roles = manifest_summary.get("roles") if isinstance(manifest_summary.get("roles"), list) else []
+    source_created_at = artifact.source_created_at if isinstance(artifact.source_created_at, dt.datetime) else None
+    created_value = source_created_at or artifact.created_at
     return {
         "slug": slug,
         "namespace": _artifact_namespace_from_slug(slug),
@@ -9804,7 +10115,7 @@ def _artifact_table_row(artifact: Artifact, *, workspace_id: Optional[str], inst
         "surfaces_count": len(nav) + len(manage) + len(docs),
         "installed": str(artifact.id) in installed_ids,
         "updated_at": _iso_utc(artifact.updated_at),
-        "created_at": _iso_utc(artifact.created_at),
+        "created_at": _iso_utc(created_value),
     }
 
 
@@ -10871,6 +11182,354 @@ def artifact_detail(request: HttpRequest, artifact_id: str) -> JsonResponse:
 
 @csrf_exempt
 @login_required
+def artifact_activate(request: HttpRequest, artifact_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    artifact = get_object_or_404(
+        Artifact.objects.select_related("workspace", "type"),
+        id=artifact_id,
+    )
+    workspace = artifact.workspace
+    if not _workspace_membership(identity, str(workspace.id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _workspace_has_role(identity, str(workspace.id), "contributor"):
+        return JsonResponse({"error": "forbidden"}, status=403)
+
+    try:
+        manifest = _load_artifact_manifest(artifact)
+        source_policy_bundle, source_policy_ref = _resolve_source_policy_bundle_for_activation(artifact)
+        activation = build_activation_payload(
+            workspace_id=str(workspace.id),
+            workspace_slug=str(workspace.slug or ""),
+            artifact_id=str(artifact.id),
+            artifact_slug=str(_artifact_slug(artifact) or ""),
+            artifact_title=str(artifact.title or ""),
+            artifact_package_version=str(artifact.package_version or ""),
+            manifest=manifest,
+            policy_bundle=source_policy_bundle,
+            policy_artifact_ref=source_policy_ref,
+        )
+    except (ValueError, ArtifactActivationError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    app_slug = str(activation.get("app_slug") or "").strip()
+    runtime_record = _workspace_runtime_target(workspace, app_slug)
+    can_reuse, reuse_reason = runtime_record_matches_revision_anchor(
+        runtime_record=runtime_record,
+        revision_anchor=activation.get("revision_anchor") if isinstance(activation.get("revision_anchor"), dict) else {},
+    )
+    if can_reuse and isinstance(runtime_record, dict):
+        runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record.get("runtime_target"), dict) else {}
+        runtime_instance = runtime_record.get("instance")
+        is_live, live_reason, runtime_target = _activation_runtime_target_is_live(runtime_target, runtime_instance)
+        if not is_live:
+            reuse_reason = live_reason
+        else:
+            sibling_ui_url = str(runtime_target.get("sibling_ui_url") or "").strip()
+            sibling_api_url = str(runtime_target.get("sibling_api_url") or "").strip()
+            if not sibling_ui_url:
+                runtime_fqdn = str(getattr(runtime_instance, "fqdn", "") or "").strip()
+                if runtime_fqdn:
+                    sibling_ui_url = runtime_fqdn if runtime_fqdn.startswith(("http://", "https://")) else f"http://{runtime_fqdn}"
+            if runtime_target.get("public_app_url") and not runtime_target.get("runtime_url"):
+                runtime_target = dict(runtime_target)
+                runtime_target["runtime_url"] = runtime_target.get("public_app_url")
+            return JsonResponse(
+                {
+                    "status": "reused",
+                    "workspace_id": str(workspace.id),
+                    "artifact_id": str(artifact.id),
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "app_slug": app_slug,
+                    "revision_anchor": activation.get("revision_anchor"),
+                    "runtime_target": runtime_target,
+                    "runtime_instance": {
+                        "id": str(getattr(runtime_instance, "id", "") or "").strip(),
+                        "app_slug": str(getattr(runtime_instance, "app_slug", "") or "").strip(),
+                        "fqdn": str(getattr(runtime_instance, "fqdn", "") or "").strip(),
+                        "status": str(getattr(runtime_instance, "status", "") or "").strip(),
+                    },
+                    "sibling_ui_url": sibling_ui_url,
+                    "sibling_api_url": sibling_api_url,
+                    "policy_source": str(activation.get("policy_source") or "reconstructed"),
+                    "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+                    "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+                    "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
+                }
+            )
+
+    completed = find_completed_activation(
+        workspace_slug=str(workspace.slug or ""),
+        revision_anchor=activation.get("revision_anchor") if isinstance(activation.get("revision_anchor"), dict) else {},
+        seed_api_request=_seed_api_request,
+    )
+    if isinstance(completed, dict):
+        runtime_target = completed.get("runtime_target") if isinstance(completed.get("runtime_target"), dict) else {}
+        runtime_instance = completed.get("runtime_instance") if isinstance(completed.get("runtime_instance"), dict) else {}
+        sibling_ui_url = str(completed.get("sibling_ui_url") or runtime_target.get("sibling_ui_url") or "").strip()
+        sibling_api_url = str(completed.get("sibling_api_url") or runtime_target.get("sibling_api_url") or "").strip()
+        if not sibling_ui_url:
+            runtime_fqdn = str(runtime_instance.get("fqdn") or "").strip()
+            if runtime_fqdn:
+                sibling_ui_url = runtime_fqdn if runtime_fqdn.startswith(("http://", "https://")) else f"http://{runtime_fqdn}"
+        is_live, live_reason, runtime_target = _activation_runtime_target_is_live(runtime_target, runtime_instance)
+        if not is_live:
+            reuse_reason = live_reason
+        else:
+            if runtime_target.get("public_app_url") and not runtime_target.get("runtime_url"):
+                runtime_target = dict(runtime_target)
+                runtime_target["runtime_url"] = runtime_target.get("public_app_url")
+            return JsonResponse(
+                {
+                    "status": "reused",
+                    "workspace_id": str(workspace.id),
+                    "artifact_id": str(artifact.id),
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "app_slug": app_slug,
+                    "revision_anchor": activation.get("revision_anchor"),
+                    "runtime_target": runtime_target,
+                    "runtime_instance": {
+                        "id": str(runtime_instance.get("id") or "").strip(),
+                        "app_slug": str(runtime_instance.get("app_slug") or "").strip(),
+                        "fqdn": str(runtime_instance.get("fqdn") or "").strip(),
+                        "status": str(runtime_instance.get("status") or "").strip(),
+                    },
+                    "sibling_ui_url": sibling_ui_url,
+                    "sibling_api_url": sibling_api_url,
+                    "activation": {
+                        "job_id": str(completed.get("job_id") or "").strip(),
+                    },
+                    "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
+                    "policy_source": str(activation.get("policy_source") or "reconstructed"),
+                    "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+                    "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+                    "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
+                }
+            )
+
+    in_flight = find_inflight_activation(
+        workspace_slug=str(workspace.slug or ""),
+        revision_anchor=activation.get("revision_anchor") if isinstance(activation.get("revision_anchor"), dict) else {},
+        seed_api_request=_seed_api_request,
+    )
+    if isinstance(in_flight, dict):
+        return JsonResponse(
+            {
+                "status": "queued_existing",
+                "workspace_id": str(workspace.id),
+                "artifact_id": str(artifact.id),
+                "artifact_slug": str(_artifact_slug(artifact) or ""),
+                "app_slug": app_slug,
+                "revision_anchor": activation.get("revision_anchor"),
+                "activation": {
+                    "draft_id": str(in_flight.get("draft_id") or ""),
+                    "job_id": str(in_flight.get("job_id") or ""),
+                },
+                "in_flight": in_flight,
+                "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
+                "policy_source": str(activation.get("policy_source") or "reconstructed"),
+                "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+                "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+                "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
+            },
+            status=202,
+        )
+
+    try:
+        queued = submit_artifact_activation(
+            workspace_slug=str(workspace.slug or ""),
+            draft_payload=activation["draft_payload"],
+            seed_api_request=_seed_api_request,
+        )
+    except ArtifactActivationError as exc:
+        return JsonResponse({"error": str(exc)}, status=502)
+
+    return JsonResponse(
+        {
+            "status": "queued",
+            "workspace_id": str(workspace.id),
+            "artifact_id": str(artifact.id),
+            "artifact_slug": str(_artifact_slug(artifact) or ""),
+            "app_slug": app_slug,
+            "revision_anchor": activation.get("revision_anchor"),
+            "activation": queued,
+            "reuse_blocked_reason": reuse_reason if isinstance(runtime_record, dict) else "",
+            "policy_source": str(activation.get("policy_source") or "reconstructed"),
+            "policy_compatibility": str(activation.get("policy_compatibility") or "unknown"),
+            "policy_compatibility_reason": str(activation.get("policy_compatibility_reason") or ""),
+            "policy_artifact_ref": activation.get("policy_artifact_ref") if isinstance(activation.get("policy_artifact_ref"), dict) else {},
+        },
+        status=202,
+    )
+
+
+def _resolve_source_policy_bundle_for_activation(artifact: Artifact) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    if not artifact or not artifact.workspace_id:
+        return {}, {}
+    app_slug = str(_artifact_slug(artifact) or "").strip()
+    preferred_policy_slug = _policy_slug_for_app_slug(app_slug) if app_slug else ""
+    app_memberships = list(
+        ApplicationArtifactMembership.objects.filter(artifact=artifact)
+        .select_related("application")
+        .order_by("sort_order", "created_at", "id")
+    )
+    if not app_memberships:
+        return {}, {}
+    preferred_roles = ("primary_ui", "primary_api")
+    selected_app_membership = next(
+        (row for role in preferred_roles for row in app_memberships if str(row.role or "").strip() == role),
+        app_memberships[0],
+    )
+    application_ids = [row.application_id for row in app_memberships if row.application_id]
+    if not application_ids:
+        return {}, {}
+    role_preference = {"supporting": 0, "policy": 1, "shared_library": 2}
+
+    def _ordered_policy_memberships(queryset):
+        rows = list(
+            queryset.select_related("artifact", "artifact__type")
+            .order_by("sort_order", "created_at", "id")
+        )
+        rows.sort(
+            key=lambda row: (
+                role_preference.get(str(row.role or "").strip(), 99),
+                int(row.sort_order or 0),
+                str(getattr(row, "created_at", "") or ""),
+                str(getattr(row, "id", "") or ""),
+            )
+        )
+        return rows
+
+    candidate_memberships = _ordered_policy_memberships(
+        ApplicationArtifactMembership.objects.filter(
+            application_id=selected_app_membership.application_id,
+            workspace_id=artifact.workspace_id,
+            artifact__type__slug="policy_bundle",
+        )
+        .exclude(artifact_id=artifact.id)
+    )
+    if not candidate_memberships:
+        candidate_memberships = _ordered_policy_memberships(
+            ApplicationArtifactMembership.objects.filter(
+                application_id__in=application_ids,
+                workspace_id=artifact.workspace_id,
+                artifact__type__slug="policy_bundle",
+            ).exclude(artifact_id=artifact.id)
+        )
+    if not candidate_memberships:
+        return {}, {}
+    if preferred_policy_slug:
+        matching_slug = [
+            row for row in candidate_memberships if str(_artifact_slug(row.artifact) or "").strip() == preferred_policy_slug
+        ]
+        if matching_slug:
+            candidate_memberships = matching_slug + [row for row in candidate_memberships if row not in matching_slug]
+    for member in candidate_memberships:
+        policy_artifact = member.artifact
+        if not policy_artifact:
+            continue
+        bundle = _policy_bundle_from_artifact(policy_artifact)
+        if not isinstance(bundle, dict) or str(bundle.get("schema_version") or "").strip() != "xyn.policy_bundle.v0":
+            continue
+        return (
+            copy.deepcopy(bundle),
+            {
+                "artifact_id": str(policy_artifact.id),
+                "artifact_slug": str(_artifact_slug(policy_artifact) or ""),
+                "artifact_version": str(policy_artifact.package_version or ""),
+            },
+        )
+    return {}, {}
+
+
+@csrf_exempt
+@login_required
+def application_activate(request: HttpRequest, application_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    workspace = application.workspace
+    if not _workspace_membership(identity, str(workspace.id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if not _workspace_has_role(identity, str(workspace.id), "contributor"):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    session_id = str(payload.get("solution_change_session_id") or payload.get("session_id") or "").strip()
+    solution_change_session = None
+    if session_id:
+        solution_change_session = SolutionChangeSession.objects.filter(
+            id=session_id,
+            application=application,
+            workspace_id=application.workspace_id,
+        ).first()
+        if solution_change_session is None:
+            return JsonResponse({"error": "solution_change_session_id was not found for this application"}, status=404)
+    selected_app_member, _selected_policy_member = _solution_activation_memberships(application)
+    if not selected_app_member or not selected_app_member.artifact:
+        return JsonResponse({"error": "solution has no application artifact membership"}, status=400)
+    response = artifact_activate(request, str(selected_app_member.artifact_id))
+    try:
+        payload = json.loads(response.content.decode("utf-8"))
+    except Exception:
+        payload = {}
+    if response.status_code in (200, 202) and isinstance(payload, dict):
+        runtime_target_payload = payload.get("runtime_target")
+        if isinstance(runtime_target_payload, dict):
+            payload["runtime_target"] = _refresh_runtime_target_localhost_url(runtime_target_payload)
+        binding = _record_solution_runtime_binding_from_activation(
+            application=application,
+            selected_app_artifact=selected_app_member.artifact,
+            activation_payload=payload,
+        )
+        if solution_change_session is not None:
+            _persist_solution_session_activation_linkage(
+                session=solution_change_session,
+                binding=binding,
+                activation_payload=payload,
+            )
+        binding_payload = _application_runtime_binding_payload(application)
+        payload["solution_runtime_binding"] = binding_payload.get("runtime_binding")
+        payload["solution_activation_composition"] = binding_payload.get("composition")
+        payload["solution_activation"] = {
+            "application_id": str(application.id),
+            "workspace_id": str(application.workspace_id),
+            # Keep artifact activation independent; solution activation records the
+            # binding so subsequent solution activations remain stable and reusable.
+            "interaction_rule": "solution_activation_records_binding; artifact_activation_remains_independent",
+        }
+        resolved_policy_ref = payload.get("policy_artifact_ref") if isinstance(payload.get("policy_artifact_ref"), dict) else {}
+        payload["solution_slug"] = _application_solution_slug(application)
+        payload["artifact_ref"] = _artifact_ref_payload(selected_app_member.artifact if selected_app_member else None)
+        payload["policy_artifact_ref"] = resolved_policy_ref
+        payload["policy_source"] = str(payload.get("policy_source") or "reconstructed")
+        payload["install_source"] = _application_install_source(application)
+        return JsonResponse(payload, status=response.status_code)
+    return response
+
+
+@csrf_exempt
+@login_required
+def application_runtime_binding_detail(request: HttpRequest, application_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    return JsonResponse(_application_runtime_binding_payload(application))
+
+
+@csrf_exempt
+@login_required
 def artifact_activity(request: HttpRequest, artifact_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -11149,6 +11808,10 @@ def _policy_bundle_from_artifact(artifact: Artifact) -> Optional[Dict[str, Any]]
     nested = payload.get("policy_bundle") if isinstance(payload.get("policy_bundle"), dict) else {}
     if str(nested.get("schema_version") or "").strip() == "xyn.policy_bundle.v0":
         return nested
+    content = payload.get("content") if isinstance(payload.get("content"), dict) else {}
+    nested_content_bundle = content.get("policy_bundle") if isinstance(content.get("policy_bundle"), dict) else {}
+    if str(nested_content_bundle.get("schema_version") or "").strip() == "xyn.policy_bundle.v0":
+        return nested_content_bundle
     return None
 
 
@@ -12307,6 +12970,76 @@ def artifacts_import_collection(request: HttpRequest) -> JsonResponse:
 
 @csrf_exempt
 @login_required
+def solution_bundle_install(request: HttpRequest) -> JsonResponse:
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if staff_error := _require_staff(request):
+        return staff_error
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+
+    workspace = _resolve_solution_import_workspace(identity, request)
+    if workspace is None:
+        return JsonResponse(
+            {"error": "workspace context is required for solution bundle install"},
+            status=400,
+        )
+
+    payload = _parse_json(request)
+    bundle_payload = payload.get("bundle") if isinstance(payload.get("bundle"), dict) else {}
+    source = str(payload.get("source") or "").strip()
+    try:
+        if bundle_payload:
+            bundle = normalize_solution_bundle(bundle_payload)
+        elif source:
+            bundle = load_solution_bundle_from_source(source)
+        else:
+            return JsonResponse({"error": "bundle or source is required"}, status=400)
+        result = install_solution_bundle(
+            workspace=workspace,
+            bundle=bundle,
+            install_source=(source or "inline_bundle"),
+            installed_by=request.user if request.user.is_authenticated else None,
+        )
+    except SolutionBundleError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    application = result.get("application")
+    memberships = result.get("memberships") if isinstance(result.get("memberships"), list) else []
+    bindings = result.get("workspace_bindings") if isinstance(result.get("workspace_bindings"), list) else []
+    receipts = result.get("receipts") if isinstance(result.get("receipts"), list) else []
+    return JsonResponse(
+        {
+            "workspace_id": str(workspace.id),
+            "source": source or None,
+            "bundle": result.get("bundle") if isinstance(result.get("bundle"), dict) else {},
+            "application": _serialize_application_detail(application) if isinstance(application, Application) else None,
+            "application_created": bool(result.get("application_created")),
+            "memberships": [
+                _serialize_application_artifact_membership(member)
+                for member in memberships
+                if isinstance(member, ApplicationArtifactMembership)
+            ],
+            "workspace_bindings": [
+                _serialize_workspace_artifact_binding(binding)
+                for binding in bindings
+                if isinstance(binding, WorkspaceArtifactBinding)
+            ],
+            "receipts": [
+                _serialize_artifact_install_receipt(receipt)
+                for receipt in receipts
+                if isinstance(receipt, ArtifactInstallReceipt)
+            ],
+            "policy_source": str(result.get("policy_source") or "reconstructed"),
+            "install_source": str(result.get("install_source") or source or "inline_bundle"),
+            "warnings": [str(item) for item in (result.get("warnings") or []) if str(item).strip()],
+        }
+    )
+
+
+@csrf_exempt
+@login_required
 def artifact_package_detail(request: HttpRequest, package_id: str) -> JsonResponse:
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -13140,6 +13873,92 @@ def workspace_artifacts_collection(request: HttpRequest, workspace_id: str) -> J
     return JsonResponse({"artifacts": data})
 
 
+def _origin_from_url_token(value: str) -> str:
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    parsed = urlsplit(token if "://" in token else f"http://{token}")
+    scheme = str(parsed.scheme or "").strip().lower() or "http"
+    host = str(parsed.hostname or "").strip().lower()
+    if not host:
+        return ""
+    if parsed.port:
+        return f"{scheme}://{host}:{parsed.port}"
+    return f"{scheme}://{host}"
+
+
+def _solution_change_session_resume_active(session: SolutionChangeSession) -> bool:
+    if str(session.status or "").strip().lower() == "archived":
+        return False
+    execution_status = str(session.execution_status or "").strip().lower()
+    if execution_status in {"ready_for_promotion", "failed"}:
+        return False
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    finalized = metadata.get("finalized")
+    return not isinstance(finalized, dict)
+
+
+def _solution_change_session_origin_candidates(session: SolutionChangeSession) -> Set[str]:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    linkage = metadata.get("iteration_linkage") if isinstance(metadata.get("iteration_linkage"), dict) else {}
+    runtime_target = linkage.get("runtime_target") if isinstance(linkage.get("runtime_target"), dict) else {}
+    candidates: Set[str] = set()
+    for field in ("public_app_url", "runtime_url", "app_url", "sibling_ui_url", "runtime_base_url"):
+        token = str(runtime_target.get(field) or "").strip()
+        normalized = _origin_from_url_token(token)
+        if normalized:
+            candidates.add(normalized)
+    return candidates
+
+
+@csrf_exempt
+def workspace_linked_change_session(request: HttpRequest, workspace_id: str) -> JsonResponse:
+    workspace = get_object_or_404(Workspace, id=workspace_id)
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    membership = _workspace_membership(identity, workspace_id)
+    if not membership and not _is_platform_admin(identity):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    current_origin = _origin_from_url_token(
+        str(request.GET.get("current_origin") or "").strip() or request.build_absolute_uri("/")
+    )
+    if not current_origin:
+        return JsonResponse({"linked_session": None})
+
+    sessions = (
+        SolutionChangeSession.objects.filter(workspace=workspace)
+        .exclude(status="archived")
+        .select_related("application")
+        .order_by("-updated_at", "-created_at")[:200]
+    )
+    for session in sessions:
+        if not _solution_change_session_resume_active(session):
+            continue
+        candidates = _solution_change_session_origin_candidates(session)
+        if current_origin not in candidates:
+            continue
+        return JsonResponse(
+            {
+                "linked_session": {
+                    "workspace_id": str(workspace.id),
+                    "application_id": str(session.application_id),
+                    "application_name": str(getattr(session.application, "name", "") or ""),
+                    "solution_change_session_id": str(session.id),
+                    "session_title": str(session.title or ""),
+                    "status": str(session.status or ""),
+                    "execution_status": str(session.execution_status or ""),
+                    "current_origin": current_origin,
+                    "origin_candidates": sorted(candidates),
+                }
+            }
+        )
+    return JsonResponse({"linked_session": None})
+
+
 @csrf_exempt
 def workspace_app_runtime_targets_collection(request: HttpRequest, workspace_id: str) -> JsonResponse:
     workspace = get_object_or_404(Workspace, id=workspace_id)
@@ -13166,6 +13985,8 @@ def workspace_app_runtime_targets_collection(request: HttpRequest, workspace_id:
     runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip().rstrip("/")
     public_app_url = str(runtime_target.get("app_url") or runtime_target.get("public_app_url") or "").strip()
     compose_project = str(runtime_target.get("compose_project") or "").strip()
+    sibling_ui_url = str(payload.get("sibling_ui_url") or runtime_target.get("sibling_ui_url") or "").strip()
+    sibling_api_url = str(payload.get("sibling_api_url") or runtime_target.get("sibling_api_url") or "").strip()
     if not runtime_base_url:
         return JsonResponse({"error": "runtime_target.runtime_base_url is required"}, status=400)
     if not compose_project:
@@ -13191,6 +14012,8 @@ def workspace_app_runtime_targets_collection(request: HttpRequest, workspace_id:
         "source_build_job_id": str(runtime_target.get("source_build_job_id") or "").strip(),
         "source_workspace_id": str(runtime_target.get("source_workspace_id") or "").strip(),
         "installed_artifact_slug": artifact_slug,
+        "sibling_ui_url": sibling_ui_url,
+        "sibling_api_url": sibling_api_url,
     }
     fqdn = str(runtime_target.get("network_alias") or f"{compose_project}.internal").strip()
     desired_dns = {"runtime_target": runtime_payload}
@@ -17147,6 +17970,11 @@ def ai_routing_status(request: HttpRequest) -> JsonResponse:
             err = _update_purpose_routing_assignment("coding", payload.get("coding_agent_id"))
             if err:
                 return JsonResponse({"error": err}, status=400)
+        if "palette_agent_id" in payload:
+            updated = True
+            err = _update_purpose_routing_assignment("palette", payload.get("palette_agent_id"))
+            if err:
+                return JsonResponse({"error": err}, status=400)
     if not updated:
         return JsonResponse({"error": "at least one routing field is required"}, status=400)
     return JsonResponse(_serialize_ai_routing_status())
@@ -17169,7 +17997,7 @@ def _serialize_ai_routing_status() -> Dict[str, Any]:
     default_routing["resolution_type"] = "required_default"
 
     routing: List[Dict[str, Any]] = [default_routing]
-    for purpose_slug in ["planning", "coding"]:
+    for purpose_slug in ["planning", "coding", "palette"]:
         purpose_routing = dict(resolve_agent_routing(purpose_slug=purpose_slug))
         explicit_assignment = _resolve_explicit_purpose_assignment(purpose_slug)
         purpose_routing["resolution_type"] = "explicit" if explicit_assignment else "falls_back_to_default"
@@ -18752,16 +19580,7 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
     text = str(message or "").strip()
     if not text:
         return None
-    lower = re.sub(r"\s+", " ", text.lower()).strip()
-    lower = re.sub(r"^(?:please[,\s]+)+", "", lower)
-    lower = re.sub(r"^(?:can|could|would)\s+you\s+", "", lower)
-    lower = re.sub(r"^take\s+me\s+to\s+", "go to ", lower)
-    lower = re.sub(r"[.!?,:;]+$", "", lower)
-    lower = re.sub(r"^show\s+me\s+(?:a\s+)?list\s+of\s+", "list ", lower)
-    lower = re.sub(r"^show\s+me\s+", "show ", lower)
-    lower = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", lower)
-    lower = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", lower)
-    lower = re.sub(r"[.!?,:;]+$", "", lower)
+    lower = _normalize_palette_panel_command_phrase(text, support_show_me_list=True)
 
     def _artifact_created_day_query(day_offset: int) -> Dict[str, Any]:
         return {
@@ -18783,6 +19602,8 @@ def _match_artifact_panel_command(message: str) -> Optional[Tuple[str, Dict[str,
         return ("artifact_list", {"query": _artifact_created_day_query(-1)})
     if re.fullmatch(r"(?:list|show|open)\s+artifacts\s+created\s+two\s+days\s+ago", lower):
         return ("artifact_list", {"query": _artifact_created_day_query(-2)})
+    if re.search(r"\blist\s+of\s+artifacts\b", lower):
+        return ("artifact_list", {})
     list_match = re.search(r"\blist\s+([a-z0-9_.-]+)\s+artifacts\b", lower)
     if list_match:
         namespace = str(list_match.group(1) or "").strip().lower()
@@ -18861,14 +19682,7 @@ def _match_core_surface_command(message: str) -> Optional[Tuple[str, Dict[str, A
     text = str(message or "").strip()
     if not text:
         return None
-    normalized = re.sub(r"\s+", " ", text.lower()).strip()
-    normalized = re.sub(r"^(?:please[,\s]+)+", "", normalized)
-    normalized = re.sub(r"^(?:can|could|would)\s+you\s+", "", normalized)
-    normalized = re.sub(r"^take\s+me\s+to\s+", "go to ", normalized)
-    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
-    normalized = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", normalized)
-    normalized = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", normalized)
-    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
+    normalized = _normalize_palette_panel_command_phrase(text, support_show_me_list=False)
     platform_settings_aliases = {
         "platform settings",
         "open platform settings",
@@ -18911,6 +19725,27 @@ def _should_invoke_legacy_intake_fallback(message: str, *, has_context_artifact:
     if re.search(r"\b(create|make|start|new|draft|write|build)\b", prompt) and re.search(r"\b(article|guide|tour|explainer|video)\b", prompt):
         return True
     return False
+
+
+def _normalize_palette_panel_command_phrase(message: str, *, support_show_me_list: bool) -> str:
+    normalized = re.sub(r"\s+", " ", str(message or "").strip().lower()).strip()
+    if not normalized:
+        return normalized
+
+    # Strip common conversational prefixes without changing the command payload.
+    normalized = re.sub(r"^(?:please[,\s]+)+", "", normalized)
+    normalized = re.sub(r"^(?:can|could|would)\s+you(?:\s+please)?\s+", "", normalized)
+    normalized = re.sub(r"^(?:i\s+would\s+like\s+you\s+to|i['’]?d\s+like\s+to)\s+", "", normalized)
+    normalized = re.sub(r"^(?:i\s+want\s+to|i\s+need\s+to)\s+", "", normalized)
+    normalized = re.sub(r"^take\s+me\s+to\s+", "go to ", normalized)
+    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
+    if support_show_me_list:
+        normalized = re.sub(r"^show\s+me\s+(?:a\s+)?list\s+of\s+", "list ", normalized)
+        normalized = re.sub(r"^show\s+me\s+", "show ", normalized)
+    normalized = re.sub(r"^(open|show|go to)\s+the\s+", r"\1 ", normalized)
+    normalized = re.sub(r"\s+(?:page|screen|view|panel|tab|hub)\s*$", "", normalized)
+    normalized = re.sub(r"[.!?,:;]+$", "", normalized)
+    return normalized
 
 
 def _direct_panel_intent_response(
@@ -19366,19 +20201,24 @@ def _seed_api_request(
     workspace_id: str = "",
     workspace_slug: str = "",
     payload: Optional[Dict[str, Any]] = None,
+    query: Optional[Dict[str, str]] = None,
     timeout: int = 20,
 ) -> requests.Response:
     base_url = _seed_api_base_url()
     url = f"{base_url}{path}"
-    params: Dict[str, str] = {}
+    params: Dict[str, str] = dict(query or {})
+    headers: Dict[str, str] = {}
     if workspace_id:
         params["workspace_id"] = workspace_id
+        headers["X-Workspace-Id"] = workspace_id
     if workspace_slug:
         params["workspace_slug"] = workspace_slug
+        headers["X-Workspace-Slug"] = workspace_slug
     return requests.request(
         method=method.upper(),
         url=url,
         params=params or None,
+        headers=headers or None,
         json=payload,
         timeout=timeout,
     )
@@ -19968,6 +20808,13 @@ def _should_use_legacy_intake_fallback(prompt: str, *, context_artifact: Optiona
     )
 
 
+def _user_facing_unsupported_intent_summary(summary: str) -> str:
+    normalized = str(summary or "").strip()
+    if normalized.lower() == "no epic d resolver matched the message":
+        return "I couldn’t determine what action to take from that request."
+    return normalized or "I couldn’t determine what action to take from that request."
+
+
 def _workspace_has_installed_artifact_slug(workspace: Workspace, artifact_slug: str) -> bool:
     return WorkspaceArtifactBinding.objects.filter(
         workspace=workspace,
@@ -20003,6 +20850,742 @@ def _workspace_runtime_target(workspace: Workspace, app_slug: str) -> Optional[D
         "runtime_target": runtime_target,
         "runtime_base_url": base_url,
     }
+
+
+def _artifact_runtime_app_slug(artifact: Artifact) -> str:
+    slug = str(getattr(artifact, "slug", "") or "").strip()
+    if slug.startswith("app."):
+        return slug[4:]
+    metadata: Dict[str, Any] = {}
+    metadata_json = getattr(artifact, "metadata_json", None)
+    if isinstance(metadata_json, dict):
+        metadata.update(metadata_json)
+    scope_json = getattr(artifact, "scope_json", None)
+    if isinstance(scope_json, dict):
+        scope_metadata = scope_json.get("metadata")
+        if isinstance(scope_metadata, dict):
+            metadata.update(scope_metadata)
+    runtime = metadata.get("runtime_target") if isinstance(metadata.get("runtime_target"), dict) else {}
+    runtime_app_slug = str(
+        runtime.get("app_slug")
+        or metadata.get("app_slug")
+        or (scope_json.get("app_slug") if isinstance(scope_json, dict) else "")
+        or ""
+    ).strip()
+    if not runtime_app_slug and slug in {"core.workbench", "xyn-ui", "xyn-api"}:
+        return slug
+    return runtime_app_slug
+
+
+def _workspace_primary_runtime_target(workspace: Workspace, app_slug: str) -> Optional[Dict[str, Any]]:
+    token = str(app_slug or "").strip()
+    if not token:
+        return None
+    instances = list(
+        WorkspaceAppInstance.objects.filter(workspace=workspace, app_slug=token, status="active")
+        .exclude(dns_config_json={})
+        .order_by("-updated_at", "-created_at")
+    )
+    for instance in instances:
+        runtime_target = instance.dns_config_json.get("runtime_target") if isinstance(instance.dns_config_json, dict) else {}
+        if not isinstance(runtime_target, dict):
+            continue
+        runtime_owner = str(runtime_target.get("runtime_owner") or "").strip().lower()
+        if runtime_owner and runtime_owner != "primary":
+            continue
+        runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip()
+        public_app_url = str(runtime_target.get("public_app_url") or "").strip()
+        if not runtime_base_url and not public_app_url:
+            continue
+        return {
+            "app_slug": token,
+            "runtime_owner": runtime_owner or "primary",
+            "runtime_target_id": str(instance.id),
+            "runtime_base_url": runtime_base_url,
+            "public_app_url": public_app_url,
+            "compose_project": str(runtime_target.get("compose_project") or "").strip(),
+        }
+    env_mode = str(os.getenv("XYN_ENV", "") or "").strip().lower()
+    local_public_base_url = str(os.getenv("XYN_PUBLIC_BASE_URL", "http://localhost") or "http://localhost").strip().rstrip("/")
+    local_compose_project = str(os.getenv("XYN_LOCAL_COMPOSE_PROJECT", "xyn-local") or "xyn-local").strip() or "xyn-local"
+    if token in {"core.workbench", "xyn-ui", "xyn-api"} and env_mode in {"local", "dev", ""} and local_public_base_url:
+        return {
+            "app_slug": token,
+            "runtime_owner": "primary",
+            "runtime_target_id": "",
+            "runtime_base_url": local_public_base_url,
+            "public_app_url": local_public_base_url,
+            "compose_project": local_compose_project,
+        }
+    return None
+
+
+def _solution_change_session_promote_eligibility(
+    *,
+    session: SolutionChangeSession,
+    application: Optional[Application] = None,
+) -> Dict[str, Any]:
+    app = application or session.application
+    execution_status = str(session.execution_status or "").strip().lower()
+    requires_commit_provenance = _solution_change_session_requires_commit_provenance(session)
+    commit_count = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).count()
+    eligibility: Dict[str, Any] = {
+        "can_promote": False,
+        "blocked_reason": "",
+        "root_target_present": False,
+        "root_target_identity": {},
+        "recommended_action": "",
+        "next_allowed_actions": [],
+    }
+    if execution_status not in {"committed", "promoted"}:
+        eligibility["blocked_reason"] = "execution_not_committed"
+        eligibility["recommended_action"] = "commit_changes"
+        eligibility["next_allowed_actions"] = ["commit_changes"]
+        return eligibility
+    if requires_commit_provenance and commit_count < 1:
+        eligibility["blocked_reason"] = "commit_provenance_missing"
+        eligibility["recommended_action"] = "record_repository_commit"
+        eligibility["next_allowed_actions"] = ["commit_changes"]
+        return eligibility
+    selected_app_member, _selected_policy_member = _solution_activation_memberships(app)
+    if selected_app_member is None or selected_app_member.artifact is None:
+        eligibility["blocked_reason"] = "primary_artifact_missing"
+        eligibility["recommended_action"] = "configure_primary_solution_artifact"
+        eligibility["next_allowed_actions"] = ["update_solution_memberships"]
+        return eligibility
+    primary_artifact = selected_app_member.artifact
+    app_slug = _artifact_runtime_app_slug(primary_artifact)
+    if not app_slug:
+        eligibility["blocked_reason"] = "root_target_unresolved"
+        eligibility["recommended_action"] = "activate_solution_in_root"
+        eligibility["next_allowed_actions"] = ["activate_in_root"]
+        return eligibility
+    installed_in_root = _workspace_has_installed_artifact_slug(app.workspace, str(primary_artifact.slug or "").strip())
+    root_target = _workspace_primary_runtime_target(app.workspace, app_slug)
+    if not root_target:
+        eligibility["blocked_reason"] = "solution_not_installed_in_root" if not installed_in_root else "root_target_missing"
+        eligibility["recommended_action"] = "install_in_root" if not installed_in_root else "activate_in_root"
+        eligibility["next_allowed_actions"] = ["install_in_root", "activate_in_root"] if not installed_in_root else ["activate_in_root"]
+        return eligibility
+    eligibility["can_promote"] = True
+    eligibility["root_target_present"] = True
+    eligibility["root_target_identity"] = root_target
+    eligibility["next_allowed_actions"] = ["promote", "finalize"]
+    return eligibility
+
+
+def _solution_change_session_promote_blocked_error(eligibility: Dict[str, Any]) -> str:
+    blocked_reason = str((eligibility or {}).get("blocked_reason") or "").strip().lower()
+    if blocked_reason == "execution_not_committed":
+        return "change session can only be promoted after commit (execution_status=committed)"
+    if blocked_reason == "commit_provenance_missing":
+        return "code-changing sessions require at least one recorded repository commit before promote"
+    if blocked_reason == "solution_not_installed_in_root":
+        return "solution is not installed in the primary root environment; install and activate it in root before promote"
+    if blocked_reason == "root_target_missing":
+        return "solution has no active primary runtime target in root environment; activate it in root before promote"
+    if blocked_reason == "primary_artifact_missing":
+        return "solution has no primary application artifact membership configured for promotion"
+    if blocked_reason == "root_target_unresolved":
+        return "unable to resolve root runtime target for selected solution artifact"
+    return "promotion is currently blocked for this change session"
+
+
+def _serialize_solution_change_session_promotion_evidence(
+    evidence: SolutionChangeSessionPromotionEvidence,
+) -> Dict[str, Any]:
+    return {
+        "id": str(evidence.id),
+        "workspace_id": str(evidence.workspace_id),
+        "application_id": str(evidence.application_id),
+        "solution_change_session_id": str(evidence.solution_change_session_id),
+        "operation": str(evidence.operation or "promotion"),
+        "promotion_status": str(evidence.promotion_status or "success"),
+        "actor_source": str(evidence.actor_source or "human"),
+        "actor_identity_id": str(evidence.actor_identity_id) if evidence.actor_identity_id else "",
+        "source_promotion_evidence_id": str(evidence.source_promotion_evidence_id) if evidence.source_promotion_evidence_id else "",
+        "targeted_artifacts": evidence.targeted_artifacts_json if isinstance(evidence.targeted_artifacts_json, list) else [],
+        "preview_target": evidence.preview_target_json if isinstance(evidence.preview_target_json, dict) else {},
+        "root_target": evidence.root_target_json if isinstance(evidence.root_target_json, dict) else {},
+        "resulting_active_target": (
+            evidence.resulting_active_target_json if isinstance(evidence.resulting_active_target_json, dict) else {}
+        ),
+        "superseded_active_state": (
+            evidence.superseded_active_state_json if isinstance(evidence.superseded_active_state_json, dict) else {}
+        ),
+        "control_result": evidence.control_result_json if isinstance(evidence.control_result_json, dict) else {},
+        "provider_context": evidence.provider_context_json if isinstance(evidence.provider_context_json, dict) else {},
+        "warnings": evidence.warnings_json if isinstance(evidence.warnings_json, list) else [],
+        "blocked_context": evidence.blocked_context_json if isinstance(evidence.blocked_context_json, dict) else {},
+        "rollback_link": evidence.rollback_link_json if isinstance(evidence.rollback_link_json, dict) else {},
+        "created_at": evidence.created_at,
+        "updated_at": evidence.updated_at,
+    }
+
+
+def _latest_solution_change_session_promotion_evidence_ref(session: SolutionChangeSession) -> Dict[str, Any]:
+    latest = (
+        SolutionChangeSessionPromotionEvidence.objects.filter(solution_change_session=session)
+        .order_by("-created_at", "-updated_at")
+        .first()
+    )
+    if not latest:
+        return {"session_id": str(session.id)}
+    return {
+        "session_id": str(session.id),
+        "promotion_evidence_id": str(latest.id),
+        "operation": str(latest.operation or "promotion"),
+        "status": str(latest.promotion_status or "success"),
+        "created_at": latest.created_at.isoformat() if latest.created_at else "",
+    }
+
+
+def _solution_change_session_rollback_source_evidence(
+    *,
+    session: SolutionChangeSession,
+    evidence_id: str = "",
+) -> Optional[SolutionChangeSessionPromotionEvidence]:
+    evidence_qs = SolutionChangeSessionPromotionEvidence.objects.filter(
+        solution_change_session=session,
+        operation="promotion",
+        promotion_status="success",
+    ).order_by("-created_at", "-updated_at")
+    if evidence_id:
+        return evidence_qs.filter(id=evidence_id).first()
+    return evidence_qs.first()
+
+
+def _solution_change_session_rollback_eligibility(
+    *,
+    session: SolutionChangeSession,
+    application: Application,
+    source_evidence: Optional[SolutionChangeSessionPromotionEvidence],
+) -> Dict[str, Any]:
+    execution_status = str(session.execution_status or "").strip().lower()
+    eligibility: Dict[str, Any] = {
+        "can_rollback": False,
+        "blocked_reason": "",
+        "recommended_action": "",
+        "next_allowed_actions": [],
+    }
+    if execution_status != "promoted":
+        eligibility["blocked_reason"] = "execution_not_promoted"
+        eligibility["recommended_action"] = "promote"
+        eligibility["next_allowed_actions"] = ["promote"]
+        return eligibility
+    if source_evidence is None:
+        eligibility["blocked_reason"] = "source_evidence_missing"
+        eligibility["recommended_action"] = "promote"
+        eligibility["next_allowed_actions"] = ["promote"]
+        return eligibility
+    superseded = (
+        source_evidence.superseded_active_state_json
+        if isinstance(source_evidence.superseded_active_state_json, dict)
+        else {}
+    )
+    if not superseded:
+        eligibility["blocked_reason"] = "superseded_state_missing"
+        eligibility["recommended_action"] = "select_evidence_with_superseded_state"
+        eligibility["next_allowed_actions"] = ["inspect"]
+        return eligibility
+    runtime_target_id = str(superseded.get("runtime_target_id") or "").strip()
+    runtime_base_url = str(superseded.get("runtime_base_url") or "").strip()
+    public_app_url = str(superseded.get("public_app_url") or "").strip()
+    if not runtime_target_id and not runtime_base_url and not public_app_url:
+        eligibility["blocked_reason"] = "superseded_state_incomplete"
+        eligibility["recommended_action"] = "select_evidence_with_complete_target_identity"
+        eligibility["next_allowed_actions"] = ["inspect"]
+        return eligibility
+    eligibility["can_rollback"] = True
+    eligibility["next_allowed_actions"] = ["rollback"]
+    return eligibility
+
+
+def _record_solution_change_session_promotion_evidence(
+    *,
+    session: SolutionChangeSession,
+    application: Application,
+    identity: Optional[UserIdentity],
+    promote_eligibility: Dict[str, Any],
+    promote_payload: Dict[str, Any],
+    promotion_meta: Dict[str, Any],
+    already_up_to_date: bool,
+) -> SolutionChangeSessionPromotionEvidence:
+    artifacts: List[Dict[str, Any]] = []
+    selected_ids = _solution_change_session_selected_artifact_ids(session)
+    if selected_ids:
+        members = {
+            str(member.artifact_id): member
+            for member in ApplicationArtifactMembership.objects.filter(application=application, artifact_id__in=selected_ids)
+            .select_related("artifact", "artifact__type")
+            .all()
+        }
+        for artifact_id in selected_ids:
+            member = members.get(str(artifact_id))
+            if not member:
+                continue
+            artifacts.append(
+                {
+                    "artifact_id": str(member.artifact_id),
+                    "artifact_slug": str(_artifact_slug(member.artifact) or ""),
+                    "artifact_title": str(member.artifact.title or ""),
+                    "role": str(member.role or ""),
+                }
+            )
+    preview = session.preview_json if isinstance(session.preview_json, dict) else {}
+    preview_target = {
+        "status": str(preview.get("status") or "").strip().lower() or "not_prepared",
+        "primary_url": str(preview.get("primary_url") or "").strip(),
+        "mode": str(preview.get("mode") or "").strip(),
+        "preview_urls": [
+            str(item).strip()
+            for item in (preview.get("preview_urls") if isinstance(preview.get("preview_urls"), list) else [])
+            if str(item).strip()
+        ],
+    }
+    root_target = (
+        promote_eligibility.get("root_target_identity")
+        if isinstance(promote_eligibility.get("root_target_identity"), dict)
+        else {}
+    )
+    provider_context: Dict[str, Any] = {}
+    release_target = root_target.get("release_target") if isinstance(root_target, dict) else {}
+    if isinstance(release_target, dict):
+        provider_context["release_target"] = {
+            "id": str(release_target.get("id") or ""),
+            "provider_profile": str(release_target.get("provider_profile") or ""),
+            "deployment_mode": str(release_target.get("deployment_mode") or ""),
+        }
+    evidence = SolutionChangeSessionPromotionEvidence.objects.create(
+        workspace=session.workspace,
+        application=application,
+        solution_change_session=session,
+        operation="promotion",
+        promotion_status="success",
+        actor_source="human",
+        actor_identity=identity,
+        targeted_artifacts_json=artifacts,
+        preview_target_json=preview_target,
+        root_target_json=root_target if isinstance(root_target, dict) else {},
+        resulting_active_target_json={
+            "target_runtime": str(promotion_meta.get("target_runtime") or "xyn-local"),
+            "compose_project": str(promotion_meta.get("compose_project") or ""),
+            "ui_url": str(promotion_meta.get("ui_url") or ""),
+            "api_url": str(promotion_meta.get("api_url") or ""),
+            "deployment_id": str(promotion_meta.get("deployment_id") or ""),
+            "provision_status": str(promotion_meta.get("provision_status") or ""),
+            "already_up_to_date": bool(already_up_to_date),
+        },
+        superseded_active_state_json=root_target if isinstance(root_target, dict) else {},
+        control_result_json={
+            "result": str(promotion_meta.get("result") or "success"),
+            "reason": str(promotion_meta.get("reason") or ""),
+            "promote_mode": str(promotion_meta.get("promote_mode") or "local_runtime_update"),
+            "promoted_at": str(promotion_meta.get("promoted_at") or ""),
+            "attempted_at": str(promotion_meta.get("attempted_at") or ""),
+            "provision_status": str((promote_payload or {}).get("status") or ""),
+        },
+        provider_context_json=provider_context,
+        warnings_json=["promotion_reused_existing_runtime"] if bool(already_up_to_date) else [],
+        blocked_context_json={},
+        rollback_link_json={},
+    )
+    return evidence
+
+
+# Canonical operator/agent-facing control contract for solution change execution.
+# Keep these helpers additive and stable so API-only control loops can rely on
+# machine-readable status/eligibility without coupling to UI-shaped flows.
+def _solution_change_session_control_status(
+    *,
+    session: SolutionChangeSession,
+    application: Optional[Application] = None,
+) -> Dict[str, Any]:
+    app = application or session.application
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=app)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    session_payload = _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id)
+    staged_changes = session_payload.get("staged_changes") if isinstance(session_payload.get("staged_changes"), dict) else {}
+    preview = session_payload.get("preview") if isinstance(session_payload.get("preview"), dict) else {}
+    validation = session_payload.get("validation") if isinstance(session_payload.get("validation"), dict) else {}
+    execution_status = str(session_payload.get("execution_status") or "").strip().lower()
+    planning_state = session_payload.get("planning") if isinstance(session_payload.get("planning"), dict) else {}
+    has_pending_prompt = bool(planning_state.get("pending_question") or planning_state.get("pending_option_set"))
+    has_draft_plan = bool(planning_state.get("latest_draft_plan") or session_payload.get("plan"))
+    pending_checkpoints = planning_state.get("pending_checkpoints") if isinstance(planning_state.get("pending_checkpoints"), list) else []
+    all_checkpoints = planning_state.get("checkpoints") if isinstance(planning_state.get("checkpoints"), list) else []
+    has_pending_checkpoint = len(pending_checkpoints) > 0
+    stage_checkpoint = next(
+        (
+            item
+            for item in all_checkpoints
+            if isinstance(item, dict) and str(item.get("checkpoint_key") or "") == "plan_scope_confirmed"
+        ),
+        None,
+    )
+    has_approved_stage_checkpoint = not isinstance(stage_checkpoint, dict) or str(stage_checkpoint.get("status") or "") == "approved"
+    can_run_execution = bool(has_draft_plan and not has_pending_prompt and has_approved_stage_checkpoint and not has_pending_checkpoint)
+    artifact_states = staged_changes.get("artifact_states") if isinstance(staged_changes.get("artifact_states"), list) else []
+    preview_status = str(preview.get("status") or "").strip().lower()
+    validation_status = str(validation.get("status") or "").strip().lower()
+    promote_eligibility = (
+        session_payload.get("promote_eligibility")
+        if isinstance(session_payload.get("promote_eligibility"), dict)
+        else {}
+    )
+    can_promote = bool(promote_eligibility.get("can_promote"))
+    rollback_source = _solution_change_session_rollback_source_evidence(session=session)
+    rollback_eligibility = _solution_change_session_rollback_eligibility(
+        session=session,
+        application=app,
+        source_evidence=rollback_source,
+    )
+    can_rollback = bool(rollback_eligibility.get("can_rollback"))
+    can_activate = bool(_solution_activation_memberships(app)[0] is not None)
+    can_stage_apply = bool(can_run_execution)
+    can_prepare_preview = bool(can_run_execution and artifact_states)
+    blocked_reason = ""
+    recommended_action = ""
+    next_allowed_actions: List[str] = []
+    if has_pending_prompt:
+        blocked_reason = "planning_prompt_pending"
+        recommended_action = "resolve_planner_prompt"
+        next_allowed_actions = ["respond_to_planner_prompt"]
+    elif not has_draft_plan:
+        blocked_reason = "draft_plan_missing"
+        recommended_action = "generate_draft_plan"
+        next_allowed_actions = ["generate_plan"]
+    elif has_pending_checkpoint:
+        blocked_reason = "checkpoint_pending"
+        recommended_action = "approve_checkpoint"
+        next_allowed_actions = ["decide_checkpoint"]
+    elif not has_approved_stage_checkpoint:
+        blocked_reason = "checkpoint_not_approved"
+        recommended_action = "approve_checkpoint"
+        next_allowed_actions = ["decide_checkpoint"]
+    elif execution_status in {"not_started", "staged", "failed"} and can_stage_apply:
+        next_allowed_actions.append("stage_apply")
+    if artifact_states:
+        next_allowed_actions.append("prepare_preview")
+    if preview_status == "ready":
+        next_allowed_actions.append("validate")
+    if execution_status == "ready_for_promotion":
+        next_allowed_actions.append("commit")
+    if can_promote:
+        next_allowed_actions.append("promote")
+    if can_rollback:
+        next_allowed_actions.append("rollback")
+    elif execution_status in {"committed", "promoted"}:
+        blocked_reason = str(promote_eligibility.get("blocked_reason") or blocked_reason or "")
+        recommended_action = str(promote_eligibility.get("recommended_action") or recommended_action or "")
+        for action in (promote_eligibility.get("next_allowed_actions") if isinstance(promote_eligibility.get("next_allowed_actions"), list) else []):
+            token = str(action or "").strip()
+            if token:
+                next_allowed_actions.append(token)
+        if recommended_action in {"activate_in_root", "install_in_root"} and can_activate:
+            next_allowed_actions.append("activate_in_root")
+    if execution_status == "promoted":
+        next_allowed_actions.append("finalize")
+    if not blocked_reason and str(validation_status) in {"failed"}:
+        blocked_reason = "validation_failed"
+        recommended_action = "resolve_validation_failures"
+    targeted_artifacts: List[Dict[str, Any]] = []
+    for artifact_id in (session_payload.get("selected_artifact_ids") if isinstance(session_payload.get("selected_artifact_ids"), list) else []):
+        member = memberships_by_artifact_id.get(str(artifact_id))
+        if not member:
+            continue
+        targeted_artifacts.append(
+            {
+                "artifact_id": str(member.artifact_id),
+                "artifact_slug": str(_artifact_slug(member.artifact) or ""),
+                "artifact_title": str(member.artifact.title or ""),
+                "role": str(member.role or ""),
+            }
+        )
+    per_repo_results = (
+        staged_changes.get("per_repo_results")
+        if isinstance(staged_changes.get("per_repo_results"), list)
+        else (
+            staged_changes.get("stage_apply_result", {}).get("per_repo_results")
+            if isinstance(staged_changes.get("stage_apply_result"), dict)
+            else []
+        )
+    )
+    preview_target = {
+        "status": preview_status or "not_prepared",
+        "primary_url": str(preview.get("primary_url") or ""),
+        "urls": [str(url).strip() for url in (preview.get("preview_urls") if isinstance(preview.get("preview_urls"), list) else []) if str(url).strip()],
+        "mode": str(preview.get("mode") or ""),
+    }
+    next_allowed_actions = [item for item in dict.fromkeys([str(action).strip() for action in next_allowed_actions if str(action).strip()])]
+    warnings: List[str] = []
+    if str(preview_status) == "ready" and str((preview.get("session_build") or {}).get("status") or "").strip().lower() == "reused":
+        warnings.append("preview_reused_existing_runtime")
+    evidence_ref = _latest_solution_change_session_promotion_evidence_ref(session)
+    return {
+        "change_session_id": str(session.id),
+        "application_id": str(app.id),
+        "execution_status": execution_status or "not_started",
+        "targeted_artifacts": targeted_artifacts,
+        "per_repo_results": per_repo_results if isinstance(per_repo_results, list) else [],
+        "preview_target": preview_target,
+        "root_target_present": bool(promote_eligibility.get("root_target_present")),
+        "root_target_identity": (
+            promote_eligibility.get("root_target_identity")
+            if isinstance(promote_eligibility.get("root_target_identity"), dict)
+            else {}
+        ),
+        "can_stage_apply": can_stage_apply,
+        "can_prepare_preview": bool(can_prepare_preview),
+        "can_activate": bool(can_activate),
+        "can_promote": bool(can_promote),
+        "can_rollback": bool(can_rollback),
+        "rollback_eligibility": rollback_eligibility,
+        "blocked_reason": blocked_reason,
+        "recommended_action": recommended_action,
+        "next_allowed_actions": next_allowed_actions,
+        "evidence_ref": evidence_ref,
+        "warnings": warnings,
+        "session": session_payload,
+    }
+
+
+def _solution_change_session_control_envelope(
+    *,
+    operation: str,
+    session: SolutionChangeSession,
+    application: Application,
+    operation_status: str = "ready",
+    operation_payload: Optional[Dict[str, Any]] = None,
+    http_status: int = 200,
+) -> JsonResponse:
+    control = _solution_change_session_control_status(session=session, application=application)
+    return JsonResponse(
+        {
+            "operation": str(operation or "").strip() or "inspect",
+            "status": str(operation_status or "").strip() or "ready",
+            "change_session_id": str(session.id),
+            "application_id": str(application.id),
+            "control": control,
+            "operation_result": operation_payload or {},
+        },
+        status=http_status,
+    )
+
+
+def _docker_container_published_port(container_name: str, container_port: str = "8080/tcp") -> str:
+    name = str(container_name or "").strip()
+    if not name:
+        return ""
+    port_key = str(container_port or "8080/tcp").strip() or "8080/tcp"
+    format_expr = f"{{{{with (index .NetworkSettings.Ports \"{port_key}\")}}}}{{{{(index . 0).HostPort}}}}{{{{end}}}}"
+    try:
+        proc = subprocess.run(
+            ["docker", "inspect", "--format", format_expr, name],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=6,
+        )
+    except Exception:
+        return ""
+    if int(proc.returncode or 1) != 0:
+        return ""
+    value = str(proc.stdout or "").strip()
+    if value.isdigit():
+        return value
+    return ""
+
+
+def _refresh_runtime_target_localhost_url(runtime_target: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(runtime_target, dict):
+        return {}
+    refreshed = dict(runtime_target)
+    container_name = str(refreshed.get("app_container_name") or "").strip()
+    if not container_name:
+        return refreshed
+    localhost_fields: List[str] = []
+    for field in ("runtime_url", "public_app_url", "app_url"):
+        raw = str(refreshed.get(field) or "").strip()
+        if not raw:
+            continue
+        parsed = urlsplit(raw)
+        if str(parsed.hostname or "").strip().lower() == "localhost":
+            localhost_fields.append(field)
+    if not localhost_fields:
+        return refreshed
+    published_port = _docker_container_published_port(container_name)
+    if not published_port:
+        return refreshed
+    resolved_url = f"http://localhost:{published_port}"
+    for field in localhost_fields:
+        if field == "app_url" and not str(refreshed.get(field) or "").strip().startswith("http://localhost:"):
+            continue
+        refreshed[field] = resolved_url
+    if not str(refreshed.get("runtime_url") or "").strip():
+        public_app_url = str(refreshed.get("public_app_url") or "").strip()
+        if public_app_url.startswith("http://localhost:"):
+            refreshed["runtime_url"] = public_app_url
+    return refreshed
+
+
+def _runtime_target_probe_base_urls(runtime_target: Dict[str, Any]) -> List[str]:
+    if not isinstance(runtime_target, dict):
+        return []
+    candidates: List[str] = []
+    runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip().rstrip("/")
+    if runtime_base_url:
+        candidates.append(runtime_base_url)
+    for field in ("runtime_url", "public_app_url", "app_url"):
+        raw = str(runtime_target.get(field) or "").strip()
+        if not raw:
+            continue
+        parsed = urlsplit(raw)
+        if not parsed.scheme or not parsed.netloc:
+            continue
+        base = urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
+        if base:
+            candidates.append(base)
+    expanded: List[str] = []
+    for item in candidates:
+        expanded.extend(_runtime_target_probe_candidates(item))
+    deduped: List[str] = []
+    seen: Set[str] = set()
+    for item in expanded:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped
+
+
+def _runtime_target_probe_candidates(base_url: str) -> List[str]:
+    token = str(base_url or "").strip().rstrip("/")
+    if not token:
+        return []
+    parsed = urlsplit(token)
+    host = str(parsed.hostname or "").strip().lower()
+    if host not in {"localhost", "127.0.0.1"}:
+        return [token]
+    if not _containerized_local_probe_mode():
+        return [token]
+    probe_hosts = _containerized_local_probe_hosts()
+    if not probe_hosts:
+        return [token]
+    scheme = str(parsed.scheme or "http").strip() or "http"
+    expanded = [token]
+    for probe_host in probe_hosts:
+        host_token = str(probe_host or "").strip()
+        if not host_token:
+            continue
+        if str(host_token).strip().lower() in {"localhost", "127.0.0.1"}:
+            continue
+        netloc = host_token
+        if parsed.port:
+            netloc = f"{host_token}:{parsed.port}"
+        candidate = urlunsplit((scheme, netloc, "", "", "")).rstrip("/")
+        if candidate:
+            expanded.append(candidate)
+    return expanded
+
+
+def _containerized_local_probe_mode() -> bool:
+    if not os.path.exists("/.dockerenv"):
+        return False
+    env_mode = str(os.environ.get("XYN_ENV") or "").strip().lower()
+    return env_mode in {"local", "dev", ""}
+
+
+def _containerized_local_probe_hosts() -> List[str]:
+    hosts: List[str] = []
+    configured = str(
+        os.environ.get("XYN_LOCALHOST_PROBE_HOSTS")
+        or os.environ.get("XYN_HOST_GATEWAY")
+        or ""
+    ).strip()
+    if configured:
+        for token in configured.split(","):
+            value = str(token or "").strip()
+            if value:
+                hosts.append(value)
+    hosts.append("host.docker.internal")
+    gateway_ip = _container_default_gateway_ip()
+    if gateway_ip:
+        hosts.append(gateway_ip)
+    deduped: List[str] = []
+    seen: Set[str] = set()
+    for host in hosts:
+        token = str(host or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return deduped
+
+
+def _container_default_gateway_ip() -> str:
+    route_path = Path("/proc/net/route")
+    if not route_path.exists():
+        return ""
+    try:
+        for line in route_path.read_text(encoding="utf-8").splitlines()[1:]:
+            parts = [part for part in line.strip().split("\t") if part]
+            if len(parts) < 4:
+                continue
+            destination = str(parts[1] or "").strip().lower()
+            gateway_hex = str(parts[2] or "").strip()
+            try:
+                flags = int(str(parts[3] or "0"), 16)
+            except ValueError:
+                continue
+            if destination != "00000000" or not (flags & 0x2):
+                continue
+            if len(gateway_hex) != 8:
+                continue
+            octets = [str(int(gateway_hex[idx : idx + 2], 16)) for idx in range(0, 8, 2)]
+            return ".".join(reversed(octets))
+    except Exception:
+        return ""
+    return ""
+
+
+def _activation_runtime_target_is_live(
+    runtime_target: Dict[str, Any],
+    runtime_instance: Any | None = None,
+) -> tuple[bool, str, Dict[str, Any]]:
+    refreshed = _refresh_runtime_target_localhost_url(runtime_target if isinstance(runtime_target, dict) else {})
+    instance_status = ""
+    if isinstance(runtime_instance, dict):
+        instance_status = str(runtime_instance.get("status") or "").strip().lower()
+    elif runtime_instance is not None:
+        instance_status = str(getattr(runtime_instance, "status", "") or "").strip().lower()
+    if instance_status and instance_status not in {"active", "ready", "running"}:
+        return False, "runtime_instance_inactive", refreshed
+
+    base_urls = _runtime_target_probe_base_urls(refreshed)
+    if not base_urls:
+        return False, "runtime_target_missing_url", refreshed
+
+    probe_paths = ("/health", "/healthz", "/xyn/api/health")
+    for base_url in base_urls:
+        for path in probe_paths:
+            try:
+                response = _runtime_target_request(
+                    base_url=base_url,
+                    method="GET",
+                    path=path,
+                    timeout=3,
+                )
+            except requests.RequestException:
+                continue
+            if int(response.status_code or 0) == 200:
+                return True, "runtime_live", refreshed
+    return False, "runtime_not_live", refreshed
 
 
 def _installed_generated_artifact(workspace: Workspace, app_slug: str) -> Optional[Artifact]:
@@ -21505,7 +23088,8 @@ def _ensure_runtime_artifact(
         slug="module",
         defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
     )
-    artifact = Artifact.objects.filter(slug=slug).order_by("-updated_at", "-created_at").first()
+    artifact = Artifact.objects.filter(workspace=workspace, slug=slug).order_by("-updated_at", "-created_at").first()
+    ownership = _runtime_artifact_ownership_for_slug(slug)
     if artifact is None:
         artifact = Artifact.objects.create(
             workspace=workspace,
@@ -21517,6 +23101,9 @@ def _ensure_runtime_artifact(
             summary=summary,
             scope_json={"slug": slug, "manifest_ref": manifest_ref, "summary": summary},
             provenance_json={"source_system": "seed-kernel", "source_id": slug},
+            owner_repo_slug=str(ownership.get("repo_slug") or "").strip(),
+            owner_path_prefixes_json=list(ownership.get("allowed_paths") or []),
+            edit_mode=str(ownership.get("edit_mode") or "generated").strip().lower() or "generated",
         )
         return artifact
     scope = dict(artifact.scope_json or {})
@@ -21534,6 +23121,18 @@ def _ensure_runtime_artifact(
     if str(artifact.summary or "").strip() != summary:
         artifact.summary = summary
         update_fields.append("summary")
+    owner_repo_slug = str(ownership.get("repo_slug") or "").strip()
+    if str(artifact.owner_repo_slug or "").strip() != owner_repo_slug:
+        artifact.owner_repo_slug = owner_repo_slug
+        update_fields.append("owner_repo_slug")
+    owner_path_prefixes = list(ownership.get("allowed_paths") or [])
+    if list(artifact.owner_path_prefixes_json or []) != owner_path_prefixes:
+        artifact.owner_path_prefixes_json = owner_path_prefixes
+        update_fields.append("owner_path_prefixes_json")
+    edit_mode = str(ownership.get("edit_mode") or "generated").strip().lower() or "generated"
+    if str(artifact.edit_mode or "").strip().lower() != edit_mode:
+        artifact.edit_mode = edit_mode
+        update_fields.append("edit_mode")
     if scope_changed:
         artifact.scope_json = scope
         update_fields.append("scope_json")
@@ -21930,6 +23529,7 @@ def _intent_apply_provision_xyn_remote(
             "api_url": urls.get("api_url"),
             "dns": dns_action,
             "driver_state": deployment_payload.get("driver_state"),
+            "provider_contract": deployment_provider_contract_summary(),
         },
         "next_actions": [
             {"label": "Open deployment details", "action": "OpenPanel", "panel_key": "artifact_detail", "params": {"slug": deployment_artifact.slug}},
@@ -23204,9 +24804,10 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 return JsonResponse({"error": "unsupported artifact_type context"}, status=400)
 
     if not _should_use_legacy_intake_fallback(message, context_artifact=context_artifact):
+        internal_summary = str((epic_d_intent.resolution_notes or ["Intent is unsupported in the current resolver scope."])[0])
         response_payload = {
             "status": "UnsupportedIntent",
-            "summary": str((epic_d_intent.resolution_notes or ["Intent is unsupported in the current resolver scope."])[0]),
+            "summary": _user_facing_unsupported_intent_summary(internal_summary),
             "intent": epic_d_payload,
             "prompt_interpretation": prompt_interpretation,
             "conversation_action": conversation_action,
@@ -23229,7 +24830,7 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
                 request_type="intent.resolve",
                 workspace_id=context_workspace_id,
                 summary=str(response_payload.get("summary") or ""),
-                error=str(epic_d_intent.clarification_reason or ""),
+                error=str(epic_d_intent.clarification_reason or internal_summary or ""),
                 trace=epic_d_trace,
                 structured_operation=epic_d_payload.get("action_payload") if isinstance(epic_d_payload.get("action_payload"), dict) else {},
                 prompt_interpretation=prompt_interpretation,
@@ -27403,6 +29004,879 @@ def release_target_execution_step(request: HttpRequest, target_id: str) -> JsonR
 
 @csrf_exempt
 @login_required
+def release_target_deployment_plan_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method not in {"GET", "POST"}:
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    payload = _parse_json(request) if request.method == "POST" else {}
+    plan = _build_release_target_deployment_plan_payload(
+        target=target,
+        payload=payload if isinstance(payload, dict) else {},
+        discover_environment_override=request.GET.get("discover_environment"),
+    )
+    return JsonResponse(
+        {
+            "release_target_id": str(target.id),
+            "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+            "deployment_plan": plan,
+        }
+    )
+
+
+def _build_release_target_deployment_plan_payload(
+    *,
+    target: ReleaseTarget,
+    payload: Dict[str, Any],
+    discover_environment_override: str | None = None,
+) -> Dict[str, Any]:
+    deployment_request = payload.get("deployment_request") if isinstance(payload.get("deployment_request"), dict) else {}
+    discover_environment = _parse_bool_param(
+        str(payload.get("discover_environment")) if payload.get("discover_environment") is not None else discover_environment_override,
+        default=False,
+    )
+    target_payload = _serialize_release_target(target)
+    runtime_payload = target_payload.get("runtime") if isinstance(target_payload.get("runtime"), dict) else {}
+    dns_payload = target_payload.get("dns") if isinstance(target_payload.get("dns"), dict) else {}
+    dns_provider_payload = target_payload.get("dns_provider") if isinstance(target_payload.get("dns_provider"), dict) else {}
+    deployment_profile = (
+        target_payload.get("deployment_provider_profile")
+        if isinstance(target_payload.get("deployment_provider_profile"), dict)
+        else {}
+    )
+    selected_provider_key = str(deployment_profile.get("selected_provider_key") or "").strip().lower()
+    target_instance_id = str(target_payload.get("target_instance_id") or "").strip()
+    target_instance = ProvisionedInstance.objects.filter(id=target_instance_id).first() if target_instance_id else None
+    aws_region = (
+        str(deployment_request.get("aws_region") or "").strip()
+        or str((target_instance.aws_region if target_instance else "") or "").strip()
+    )
+    fqdn = str(deployment_request.get("hostname") or "").strip() or str(target_payload.get("fqdn") or "").strip()
+    dns_provider = str(dns_payload.get("provider") or "").strip().lower()
+    solution_name = str(deployment_request.get("solution_name") or "").strip()
+    if not solution_name and target.blueprint:
+        solution_name = f"{target.blueprint.namespace}.{target.blueprint.name}"
+    return build_non_destructive_deployment_plan(
+        selected_provider_key=selected_provider_key,
+        release_target_id=str(target.id),
+        blueprint_ref=str(target.blueprint_id or ""),
+        solution_name=solution_name,
+        target_instance_id=target_instance_id,
+        aws_region=aws_region,
+        runtime_config=runtime_payload,
+        dns_provider=dns_provider,
+        dns_config=dns_provider_payload,
+        fqdn=fqdn,
+        instance_type=str(deployment_request.get("instance_type") or "").strip(),
+        discover_environment=bool(discover_environment),
+    )
+
+
+def _serialize_release_target_deployment_preparation_evidence(
+    record: ReleaseTargetDeploymentPreparationEvidence,
+) -> Dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "release_target_id": str(record.release_target_id),
+        "blueprint_id": str(record.blueprint_id),
+        "planning_mode": str(record.planning_mode or ""),
+        "operation": str(record.operation or ""),
+        "provider_key": str(record.provider_key or ""),
+        "provider_module_contract_ref": str(record.provider_module_contract_ref or ""),
+        "execution_ready_in_principle": bool(record.execution_ready_in_principle),
+        "mutation_performed": bool(record.mutation_performed),
+        "requested_config": record.requested_config_json or {},
+        "discovered_inputs": record.discovered_inputs_json or [],
+        "missing_inputs": record.missing_inputs_json or [],
+        "steps": record.steps_json or [],
+        "warnings": record.warnings_json or [],
+        "staged_execution_intent": record.staged_execution_intent_json or {},
+        "plan_snapshot": record.plan_snapshot_json or {},
+        "created_at": record.created_at.isoformat() if record.created_at else "",
+    }
+
+
+@csrf_exempt
+@login_required
+def release_target_deployment_preparation_evidence_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    if request.method == "GET":
+        limit = 10
+        try:
+            if request.GET.get("limit"):
+                limit = max(1, min(100, int(str(request.GET.get("limit")))))
+        except ValueError:
+            limit = 10
+        records = list(
+            ReleaseTargetDeploymentPreparationEvidence.objects.filter(release_target=target).order_by("-created_at")[:limit]
+        )
+        latest = records[0] if records else None
+        return JsonResponse(
+            {
+                "release_target_id": str(target.id),
+                "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+                "latest_evidence_ref": {"deployment_preparation_evidence_id": str(latest.id)} if latest else {},
+                "evidence": [_serialize_release_target_deployment_preparation_evidence(item) for item in records],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    payload = _parse_json(request)
+    plan = _build_release_target_deployment_plan_payload(
+        target=target,
+        payload=payload if isinstance(payload, dict) else {},
+        discover_environment_override=request.GET.get("discover_environment"),
+    )
+    staged_intent = derive_staged_execution_intent_from_deployment_plan(plan)
+    provider_contract = plan.get("provider_contract") if isinstance(plan.get("provider_contract"), dict) else {}
+    record = ReleaseTargetDeploymentPreparationEvidence.objects.create(
+        release_target=target,
+        blueprint=target.blueprint,
+        planning_mode=str(plan.get("planning_mode") or "").strip(),
+        operation=str(plan.get("operation") or "").strip(),
+        provider_key=str(plan.get("provider_key") or "").strip(),
+        provider_module_contract_ref=str(provider_contract.get("module_manifest_ref") or "").strip(),
+        execution_ready_in_principle=bool(plan.get("execution_ready_in_principle")),
+        mutation_performed=False,
+        requested_config_json=plan.get("requested_config") if isinstance(plan.get("requested_config"), dict) else {},
+        discovered_inputs_json=plan.get("discovered_inputs") if isinstance(plan.get("discovered_inputs"), list) else [],
+        missing_inputs_json=plan.get("missing_inputs") if isinstance(plan.get("missing_inputs"), list) else [],
+        steps_json=plan.get("steps") if isinstance(plan.get("steps"), list) else [],
+        warnings_json=plan.get("warnings") if isinstance(plan.get("warnings"), list) else [],
+        staged_execution_intent_json=staged_intent,
+        plan_snapshot_json=plan,
+        created_by=request.user,
+    )
+    return JsonResponse(
+        {
+            "status": "recorded",
+            "release_target_id": str(target.id),
+            "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+            "evidence_ref": {"deployment_preparation_evidence_id": str(record.id)},
+            "deployment_plan": plan,
+            "staged_execution_intent": staged_intent,
+            "mutation_performed": False,
+        }
+    )
+
+
+def _serialize_release_target_execution_preparation_handoff(
+    record: ReleaseTargetExecutionPreparationHandoff,
+) -> Dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "release_target_id": str(record.release_target_id),
+        "blueprint_id": str(record.blueprint_id),
+        "source_evidence_ref": {
+            "deployment_preparation_evidence_id": str(record.source_preparation_evidence_id),
+        },
+        "validation_status": str(record.validation_status or ""),
+        "blocked_reason": str(record.blocked_reason or ""),
+        "mutation_performed": bool(record.mutation_performed),
+        "warnings": record.warnings_json or [],
+        "handoff": record.handoff_json or {},
+        "created_at": record.created_at.isoformat() if record.created_at else "",
+    }
+
+
+def _build_execution_preparation_handoff_from_evidence(
+    *,
+    evidence: ReleaseTargetDeploymentPreparationEvidence,
+) -> Dict[str, Any]:
+    intent = evidence.staged_execution_intent_json if isinstance(evidence.staged_execution_intent_json, dict) else {}
+    plan_snapshot = evidence.plan_snapshot_json if isinstance(evidence.plan_snapshot_json, dict) else {}
+    status = "ready"
+    blocked_reason = ""
+    warnings: List[str] = list(evidence.warnings_json or [])
+    now = timezone.now()
+    max_age_seconds = 21600
+    try:
+        max_age_seconds = int(str(os.environ.get("XYN_DEPLOYMENT_HANDOFF_MAX_AGE_SECONDS") or "21600"))
+    except ValueError:
+        max_age_seconds = 21600
+    if evidence.created_at:
+        age_seconds = int((now - evidence.created_at).total_seconds())
+        if max_age_seconds > 0 and age_seconds > max_age_seconds:
+            status = "blocked"
+            blocked_reason = "staged_intent_stale"
+            warnings.append(f"Source evidence is stale ({age_seconds}s old). Refresh deployment-preparation evidence.")
+    if status == "ready":
+        if str(intent.get("schema_version") or "").strip() != "xyn.deployment_staged_intent.v1":
+            status = "invalid"
+            blocked_reason = "missing_or_invalid_staged_intent"
+        elif not bool(intent.get("promotable_to_execution_in_principle")):
+            status = "blocked"
+            blocked_reason = "staged_intent_not_promotable"
+        elif list(intent.get("blocked_steps") or []):
+            status = "blocked"
+            blocked_reason = "staged_intent_blocked_steps"
+        elif list(intent.get("required_future_inputs") or []):
+            status = "blocked"
+            blocked_reason = "staged_intent_missing_future_inputs"
+    ready_steps = [str(item).strip() for item in (intent.get("ready_steps") or []) if str(item).strip()]
+    blocked_steps = [str(item).strip() for item in (intent.get("blocked_steps") or []) if str(item).strip()]
+    required_future_inputs = [str(item).strip() for item in (intent.get("required_future_inputs") or []) if str(item).strip()]
+    handoff = {
+        "schema_version": "xyn.execution_preparation_handoff.v1",
+        "handoff_type": "execution_preparation",
+        "planning_mode": str(evidence.planning_mode or ""),
+        "operation": str(evidence.operation or ""),
+        "source_evidence_ref": {"deployment_preparation_evidence_id": str(evidence.id)},
+        "release_target_id": str(evidence.release_target_id),
+        "provider_key": str(evidence.provider_key or ""),
+        "provider_module_contract_ref": str(evidence.provider_module_contract_ref or ""),
+        "requested_config": evidence.requested_config_json or {},
+        "ready_steps": ready_steps,
+        "blocked_steps": blocked_steps,
+        "required_future_inputs": required_future_inputs,
+        "promotable_to_execution_in_principle": bool(intent.get("promotable_to_execution_in_principle")),
+        "validation_status": status,
+        "blocked_reason": blocked_reason,
+        "warnings": warnings,
+        "mutation_performed": False,
+        "non_destructive_note": "No EC2, Route53, or remote runtime mutation has occurred.",
+        "derived_from_plan": {
+            "schema_version": str(plan_snapshot.get("schema_version") or ""),
+            "operation": str(plan_snapshot.get("operation") or ""),
+        },
+    }
+    return {
+        "validation_status": status,
+        "blocked_reason": blocked_reason,
+        "warnings": warnings,
+        "handoff": handoff,
+    }
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_preparation_handoff_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    if request.method == "GET":
+        limit = 10
+        try:
+            if request.GET.get("limit"):
+                limit = max(1, min(100, int(str(request.GET.get("limit")))))
+        except ValueError:
+            limit = 10
+        records = list(
+            ReleaseTargetExecutionPreparationHandoff.objects.filter(release_target=target).order_by("-created_at")[:limit]
+        )
+        latest = records[0] if records else None
+        return JsonResponse(
+            {
+                "release_target_id": str(target.id),
+                "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+                "latest_handoff_ref": {"execution_preparation_handoff_id": str(latest.id)} if latest else {},
+                "handoffs": [_serialize_release_target_execution_preparation_handoff(item) for item in records],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    payload = _parse_json(request)
+    evidence_id = str(payload.get("evidence_id") or "").strip() if isinstance(payload, dict) else ""
+    if evidence_id:
+        source_evidence = (
+            ReleaseTargetDeploymentPreparationEvidence.objects.filter(id=evidence_id, release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    else:
+        source_evidence = (
+            ReleaseTargetDeploymentPreparationEvidence.objects.filter(release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    if source_evidence is None:
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "release_target_id": str(target.id),
+                "blocked_reason": "missing_deployment_preparation_evidence",
+                "message": "Generate deployment-preparation evidence before requesting execution handoff.",
+                "mutation_performed": False,
+            },
+            status=409,
+        )
+    decision = _build_execution_preparation_handoff_from_evidence(evidence=source_evidence)
+    record = ReleaseTargetExecutionPreparationHandoff.objects.create(
+        release_target=target,
+        blueprint=target.blueprint,
+        source_preparation_evidence=source_evidence,
+        validation_status=str(decision.get("validation_status") or "blocked"),
+        blocked_reason=str(decision.get("blocked_reason") or ""),
+        mutation_performed=False,
+        warnings_json=list(decision.get("warnings") or []),
+        handoff_json=decision.get("handoff") if isinstance(decision.get("handoff"), dict) else {},
+        created_by=request.user,
+    )
+    response_payload = {
+        "status": "ready" if str(record.validation_status) == "ready" else "blocked",
+        "release_target_id": str(target.id),
+        "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+        "handoff_ref": {"execution_preparation_handoff_id": str(record.id)},
+        "source_evidence_ref": {"deployment_preparation_evidence_id": str(source_evidence.id)},
+        "validation_status": str(record.validation_status),
+        "blocked_reason": str(record.blocked_reason or ""),
+        "warnings": record.warnings_json or [],
+        "handoff": record.handoff_json or {},
+        "mutation_performed": False,
+    }
+    status_code = 200 if str(record.validation_status) == "ready" else 409
+    return JsonResponse(response_payload, status=status_code)
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_preparation_approval_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    return release_target_execution_preparation_approval(request=request, target_id=target_id)
+
+
+def _serialize_release_target_execution_preparation_evidence(
+    record: ReleaseTargetExecutionPreparationEvidence,
+) -> Dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "release_target_id": str(record.release_target_id),
+        "blueprint_id": str(record.blueprint_id),
+        "source_handoff_ref": {"execution_preparation_handoff_id": str(record.source_handoff_id)},
+        "status": str(record.status or ""),
+        "blocked_reason": str(record.blocked_reason or ""),
+        "approval_granted": bool(record.approval_granted),
+        "mutation_performed": bool(record.mutation_performed),
+        "prepared_actions": record.prepared_actions_json or [],
+        "prepared_payload": record.prepared_payload_json or {},
+        "warnings": record.warnings_json or [],
+        "created_at": record.created_at.isoformat() if record.created_at else "",
+    }
+
+
+def _build_execution_preparation_package_from_handoff(
+    *,
+    handoff: ReleaseTargetExecutionPreparationHandoff,
+) -> Dict[str, Any]:
+    payload = handoff.handoff_json if isinstance(handoff.handoff_json, dict) else {}
+    requested = payload.get("requested_config") if isinstance(payload.get("requested_config"), dict) else {}
+    ready_steps = [str(item).strip() for item in (payload.get("ready_steps") or []) if str(item).strip()]
+    blocked_steps = [str(item).strip() for item in (payload.get("blocked_steps") or []) if str(item).strip()]
+    required_future_inputs = [str(item).strip() for item in (payload.get("required_future_inputs") or []) if str(item).strip()]
+    provider_key = str(payload.get("provider_key") or "").strip()
+    contract = resolve_deployment_target_contract(selected_provider_key=provider_key)
+    module_contract = contract.get("provider_module_contract") if isinstance(contract, dict) else {}
+    module_contract = module_contract if isinstance(module_contract, dict) else {}
+    capabilities_expected = [
+        str(item).strip()
+        for item in (module_contract.get("capabilities_expected") or [])
+        if str(item).strip()
+    ]
+    prepared_actions: List[Dict[str, Any]] = []
+    for step_id in ready_steps:
+        capability = ""
+        if step_id.startswith("prepare.runtime_target"):
+            capability = "runtime.sibling.ec2.preparation"
+        elif step_id.startswith("prepare.dns_target"):
+            capability = "dns.route53.records"
+        elif step_id.startswith("prepare.execution_preflight"):
+            capability = "runtime.compose.apply_remote"
+        prepared_actions.append(
+            {
+                "action_id": f"prepare.{step_id}",
+                "source_step_id": step_id,
+                "capability_hint": capability,
+                "execution_mode": "preparation_only",
+                "mutation_performed": False,
+            }
+        )
+    package = {
+        "schema_version": "xyn.execution_preparation_package.v1",
+        "operation": "execution_preparation_consume",
+        "release_target_id": str(handoff.release_target_id),
+        "provider_key": provider_key,
+        "provider_module_contract_ref": str(payload.get("provider_module_contract_ref") or "").strip(),
+        "requested_config": requested,
+        "module_capabilities_expected": capabilities_expected,
+        "ready_steps": ready_steps,
+        "blocked_steps": blocked_steps,
+        "required_future_inputs": required_future_inputs,
+        "prepared_actions": prepared_actions,
+        "non_destructive_note": "Prepared package only; no EC2, Route53, or remote runtime mutation performed.",
+        "source_handoff_ref": {"execution_preparation_handoff_id": str(handoff.id)},
+    }
+    return {"prepared_actions": prepared_actions, "prepared_payload": package}
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_preparation_consume_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    if request.method == "GET":
+        limit = 10
+        try:
+            if request.GET.get("limit"):
+                limit = max(1, min(100, int(str(request.GET.get("limit")))))
+        except ValueError:
+            limit = 10
+        records = list(
+            ReleaseTargetExecutionPreparationEvidence.objects.filter(release_target=target).order_by("-created_at")[:limit]
+        )
+        latest = records[0] if records else None
+        return JsonResponse(
+            {
+                "release_target_id": str(target.id),
+                "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+                "latest_execution_preparation_ref": {"execution_preparation_evidence_id": str(latest.id)} if latest else {},
+                "execution_preparation_evidence": [
+                    _serialize_release_target_execution_preparation_evidence(item) for item in records
+                ],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    payload = _parse_json(request)
+    handoff_id = str(payload.get("handoff_id") or "").strip() if isinstance(payload, dict) else ""
+    approval_granted = bool((payload or {}).get("approve_execution_preparation")) if isinstance(payload, dict) else False
+    if handoff_id:
+        handoff = (
+            ReleaseTargetExecutionPreparationHandoff.objects.filter(id=handoff_id, release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    else:
+        handoff = (
+            ReleaseTargetExecutionPreparationHandoff.objects.filter(release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    if handoff is None:
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "release_target_id": str(target.id),
+                "blocked_reason": "missing_execution_preparation_handoff",
+                "message": "Generate an execution-preparation handoff before consuming execution-preparation.",
+                "mutation_performed": False,
+            },
+            status=409,
+        )
+    status = "prepared"
+    blocked_reason = ""
+    warnings: List[str] = []
+    prepared_actions: List[Dict[str, Any]] = []
+    prepared_payload: Dict[str, Any] = {}
+    if not approval_granted:
+        status = "blocked"
+        blocked_reason = "approval_required"
+    elif str(handoff.validation_status or "").strip().lower() != "ready":
+        status = "blocked"
+        blocked_reason = "handoff_not_ready"
+        warnings.append(f"Handoff status is {handoff.validation_status}.")
+    elif str((handoff.handoff_json or {}).get("schema_version") or "").strip() != "xyn.execution_preparation_handoff.v1":
+        status = "invalid"
+        blocked_reason = "invalid_handoff_schema"
+    else:
+        package = _build_execution_preparation_package_from_handoff(handoff=handoff)
+        prepared_actions = package.get("prepared_actions") if isinstance(package.get("prepared_actions"), list) else []
+        prepared_payload = package.get("prepared_payload") if isinstance(package.get("prepared_payload"), dict) else {}
+        warnings.extend([str(item) for item in ((handoff.handoff_json or {}).get("warnings") or []) if str(item).strip()])
+    record = ReleaseTargetExecutionPreparationEvidence.objects.create(
+        release_target=target,
+        blueprint=target.blueprint,
+        source_handoff=handoff,
+        status=status,
+        blocked_reason=blocked_reason,
+        approval_granted=bool(approval_granted),
+        mutation_performed=False,
+        prepared_actions_json=prepared_actions,
+        prepared_payload_json=prepared_payload,
+        warnings_json=warnings,
+        created_by=request.user,
+    )
+    response_payload = {
+        "status": "prepared" if status == "prepared" else "blocked",
+        "release_target_id": str(target.id),
+        "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+        "execution_preparation_ref": {"execution_preparation_evidence_id": str(record.id)},
+        "source_handoff_ref": {"execution_preparation_handoff_id": str(handoff.id)},
+        "validation_status": str(status),
+        "blocked_reason": str(blocked_reason),
+        "approval_granted": bool(approval_granted),
+        "prepared_actions": prepared_actions,
+        "prepared_payload": prepared_payload,
+        "warnings": warnings,
+        "mutation_performed": False,
+    }
+    status_code = 200 if status == "prepared" else 409
+    return JsonResponse(response_payload, status=status_code)
+
+
+def _serialize_release_target_execution_step_evidence(
+    record: ReleaseTargetExecutionStepEvidence,
+) -> Dict[str, Any]:
+    return {
+        "id": str(record.id),
+        "release_target_id": str(record.release_target_id),
+        "blueprint_id": str(record.blueprint_id),
+        "source_preparation_evidence_ref": {
+            "execution_preparation_evidence_id": str(record.source_preparation_evidence_id),
+        },
+        "action_key": str(record.action_key or ""),
+        "status": str(record.status or ""),
+        "blocked_reason": str(record.blocked_reason or ""),
+        "approval_granted": bool(record.approval_granted),
+        "mutation_performed": bool(record.mutation_performed),
+        "result": record.result_json or {},
+        "warnings": record.warnings_json or [],
+        "created_at": record.created_at.isoformat() if record.created_at else "",
+    }
+
+
+def _extract_execution_inputs_from_plan_snapshot(plan_snapshot: Dict[str, Any]) -> Dict[str, str]:
+    required_inputs = plan_snapshot.get("required_inputs") if isinstance(plan_snapshot.get("required_inputs"), list) else []
+    value_map: Dict[str, str] = {}
+    for item in required_inputs:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        raw_value = item.get("value")
+        if raw_value is None:
+            continue
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        value_map[key] = value
+    return {
+        "target_instance_id": str(value_map.get("release_target.target_instance_id") or "").strip(),
+        "aws_region": str(value_map.get("target_instance.aws_region") or "").strip(),
+        "runtime_transport": str(value_map.get("release_target.runtime.transport") or "").strip().lower(),
+        "remote_root": str(value_map.get("release_target.runtime.remote_root") or "").strip(),
+    }
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_step_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    if request.method == "GET":
+        limit = 10
+        try:
+            if request.GET.get("limit"):
+                limit = max(1, min(100, int(str(request.GET.get("limit")))))
+        except ValueError:
+            limit = 10
+        records = list(
+            ReleaseTargetExecutionStepEvidence.objects.filter(release_target=target).order_by("-created_at")[:limit]
+        )
+        latest = records[0] if records else None
+        return JsonResponse(
+            {
+                "release_target_id": str(target.id),
+                "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+                "latest_execution_step_ref": {"execution_step_evidence_id": str(latest.id)} if latest else {},
+                "execution_step_evidence": [_serialize_release_target_execution_step_evidence(item) for item in records],
+            }
+        )
+    if request.method != "POST":
+        return JsonResponse({"error": "GET or POST required"}, status=405)
+    payload = _parse_json(request)
+    preparation_evidence_id = str(payload.get("execution_preparation_evidence_id") or "").strip() if isinstance(payload, dict) else ""
+    action_key = (
+        str(payload.get("action_key") or "runtime_marker_probe").strip().lower()
+        if isinstance(payload, dict)
+        else "runtime_marker_probe"
+    )
+    approval_granted = bool((payload or {}).get("approve_execution_step")) if isinstance(payload, dict) else False
+    if preparation_evidence_id:
+        prep_evidence = (
+            ReleaseTargetExecutionPreparationEvidence.objects.filter(id=preparation_evidence_id, release_target=target)
+            .order_by("-created_at")
+            .first()
+        )
+    else:
+        prep_evidence = (
+            ReleaseTargetExecutionPreparationEvidence.objects.filter(release_target=target, status="prepared")
+            .order_by("-created_at")
+            .first()
+        )
+    if prep_evidence is None:
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "release_target_id": str(target.id),
+                "blocked_reason": "missing_prepared_execution_preparation_evidence",
+                "message": "Run execution_preparation_consume and obtain status=prepared before execution steps.",
+                "mutation_performed": False,
+            },
+            status=409,
+        )
+    status = "succeeded"
+    blocked_reason = ""
+    warnings: List[str] = []
+    result: Dict[str, Any] = {}
+    if not approval_granted:
+        status = "blocked"
+        blocked_reason = "approval_required"
+    elif str(prep_evidence.status or "").strip().lower() != "prepared":
+        status = "blocked"
+        blocked_reason = "preparation_evidence_not_prepared"
+    elif action_key not in {
+        "runtime_marker_probe",
+        "runtime_prepare_root_marker",
+        "runtime_stage_execution_manifest",
+    }:
+        status = "blocked"
+        blocked_reason = "unsupported_action_key"
+    else:
+        prepared_payload = prep_evidence.prepared_payload_json if isinstance(prep_evidence.prepared_payload_json, dict) else {}
+        if str(prepared_payload.get("schema_version") or "").strip() != "xyn.execution_preparation_package.v1":
+            status = "blocked"
+            blocked_reason = "invalid_execution_preparation_package"
+        else:
+            source_handoff = prep_evidence.source_handoff
+            source_preparation_evidence = source_handoff.source_preparation_evidence if source_handoff else None
+            plan_snapshot = (
+                source_preparation_evidence.plan_snapshot_json
+                if source_preparation_evidence and isinstance(source_preparation_evidence.plan_snapshot_json, dict)
+                else {}
+            )
+            execution_inputs = _extract_execution_inputs_from_plan_snapshot(plan_snapshot)
+            provider_key = str(prepared_payload.get("provider_key") or "").strip()
+            if action_key == "runtime_marker_probe":
+                preflight = evaluate_deployment_execution_preflight_readiness(
+                    operation="check_drift",
+                    runtime_config={
+                        "transport": execution_inputs.get("runtime_transport", ""),
+                        "remote_root": execution_inputs.get("remote_root", ""),
+                    },
+                    target_instance_id=execution_inputs.get("target_instance_id", ""),
+                    aws_region=execution_inputs.get("aws_region", ""),
+                    remote_root=execution_inputs.get("remote_root", ""),
+                    selected_provider_key=provider_key,
+                )
+                if not bool(preflight.get("can_probe_runtime_marker")):
+                    status = "blocked"
+                    blocked_reason = "execution_preflight_blocked"
+                    result = {"preflight": preflight, "execution_inputs": execution_inputs}
+                else:
+                    try:
+                        marker = _ssm_fetch_runtime_marker(
+                            execution_inputs.get("target_instance_id", ""),
+                            execution_inputs.get("aws_region", ""),
+                            execution_inputs.get("remote_root", ""),
+                        )
+                        result = {
+                            "action": "runtime_marker_probe",
+                            "provider_key": provider_key,
+                            "execution_inputs": execution_inputs,
+                            "preflight": preflight,
+                            "runtime_marker": marker,
+                        }
+                    except Exception as exc:
+                        status = "failed"
+                        blocked_reason = "runtime_marker_probe_failed"
+                        result = {"error": str(exc), "preflight": preflight, "execution_inputs": execution_inputs}
+            else:
+                ready_steps = [
+                    str(item).strip()
+                    for item in (prepared_payload.get("ready_steps") or [])
+                    if str(item).strip()
+                ]
+                if action_key == "runtime_prepare_root_marker":
+                    if "prepare.runtime_target" not in set(ready_steps):
+                        status = "blocked"
+                        blocked_reason = "runtime_target_preparation_not_ready"
+                        result = {"ready_steps": ready_steps, "execution_inputs": execution_inputs}
+                    else:
+                        preflight = evaluate_deployment_execution_preflight_readiness(
+                            operation="prepare_runtime_root",
+                            runtime_config={
+                                "transport": execution_inputs.get("runtime_transport", ""),
+                                "remote_root": execution_inputs.get("remote_root", ""),
+                            },
+                            target_instance_id=execution_inputs.get("target_instance_id", ""),
+                            aws_region=execution_inputs.get("aws_region", ""),
+                            remote_root=execution_inputs.get("remote_root", ""),
+                            selected_provider_key=provider_key,
+                        )
+                        if not bool(preflight.get("can_prepare_runtime_root")):
+                            status = "blocked"
+                            blocked_reason = "execution_preflight_blocked"
+                            result = {"preflight": preflight, "execution_inputs": execution_inputs}
+                        else:
+                            try:
+                                marker_payload = {
+                                    "schema_version": "xyn.execution_step.runtime_prepare_root_marker.v1",
+                                    "provider_key": provider_key,
+                                    "release_target_id": str(target.id),
+                                    "source_preparation_evidence_ref": {
+                                        "execution_preparation_evidence_id": str(prep_evidence.id),
+                                    },
+                                    "action_key": action_key,
+                                    "prepared_at": timezone.now().isoformat(),
+                                }
+                                marker_write = _ssm_prepare_runtime_root_marker(
+                                    execution_inputs.get("target_instance_id", ""),
+                                    execution_inputs.get("aws_region", ""),
+                                    execution_inputs.get("remote_root", ""),
+                                    marker_payload=marker_payload,
+                                )
+                                result = {
+                                    "action": "runtime_prepare_root_marker",
+                                    "provider_key": provider_key,
+                                    "execution_inputs": execution_inputs,
+                                    "preflight": preflight,
+                                    "marker_write": marker_write,
+                                }
+                            except Exception as exc:
+                                status = "failed"
+                                blocked_reason = "runtime_prepare_root_marker_failed"
+                                result = {
+                                    "error": str(exc),
+                                    "preflight": preflight,
+                                    "execution_inputs": execution_inputs,
+                                }
+                else:
+                    source_step_evidence_id = (
+                        str(payload.get("source_execution_step_evidence_id") or "").strip()
+                        if isinstance(payload, dict)
+                        else ""
+                    )
+                    if source_step_evidence_id:
+                        source_step = (
+                            ReleaseTargetExecutionStepEvidence.objects.filter(
+                                id=source_step_evidence_id,
+                                release_target=target,
+                                source_preparation_evidence=prep_evidence,
+                                action_key="runtime_prepare_root_marker",
+                            )
+                            .order_by("-created_at")
+                            .first()
+                        )
+                    else:
+                        source_step = (
+                            ReleaseTargetExecutionStepEvidence.objects.filter(
+                                release_target=target,
+                                source_preparation_evidence=prep_evidence,
+                                action_key="runtime_prepare_root_marker",
+                                status="succeeded",
+                            )
+                            .order_by("-created_at")
+                            .first()
+                        )
+                    if source_step is None or str(source_step.status or "").strip().lower() != "succeeded":
+                        status = "blocked"
+                        blocked_reason = "missing_runtime_prepare_root_marker"
+                        result = {
+                            "source_execution_step_evidence_id": source_step_evidence_id,
+                            "execution_inputs": execution_inputs,
+                        }
+                    else:
+                        preflight = evaluate_deployment_execution_preflight_readiness(
+                            operation="stage_execution_manifest",
+                            runtime_config={
+                                "transport": execution_inputs.get("runtime_transport", ""),
+                                "remote_root": execution_inputs.get("remote_root", ""),
+                            },
+                            target_instance_id=execution_inputs.get("target_instance_id", ""),
+                            aws_region=execution_inputs.get("aws_region", ""),
+                            remote_root=execution_inputs.get("remote_root", ""),
+                            selected_provider_key=provider_key,
+                        )
+                        if not bool(preflight.get("can_stage_execution_manifest")):
+                            status = "blocked"
+                            blocked_reason = "execution_preflight_blocked"
+                            result = {"preflight": preflight, "execution_inputs": execution_inputs}
+                        else:
+                            try:
+                                manifest_payload = {
+                                    "schema_version": "xyn.execution_manifest.runtime.v1",
+                                    "provider_key": provider_key,
+                                    "release_target_id": str(target.id),
+                                    "source_preparation_evidence_ref": {
+                                        "execution_preparation_evidence_id": str(prep_evidence.id),
+                                    },
+                                    "source_execution_step_ref": {
+                                        "execution_step_evidence_id": str(source_step.id),
+                                    },
+                                    "prepared_payload": prepared_payload,
+                                    "staged_at": timezone.now().isoformat(),
+                                }
+                                manifest_write = _ssm_stage_execution_manifest(
+                                    execution_inputs.get("target_instance_id", ""),
+                                    execution_inputs.get("aws_region", ""),
+                                    execution_inputs.get("remote_root", ""),
+                                    manifest_payload=manifest_payload,
+                                )
+                                result = {
+                                    "action": "runtime_stage_execution_manifest",
+                                    "provider_key": provider_key,
+                                    "execution_inputs": execution_inputs,
+                                    "preflight": preflight,
+                                    "source_execution_step_ref": {
+                                        "execution_step_evidence_id": str(source_step.id),
+                                    },
+                                    "manifest_write": manifest_write,
+                                }
+                            except Exception as exc:
+                                status = "failed"
+                                blocked_reason = "runtime_stage_execution_manifest_failed"
+                                result = {"error": str(exc), "preflight": preflight, "execution_inputs": execution_inputs}
+    mutation_performed = bool(
+        status == "succeeded"
+        and action_key in {"runtime_prepare_root_marker", "runtime_stage_execution_manifest"}
+    )
+    record = ReleaseTargetExecutionStepEvidence.objects.create(
+        release_target=target,
+        blueprint=target.blueprint,
+        source_preparation_evidence=prep_evidence,
+        action_key=action_key,
+        status=status,
+        blocked_reason=blocked_reason,
+        approval_granted=bool(approval_granted),
+        mutation_performed=mutation_performed,
+        result_json=result,
+        warnings_json=warnings,
+        created_by=request.user,
+    )
+    response_payload = {
+        "status": "succeeded" if status == "succeeded" else "blocked",
+        "release_target_id": str(target.id),
+        "blueprint_id": str(target.blueprint_id) if target.blueprint_id else None,
+        "execution_step_ref": {"execution_step_evidence_id": str(record.id)},
+        "source_preparation_evidence_ref": {"execution_preparation_evidence_id": str(prep_evidence.id)},
+        "action_key": action_key,
+        "execution_status": status,
+        "blocked_reason": blocked_reason,
+        "approval_granted": bool(approval_granted),
+        "result": result,
+        "warnings": warnings,
+        "mutation_performed": mutation_performed,
+    }
+    if status == "succeeded":
+        return JsonResponse(response_payload, status=200)
+    if status == "failed":
+        return JsonResponse(response_payload, status=500)
+    return JsonResponse(response_payload, status=409)
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_step_approval_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    return release_target_execution_step_approval(request=request, target_id=target_id)
+
+
+@csrf_exempt
+@login_required
 def registries_collection(request: HttpRequest) -> JsonResponse:
     if staff_error := _require_staff(request):
         return staff_error
@@ -29900,6 +32374,208 @@ def _append_unique_lowered(target: List[str], value: str) -> None:
     target.append(text)
 
 
+_PLAN_REWRITE_INSTRUCTION_PATTERNS: Tuple[re.Pattern[str], ...] = (
+    re.compile(r"\brewrite\b.*\bproposed\s+work\b", re.IGNORECASE),
+    re.compile(r"\breplace\b.*\bnext\s+action\b", re.IGNORECASE),
+    re.compile(r"\bkeep\b.*\bprimary\b", re.IGNORECASE),
+    re.compile(r"\binclude\b.*\bonly\s+if\b", re.IGNORECASE),
+    re.compile(r"\bremove\b.*\b(provider|framework)\b", re.IGNORECASE),
+    re.compile(r"\bnarrow\b.*\bscope\b", re.IGNORECASE),
+    re.compile(r"\btighten\b.*\bplan\b", re.IGNORECASE),
+)
+
+
+def _looks_like_plan_rewrite_instruction(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    if any(token in lowered for token in {"proposed work", "next action", "keep", "include", "primary", "only if evidence", "provider", "framework"}):
+        return True
+    return any(pattern.search(value) for pattern in _PLAN_REWRITE_INSTRUCTION_PATTERNS)
+
+
+def _extract_filename_tokens(text: str) -> List[str]:
+    tokens: List[str] = []
+    if not text:
+        return tokens
+    for match in re.findall(r"\b([A-Za-z0-9_./-]+\.(?:tsx|ts|jsx|js|css|scss|py))\b", text):
+        candidate = str(match or "").strip()
+        if candidate and candidate not in tokens:
+            tokens.append(candidate)
+    return tokens
+
+
+def _normalize_file_hint(value: str) -> str:
+    return str(value or "").strip().replace("\\", "/").lower()
+
+
+def _match_file_hint_to_candidates(hint: str, candidates: List[str]) -> str:
+    normalized_hint = _normalize_file_hint(hint)
+    if not normalized_hint:
+        return ""
+    hint_name = normalized_hint.rsplit("/", 1)[-1]
+    for candidate in candidates:
+        normalized_candidate = _normalize_file_hint(candidate)
+        if normalized_candidate.endswith(normalized_hint):
+            return candidate
+    for candidate in candidates:
+        normalized_candidate = _normalize_file_hint(candidate)
+        candidate_name = normalized_candidate.rsplit("/", 1)[-1]
+        if hint_name and candidate_name == hint_name:
+            return candidate
+    return ""
+
+
+def _extract_plan_rewrite_directives(records: List[Dict[str, Any]], refinements: List[str]) -> Dict[str, Any]:
+    reply_texts: List[str] = []
+    for record in records:
+        reply = str((record or {}).get("reply_text") or "").strip()
+        if reply:
+            reply_texts.append(reply)
+    for reply in refinements:
+        candidate = str(reply or "").strip()
+        if candidate and candidate not in reply_texts:
+            reply_texts.append(candidate)
+
+    directives: Dict[str, Any] = {
+        "rewrite_requested": False,
+        "rewrite_proposed_work": False,
+        "replace_next_action": False,
+        "remove_provider_framework_noise": False,
+        "narrow_scope": False,
+        "primary_file_hints": [],
+        "conditional_file_hints": [],
+    }
+    for text in reply_texts:
+        lowered = text.lower()
+        has_instruction = _looks_like_plan_rewrite_instruction(text)
+        if has_instruction:
+            directives["rewrite_requested"] = True
+        if re.search(r"\brewrite\b.*\bproposed\s+work\b", lowered):
+            directives["rewrite_proposed_work"] = True
+        if re.search(r"\breplace\b.*\bnext\s+action\b", lowered) or (
+            "next action" in lowered and any(token in lowered for token in {"replace", "actual implementation", "implementation action"})
+        ):
+            directives["replace_next_action"] = True
+        if re.search(r"\bremove\b.*\b(provider|framework)\b", lowered) or ("provider/framework" in lowered):
+            directives["remove_provider_framework_noise"] = True
+        if any(token in lowered for token in {"tighten", "narrow scope", "narrow the scope", "focus scope", "keep scope tight"}):
+            directives["narrow_scope"] = True
+        file_tokens = _extract_filename_tokens(text)
+        if "primary" in lowered:
+            for token in file_tokens:
+                if token not in directives["primary_file_hints"]:
+                    directives["primary_file_hints"].append(token)
+        if "only if" in lowered or "only when" in lowered:
+            for token in file_tokens:
+                if token not in directives["conditional_file_hints"]:
+                    directives["conditional_file_hints"].append(token)
+    return directives
+
+
+def _sanitize_shared_contracts_for_refinement(
+    contracts: List[str],
+    *,
+    directives: Dict[str, Any],
+) -> List[str]:
+    cleaned: List[str] = []
+    remove_noise = bool(directives.get("remove_provider_framework_noise"))
+    for item in contracts:
+        token = str(item or "").strip()
+        if not token:
+            continue
+        lowered = token.lower()
+        if _looks_like_plan_rewrite_instruction(token):
+            continue
+        if remove_noise and any(noise in lowered for noise in {"provider", "framework"}):
+            continue
+        if token not in cleaned:
+            cleaned.append(token)
+    return cleaned
+
+
+def _apply_refinement_rewrite_to_plan_payload(
+    *,
+    plan: Dict[str, Any],
+    directives: Dict[str, Any],
+    request_text: str,
+) -> Dict[str, Any]:
+    if not isinstance(plan, dict):
+        return plan
+    if not bool(directives.get("rewrite_requested")):
+        return plan
+    updated = copy.deepcopy(plan)
+    candidate_files = [str(item).strip() for item in (updated.get("candidate_files") or []) if str(item).strip()]
+
+    primary_candidate = ""
+    for hint in directives.get("primary_file_hints") or []:
+        matched = _match_file_hint_to_candidates(str(hint or ""), candidate_files)
+        if matched:
+            primary_candidate = matched
+            break
+    if not primary_candidate and candidate_files:
+        primary_candidate = candidate_files[0]
+
+    conditional_candidates: List[str] = []
+    for hint in directives.get("conditional_file_hints") or []:
+        matched = _match_file_hint_to_candidates(str(hint or ""), candidate_files)
+        if matched and matched != primary_candidate and matched not in conditional_candidates:
+            conditional_candidates.append(matched)
+
+    if bool(directives.get("rewrite_proposed_work")):
+        if primary_candidate:
+            rewritten_steps: List[str] = [
+                f"Inspect `{primary_candidate}` and confirm ownership of the affected header/dropdown styling behavior.",
+                f"Apply a minimal UI/layout fix in `{primary_candidate}` to address: {str(request_text or '').strip()[:140]}.",
+            ]
+            if conditional_candidates:
+                rewritten_steps.append(
+                    f"Include `{conditional_candidates[0]}` only if evidence shows shared styling/component coupling requires it."
+                )
+            rewritten_steps.extend(
+                [
+                    "Validate the dropdown styling/width behavior in the live header shell and check adjacent control parity.",
+                    "Add or update a focused regression test for this UI behavior.",
+                ]
+            )
+            updated["implementation_steps"] = rewritten_steps[:5]
+            updated["proposed_work"] = rewritten_steps[:5]
+        else:
+            message = (
+                "Could not confidently identify owning component files for the requested rewrite. "
+                "Please confirm the primary component path before revising implementation steps."
+            )
+            open_questions = [
+                str(item).strip()
+                for item in (updated.get("open_questions") if isinstance(updated.get("open_questions"), list) else [])
+                if str(item).strip()
+            ]
+            if message not in open_questions:
+                open_questions.append(message)
+            updated["open_questions"] = open_questions
+            updated["next_action"] = "Confirm the primary target component path, then regenerate the plan rewrite."
+
+    if bool(directives.get("replace_next_action")) and primary_candidate:
+        next_action = f"Apply the first implementation change in `{primary_candidate}` and capture a focused diff."
+        updated["next_action"] = next_action
+        validation_plan = [
+            str(item).strip()
+            for item in (updated.get("validation_plan") if isinstance(updated.get("validation_plan"), list) else [])
+            if str(item).strip()
+        ]
+        tail = [item for item in validation_plan if item != next_action]
+        updated["validation_plan"] = [next_action, *tail]
+
+    contracts = [
+        str(item).strip()
+        for item in (updated.get("shared_contracts") if isinstance(updated.get("shared_contracts"), list) else [])
+        if str(item).strip()
+    ]
+    updated["shared_contracts"] = _sanitize_shared_contracts_for_refinement(contracts, directives=directives)
+    return updated
+
+
 def _normalize_question_key(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
@@ -30041,10 +32717,49 @@ def _extract_json_object_text(text: str) -> str:
     payload = str(text or "").strip()
     if not payload:
         return ""
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", payload, re.IGNORECASE)
+    if fence_match:
+        fenced = str(fence_match.group(1) or "").strip()
+        if fenced:
+            payload = fenced
     if payload.startswith("{") and payload.endswith("}"):
         return payload
-    match = re.search(r"\{[\s\S]*\}", payload)
-    return str(match.group(0) if match else "").strip()
+
+    in_string = False
+    escape = False
+    depth = 0
+    start_index: Optional[int] = None
+    for idx, ch in enumerate(payload):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start_index = idx
+            depth += 1
+        elif ch == "}":
+            if depth == 0:
+                continue
+            depth -= 1
+            if depth == 0 and start_index is not None:
+                candidate = payload[start_index : idx + 1].strip()
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    start_index = None
+                    continue
+                if isinstance(parsed, dict):
+                    return candidate
+                start_index = None
+    return ""
 
 
 def _validate_hybrid_refinement_envelope(candidate: Any) -> Tuple[Optional[Dict[str, Any]], List[str]]:
@@ -30204,17 +32919,80 @@ def _invoke_planner_refinement_fallback(
     session: SolutionChangeSession,
     reply_text: str,
     deterministic: Dict[str, Any],
+    force_planner_fallback: bool = False,
 ) -> Dict[str, Any]:
     resolved = resolve_ai_config(purpose_slug="planning")
+    fallback_diagnostics: Dict[str, Any] = {
+        "forced": bool(force_planner_fallback),
+        "context_pack_applied": False,
+        "context_pack_ref_count": 0,
+        "context_pack_hash": "",
+        "raw_response_present": False,
+        "raw_response_length": 0,
+        "json_extracted": False,
+        "validation_errors": [],
+    }
+    raw_context_refs: List[Any] = []
+    for key in ("purpose_default_context_pack_refs_json", "agent_context_pack_refs_json"):
+        refs = resolved.get(key)
+        if isinstance(refs, list):
+            raw_context_refs.extend(refs)
+    resolved_packs: List[ContextPack] = []
+    seen_pack_ids: Set[str] = set()
+    for ref in raw_context_refs:
+        pack = _resolve_context_pack_ref(ref)
+        if not pack:
+            continue
+        pack_id = str(pack.id)
+        if pack_id in seen_pack_ids:
+            continue
+        seen_pack_ids.add(pack_id)
+        resolved_packs.append(pack)
+    fallback_diagnostics["context_pack_ref_count"] = len(resolved_packs)
+    if resolved_packs:
+        resolved_context = _resolve_context_pack_list(resolved_packs)
+        context_text = str(resolved_context.get("effective_context") or "").strip()
+        fallback_diagnostics["context_pack_hash"] = str(resolved_context.get("hash") or "")
+        if context_text:
+            base_system_prompt = str(resolved.get("system_prompt") or "").strip()
+            resolved["system_prompt"] = (
+                f"{base_system_prompt}\n\n{context_text}".strip() if base_system_prompt else context_text
+            )
+            fallback_diagnostics["context_pack_applied"] = True
     deterministic_updates = deterministic.get("normalized_updates") if isinstance(deterministic.get("normalized_updates"), dict) else {}
+    schema_example = {
+        "mode": "agent_fallback",
+        "result_type": "plan_revision",
+        "confidence": 0.78,
+        "normalized_updates": {
+            "name": "My Knowledge",
+            "ui_preferences": {"theme": "light"},
+            "features_add": ["offline sync"],
+            "constraints_add": ["no external integrations in v1"],
+            "resolved_answers": [{"question_key": "integration_v1", "value": False}],
+            "open_questions_remaining": ["collaboration_model"],
+            "additional_considerations_add": ["prioritize fast capture flow"],
+        },
+        "planner_message": "Applied the refinement with one remaining clarification.",
+        "warnings": [],
+    }
     prompt = (
-        "You are a refinement interpreter. Return ONLY JSON with keys: "
-        "mode,result_type,confidence,normalized_updates,planner_message,warnings.\n"
-        "Allowed result_type: answer_resolution,plan_revision,clarification_request,cannot_interpret.\n"
+        "You are a refinement interpreter.\n"
+        "Return ONLY one strict JSON object that matches the required envelope.\n"
+        "Do not output markdown.\n"
+        "Do not output backticks.\n"
+        "Do not output prose.\n"
+        "Do not output any text before or after the JSON object.\n"
+        "Do not include markdown fences, explanations, or any prose before/after JSON.\n"
+        "Unknown keys are forbidden at every level.\n"
+        "Top-level keys allowed exactly: mode,result_type,confidence,normalized_updates,planner_message,warnings.\n"
+        "Set mode to agent_fallback.\n"
+        "Allowed result_type values: answer_resolution,plan_revision,clarification_request,cannot_interpret.\n"
         "Allowed normalized_updates keys: name,ui_preferences,features_add,constraints_add,resolved_answers,"
         "open_questions_remaining,additional_considerations_add.\n"
-        "Do not include any other keys.\n"
-        "Question keys allowed: integration_v1,collaboration_model,rich_text_required,app_name,ui_theme.\n\n"
+        "Allowed question_key values: integration_v1,collaboration_model,rich_text_required,app_name,ui_theme.\n"
+        "If you cannot safely interpret, return result_type cannot_interpret with minimal safe updates.\n"
+        f"Schema example (JSON object shape): {json.dumps(schema_example, ensure_ascii=True)}\n\n"
         f"Session request: {str(session.request_text or '').strip()}\n"
         f"User refinement: {str(reply_text or '').strip()}\n"
         f"Deterministic baseline: {json.dumps(deterministic_updates, ensure_ascii=True)}\n"
@@ -30224,13 +33002,23 @@ def _invoke_planner_refinement_fallback(
         messages=[{"role": "user", "content": prompt}],
     )
     raw_text = str(result.get("content") or "")
+    fallback_diagnostics["raw_response_present"] = bool(raw_text.strip())
+    fallback_diagnostics["raw_response_length"] = len(raw_text)
     json_text = _extract_json_object_text(raw_text)
+    fallback_diagnostics["json_extracted"] = bool(json_text)
+    logger.info(
+        "planning_refinement_fallback diagnostics=%s",
+        json.dumps(fallback_diagnostics, sort_keys=True),
+    )
     if not json_text:
         return _refinement_default_result(
             mode="agent_fallback",
             result_type="cannot_interpret",
             confidence=0.0,
-            planner_message="Planner fallback did not return structured interpretation output.",
+            planner_message=(
+                "I could not safely interpret that refinement. Please restate it in a more specific way, "
+                "or retry with planner interpretation."
+            ),
             warnings=["fallback returned no parseable JSON"],
         )
     try:
@@ -30240,16 +33028,27 @@ def _invoke_planner_refinement_fallback(
             mode="agent_fallback",
             result_type="cannot_interpret",
             confidence=0.0,
-            planner_message="Planner fallback returned invalid JSON.",
+            planner_message=(
+                "I could not safely interpret that refinement. Please restate it in a more specific way, "
+                "or retry with planner interpretation."
+            ),
             warnings=["fallback JSON decode failure"],
         )
     safe, errors = _validate_hybrid_refinement_envelope(parsed)
     if safe is None:
+        fallback_diagnostics["validation_errors"] = list(errors)
+        logger.warning(
+            "planning_refinement_fallback validation_failed diagnostics=%s",
+            json.dumps(fallback_diagnostics, sort_keys=True),
+        )
         return _refinement_default_result(
             mode="agent_fallback",
             result_type="cannot_interpret",
             confidence=0.0,
-            planner_message="Planner interpretation could not be safely applied.",
+            planner_message=(
+                "I could not safely interpret that refinement. Please restate it in a more specific way, "
+                "or retry with planner interpretation."
+            ),
             warnings=[f"validation error: {err}" for err in errors],
         )
     safe["mode"] = "agent_fallback"
@@ -30272,6 +33071,7 @@ def _interpret_solution_refinement(
             session=session,
             reply_text=reply_text,
             deterministic=deterministic,
+            force_planner_fallback=force_planner_fallback,
         )
     except Exception as exc:
         if deterministic_type in {"answer_resolution", "plan_revision"} and not force_planner_fallback:
@@ -30311,8 +33111,62 @@ def _solution_option_rows(
     memberships: List[ApplicationArtifactMembership],
     *,
     limit: int = 3,
+    ordered_artifact_ids: Optional[List[str]] = None,
+    request_text: str = "",
 ) -> List[Dict[str, Any]]:
-    candidate_members = memberships[: min(max(limit, 1), len(memberships))]
+    normalized_ordered_ids: List[str] = []
+    seen_ordered_ids: Set[str] = set()
+    if isinstance(ordered_artifact_ids, list):
+        for item in ordered_artifact_ids:
+            token = str(item or "").strip()
+            if not token or token in seen_ordered_ids:
+                continue
+            seen_ordered_ids.add(token)
+            normalized_ordered_ids.append(token)
+
+    membership_by_artifact_id: Dict[str, ApplicationArtifactMembership] = {
+        str(member.artifact_id): member for member in memberships
+    }
+    ordered_members: List[ApplicationArtifactMembership] = []
+    seen_membership_artifact_ids: Set[str] = set()
+    for artifact_id in normalized_ordered_ids:
+        member = membership_by_artifact_id.get(artifact_id)
+        if member is None:
+            continue
+        seen_membership_artifact_ids.add(str(member.artifact_id))
+        ordered_members.append(member)
+    for member in memberships:
+        artifact_id = str(member.artifact_id)
+        if artifact_id in seen_membership_artifact_ids:
+            continue
+        seen_membership_artifact_ids.add(artifact_id)
+        ordered_members.append(member)
+
+    lowered_request = str(request_text or "").strip().lower()
+    ui_context_tokens = {"ui", "ux", "frontend", "view", "screen", "page", "panel", "layout", "input", "component"}
+    ui_code_change_tokens = {"resize", "width", "height", "css", "style", "component", "input", "textarea", "field", "layout"}
+    is_ui_code_change_request = (
+        bool(lowered_request)
+        and any(token in lowered_request for token in ui_context_tokens)
+        and any(token in lowered_request for token in ui_code_change_tokens)
+    )
+    if is_ui_code_change_request:
+        editable_members: List[ApplicationArtifactMembership] = []
+        non_editable_members: List[ApplicationArtifactMembership] = []
+        for member in ordered_members:
+            artifact = member.artifact
+            has_editable_paths = bool(
+                isinstance(getattr(artifact, "owner_path_prefixes_json", None), list)
+                and any(str(item or "").strip() for item in (artifact.owner_path_prefixes_json or []))
+            )
+            if has_editable_paths:
+                editable_members.append(member)
+            else:
+                non_editable_members.append(member)
+        if editable_members:
+            ordered_members = editable_members + non_editable_members
+
+    candidate_members = ordered_members[: min(max(limit, 1), len(ordered_members))]
     options: List[Dict[str, Any]] = []
     for member in candidate_members:
         options.append(
@@ -30381,8 +33235,13 @@ def _record_solution_draft_plan(
     session: SolutionChangeSession,
     memberships: List[ApplicationArtifactMembership],
     summary: str,
+    force_code_aware_planning: bool = False,
 ) -> Dict[str, Any]:
-    plan = _generate_solution_change_plan(session=session, memberships=memberships)
+    plan = _generate_solution_change_plan(
+        session=session,
+        memberships=memberships,
+        force_code_aware_planning=force_code_aware_planning,
+    )
     objective_summary = str(
         plan.get("planner_objective_text")
         or plan.get("request_text")
@@ -30411,7 +33270,13 @@ def _record_solution_draft_plan(
             "suggested_workstreams": list(plan.get("suggested_workstreams") or []),
             "implementation_steps": list(plan.get("implementation_steps") or []),
             "shared_contracts": list(plan.get("shared_contracts") or []),
+            "open_questions": list(plan.get("open_questions") or []),
             "validation_plan": list(plan.get("validation_plan") or []),
+            "planning_mode": str(plan.get("planning_mode") or "deterministic"),
+            "code_context_summary": str(plan.get("code_context_summary") or ""),
+            "candidate_files": list(plan.get("candidate_files") or []),
+            "candidate_components": list(plan.get("candidate_components") or []),
+            "proposed_work": list(plan.get("proposed_work") or []),
         },
     )
     return plan
@@ -30557,14 +33422,27 @@ def _seed_solution_planning_state_on_create(
             },
         )
     else:
-        options = _solution_option_rows(memberships)
+        analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+        ordered_artifact_ids = (
+            analysis.get("suggested_artifact_ids")
+            if isinstance(analysis.get("suggested_artifact_ids"), list)
+            else []
+        )
+        options = _solution_option_rows(
+            memberships,
+            ordered_artifact_ids=ordered_artifact_ids,
+            request_text=request_text,
+        )
         if options:
             _append_solution_planning_turn(
                 session=session,
                 actor="planner",
                 kind="option_set",
                 payload={
-                    "prompt": "Select the first artifact focus for this planning session.",
+                    "prompt": (
+                        "Select the initial artifact to focus planning on "
+                        "(you can still include multiple artifacts later)."
+                    ),
                     "options": options,
                 },
             )
@@ -30614,6 +33492,64 @@ def _analyze_solution_impacted_artifacts(
 ) -> Dict[str, Any]:
     text = str(request_text or "").strip().lower()
     tokens = [token for token in re.findall(r"[a-z0-9_]+", text) if len(token) >= 3]
+    ui_context_tokens = {
+        "ui",
+        "ux",
+        "frontend",
+        "view",
+        "screen",
+        "page",
+        "panel",
+        "pane",
+        "layout",
+        "form",
+        "input",
+        "button",
+        "modal",
+        "workbench",
+        "console",
+        "header",
+        "footer",
+    }
+    ui_code_change_tokens = {
+        "resize",
+        "resized",
+        "width",
+        "height",
+        "align",
+        "spacing",
+        "margin",
+        "padding",
+        "css",
+        "style",
+        "styling",
+        "component",
+        "textfield",
+        "input",
+        "textarea",
+        "dropdown",
+        "select",
+        "placeholder",
+        "label",
+        "font",
+        "color",
+        "theme",
+        "fullwidth",
+    }
+    api_change_tokens = {
+        "api",
+        "endpoint",
+        "schema",
+        "contract",
+        "backend",
+        "payload",
+        "response",
+        "request",
+    }
+    has_ui_context = any(token in text for token in ui_context_tokens)
+    has_ui_code_change_signal = any(token in text for token in ui_code_change_tokens)
+    is_ui_code_change_request = has_ui_context and has_ui_code_change_signal
+    is_api_change_request = any(token in text for token in api_change_tokens) and not is_ui_code_change_request
     role_signals: Dict[str, List[str]] = {
         "primary_ui": ["ui", "ux", "frontend", "view", "screen", "page", "shell", "workbench"],
         "primary_api": ["api", "endpoint", "contract", "schema", "backend", "service", "orchestrator"],
@@ -30631,9 +33567,27 @@ def _analyze_solution_impacted_artifacts(
         artifact = member.artifact
         score = 0
         reasons: List[str] = []
+        has_editable_paths = bool(
+            isinstance(getattr(artifact, "owner_path_prefixes_json", None), list)
+            and any(str(item or "").strip() for item in (artifact.owner_path_prefixes_json or []))
+        )
+        is_repo_backed = str(getattr(artifact, "edit_mode", "") or "").strip().lower() == "repo_backed"
+        artifact_intent_text = " ".join(
+            [
+                str(getattr(artifact, "title", "") or ""),
+                str(getattr(artifact, "slug", "") or ""),
+                str(getattr(artifact, "summary", "") or ""),
+                str(member.responsibility_summary or ""),
+            ]
+        ).lower()
+        artifact_ui_signal = any(token in artifact_intent_text for token in {" ui", "frontend", "workbench", "panel", "layout"})
+        artifact_api_signal = any(token in artifact_intent_text for token in {"api", "backend", "endpoint", "service"})
         if member.role in matched_roles:
             score += 4
             reasons.append(f"request mentions {member.role.replace('_', ' ')} concerns")
+            if is_ui_code_change_request and member.role == "primary_ui" and not has_editable_paths:
+                score -= 3
+                reasons.append("role confidence reduced: primary_ui artifact has no editable paths for UI code changes")
         haystack = " ".join(
             [
                 str(member.role or ""),
@@ -30648,8 +33602,32 @@ def _analyze_solution_impacted_artifacts(
             score += min(3, len(token_hits))
             reasons.append(f"matched request terms: {', '.join(sorted(set(token_hits))[:3])}")
         if member.role in {"primary_ui", "primary_api"}:
-            score += 1
-            reasons.append("primary role default weighting")
+            if is_ui_code_change_request and member.role == "primary_ui" and not has_editable_paths:
+                reasons.append("primary role weighting suppressed: artifact is not editable for UI code changes")
+            else:
+                score += 1
+                reasons.append("primary role default weighting")
+        if is_ui_code_change_request:
+            if has_editable_paths:
+                bonus = 5 if is_repo_backed else 4
+                score += bonus
+                reasons.append("ui code-change request prefers artifacts with editable path ownership")
+            else:
+                score -= 4
+                reasons.append("ui code-change request penalizes artifacts without editable path ownership")
+            if artifact_ui_signal:
+                score += 3
+                reasons.append("ui code-change request aligns with artifact UI intent")
+            elif artifact_api_signal:
+                score -= 2
+                reasons.append("ui code-change request de-prioritizes API-oriented artifacts")
+        if is_api_change_request:
+            if artifact_api_signal:
+                score += 3
+                reasons.append("api change request aligns with artifact API intent")
+            elif artifact_ui_signal:
+                score -= 2
+                reasons.append("api change request de-prioritizes UI-oriented artifacts")
         if score <= 0:
             continue
         impacted_rows.append(
@@ -30709,14 +33687,929 @@ def _build_solution_impacted_analysis(
     else:
         analysis_status = "no_confident_matches"
     analysis["analysis_status"] = analysis_status
+    placement_guidance = evaluate_architectural_placement(
+        request_text=request_text,
+        capability_domain="auto",
+    )
+    analysis["placement_guidance"] = placement_guidance
+    analysis["architectural_placement"] = (
+        placement_guidance.get("architectural_placement")
+        if isinstance(placement_guidance, dict) and isinstance(placement_guidance.get("architectural_placement"), dict)
+        else {}
+    )
     analysis["analyzed_at"] = timezone.now().isoformat()
     return analysis
+
+
+_CODE_AWARE_IMPLEMENTATION_TOKENS: Set[str] = {
+    "css",
+    "style",
+    "styling",
+    "alignment",
+    "spacing",
+    "height",
+    "header",
+    "dropdown",
+    "menu",
+    "navbar",
+    "nav",
+    "toolbar",
+    "section",
+    "field",
+    "button",
+    "width",
+    "layout",
+    "component",
+    "form",
+    "modal",
+    "dialog",
+    "page",
+    "panel",
+    "input",
+    "textarea",
+    "serializer",
+    "model",
+    "migration",
+    "endpoint",
+    "api",
+}
+
+_CODE_AWARE_UI_HINT_TOKENS: Set[str] = {
+    "ui",
+    "css",
+    "style",
+    "styling",
+    "layout",
+    "alignment",
+    "spacing",
+    "width",
+    "height",
+    "header",
+    "dropdown",
+    "menu",
+    "navbar",
+    "nav",
+    "toolbar",
+    "panel",
+    "section",
+    "component",
+    "button",
+    "input",
+    "field",
+    "form",
+    "modal",
+    "dialog",
+    "page",
+    "screen",
+}
+
+_CODE_AWARE_STOPWORDS: Set[str] = {
+    "the",
+    "and",
+    "with",
+    "from",
+    "that",
+    "this",
+    "into",
+    "for",
+    "you",
+    "your",
+    "use",
+    "full",
+    "needs",
+    "need",
+    "make",
+    "show",
+    "list",
+}
+
+_CODE_AWARE_HEADER_LAYOUT_TOKENS: Set[str] = {
+    "header",
+    "nav",
+    "navbar",
+    "navigation",
+    "shell",
+    "layout",
+    "dropdown",
+    "menu",
+    "toolbar",
+}
+
+_CODE_AWARE_STYLE_HINT_TOKENS: Set[str] = {
+    "css",
+    "style",
+    "styling",
+    "width",
+    "height",
+    "spacing",
+    "alignment",
+    "layout",
+}
+
+_CODE_AWARE_HEADER_PATH_HINTS: Tuple[str, ...] = (
+    "/components/common/",
+    "/components/layout/",
+    "/components/shell/",
+    "header",
+    "nav",
+    "navbar",
+    "menu",
+    "toolbar",
+)
+
+
+def _request_appears_implementation_specific(request_text: str) -> bool:
+    lowered = str(request_text or "").strip().lower()
+    if not lowered:
+        return False
+    tokens = set(re.findall(r"[a-z0-9_]+", lowered))
+    return any(token in tokens for token in _CODE_AWARE_IMPLEMENTATION_TOKENS)
+
+
+def _request_appears_ui_implementation_specific(request_text: str) -> bool:
+    lowered = str(request_text or "").strip().lower()
+    if not lowered:
+        return False
+    tokens = set(re.findall(r"[a-z0-9_]+", lowered))
+    return any(token in tokens for token in _CODE_AWARE_UI_HINT_TOKENS)
+
+
+def _plan_lacks_concrete_targets(plan: Dict[str, Any]) -> bool:
+    if not isinstance(plan, dict):
+        return True
+    if isinstance(plan.get("candidate_files"), list) and any(str(item or "").strip() for item in plan.get("candidate_files") or []):
+        return False
+    if isinstance(plan.get("candidate_components"), list) and any(str(item or "").strip() for item in plan.get("candidate_components") or []):
+        return False
+    implementation_steps = plan.get("implementation_steps") if isinstance(plan.get("implementation_steps"), list) else []
+    for step in implementation_steps:
+        text = str(step or "").strip()
+        if "/" in text or "." in text:
+            return False
+    return True
+
+
+def _likely_code_context_keywords(request_text: str) -> List[str]:
+    tokens = [str(token).strip().lower() for token in re.findall(r"[a-z0-9_]+", str(request_text or ""))]
+    keywords: List[str] = []
+    for token in tokens:
+        if len(token) < 3 or token in _CODE_AWARE_STOPWORDS:
+            continue
+        if token not in keywords:
+            keywords.append(token)
+    return keywords[:14]
+
+
+def _request_token_set(request_text: str) -> Set[str]:
+    return {str(token).strip().lower() for token in re.findall(r"[a-z0-9_]+", str(request_text or "")) if str(token).strip()}
+
+
+def _request_prefers_header_navigation_scope(request_text: str) -> bool:
+    tokens = _request_token_set(request_text)
+    if not tokens:
+        return False
+    has_header_scope = bool(tokens.intersection(_CODE_AWARE_HEADER_LAYOUT_TOKENS))
+    has_style_hint = bool(tokens.intersection(_CODE_AWARE_STYLE_HINT_TOKENS))
+    has_navigation_target = bool(tokens.intersection({"dropdown", "menu", "nav", "navbar", "navigation", "header"}))
+    return has_header_scope and (has_style_hint or has_navigation_target)
+
+
+def _normalized_repo_path(path: str) -> str:
+    return str(path or "").strip().replace("\\", "/").lower()
+
+
+def _path_is_page_level(path: str) -> bool:
+    normalized = _normalized_repo_path(path)
+    if "/pages/" in normalized:
+        return True
+    return bool(re.search(r"[a-z0-9_-]+page\.(tsx|ts|jsx|js)$", normalized))
+
+
+def _path_has_header_navigation_hint(path: str) -> bool:
+    normalized = _normalized_repo_path(path)
+    return any(token in normalized for token in _CODE_AWARE_HEADER_PATH_HINTS)
+
+
+def _component_name_has_header_navigation_hint(name: str) -> bool:
+    token = str(name or "").strip().lower()
+    if not token:
+        return False
+    return any(
+        hint in token
+        for hint in (
+            "header",
+            "nav",
+            "navbar",
+            "menu",
+            "dropdown",
+            "shell",
+            "toolbar",
+            "layout",
+            "topbar",
+            "utility",
+            "workspace",
+            "profile",
+        )
+    )
+
+
+def _extract_exported_components(content: str) -> List[str]:
+    if not content:
+        return []
+    hits: List[str] = []
+    patterns = [
+        r"export\s+function\s+([A-Z][A-Za-z0-9_]*)\b",
+        r"export\s+const\s+([A-Z][A-Za-z0-9_]*)\b",
+        r"export\s+class\s+([A-Z][A-Za-z0-9_]*)\b",
+        r"export\s+default\s+function\s+([A-Z][A-Za-z0-9_]*)\b",
+        r"export\s+default\s+([A-Z][A-Za-z0-9_]*)\b",
+    ]
+    for pattern in patterns:
+        for match in re.findall(pattern, content):
+            value = str(match or "").strip()
+            if value and value not in hits:
+                hits.append(value)
+    return hits[:24]
+
+
+def _extract_imported_components(content: str) -> List[str]:
+    if not content:
+        return []
+    hits: List[str] = []
+    for block in re.findall(r"import\s+([^;]+?)\s+from\s+['\"][^'\"]+['\"]", content, flags=re.MULTILINE):
+        token = str(block or "").strip()
+        if not token:
+            continue
+        candidates: List[str] = []
+        if token.startswith("{") and token.endswith("}"):
+            candidates = [item.strip() for item in token[1:-1].split(",")]
+        elif token.startswith("* as "):
+            candidates = [token[5:].strip()]
+        elif "," in token:
+            left, right = token.split(",", 1)
+            candidates.append(left.strip())
+            right = right.strip()
+            if right.startswith("{") and right.endswith("}"):
+                candidates.extend([item.strip() for item in right[1:-1].split(",")])
+            else:
+                candidates.append(right)
+        else:
+            candidates = [token]
+        for candidate in candidates:
+            value = str(candidate or "").split(" as ", 1)[0].strip()
+            if value and re.match(r"^[A-Z][A-Za-z0-9_]*$", value) and value not in hits:
+                hits.append(value)
+    return hits[:24]
+
+
+def _extract_local_import_specs(content: str) -> List[str]:
+    if not content:
+        return []
+    specs: List[str] = []
+    for match in re.findall(r"import\s+[^;]+?\s+from\s+['\"]([^'\"]+)['\"]", content, flags=re.MULTILINE):
+        spec = str(match or "").strip()
+        if spec.startswith(".") and spec not in specs:
+            specs.append(spec)
+    return specs[:48]
+
+
+def _extract_jsx_component_tags(content: str) -> List[str]:
+    if not content:
+        return []
+    tags: List[str] = []
+    for match in re.findall(r"<([A-Z][A-Za-z0-9_]*)\b", content):
+        token = str(match or "").strip()
+        if token and token not in tags:
+            tags.append(token)
+    return tags[:32]
+
+
+def _humanize_request_issue(request_text: str) -> str:
+    text = str(request_text or "").strip()
+    if not text:
+        return "the reported UI behavior issue"
+    lowered = text.lower()
+    if any(token in lowered for token in {"dropdown", "menu"}) and any(token in lowered for token in {"header", "nav", "toolbar"}):
+        return "the reported header dropdown sizing/alignment issue"
+    if any(token in lowered for token in {"width", "height", "layout", "spacing", "alignment", "css", "style"}):
+        return "the reported layout/styling issue"
+    if any(token in lowered for token in {"field", "input", "form"}):
+        return "the reported form field behavior issue"
+    return "the reported behavior issue"
+
+
+def _file_rationale_map(code_context: Dict[str, Any]) -> Dict[str, str]:
+    rows = code_context.get("evidence") if isinstance(code_context.get("evidence"), list) else []
+    mapping: Dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        path = str(row.get("path") or "").strip()
+        rationale = str(row.get("rationale") or "").strip()
+        if path and rationale:
+            mapping[path] = rationale
+    return mapping
+
+
+def _candidate_file_is_strongly_supported(path: str, *, code_context: Dict[str, Any]) -> bool:
+    confidence = float(code_context.get("confidence") or 0.0)
+    rationale = _file_rationale_map(code_context).get(path, "").lower()
+    if "page-level path penalty" in rationale:
+        return False
+    if confidence >= 0.75:
+        return True
+    return bool(
+        "header/navigation path" in rationale
+        or "header/navigation export" in rationale
+        or "ownership bonus" in rationale
+    )
+
+
+def _resolve_local_import_paths(
+    *,
+    current_rel_path: str,
+    import_specs: List[str],
+    known_files: Set[str],
+) -> List[str]:
+    resolved: List[str] = []
+    current_path = Path(current_rel_path)
+    current_parent = current_path.parent
+    for spec in import_specs:
+        raw = str(spec or "").strip()
+        if not raw:
+            continue
+        base = (current_parent / raw).as_posix()
+        candidates = [
+            f"{base}.tsx",
+            f"{base}.ts",
+            f"{base}.jsx",
+            f"{base}.js",
+            f"{base}.css",
+            f"{base}.scss",
+            f"{base}/index.tsx",
+            f"{base}/index.ts",
+            f"{base}/index.jsx",
+            f"{base}/index.js",
+        ]
+        for candidate in candidates:
+            normalized = _normalized_repo_path(candidate)
+            if normalized in known_files and normalized not in resolved:
+                resolved.append(normalized)
+                break
+    return resolved
+
+
+def _resolve_local_repo_root(repo_slug: str) -> Optional[Path]:
+    slug = str(repo_slug or "").strip().lower()
+    candidates: List[Path] = []
+    runtime_repo_map_raw = str(os.getenv("XYN_RUNTIME_REPO_MAP", "") or "").strip()
+    if runtime_repo_map_raw:
+        try:
+            parsed_map = json.loads(runtime_repo_map_raw)
+        except (TypeError, ValueError):
+            parsed_map = {}
+        mapped_paths = parsed_map.get(slug) if isinstance(parsed_map, dict) else []
+        if isinstance(mapped_paths, list):
+            for item in mapped_paths:
+                token = str(item or "").strip()
+                if token:
+                    candidates.append(Path(token))
+    if slug == "xyn-platform":
+        env_root = str(os.getenv("XYN_PLATFORM_REPO_ROOT", "") or "").strip()
+        if env_root:
+            candidates.append(Path(env_root))
+        candidates.append(Path("/workspace/xyn-platform"))
+        candidates.append(Path("/home/jrestivo/src/xyn-platform"))
+    elif slug == "xyn":
+        env_root = str(os.getenv("XYN_REPO_ROOT", "") or "").strip()
+        if env_root:
+            candidates.append(Path(env_root))
+        candidates.append(Path("/workspace/xyn"))
+        candidates.append(Path("/home/jrestivo/src/xyn"))
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except Exception:
+            continue
+        if resolved.exists() and resolved.is_dir():
+            return resolved
+    return None
+
+
+def gather_solution_change_code_context(
+    *,
+    request_text: str,
+    artifact: Artifact,
+    owner_repo_slug: str,
+    allowed_paths: List[str],
+) -> Dict[str, Any]:
+    artifact_title = str(getattr(artifact, "title", "") or "").strip() or str(getattr(artifact, "slug", "") or "").strip()
+    if not str(owner_repo_slug or "").strip():
+        return {
+            "available": False,
+            "reason": "artifact has no owner_repo_slug",
+            "candidate_files": [],
+            "candidate_components": [],
+            "summary": f"Code-aware planning unavailable: {artifact_title or 'selected artifact'} has no repository ownership metadata.",
+        }
+    safe_paths = [str(item).strip() for item in (allowed_paths or []) if str(item).strip()]
+    if not safe_paths:
+        return {
+            "available": False,
+            "reason": "artifact has no allowed owner paths",
+            "candidate_files": [],
+            "candidate_components": [],
+            "summary": f"Code-aware planning unavailable: {artifact_title or 'selected artifact'} has no editable path scope.",
+        }
+    repo_root = _resolve_local_repo_root(owner_repo_slug)
+    if repo_root is None:
+        return {
+            "available": False,
+            "reason": "repo root not available locally",
+            "candidate_files": [],
+            "candidate_components": [],
+            "summary": f"Code-aware planning unavailable: could not resolve local repo root for {owner_repo_slug}.",
+        }
+    keywords = _likely_code_context_keywords(request_text)
+    prefers_header_scope = _request_prefers_header_navigation_scope(request_text)
+    suffixes = {".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".py", ".json", ".md"}
+    scanned_files = 0
+    max_scanned_files = 260
+    file_records: List[Dict[str, Any]] = []
+    for prefix in safe_paths:
+        scoped_root = (repo_root / prefix).resolve()
+        if not scoped_root.exists() or not scoped_root.is_dir():
+            continue
+        for file_path in scoped_root.rglob("*"):
+            if scanned_files >= max_scanned_files:
+                break
+            if not file_path.is_file() or file_path.suffix.lower() not in suffixes:
+                continue
+            scanned_files += 1
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            rel_path = str(file_path.relative_to(repo_root))
+            normalized_path = _normalized_repo_path(rel_path)
+            lowered_content = content.lower()
+            file_records.append(
+                {
+                    "path": rel_path,
+                    "normalized_path": normalized_path,
+                    "lowered_name": file_path.name.lower(),
+                    "lowered_content": lowered_content,
+                    "exported_components": _extract_exported_components(content),
+                    "imported_components": _extract_imported_components(content),
+                    "jsx_components": _extract_jsx_component_tags(content),
+                    "import_specs": _extract_local_import_specs(content),
+                }
+            )
+        if scanned_files >= max_scanned_files:
+            break
+    known_files = {str(record.get("normalized_path") or "").strip() for record in file_records if str(record.get("normalized_path") or "").strip()}
+    component_exports: Dict[str, Set[str]] = {}
+    for record in file_records:
+        rel_path = str(record.get("path") or "").strip()
+        if not rel_path:
+            continue
+        record["local_import_paths"] = _resolve_local_import_paths(
+            current_rel_path=rel_path,
+            import_specs=[str(item) for item in (record.get("import_specs") or [])],
+            known_files=known_files,
+        )
+        for component in record.get("exported_components") or []:
+            component_name = str(component or "").strip()
+            if not component_name:
+                continue
+            component_exports.setdefault(component_name, set()).add(rel_path)
+
+    score_bonus_by_path: Dict[str, int] = {}
+    ranked: List[Tuple[int, str, str]] = []
+    for record in file_records:
+        rel_path = str(record.get("path") or "").strip()
+        if not rel_path:
+            continue
+        score = 0
+        matched_terms: List[str] = []
+        lowered_name = str(record.get("lowered_name") or "")
+        lowered_content = str(record.get("lowered_content") or "")
+        for token in keywords:
+            if token in lowered_name:
+                score += 3
+                matched_terms.append(token)
+            elif token in lowered_content:
+                score += 1
+                matched_terms.append(token)
+        if "requested change" in lowered_content:
+            score += 2
+            matched_terms.append("requested change")
+        if "solution" in lowered_content and "panel" in lowered_content:
+            score += 1
+            matched_terms.append("solution/panel")
+
+        exported = [str(item).strip() for item in (record.get("exported_components") or []) if str(item).strip()]
+        imported = [str(item).strip() for item in (record.get("imported_components") or []) if str(item).strip()]
+        jsx_components = [str(item).strip() for item in (record.get("jsx_components") or []) if str(item).strip()]
+        local_import_paths = [str(item).strip() for item in (record.get("local_import_paths") or []) if str(item).strip()]
+
+        if prefers_header_scope:
+            if _path_has_header_navigation_hint(rel_path):
+                score += 4
+                matched_terms.append("header/navigation path")
+            if _path_is_page_level(rel_path):
+                score -= 4
+                matched_terms.append("page-level path penalty")
+            if any(_component_name_has_header_navigation_hint(item) for item in exported):
+                score += 4
+                matched_terms.append("header/navigation export")
+            if any(_component_name_has_header_navigation_hint(item) for item in imported):
+                score += 2
+                matched_terms.append("header/navigation import")
+            if any(_component_name_has_header_navigation_hint(item) for item in jsx_components):
+                score += 3
+                matched_terms.append("header/navigation jsx ownership")
+            if any(_path_has_header_navigation_hint(item) for item in local_import_paths):
+                score += 2
+                matched_terms.append("imports header/navigation module")
+
+            # Lightweight ownership tracing: if a page references a header/nav component,
+            # boost the owning component file instead of the page wrapper.
+            if _path_is_page_level(rel_path):
+                page_mentions_header_owner = False
+                for component_name in jsx_components:
+                    if not _component_name_has_header_navigation_hint(component_name):
+                        continue
+                    for owner_path in component_exports.get(component_name, set()):
+                        if owner_path == rel_path:
+                            continue
+                        if _path_has_header_navigation_hint(owner_path) or _component_name_has_header_navigation_hint(component_name):
+                            score_bonus_by_path[owner_path] = int(score_bonus_by_path.get(owner_path, 0)) + 5
+                            page_mentions_header_owner = True
+                if page_mentions_header_owner:
+                    score -= 2
+                    matched_terms.append("page wrapper around shared header component")
+
+        if score <= 0:
+            continue
+        rationale = f"matched terms: {', '.join(sorted(set(matched_terms))[:5])}"
+        ranked.append((score, rel_path, rationale))
+
+    if score_bonus_by_path:
+        boosted: List[Tuple[int, str, str]] = []
+        for score, rel_path, rationale in ranked:
+            bonus = int(score_bonus_by_path.get(rel_path, 0))
+            if bonus > 0:
+                boosted.append((score + bonus, rel_path, f"{rationale}; ownership bonus +{bonus}"))
+            else:
+                boosted.append((score, rel_path, rationale))
+        ranked = boosted
+
+    component_hits: List[str] = []
+    for record in file_records:
+        for component_name in [*record.get("exported_components", []), *record.get("jsx_components", [])]:
+            candidate = str(component_name or "").strip()
+            if candidate and candidate not in component_hits:
+                component_hits.append(candidate)
+            if len(component_hits) >= 12:
+                break
+        if len(component_hits) >= 12:
+            break
+
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    search_strategy = "default"
+    if prefers_header_scope:
+        focused_rows = [row for row in ranked if _path_has_header_navigation_hint(row[1])]
+        if focused_rows:
+            focused_rows.sort(key=lambda row: (-row[0], row[1]))
+            ranked = focused_rows + [row for row in ranked if row not in focused_rows]
+            search_strategy = "focused_header_navigation"
+    top_rows = ranked[:8]
+    candidate_files = [row[1] for row in top_rows]
+    evidence = [{"path": row[1], "rationale": row[2], "score": int(row[0])} for row in top_rows]
+    top_slice = top_rows[:3]
+    top_all_page_level = bool(top_slice) and all(_path_is_page_level(row[1]) for row in top_slice)
+    top_has_header_hint = bool(top_slice) and any(_path_has_header_navigation_hint(row[1]) for row in top_slice)
+    top_score = int(top_rows[0][0]) if top_rows else 0
+    needs_clarification = False
+    confidence_reason = ""
+    if prefers_header_scope:
+        if top_rows and top_all_page_level and not top_has_header_hint:
+            needs_clarification = True
+            confidence_reason = "header_request_only_page_level_matches"
+        elif top_rows and top_score < 5:
+            needs_clarification = True
+            confidence_reason = "header_request_low_match_confidence"
+        elif not top_rows:
+            needs_clarification = True
+            confidence_reason = "header_request_no_matches"
+    confidence = 0.0
+    if top_rows:
+        confidence = max(0.25, min(0.95, float(top_score) / 10.0))
+        if needs_clarification:
+            confidence = min(confidence, 0.4)
+
+    clarification_prompt = (
+        "I may not have identified the correct component. "
+        "This request refers to a header dropdown, but current matches are page-level files.\n\n"
+        "Would you like me to:\n"
+        "1. Search specifically for header/navigation components?\n"
+        "2. Expand search scope?\n"
+        "3. Proceed with current candidates?"
+    )
+    clarification_options = [
+        "Search specifically for header/navigation components",
+        "Expand search scope",
+        "Proceed with current candidates",
+    ]
+
+    if needs_clarification and (not top_has_header_hint or top_all_page_level):
+        candidate_files = []
+        evidence = []
+
+    if not candidate_files:
+        return {
+            "available": True,
+            "reason": confidence_reason or "no strong matches",
+            "candidate_files": [],
+            "candidate_components": [],
+            "evidence": [],
+            "summary": f"Searched {owner_repo_slug} within {', '.join(safe_paths)} but found no strong file matches.",
+            "repo_slug": owner_repo_slug,
+            "scoped_paths": safe_paths,
+            "confidence": confidence,
+            "needs_clarification": needs_clarification,
+            "clarification_prompt": clarification_prompt if needs_clarification else "",
+            "clarification_options": clarification_options if needs_clarification else [],
+            "search_strategy": search_strategy,
+        }
+    return {
+        "available": True,
+        "reason": "matched",
+        "candidate_files": candidate_files,
+        "candidate_components": component_hits[:8],
+        "evidence": evidence,
+        "summary": f"Used repo context from {owner_repo_slug} ({', '.join(safe_paths)}).",
+        "repo_slug": owner_repo_slug,
+        "scoped_paths": safe_paths,
+        "confidence": confidence,
+        "needs_clarification": needs_clarification,
+        "clarification_prompt": clarification_prompt if needs_clarification else "",
+        "clarification_options": clarification_options if needs_clarification else [],
+        "search_strategy": search_strategy,
+    }
+
+
+def _format_code_aware_steps(base_steps: List[str], *, code_context: Dict[str, Any], request_text: str) -> List[str]:
+    candidate_files = [str(item).strip() for item in (code_context.get("candidate_files") or []) if str(item).strip()]
+    if not candidate_files:
+        return base_steps
+    steps: List[str] = []
+    first_file = candidate_files[0]
+    issue_summary = _humanize_request_issue(request_text)
+    steps.append(
+        f"Inspect the owning UI component in `{first_file}` to confirm whether width, min-width, max-width, or anchoring is causing {issue_summary}."
+    )
+    steps.append(
+        f"Apply the narrowest styling/positioning fix in `{first_file}` so the control remains visible and aligned within the viewport."
+    )
+    steps.append("Verify the updated control alignment does not regress neighboring header/navigation controls.")
+    if len(candidate_files) > 1:
+        secondary = candidate_files[1]
+        if _candidate_file_is_strongly_supported(secondary, code_context=code_context):
+            steps.append(f"Review `{secondary}` if shared dropdown logic or styles are referenced during implementation.")
+        else:
+            steps.append(f"Review `{secondary}` only if implementation evidence shows shared dropdown logic.")
+    steps.append("Add or update a focused regression check for the affected UI behavior.")
+    unique_steps: List[str] = []
+    for item in [*steps, *base_steps]:
+        token = str(item or "").strip()
+        if not token:
+            continue
+        if token not in unique_steps:
+            unique_steps.append(token)
+        if len(unique_steps) >= 5:
+            break
+    return unique_steps
+
+
+def _plan_contains_uuid_like_work_items(plan: Dict[str, Any]) -> bool:
+    proposed_work = plan.get("proposed_work")
+    if not isinstance(proposed_work, list):
+        return False
+    uuid_like_pattern = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", re.IGNORECASE)
+    return any(uuid_like_pattern.search(str(item or "")) for item in proposed_work)
+
+
+def _plan_has_meaningful_proposed_work(plan: Dict[str, Any]) -> bool:
+    if not isinstance(plan, dict):
+        return False
+    proposed_work = plan.get("proposed_work")
+    if not isinstance(proposed_work, list):
+        return False
+    entries = [str(item or "").strip() for item in proposed_work if str(item or "").strip()]
+    if not entries:
+        return False
+    uuid_like_pattern = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", re.IGNORECASE)
+    meaningful_entries = [entry for entry in entries if not uuid_like_pattern.search(entry)]
+    if not meaningful_entries:
+        return False
+    for entry in meaningful_entries:
+        lowered = entry.lower()
+        # File/component references and multi-word implementation steps are meaningful.
+        if "/" in entry or "`" in entry or "." in entry:
+            return True
+        if len(re.findall(r"[a-z]{3,}", lowered)) >= 3:
+            return True
+        if any(
+            token in lowered
+            for token in {
+                "inspect",
+                "update",
+                "adjust",
+                "apply",
+                "verify",
+                "validate",
+                "component",
+                "layout",
+                "style",
+                "css",
+                "header",
+                "dropdown",
+                "field",
+                "input",
+                "panel",
+                "endpoint",
+                "schema",
+                "model",
+                "migration",
+            }
+        ):
+            return True
+    return False
+
+
+def _generate_code_aware_solution_change_plan(
+    *,
+    base_plan: Dict[str, Any],
+    request_text: str,
+    code_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    plan = copy.deepcopy(base_plan if isinstance(base_plan, dict) else {})
+    plan["planning_mode"] = "code_aware"
+    plan["code_context_summary"] = str(code_context.get("summary") or "").strip()
+    plan["candidate_files"] = [str(item).strip() for item in (code_context.get("candidate_files") or []) if str(item).strip()]
+    plan["candidate_components"] = [str(item).strip() for item in (code_context.get("candidate_components") or []) if str(item).strip()]
+    plan["code_context_confidence"] = float(code_context.get("confidence") or 0.0)
+    plan["code_context_search_strategy"] = str(code_context.get("search_strategy") or "").strip()
+    implementation_steps = plan.get("implementation_steps") if isinstance(plan.get("implementation_steps"), list) else []
+    plan["implementation_steps"] = _format_code_aware_steps(
+        [str(step).strip() for step in implementation_steps if str(step).strip()],
+        code_context=code_context,
+        request_text=request_text,
+    )
+    shared_contracts = [str(item).strip() for item in (plan.get("shared_contracts") if isinstance(plan.get("shared_contracts"), list) else []) if str(item).strip()]
+    lowered_request = str(request_text or "").lower()
+    ui_only_request = any(token in lowered_request for token in {"field", "input", "textarea", "width", "layout", "panel"}) and not any(
+        token in lowered_request for token in {"api", "endpoint", "schema", "payload", "contract", "response"}
+    )
+    if ui_only_request:
+        shared_contracts = [
+            item
+            for item in shared_contracts
+            if "backward-compatible api contracts" not in item.lower()
+            and "payload/data-shape compatibility" not in item.lower()
+        ]
+    plan["shared_contracts"] = shared_contracts
+    needs_clarification = bool(code_context.get("needs_clarification"))
+    if needs_clarification:
+        clarification_prompt = str(code_context.get("clarification_prompt") or "").strip()
+        clarification_options = [
+            str(item).strip() for item in (code_context.get("clarification_options") or []) if str(item).strip()
+        ]
+        existing_open_questions = [
+            str(item).strip() for item in (plan.get("open_questions") if isinstance(plan.get("open_questions"), list) else []) if str(item).strip()
+        ]
+        if clarification_prompt and clarification_prompt not in existing_open_questions:
+            existing_open_questions.append(clarification_prompt)
+        plan["open_questions"] = existing_open_questions
+        plan["clarification_options"] = clarification_options
+        plan["next_action"] = "Clarify the target header/navigation component before staging code changes."
+    proposed_work = [str(item).strip() for item in plan.get("implementation_steps", []) if str(item).strip()]
+    plan["proposed_work"] = proposed_work
+    if not str(plan.get("next_action") or "").strip():
+        plan["next_action"] = proposed_work[0] if proposed_work else "Confirm the first implementation step before staging."
+    validation_plan = [str(item).strip() for item in (plan.get("validation_plan") if isinstance(plan.get("validation_plan"), list) else []) if str(item).strip()]
+    if validation_plan:
+        if validation_plan[0] != str(plan.get("next_action") or ""):
+            validation_plan = [str(plan.get("next_action") or ""), *[item for item in validation_plan if item != str(plan.get("next_action") or "")]]
+    else:
+        validation_plan = [str(plan.get("next_action") or "Confirm the first implementation step before staging.")]
+    plan["validation_plan"] = validation_plan
+    return plan
+
+
+def _maybe_apply_code_aware_solution_planning(
+    *,
+    plan: Dict[str, Any],
+    session: SolutionChangeSession,
+    selected_members: List[ApplicationArtifactMembership],
+    force_code_aware_planning: bool = False,
+) -> Dict[str, Any]:
+    base_plan = copy.deepcopy(plan if isinstance(plan, dict) else {})
+    base_plan.setdefault("planning_mode", "deterministic")
+    base_plan.setdefault("code_context_summary", "")
+    base_plan.setdefault("candidate_files", [])
+    base_plan.setdefault("candidate_components", [])
+    base_plan["proposed_work"] = [
+        str(item).strip()
+        for item in (base_plan.get("implementation_steps") if isinstance(base_plan.get("implementation_steps"), list) else [])
+        if str(item).strip()
+    ]
+    if _plan_contains_uuid_like_work_items(base_plan):
+        base_plan["proposed_work"] = []
+    if not selected_members:
+        return base_plan
+    selected_ids = [str(item).strip() for item in _solution_change_session_selected_artifact_ids(session) if str(item).strip()]
+    selected_member = None
+    for artifact_id in selected_ids:
+        selected_member = next((member for member in selected_members if str(member.artifact_id) == artifact_id), None)
+        if selected_member is not None:
+            break
+    if selected_member is None:
+        selected_member = selected_members[0]
+    ownership = resolve_artifact_ownership(selected_member.artifact)
+    owner_repo_slug = str(ownership.get("repo_slug") or "").strip()
+    allowed_paths = [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()]
+    has_repo_backed_scope = bool(owner_repo_slug and allowed_paths)
+    implementation_specific = _request_appears_implementation_specific(str(session.request_text or ""))
+    ui_implementation_specific = _request_appears_ui_implementation_specific(str(session.request_text or ""))
+    lacks_concrete_targets = _plan_lacks_concrete_targets(base_plan)
+    has_meaningful_proposed_work = _plan_has_meaningful_proposed_work(base_plan)
+    structural_fallback = has_repo_backed_scope and ui_implementation_specific and (lacks_concrete_targets or not has_meaningful_proposed_work)
+    trigger_reason = "none"
+    should_run = False
+    if force_code_aware_planning:
+        should_run = True
+        trigger_reason = "forced"
+    elif implementation_specific and lacks_concrete_targets:
+        should_run = True
+        trigger_reason = "token_match"
+    elif structural_fallback:
+        should_run = True
+        trigger_reason = "structural_fallback"
+    logger.info(
+        "solution planning mode decision session=%s should_run_code_aware=%s reason=%s force=%s implementation_specific=%s ui_implementation_specific=%s selected_artifact=%s repo=%s lacks_targets=%s meaningful_proposed_work=%s",
+        str(session.id),
+        bool(should_run),
+        trigger_reason,
+        bool(force_code_aware_planning),
+        bool(implementation_specific),
+        bool(ui_implementation_specific),
+        str(getattr(selected_member, "artifact_id", "") or ""),
+        owner_repo_slug or "",
+        bool(lacks_concrete_targets),
+        bool(has_meaningful_proposed_work),
+    )
+    if not should_run:
+        return base_plan
+    context = gather_solution_change_code_context(
+        request_text=str(session.request_text or ""),
+        artifact=selected_member.artifact,
+        owner_repo_slug=owner_repo_slug,
+        allowed_paths=allowed_paths,
+    )
+    if not bool(context.get("available")):
+        base_plan["planning_mode"] = "deterministic"
+        base_plan["code_context_summary"] = str(context.get("summary") or "").strip()
+        base_plan["candidate_files"] = []
+        base_plan["candidate_components"] = []
+        logger.info(
+            "solution planning mode session=%s finalized_mode=%s reason=%s",
+            str(session.id),
+            "deterministic",
+            str(context.get("reason") or "context_unavailable"),
+        )
+        return base_plan
+    code_aware_plan = _generate_code_aware_solution_change_plan(
+        base_plan=base_plan,
+        request_text=str(session.request_text or ""),
+        code_context=context,
+    )
+    logger.info(
+        "solution planning mode session=%s finalized_mode=%s candidate_files=%s",
+        str(session.id),
+        str(code_aware_plan.get("planning_mode") or "deterministic"),
+        len(code_aware_plan.get("candidate_files") or []),
+    )
+    return code_aware_plan
 
 
 def _generate_solution_change_plan(
     *,
     session: SolutionChangeSession,
     memberships: List[ApplicationArtifactMembership],
+    force_code_aware_planning: bool = False,
 ) -> Dict[str, Any]:
     planning_turns = list(
         SolutionPlanningTurn.objects.filter(session=session)
@@ -30739,6 +34632,22 @@ def _generate_solution_change_plan(
                 "reply_text": reply_text,
                 "interpretation": payload.get("interpretation") if isinstance(payload.get("interpretation"), dict) else None,
             }
+        )
+
+    def _finalize_plan_payload(
+        payload: Dict[str, Any],
+        selected_members_for_plan: List[ApplicationArtifactMembership],
+    ) -> Dict[str, Any]:
+        finalized = _maybe_apply_code_aware_solution_planning(
+            plan=payload,
+            session=session,
+            selected_members=selected_members_for_plan,
+            force_code_aware_planning=force_code_aware_planning,
+        )
+        return _apply_refinement_rewrite_to_plan_payload(
+            plan=finalized,
+            directives=plan_rewrite_directives,
+            request_text=original_request,
         )
 
     def _compact_objective(text: str) -> str:
@@ -30953,7 +34862,16 @@ def _generate_solution_change_plan(
         state["additional_considerations"] = additional_considerations
         return state
 
+    plan_rewrite_directives = _extract_plan_rewrite_directives(response_records, user_refinements)
     refinement_state = _refinement_state(response_records, user_refinements)
+    refinement_state["constraints"] = _sanitize_shared_contracts_for_refinement(
+        [str(item).strip() for item in (refinement_state.get("constraints") or []) if str(item).strip()],
+        directives=plan_rewrite_directives,
+    )
+    refinement_state["additional_considerations"] = _sanitize_shared_contracts_for_refinement(
+        [str(item).strip() for item in (refinement_state.get("additional_considerations") or []) if str(item).strip()],
+        directives=plan_rewrite_directives,
+    )
     latest_draft_summary = ""
     for turn in reversed(planning_turns):
         if str(turn.actor or "") == "planner" and str(turn.kind or "") == "draft_plan":
@@ -31048,6 +34966,13 @@ def _generate_solution_change_plan(
                 ]
             )
 
+        validation_steps = [
+            "Stage the planned changes for the selected artifacts.",
+            "Prepare a preview environment to review the applied changes.",
+            "Validate the changes, including running relevant tests.",
+            *validation_steps,
+        ]
+
         shared_contracts = [
             "Plan against the current solution baseline; do not introduce greenfield/bootstrap assumptions.",
             "Preserve existing cross-artifact contracts unless the request explicitly requires contract changes.",
@@ -31056,7 +34981,7 @@ def _generate_solution_change_plan(
         shared_contracts.extend(refinement_state["constraints"])
         shared_contracts.extend(refinement_state["additional_considerations"][:2])
 
-        return {
+        return _finalize_plan_payload({
             "session_id": str(session.id),
             "application_id": str(session.application_id),
             "title": plan_title_value,
@@ -31070,12 +34995,13 @@ def _generate_solution_change_plan(
             "suggested_workstreams": suggested_workstreams,
             "per_artifact_work": [],
             "shared_contracts": shared_contracts,
+            "open_questions": [],
             "validation_plan": validation_steps,
             "preview_implications": [
                 "Use preview to verify the targeted behavior change against the existing solution baseline.",
             ],
             "implementation_steps": implementation_steps,
-        }
+        }, [])
 
     analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
     confirmed_workstreams = _solution_change_session_confirmed_workstreams(session)
@@ -31118,13 +35044,13 @@ def _generate_solution_change_plan(
     plan_title = str(refinement_state.get("name") or fallback_title or "").strip() or fallback_title
     if not selected_members:
         if confirmed_workstreams or not _is_greenfield_initial_solution_plan():
-            return _existing_solution_no_membership_plan(
+            return _finalize_plan_payload(_existing_solution_no_membership_plan(
                 objective_text=_compact_objective(original_request),
                 plan_title_value=plan_title,
                 planner_objective_value=planner_objective_text,
                 planner_context_value=planner_context_text,
                 suggested_workstreams=effective_workstreams,
-            )
+            ), [])
         objective_text = _compact_objective(original_request)
         first_focus = "Start by shaping the primary data model and first user-facing workflow."
         objective_lower = objective_text.lower()
@@ -31143,19 +35069,17 @@ def _generate_solution_change_plan(
             "Assumption: initial release targets internal authenticated users.",
         ]
         assumptions.extend(refinement_state["resolved_assumptions"])
+        open_questions: List[str] = []
         if refinement_state.get("has_explicit_open_questions"):
-            if "collaboration_model" in refinement_state.get("open_questions_remaining", set()):
-                assumptions.append("Open question: should v1 support a single-user or multi-user collaboration model?")
-            if "integration_v1" in refinement_state.get("open_questions_remaining", set()):
-                assumptions.append("Open question: which external integrations are required in v1 versus later phases?")
-        else:
-            if not refinement_state["collaboration"]:
-                assumptions.append("Open question: should v1 support a single-user or multi-user collaboration model?")
-            if refinement_state["integration_v1"] is None:
-                assumptions.append("Open question: which external integrations are required in v1 versus later phases?")
+            remaining = refinement_state.get("open_questions_remaining", set())
+            if "collaboration_model" in remaining:
+                open_questions.append("Collaboration model for v1 is still unresolved.")
+            if "integration_v1" in remaining:
+                open_questions.append("External integration scope for v1 is still unresolved.")
+            assumptions.extend([f"Open question: {question}" for question in open_questions])
         assumptions.extend(refinement_state["constraints"][:2])
         assumptions.extend(refinement_state["additional_considerations"][:2])
-        return {
+        return _finalize_plan_payload({
             "session_id": str(session.id),
             "application_id": str(session.application_id),
             "title": plan_title,
@@ -31169,6 +35093,7 @@ def _generate_solution_change_plan(
             "suggested_workstreams": effective_workstreams,
             "per_artifact_work": [],
             "shared_contracts": assumptions,
+            "open_questions": open_questions,
             "validation_plan": [
                 first_focus,
                 "Validate the first vertical slice end-to-end before broadening scope.",
@@ -31176,7 +35101,7 @@ def _generate_solution_change_plan(
             "preview_implications": [
                 "Use preview to validate the first vertical slice with representative data.",
             ],
-        }
+        }, [])
     per_artifact: List[Dict[str, Any]] = []
     for member in selected_members:
         artifact = member.artifact
@@ -31216,33 +35141,39 @@ def _generate_solution_change_plan(
             per_artifact[-1]["planned_work"].append(f"set default UI theme to {theme}")
         for feature in refinement_state.get("features") or []:
             per_artifact[-1]["planned_work"].append(f"add support for {feature}")
-    shared_contracts = [
-        "Cross-artifact API/schema compatibility",
-        "Event/payload shape compatibility where artifacts exchange runtime data",
-        "Generated surface/action metadata consistency for shell navigation",
-    ]
+    shared_contracts: List[str] = []
+    open_questions: List[str] = []
     validation_plan = [
-        "Run artifact-local unit tests for each changed artifact",
-        "Run integration tests covering cross-artifact contract seams",
-        "Run shell/workbench smoke route checks for affected user paths",
+        "Stage the planned changes for the selected artifacts.",
+        "Prepare a preview environment to review the applied changes.",
+        "Validate the changes, including running relevant tests.",
     ]
+    selected_roles = {str(member.role or "").strip() for member in selected_members}
+    selected_artifact_count = len(selected_members)
+    lowered_request = original_request.lower()
+    api_workstream_active = ("api" in effective_workstreams) or bool(selected_roles.intersection({"primary_api", "integration_adapter"}))
+    mentions_contract = any(token in lowered_request for token in {"api", "endpoint", "schema", "contract", "payload", "response"})
+    mentions_exchange = any(
+        token in lowered_request
+        for token in {"event", "payload", "message", "queue", "stream", "webhook", "integration", "adapter", "exchange"}
+    )
+    if selected_artifact_count > 1 and api_workstream_active and mentions_contract:
+        shared_contracts.append("Maintain backward-compatible API contracts across selected artifacts.")
+    if selected_artifact_count > 1 and mentions_exchange:
+        shared_contracts.append("Validate payload/data-shape compatibility where selected artifacts exchange runtime data.")
     shared_contracts.extend(refinement_state["resolved_assumptions"])
     if refinement_state.get("has_explicit_open_questions"):
         remaining = refinement_state.get("open_questions_remaining", set())
         if "collaboration_model" in remaining:
-            shared_contracts.append("Open question: should v1 collaboration be single-user or multi-user?")
+            open_questions.append("Collaboration model for v1 is still unresolved.")
         if "integration_v1" in remaining:
-            shared_contracts.append("Open question: are external integrations required in v1?")
-    else:
-        if refinement_state["collaboration"] is None:
-            shared_contracts.append("Open question: should v1 collaboration be single-user or multi-user?")
-        if refinement_state["integration_v1"] is None:
-            shared_contracts.append("Open question: are external integrations required in v1?")
+            open_questions.append("External integration scope for v1 is still unresolved.")
+    shared_contracts.extend([f"Open question: {question}" for question in open_questions])
     shared_contracts.extend(refinement_state["constraints"])
     shared_contracts.extend(refinement_state["additional_considerations"][:2])
     if refinement_state["constraints"]:
         validation_plan.insert(0, "Validate that revision constraints are reflected in scope and acceptance checks.")
-    return {
+    return _finalize_plan_payload({
         "session_id": str(session.id),
         "application_id": str(session.application_id),
         "title": plan_title,
@@ -31256,12 +35187,13 @@ def _generate_solution_change_plan(
         "suggested_workstreams": effective_workstreams,
         "per_artifact_work": per_artifact,
         "shared_contracts": shared_contracts,
+        "open_questions": open_questions,
         "validation_plan": validation_plan,
         "preview_implications": [
             "Preview instance should include all changed artifacts in one sibling deploy set",
             "Cross-artifact regression checks are required before promotion",
         ],
-    }
+    }, selected_members)
 
 
 def _serialize_solution_change_session(
@@ -31285,6 +35217,10 @@ def _serialize_solution_change_session(
             }
         )
     planning_state = _solution_planning_state(session)
+    commit_count = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).count()
+    requires_commit_provenance = _solution_change_session_requires_commit_provenance(session)
+    promote_eligibility = _solution_change_session_promote_eligibility(session=session, application=session.application)
+    evidence_ref = _latest_solution_change_session_promotion_evidence_ref(session)
     return {
         "id": str(session.id),
         "workspace_id": str(session.workspace_id),
@@ -31303,16 +35239,813 @@ def _serialize_solution_change_session(
         "preview": session.preview_json if isinstance(session.preview_json, dict) else {},
         "validation": session.validation_json if isinstance(session.validation_json, dict) else {},
         "metadata": session.metadata_json if isinstance(session.metadata_json, dict) else {},
+        "repo_commit_count": int(commit_count),
+        "requires_commit_provenance": bool(requires_commit_provenance),
+        "promote_eligibility": promote_eligibility,
+        "evidence_ref": evidence_ref,
         "planning": planning_state,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     }
 
 
+def _serialize_solution_change_session_repo_commit(commit: SolutionChangeSessionRepoCommit) -> Dict[str, Any]:
+    return {
+        "id": str(commit.id),
+        "workspace_id": str(commit.workspace_id),
+        "solution_change_session_id": str(commit.solution_change_session_id),
+        "repository_slug": str(commit.repository_slug or "").strip(),
+        "branch": str(commit.branch or "").strip(),
+        "commit_sha": str(commit.commit_sha or "").strip(),
+        "changed_files": commit.changed_files_json if isinstance(commit.changed_files_json, list) else [],
+        "validation_status": str(commit.validation_status or "unknown").strip() or "unknown",
+        "created_at": commit.created_at,
+        "updated_at": commit.updated_at,
+    }
+
+
+def _solution_session_iteration_linkage(session: SolutionChangeSession) -> Dict[str, Any]:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    linkage = metadata.get("iteration_linkage")
+    return linkage if isinstance(linkage, dict) else {}
+
+
+def _persist_solution_session_iteration_linkage(
+    *,
+    session: SolutionChangeSession,
+    linkage_updates: Dict[str, Any],
+    source: str,
+) -> None:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    existing = metadata.get("iteration_linkage") if isinstance(metadata.get("iteration_linkage"), dict) else {}
+    merged: Dict[str, Any] = {**existing, **(linkage_updates if isinstance(linkage_updates, dict) else {})}
+    merged["source"] = str(source or "unknown").strip() or "unknown"
+    merged["updated_at"] = timezone.now().isoformat()
+    metadata["iteration_linkage"] = merged
+    session.metadata_json = metadata
+    session.save(update_fields=["metadata_json", "updated_at"])
+
+
+def _persist_solution_session_activation_linkage(
+    *,
+    session: SolutionChangeSession,
+    binding: Optional[SolutionRuntimeBinding],
+    activation_payload: Dict[str, Any],
+) -> None:
+    if not isinstance(activation_payload, dict):
+        return
+    linkage_updates: Dict[str, Any] = {
+        "workspace_id": str(session.workspace_id),
+        "application_id": str(session.application_id),
+        "session_id": str(session.id),
+        "status": str(activation_payload.get("status") or "").strip().lower(),
+        "activation_mode": str(activation_payload.get("policy_source") or "reconstructed"),
+        "revision_anchor": activation_payload.get("revision_anchor") if isinstance(activation_payload.get("revision_anchor"), dict) else {},
+        "activation": activation_payload.get("activation") if isinstance(activation_payload.get("activation"), dict) else {},
+        "runtime_target": activation_payload.get("runtime_target") if isinstance(activation_payload.get("runtime_target"), dict) else {},
+        "runtime_instance": activation_payload.get("runtime_instance") if isinstance(activation_payload.get("runtime_instance"), dict) else {},
+    }
+    if binding is not None:
+        linkage_updates["runtime_binding_id"] = str(binding.id)
+    _persist_solution_session_iteration_linkage(
+        session=session,
+        linkage_updates=linkage_updates,
+        source="application_activate",
+    )
+
+
+def _process_solution_change_session_reply(
+    *,
+    session: SolutionChangeSession,
+    application: Application,
+    identity: UserIdentity,
+    reply_text: str,
+    force_planner_fallback: bool,
+    response_kind: str = "response",
+    source_turn_id: str = "",
+    include_iteration_linkage: bool = False,
+) -> Dict[str, Any]:
+    interpretation = _interpret_solution_refinement(
+        session=session,
+        reply_text=reply_text,
+        force_planner_fallback=force_planner_fallback,
+    )
+    interpretation_type = str(interpretation.get("result_type") or "cannot_interpret")
+    payload: Dict[str, Any] = {
+        "reply_text": reply_text,
+        "response_kind": response_kind,
+        "source_turn_id": source_turn_id or None,
+        "interpretation": interpretation,
+        "use_planner_interpretation": force_planner_fallback,
+    }
+    if include_iteration_linkage:
+        payload["iteration_linkage"] = _solution_session_iteration_linkage(session)
+    _append_solution_planning_turn(
+        session=session,
+        actor="user",
+        kind="response",
+        payload=payload,
+        created_by=identity,
+    )
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at")
+    )
+    if interpretation_type in {"clarification_request", "cannot_interpret"}:
+        planner_question = str(interpretation.get("planner_message") or "").strip()
+        if not planner_question:
+            planner_question = (
+                "I could not safely interpret that refinement. Please clarify the request or provide a more specific constraint."
+                if interpretation_type == "cannot_interpret"
+                else "I need one clarification before I can revise the draft plan."
+            )
+        _append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="question",
+            payload={
+                "question": planner_question,
+                "reason": "cannot_interpret" if interpretation_type == "cannot_interpret" else "clarification_request",
+                "interpretation": interpretation,
+            },
+        )
+    else:
+        _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    return {
+        "recorded": True,
+        "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+    }
+
+
+def _solution_change_stage_work_item_seed(session: SolutionChangeSession, artifact: Artifact, sequence: int) -> str:
+    base = slugify(f"solution-{session.id}-{artifact.slug or artifact.id}")[:72]
+    token = base or f"solution-change-{str(artifact.id).replace('-', '')[:12]}"
+    return f"{token}-{sequence}"
+
+
+def _solution_change_stage_repo_work_item_seed(session: SolutionChangeSession, repo_slug: str, sequence: int) -> str:
+    base = slugify(f"solution-{session.id}-{repo_slug}")[:72]
+    token = base or f"solution-change-{str(session.id).replace('-', '')[:12]}"
+    return f"{token}-{sequence}"
+
+
+def _solution_change_stage_artifact_plan_steps(
+    *,
+    artifact_id: str,
+    session: SolutionChangeSession,
+    plan: Dict[str, Any],
+    planned_work_by_artifact: Dict[str, List[str]],
+) -> List[str]:
+    planned = [str(item).strip() for item in (planned_work_by_artifact.get(artifact_id) or []) if str(item).strip()]
+    if planned:
+        return planned
+    proposed_work = [str(item).strip() for item in (plan.get("proposed_work") if isinstance(plan.get("proposed_work"), list) else []) if str(item).strip()]
+    if proposed_work:
+        return proposed_work
+    implementation_steps = [
+        str(item).strip()
+        for item in (plan.get("implementation_steps") if isinstance(plan.get("implementation_steps"), list) else [])
+        if str(item).strip()
+    ]
+    if implementation_steps:
+        return implementation_steps[:4]
+    objective = str(session.request_text or "").strip()
+    if objective:
+        return [f"Implement requested change: {objective}"]
+    return ["Implement the approved solution change for this artifact."]
+
+
+def _resolve_stage_apply_target_branch(
+    *,
+    repo_slug: str,
+    fallback_branch: str,
+) -> Tuple[str, str, str]:
+    token = str(repo_slug or "").strip()
+    fallback = str(fallback_branch or "").strip() or "develop"
+    if not token:
+        return "", "unresolved", "missing_repo_slug"
+    repo_root = _resolve_local_repo_root(token)
+    if repo_root is None:
+        return "", "unresolved", f"unable to resolve local runtime repo root for {token}"
+
+    safe_directory = str(repo_root).strip()
+
+    def _git_stdout(args: List[str]) -> str:
+        try:
+            proc = subprocess.run(
+                ["git", "-c", f"safe.directory={safe_directory}", *args],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+        except Exception:
+            return ""
+        if int(proc.returncode or 0) != 0:
+            return ""
+        return str(proc.stdout or "").strip()
+
+    branch = _git_stdout(["-C", str(repo_root), "branch", "--show-current"])
+    if branch and branch != "HEAD":
+        return branch, "runtime_repo_checkout", ""
+    branch = _git_stdout(["-C", str(repo_root), "rev-parse", "--abbrev-ref", "HEAD"])
+    if branch and branch != "HEAD":
+        return branch, "runtime_repo_checkout", ""
+    return "", "runtime_repo_checkout", (
+        f"unable to determine checked out branch for {token} at {repo_root}; "
+        f"fallback branch '{fallback}' was not used for safety"
+    )
+
+
+def _git_repo_command(
+    *,
+    repo_root: Path,
+    args: List[str],
+    timeout_seconds: int = 20,
+) -> Tuple[int, str, str]:
+    safe_directory = str(repo_root).strip()
+    cmd = ["git", "-c", f"safe.directory={safe_directory}", "-C", str(repo_root), *args]
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = str(exc.stdout or "").strip()
+        stderr = str(exc.stderr or "").strip()
+        return 124, stdout, stderr or f"command timed out after {timeout_seconds}s"
+    except Exception as exc:  # pragma: no cover - defensive
+        return 1, "", str(exc)
+    return int(proc.returncode or 0), str(proc.stdout or "").strip(), str(proc.stderr or "").strip()
+
+
+def _git_changed_files_for_paths(
+    *,
+    repo_root: Path,
+    pathspecs: List[str],
+) -> List[str]:
+    scoped = [str(item).strip() for item in pathspecs if str(item).strip()]
+    if not scoped:
+        return []
+    commands = [
+        ["diff", "--name-only", "--", *scoped],
+        ["diff", "--cached", "--name-only", "--", *scoped],
+        ["ls-files", "--others", "--exclude-standard", "--", *scoped],
+    ]
+    changed: List[str] = []
+    seen_keys: set[str] = set()
+    for args in commands:
+        code, out, _err = _git_repo_command(repo_root=repo_root, args=args)
+        if code != 0:
+            continue
+        for line in (out or "").splitlines():
+            token = str(line or "").strip()
+            if not token:
+                continue
+            normalized_display = str(token).replace("\\", "/").strip()
+            normalized_key = normalized_display.lower()
+            if normalized_display and normalized_key not in seen_keys:
+                seen_keys.add(normalized_key)
+                changed.append(normalized_display)
+    return changed
+
+
+def _git_repo_dirty_files(repo_root: Path) -> Tuple[List[str], str]:
+    code, out, err = _git_repo_command(repo_root=repo_root, args=["status", "--porcelain"])
+    if code != 0:
+        return [], err or "git status failed"
+    dirty_files: List[str] = []
+    for line in (out or "").splitlines():
+        token = str(line or "").strip()
+        if not token:
+            continue
+        path_token = token[3:].strip() if len(token) > 3 else token
+        if "->" in path_token:
+            path_token = path_token.split("->", 1)[1].strip()
+        normalized = _normalized_repo_path(path_token)
+        if normalized and normalized not in dirty_files:
+            dirty_files.append(normalized)
+    return dirty_files, ""
+
+
+def _solution_change_commit_message(session: SolutionChangeSession) -> str:
+    request_text = str(session.request_text or "").strip()
+    title = str(session.title or "").strip()
+    summary = title or request_text or "Apply validated solution change"
+    summary = re.sub(r"\s+", " ", summary).strip()
+    if len(summary) > 120:
+        summary = summary[:117].rstrip() + "..."
+    return f"Xyn session {session.id}: {summary}"
+
+
+def _solution_change_commit_repo_scopes(session: SolutionChangeSession) -> Dict[str, List[str]]:
+    selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    if not selected_ids:
+        staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+        selected_ids = {str(item).strip() for item in (staged.get("selected_artifact_ids") or []) if str(item).strip()}
+    if not selected_ids:
+        return {}
+    artifacts = list(Artifact.objects.filter(id__in=selected_ids))
+    repo_scopes: Dict[str, List[str]] = {}
+    for artifact in artifacts:
+        ownership = resolve_artifact_ownership(artifact)
+        if str(ownership.get("edit_mode") or "").strip().lower() != "repo_backed":
+            continue
+        repo_slug = str(ownership.get("repo_slug") or "").strip()
+        allowed_paths = [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()]
+        if not repo_slug or not allowed_paths:
+            continue
+        existing = repo_scopes.setdefault(repo_slug, [])
+        for path in allowed_paths:
+            if path not in existing:
+                existing.append(path)
+    return repo_scopes
+
+
+def _stage_solution_change_dispatch_dev_tasks(
+    *,
+    session: SolutionChangeSession,
+    selected_members: List[ApplicationArtifactMembership],
+    staged_artifacts: List[Dict[str, Any]],
+    planned_work_by_artifact: Dict[str, List[str]],
+    plan: Dict[str, Any],
+    dispatch_user,
+) -> Dict[str, Any]:
+    staged_artifacts_by_id = {
+        str(row.get("artifact_id") or "").strip(): row
+        for row in staged_artifacts
+        if isinstance(row, dict) and str(row.get("artifact_id") or "").strip()
+    }
+    dispatch_results: List[Dict[str, Any]] = []
+    per_repo_results: List[Dict[str, Any]] = []
+    if dispatch_user is None:
+        return {"execution_runs": dispatch_results, "per_repo_results": per_repo_results}
+
+    repo_groups: Dict[str, Dict[str, Any]] = {}
+    for index, member in enumerate(selected_members, start=1):
+        artifact = member.artifact
+        artifact_id = str(artifact.id)
+        ownership = resolve_artifact_ownership(artifact)
+        repo_slug = str(ownership.get("repo_slug") or "").strip()
+        allowed_paths = [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()]
+        edit_mode = str(ownership.get("edit_mode") or "").strip().lower()
+        staged_row = staged_artifacts_by_id.get(artifact_id)
+        if edit_mode != "repo_backed" or not repo_slug or not allowed_paths:
+            if isinstance(staged_row, dict):
+                staged_row["apply_state"] = "skipped"
+            dispatch_results.append(
+                {
+                    "artifact_id": artifact_id,
+                    "artifact_slug": str(_artifact_slug(artifact) or ""),
+                    "status": "skipped",
+                    "reason": "artifact_not_repo_backed_or_not_editable",
+                    "owner_repo_slug": repo_slug,
+                    "allowed_paths": allowed_paths,
+                }
+            )
+            continue
+        implementation_steps = _solution_change_stage_artifact_plan_steps(
+            artifact_id=artifact_id,
+            session=session,
+            plan=plan,
+            planned_work_by_artifact=planned_work_by_artifact,
+        )
+        group = repo_groups.setdefault(
+            repo_slug,
+            {
+                "repo_slug": repo_slug,
+                "artifacts": [],
+                "allowed_paths": [],
+                "sequence": index,
+            },
+        )
+        artifact_entry = {
+            "artifact_id": artifact_id,
+            "artifact": artifact,
+            "artifact_slug": str(_artifact_slug(artifact) or ""),
+            "artifact_title": str(getattr(artifact, "title", "") or ""),
+            "allowed_paths": allowed_paths,
+            "implementation_steps": implementation_steps,
+            "staged_row": staged_row,
+        }
+        group["artifacts"].append(artifact_entry)
+        existing_paths = group["allowed_paths"]
+        for path in allowed_paths:
+            if path not in existing_paths:
+                existing_paths.append(path)
+
+    for repo_slug, group in repo_groups.items():
+        artifacts_for_repo = group.get("artifacts") if isinstance(group.get("artifacts"), list) else []
+        allowed_paths = [str(item).strip() for item in (group.get("allowed_paths") or []) if str(item).strip()]
+        targeted_artifacts = [
+            {
+                "artifact_id": str(item.get("artifact_id") or ""),
+                "artifact_slug": str(item.get("artifact_slug") or ""),
+                "artifact_title": str(item.get("artifact_title") or ""),
+            }
+            for item in artifacts_for_repo
+            if isinstance(item, dict)
+        ]
+        managed_repo = ManagedRepository.objects.filter(slug=repo_slug, is_active=True).first()
+        default_branch = str(getattr(managed_repo, "default_branch", "") or "develop").strip() or "develop"
+        branch, branch_source, branch_error = _resolve_stage_apply_target_branch(
+            repo_slug=repo_slug,
+            fallback_branch=default_branch,
+        )
+        if not branch:
+            for item in artifacts_for_repo:
+                if not isinstance(item, dict):
+                    continue
+                staged_row = item.get("staged_row") if isinstance(item.get("staged_row"), dict) else None
+                if isinstance(staged_row, dict):
+                    staged_row["apply_state"] = "failed"
+                    staged_row["apply_error"] = branch_error or "target branch could not be resolved"
+                    staged_row["branch_source"] = branch_source
+                dispatch_results.append(
+                    {
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                        "artifact_slug": str(item.get("artifact_slug") or ""),
+                        "status": "failed",
+                        "reason": "target_branch_unresolved",
+                        "error": branch_error or "target branch could not be resolved",
+                        "owner_repo_slug": repo_slug,
+                        "target_branch": "",
+                        "default_branch": default_branch,
+                        "branch_source": branch_source,
+                        "allowed_paths": [str(p).strip() for p in (item.get("allowed_paths") or []) if str(p).strip()],
+                    }
+                )
+            per_repo_results.append(
+                {
+                    "repo_slug": repo_slug,
+                    "status": "failed",
+                    "blocked_reason": "target_branch_unresolved",
+                    "failure_reason": branch_error or "target branch could not be resolved",
+                    "target_branch": "",
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
+                    "targeted_artifacts": targeted_artifacts,
+                    "applied_files": [],
+                    "skipped_artifacts": [],
+                    "preview_can_proceed": False,
+                    "next_allowed_actions": ["stage_apply"],
+                }
+            )
+            continue
+        repo_root = _resolve_local_repo_root(repo_slug)
+        if repo_root is None:
+            failure_reason = f"unable to resolve local runtime repo root for {repo_slug}"
+            for item in artifacts_for_repo:
+                if not isinstance(item, dict):
+                    continue
+                staged_row = item.get("staged_row") if isinstance(item.get("staged_row"), dict) else None
+                if isinstance(staged_row, dict):
+                    staged_row["apply_state"] = "failed"
+                    staged_row["apply_error"] = failure_reason
+                dispatch_results.append(
+                    {
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                        "artifact_slug": str(item.get("artifact_slug") or ""),
+                        "status": "failed",
+                        "reason": "repo_root_unresolved",
+                        "error": failure_reason,
+                        "owner_repo_slug": repo_slug,
+                        "target_branch": branch,
+                        "default_branch": default_branch,
+                        "branch_source": branch_source,
+                        "allowed_paths": [str(p).strip() for p in (item.get("allowed_paths") or []) if str(p).strip()],
+                    }
+                )
+            per_repo_results.append(
+                {
+                    "repo_slug": repo_slug,
+                    "status": "failed",
+                    "blocked_reason": "repo_root_unresolved",
+                    "failure_reason": failure_reason,
+                    "target_branch": branch,
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
+                    "targeted_artifacts": targeted_artifacts,
+                    "applied_files": [],
+                    "skipped_artifacts": [],
+                    "preview_can_proceed": False,
+                    "next_allowed_actions": ["stage_apply"],
+                }
+            )
+            continue
+        dirty_files, dirty_error = _git_repo_dirty_files(repo_root)
+        if dirty_error:
+            for item in artifacts_for_repo:
+                if not isinstance(item, dict):
+                    continue
+                staged_row = item.get("staged_row") if isinstance(item.get("staged_row"), dict) else None
+                if isinstance(staged_row, dict):
+                    staged_row["apply_state"] = "failed"
+                    staged_row["apply_error"] = dirty_error
+                dispatch_results.append(
+                    {
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                        "artifact_slug": str(item.get("artifact_slug") or ""),
+                        "status": "failed",
+                        "reason": "repo_status_check_failed",
+                        "error": dirty_error,
+                        "owner_repo_slug": repo_slug,
+                        "target_branch": branch,
+                        "default_branch": default_branch,
+                        "branch_source": branch_source,
+                        "allowed_paths": [str(p).strip() for p in (item.get("allowed_paths") or []) if str(p).strip()],
+                    }
+                )
+            per_repo_results.append(
+                {
+                    "repo_slug": repo_slug,
+                    "status": "failed",
+                    "blocked_reason": "repo_status_check_failed",
+                    "failure_reason": dirty_error,
+                    "target_branch": branch,
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
+                    "targeted_artifacts": targeted_artifacts,
+                    "applied_files": [],
+                    "skipped_artifacts": [],
+                    "preview_can_proceed": False,
+                    "next_allowed_actions": ["stage_apply"],
+                }
+            )
+            continue
+        if dirty_files:
+            failure_reason = (
+                f"Repository '{repo_root.name}' has uncommitted changes; refusing stage apply for repo-coordinated baseline safety."
+            )
+            for item in artifacts_for_repo:
+                if not isinstance(item, dict):
+                    continue
+                staged_row = item.get("staged_row") if isinstance(item.get("staged_row"), dict) else None
+                if isinstance(staged_row, dict):
+                    staged_row["apply_state"] = "failed"
+                    staged_row["apply_error"] = failure_reason
+                dispatch_results.append(
+                    {
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                        "artifact_slug": str(item.get("artifact_slug") or ""),
+                        "status": "failed",
+                        "reason": "unsafe_repository_state",
+                        "error": failure_reason,
+                        "owner_repo_slug": repo_slug,
+                        "target_branch": branch,
+                        "default_branch": default_branch,
+                        "branch_source": branch_source,
+                        "allowed_paths": [str(p).strip() for p in (item.get("allowed_paths") or []) if str(p).strip()],
+                    }
+                )
+            per_repo_results.append(
+                {
+                    "repo_slug": repo_slug,
+                    "status": "blocked",
+                    "blocked_reason": "unsafe_repository_state",
+                    "failure_reason": failure_reason,
+                    "target_branch": branch,
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
+                    "targeted_artifacts": targeted_artifacts,
+                    "applied_files": [],
+                    "dirty_files": dirty_files[:50],
+                    "skipped_artifacts": [],
+                    "preview_can_proceed": False,
+                    "next_allowed_actions": ["review_repo_state", "stage_apply"],
+                }
+            )
+            continue
+        aggregate_steps: List[str] = []
+        for item in artifacts_for_repo:
+            if not isinstance(item, dict):
+                continue
+            for step in (item.get("implementation_steps") or []):
+                token = str(step).strip()
+                if token and token not in aggregate_steps:
+                    aggregate_steps.append(token)
+        summary = f"{session.title or 'Apply solution change'} · {repo_slug} coordinated apply"
+        objective = str(session.request_text or "").strip()
+        brief_target = DevelopmentTargetResolution(
+            repository=managed_repo,
+            repository_slug=repo_slug,
+            branch=branch,
+            allowed_paths=tuple(allowed_paths),
+            source_kind="artifact_ownership",
+            application_id=str(session.application_id),
+            application_plan_id=None,
+            goal_id=None,
+            unresolved_reason=None,
+        )
+        execution_brief = build_execution_brief(
+            summary=summary,
+            objective=objective,
+            implementation_intent="; ".join(aggregate_steps[:3]),
+            target=brief_target,
+            allowed_areas=allowed_paths,
+            acceptance_criteria=aggregate_steps[:8],
+            validation_commands=[],
+            boundaries=[
+                "Keep changes scoped to the selected artifact ownership paths.",
+                "Do not modify files outside allowed artifact ownership boundaries.",
+            ],
+            source_context={
+                "source": "solution_change_session_stage_apply",
+                "solution_change_session_id": str(session.id),
+                "application_id": str(session.application_id),
+                "artifact_ids": [str(item.get("artifact_id") or "") for item in artifacts_for_repo if isinstance(item, dict)],
+                "artifact_slugs": [str(item.get("artifact_slug") or "") for item in artifacts_for_repo if isinstance(item, dict)],
+            },
+            revision=1,
+            revision_reason="stage_apply",
+        )
+        task = DevTask.objects.create(
+            title=summary[:240],
+            description="\n".join(aggregate_steps[:10]) or "Apply approved solution change in repo-coordinated mode.",
+            task_type="codegen",
+            status="queued",
+            priority=0,
+            max_attempts=2,
+            source_entity_type="solution_change_session",
+            source_entity_id=session.id,
+            source_conversation_id="",
+            intent_type="solution_change_apply",
+            target_repo=repo_slug,
+            target_branch=branch,
+            execution_brief=execution_brief,
+            execution_brief_history=[],
+            execution_brief_review_state="ready",
+            execution_brief_review_notes="Auto-generated from approved solution change plan stage apply.",
+            execution_policy={
+                "auto_continue": True,
+                "max_retries": 1,
+                "require_human_review_on_failure": True,
+                "solution_change_session_id": str(session.id),
+                "solution_change_session": {"id": str(session.id), "application_id": str(session.application_id)},
+                "coordinated_repo_apply": True,
+            },
+            runtime_workspace_id=session.workspace_id,
+            context_purpose="coding",
+            work_item_id=_solution_change_stage_repo_work_item_seed(
+                session,
+                repo_slug,
+                int(group.get("sequence") or 1),
+            ),
+            created_by=dispatch_user,
+            updated_by=dispatch_user,
+        )
+        for item in artifacts_for_repo:
+            if not isinstance(item, dict):
+                continue
+            staged_row = item.get("staged_row") if isinstance(item.get("staged_row"), dict) else None
+            if isinstance(staged_row, dict):
+                staged_row["dev_task_id"] = str(task.id)
+        try:
+            run_result = _submit_dev_task_runtime_run(task, workspace=session.workspace, user=dispatch_user)
+            task.refresh_from_db()
+            run_id = str(run_result.get("run_id") or "")
+            for item in artifacts_for_repo:
+                if not isinstance(item, dict):
+                    continue
+                staged_row = item.get("staged_row") if isinstance(item.get("staged_row"), dict) else None
+                if isinstance(staged_row, dict):
+                    staged_row["apply_state"] = "queued"
+                dispatch_results.append(
+                    {
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                        "artifact_slug": str(item.get("artifact_slug") or ""),
+                        "dev_task_id": str(task.id),
+                        "work_item_id": str(task.work_item_id or ""),
+                        "status": "queued",
+                        "run_id": run_id,
+                        "owner_repo_slug": repo_slug,
+                        "target_branch": branch,
+                        "default_branch": default_branch,
+                        "branch_source": branch_source,
+                        "allowed_paths": [str(p).strip() for p in (item.get("allowed_paths") or []) if str(p).strip()],
+                    }
+                )
+            per_repo_results.append(
+                {
+                    "repo_slug": repo_slug,
+                    "status": "queued",
+                    "blocked_reason": "",
+                    "failure_reason": "",
+                    "target_branch": branch,
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
+                    "targeted_artifacts": targeted_artifacts,
+                    "dev_task_id": str(task.id),
+                    "run_id": run_id,
+                    "applied_files": [],
+                    "skipped_artifacts": [],
+                    "preview_can_proceed": True,
+                    "next_allowed_actions": ["prepare_preview"],
+                }
+            )
+        except ValueError as exc:
+            task.status = "awaiting_review"
+            task.last_error = str(exc)
+            task.updated_by = dispatch_user
+            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+            for item in artifacts_for_repo:
+                if not isinstance(item, dict):
+                    continue
+                staged_row = item.get("staged_row") if isinstance(item.get("staged_row"), dict) else None
+                if isinstance(staged_row, dict):
+                    staged_row["apply_state"] = "failed"
+                dispatch_results.append(
+                    {
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                        "artifact_slug": str(item.get("artifact_slug") or ""),
+                        "dev_task_id": str(task.id),
+                        "work_item_id": str(task.work_item_id or ""),
+                        "status": "failed",
+                        "reason": "runtime_submission_validation_failed",
+                        "error": str(exc),
+                        "owner_repo_slug": repo_slug,
+                        "target_branch": branch,
+                        "default_branch": default_branch,
+                        "branch_source": branch_source,
+                        "allowed_paths": [str(p).strip() for p in (item.get("allowed_paths") or []) if str(p).strip()],
+                    }
+                )
+            per_repo_results.append(
+                {
+                    "repo_slug": repo_slug,
+                    "status": "failed",
+                    "blocked_reason": "runtime_submission_validation_failed",
+                    "failure_reason": str(exc),
+                    "target_branch": branch,
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
+                    "targeted_artifacts": targeted_artifacts,
+                    "dev_task_id": str(task.id),
+                    "applied_files": [],
+                    "skipped_artifacts": [],
+                    "preview_can_proceed": False,
+                    "next_allowed_actions": ["stage_apply"],
+                }
+            )
+        except RuntimeError as exc:
+            task.status = "failed"
+            task.last_error = str(exc)
+            task.updated_by = dispatch_user
+            task.save(update_fields=["status", "last_error", "updated_by", "updated_at"])
+            for item in artifacts_for_repo:
+                if not isinstance(item, dict):
+                    continue
+                staged_row = item.get("staged_row") if isinstance(item.get("staged_row"), dict) else None
+                if isinstance(staged_row, dict):
+                    staged_row["apply_state"] = "failed"
+                dispatch_results.append(
+                    {
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                        "artifact_slug": str(item.get("artifact_slug") or ""),
+                        "dev_task_id": str(task.id),
+                        "work_item_id": str(task.work_item_id or ""),
+                        "status": "failed",
+                        "reason": "runtime_submission_failed",
+                        "error": str(exc),
+                        "owner_repo_slug": repo_slug,
+                        "target_branch": branch,
+                        "default_branch": default_branch,
+                        "branch_source": branch_source,
+                        "allowed_paths": [str(p).strip() for p in (item.get("allowed_paths") or []) if str(p).strip()],
+                    }
+                )
+            per_repo_results.append(
+                {
+                    "repo_slug": repo_slug,
+                    "status": "failed",
+                    "blocked_reason": "runtime_submission_failed",
+                    "failure_reason": str(exc),
+                    "target_branch": branch,
+                    "default_branch": default_branch,
+                    "branch_source": branch_source,
+                    "targeted_artifacts": targeted_artifacts,
+                    "dev_task_id": str(task.id),
+                    "applied_files": [],
+                    "skipped_artifacts": [],
+                    "preview_can_proceed": False,
+                    "next_allowed_actions": ["stage_apply"],
+                }
+            )
+
+    return {"execution_runs": dispatch_results, "per_repo_results": per_repo_results}
+
+
 def _stage_solution_change_session(
     *,
     session: SolutionChangeSession,
     memberships: List[ApplicationArtifactMembership],
+    dispatch_runtime: bool = False,
+    dispatch_user=None,
 ) -> Dict[str, Any]:
     selected_ids = set(_solution_change_session_selected_artifact_ids(session))
     confirmed_workstreams = _solution_change_session_confirmed_workstreams(session)
@@ -31368,6 +36101,65 @@ def _stage_solution_change_session(
             "rejected_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="rejected").count(),
         },
     }
+    if dispatch_runtime:
+        dispatch_payload = _stage_solution_change_dispatch_dev_tasks(
+            session=session,
+            selected_members=selected_members,
+            staged_artifacts=staged_artifacts,
+            planned_work_by_artifact=planned_work_by_artifact,
+            plan=plan,
+            dispatch_user=dispatch_user,
+        )
+        dispatch_results = dispatch_payload.get("execution_runs") if isinstance(dispatch_payload, dict) else []
+        per_repo_results = dispatch_payload.get("per_repo_results") if isinstance(dispatch_payload, dict) else []
+        queued_count = sum(1 for row in dispatch_results if isinstance(row, dict) and str(row.get("status") or "") == "queued")
+        failed_count = sum(1 for row in dispatch_results if isinstance(row, dict) and str(row.get("status") or "") == "failed")
+        skipped_count = sum(1 for row in dispatch_results if isinstance(row, dict) and str(row.get("status") or "") == "skipped")
+        blocked_repo_count = sum(
+            1
+            for row in per_repo_results
+            if isinstance(row, dict) and str(row.get("status") or "").strip().lower() in {"blocked", "failed"}
+        )
+        stage_apply_overall_status = (
+            "failed"
+            if failed_count > 0 or blocked_repo_count > 0
+            else "materialization_queued"
+            if queued_count > 0
+            else "staged_only"
+        )
+        staged_payload["execution_runs"] = dispatch_results
+        staged_payload["per_repo_results"] = per_repo_results if isinstance(per_repo_results, list) else []
+        staged_payload["dev_task_ids"] = [
+            str(row.get("dev_task_id") or "").strip()
+            for row in dispatch_results
+            if isinstance(row, dict) and str(row.get("dev_task_id") or "").strip()
+        ]
+        staged_payload["execution_summary"] = {
+            "queued_count": queued_count,
+            "failed_count": failed_count,
+            "skipped_count": skipped_count,
+            "blocked_repo_count": blocked_repo_count,
+        }
+        staged_payload["stage_apply_result"] = {
+            "change_session_id": str(session.id),
+            "overall_status": stage_apply_overall_status,
+            "per_repo_results": per_repo_results if isinstance(per_repo_results, list) else [],
+            "skipped_artifacts": [
+                {
+                    "artifact_id": str(row.get("artifact_id") or ""),
+                    "artifact_slug": str(row.get("artifact_slug") or ""),
+                    "reason": str(row.get("reason") or "skipped"),
+                }
+                for row in dispatch_results
+                if isinstance(row, dict) and str(row.get("status") or "") == "skipped"
+            ],
+            "preview_can_proceed": bool(queued_count > 0 and failed_count == 0 and blocked_repo_count == 0),
+            "next_allowed_actions": (
+                ["prepare_preview"]
+                if queued_count > 0 and failed_count == 0 and blocked_repo_count == 0
+                else ["review_stage_apply_results", "stage_apply"]
+            ),
+        }
     session.staged_changes_json = staged_payload
     session.preview_json = {}
     session.validation_json = {}
@@ -31384,15 +36176,158 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
     workspace_id = str(session.workspace_id)
     application_id = str(session.application_id)
     now_iso = timezone.now().isoformat()
+    local_public_base_url = str(os.getenv("XYN_PUBLIC_BASE_URL", "http://localhost") or "http://localhost").strip().rstrip("/")
+    local_compose_project = str(os.getenv("XYN_LOCAL_COMPOSE_PROJECT", "xyn-local") or "xyn-local").strip() or "xyn-local"
 
-    def _artifact_preview_app_slug(artifact: Artifact) -> str:
-        slug = str(getattr(artifact, "slug", "") or "").strip()
-        if slug.startswith("app."):
-            return slug[4:]
-        metadata = artifact.metadata_json if isinstance(artifact.metadata_json, dict) else {}
-        runtime = metadata.get("runtime_target") if isinstance(metadata.get("runtime_target"), dict) else {}
-        runtime_app_slug = str(runtime.get("app_slug") or metadata.get("app_slug") or "").strip()
-        return runtime_app_slug
+    def _session_preview_candidate_artifact_ids() -> List[str]:
+        selected_ids = [str(item).strip() for item in (staged.get("selected_artifact_ids") or []) if str(item).strip()]
+        if selected_ids:
+            return selected_ids
+        inferred: List[str] = []
+        for row in artifact_states:
+            if not isinstance(row, dict):
+                continue
+            artifact_id = str(row.get("artifact_id") or "").strip()
+            if artifact_id and artifact_id not in inferred:
+                inferred.append(artifact_id)
+        return inferred
+
+    def _session_preview_should_provision_isolated_runtime(*, artifact_ids: List[str]) -> bool:
+        if not artifact_ids:
+            return False
+        execution_runs = staged.get("execution_runs") if isinstance(staged.get("execution_runs"), list) else []
+        has_stage_execution_evidence = bool(execution_runs) or bool(staged.get("dev_task_ids"))
+        if not has_stage_execution_evidence:
+            return False
+        artifacts = list(Artifact.objects.filter(id__in=artifact_ids))
+        if not artifacts:
+            return False
+        for artifact in artifacts:
+            ownership = resolve_artifact_ownership(artifact)
+            edit_mode = str(ownership.get("edit_mode") or "").strip().lower()
+            if edit_mode == "repo_backed":
+                return True
+        return False
+
+    def _provision_session_preview_environment() -> Dict[str, Any]:
+        started_at = timezone.now().isoformat()
+        session_token = str(session.id).replace("-", "")[:8]
+        if not session_token:
+            return {
+                "attempted": False,
+                "supported": False,
+                "status": "reused",
+                "reason": "session_id_unavailable",
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        project_name = f"preview-{session_token}"
+        ui_host = f"xyn-preview-{session_token}.localhost"
+        api_host = f"api.xyn-preview-{session_token}.localhost"
+        payload = {
+            "name": project_name,
+            "workspace_slug": str(getattr(session.workspace, "slug", "") or "").strip(),
+            "ui_host": ui_host,
+            "api_host": api_host,
+        }
+        env_mode = str(os.getenv("XYN_ENV", "") or "").strip().lower()
+        if env_mode in {"local", "dev", ""}:
+            payload["prefer_local_images"] = True
+            payload["prefer_local_sources"] = True
+        try:
+            response = _seed_api_request(
+                method="POST",
+                path="/api/v1/provision/local-instance",
+                payload=payload,
+                timeout=180,
+            )
+        except requests.RequestException as exc:
+            return {
+                "attempted": True,
+                "supported": True,
+                "status": "failed",
+                "reason": "session_preview_provision_unreachable",
+                "details": exc.__class__.__name__,
+                "session_preview_project": f"xyn-{project_name}",
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        content_type = str(response.headers.get("content-type") or "").lower()
+        if "application/json" not in content_type:
+            return {
+                "attempted": True,
+                "supported": True,
+                "status": "failed",
+                "reason": "session_preview_provision_invalid_response",
+                "details": response.text[:300],
+                "session_preview_project": f"xyn-{project_name}",
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        try:
+            provision_payload = response.json() if response.content else {}
+        except ValueError:
+            provision_payload = {}
+        if response.status_code >= 400:
+            return {
+                "attempted": True,
+                "supported": True,
+                "status": "failed",
+                "reason": "session_preview_provision_failed",
+                "details": str((provision_payload or {}).get("detail") or (provision_payload or {}).get("error") or response.text[:300]),
+                "session_preview_project": f"xyn-{project_name}",
+                "provision_status": str((provision_payload or {}).get("status") or "").strip().lower(),
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        ui_url = str((provision_payload or {}).get("ui_url") or "").strip()
+        api_url = str((provision_payload or {}).get("api_url") or "").strip()
+        compose_project = str((provision_payload or {}).get("compose_project") or "").strip() or f"xyn-{project_name}"
+        provision_status = str((provision_payload or {}).get("status") or "").strip().lower()
+        if not ui_url:
+            return {
+                "attempted": True,
+                "supported": True,
+                "status": "failed",
+                "reason": "session_preview_missing_ui_url",
+                "details": "Provisioning response did not include a UI URL.",
+                "compose_project": compose_project,
+                "provision_status": provision_status,
+                "started_at": started_at,
+                "completed_at": timezone.now().isoformat(),
+            }
+        return {
+            "attempted": True,
+            "supported": True,
+            "status": "newly_built_for_session",
+            "reason": "session_preview_environment_created",
+            "details": "",
+            "compose_project": compose_project,
+            "ui_url": ui_url,
+            "api_url": api_url,
+            "provision_status": provision_status,
+            "session_preview_project": f"xyn-{project_name}",
+            "started_at": started_at,
+            "completed_at": timezone.now().isoformat(),
+        }
+
+    def _platform_preview_runtime_fallback(artifact: Artifact) -> Dict[str, Any]:
+        slug = str(_artifact_slug(artifact) or "").strip()
+        if slug not in {"core.workbench", "xyn-ui", "xyn-api"}:
+            return {}
+        if str(os.getenv("XYN_ENV", "") or "").strip().lower() not in {"local", "dev"}:
+            return {}
+        if not local_public_base_url:
+            return {}
+        return {
+            "runtime_owner": "primary",
+            "runtime_base_url": local_public_base_url,
+            "public_app_url": local_public_base_url,
+            "compose_project": local_compose_project,
+            "runtime_target_id": "",
+            "app_container_name": "",
+            "source_build_job_id": "",
+        }
 
     def _probe_runtime(base_url: str) -> Dict[str, Any]:
         probe_paths = ["/healthz", "/health", "/xyn/api/health"]
@@ -31520,6 +36455,26 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             "completed_at": timezone.now().isoformat(),
         }
 
+    selected_artifact_ids_for_preview = _session_preview_candidate_artifact_ids()
+    isolated_session_preview_requested = _session_preview_should_provision_isolated_runtime(
+        artifact_ids=selected_artifact_ids_for_preview
+    )
+    session_preview_runtime: Dict[str, Any] = {}
+    session_preview_fallback_reason = ""
+    if isolated_session_preview_requested:
+        session_preview_runtime = _provision_session_preview_environment()
+        provision_status = str(session_preview_runtime.get("status") or "").strip().lower()
+        if provision_status != "newly_built_for_session":
+            if provision_status == "failed":
+                # Keep failed provisioning evidence and surface an explicit preview failure
+                # instead of silently reusing a stale runtime target.
+                session_preview_fallback_reason = ""
+            else:
+                session_preview_fallback_reason = str(
+                    session_preview_runtime.get("reason") or "session_preview_environment_unavailable"
+                ).strip() or "session_preview_environment_unavailable"
+                session_preview_runtime = {}
+
     artifact_rows: List[Dict[str, Any]] = []
     selected_artifact_ids: List[str] = []
     compose_projects: set[str] = set()
@@ -31542,7 +36497,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 }
             )
             continue
-        app_slug = _artifact_preview_app_slug(artifact)
+        app_slug = _artifact_runtime_app_slug(artifact)
         if not app_slug:
             all_bound = False
             artifact_rows.append(
@@ -31561,6 +36516,17 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         runtime_base_url = str(runtime_target.get("runtime_base_url") or "").strip()
         public_app_url = str(runtime_target.get("public_app_url") or "").strip()
         compose_project = str(runtime_target.get("compose_project") or "").strip()
+        fallback_runtime = {}
+        if session_preview_runtime:
+            public_app_url = str(session_preview_runtime.get("ui_url") or "").strip()
+            runtime_base_url = str(session_preview_runtime.get("api_url") or public_app_url).strip()
+            compose_project = str(session_preview_runtime.get("compose_project") or "").strip()
+        elif not runtime_base_url or not compose_project:
+            fallback_runtime = _platform_preview_runtime_fallback(artifact)
+            if fallback_runtime:
+                runtime_base_url = str(fallback_runtime.get("runtime_base_url") or "").strip()
+                public_app_url = str(fallback_runtime.get("public_app_url") or "").strip()
+                compose_project = str(fallback_runtime.get("compose_project") or "").strip()
         if not runtime_base_url or not compose_project:
             all_bound = False
             artifact_rows.append(
@@ -31574,7 +36540,21 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 }
             )
             continue
-        probe = _probe_runtime(runtime_base_url)
+        probe = (
+            {
+                "ok": True,
+                "status_code": 200,
+                "path": "session_preview_environment_created",
+            }
+            if session_preview_runtime
+            else {
+                "ok": True,
+                "status_code": 200,
+                "path": "local_platform_runtime_fallback",
+            }
+            if fallback_runtime
+            else _probe_runtime(runtime_base_url)
+        )
         if not probe.get("ok"):
             all_bound = False
         compose_projects.add(compose_project)
@@ -31585,13 +36565,31 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 "artifact_slug": artifact.slug,
                 "app_slug": app_slug,
                 "status": "ready" if probe.get("ok") else "failed",
-                "runtime_owner": str(runtime_target.get("runtime_owner") or "sibling"),
+                "runtime_owner": str(
+                    session_preview_runtime.get("runtime_owner")
+                    or runtime_target.get("runtime_owner")
+                    or fallback_runtime.get("runtime_owner")
+                    or "sibling"
+                ),
                 "runtime_base_url": runtime_base_url,
                 "public_app_url": public_app_url,
                 "compose_project": compose_project,
-                "runtime_target_id": str(getattr(runtime_instance, "id", "") or "").strip(),
-                "app_container_name": str(runtime_target.get("app_container_name") or "").strip(),
-                "source_build_job_id": str(runtime_target.get("source_build_job_id") or "").strip(),
+                "runtime_target_id": str(
+                    getattr(runtime_instance, "id", "")
+                    or fallback_runtime.get("runtime_target_id")
+                    or ""
+                ).strip(),
+                "app_container_name": str(
+                    runtime_target.get("app_container_name")
+                    or fallback_runtime.get("app_container_name")
+                    or ""
+                ).strip(),
+                "source_build_job_id": str(
+                    session_preview_runtime.get("source_build_job_id")
+                    or runtime_target.get("source_build_job_id")
+                    or fallback_runtime.get("source_build_job_id")
+                    or ""
+                ).strip(),
                 "probe": probe,
             }
         )
@@ -31608,9 +36606,16 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         if url and url not in preview_urls:
             preview_urls.append(url)
 
-    session_build = _launch_preview_for_session(artifact_rows=artifact_rows, compose_projects=compose_projects)
+    session_build = (
+        dict(session_preview_runtime)
+        if session_preview_runtime
+        else _launch_preview_for_session(artifact_rows=artifact_rows, compose_projects=compose_projects)
+    )
+    if not session_preview_runtime and session_preview_fallback_reason:
+        session_build = dict(session_build)
+        session_build["fallback_reason"] = session_preview_fallback_reason
     build_status = str(session_build.get("status") or "").strip().lower()
-    built_for_session = bool(session_build.get("attempted")) and build_status == "succeeded"
+    built_for_session = bool(session_build.get("attempted")) and build_status in {"succeeded", "newly_built_for_session"}
     reused_existing_runtime = not built_for_session
     if build_status == "failed":
         for artifact_row in artifact_rows:
@@ -31627,6 +36632,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         "prepared_at": now_iso,
         "newly_built_for_session": built_for_session,
         "reused_existing_runtime": reused_existing_runtime,
+        "isolated_session_preview_requested": isolated_session_preview_requested,
         "selected_artifact_ids": selected_artifact_ids,
         "artifact_count": len(selected_artifact_ids),
         "artifacts": artifact_rows,
@@ -31666,6 +36672,49 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             "reason": reason,
             "details": details,
         }
+    elif session_preview_fallback_reason:
+        preview_payload["warning"] = {
+            "reason": "session_preview_environment_create_failed_fallback_reused",
+            "details": "Isolated session preview could not be provisioned; reused existing runtime target.",
+            "fallback_reason": session_preview_fallback_reason,
+        }
+    else:
+        primary_row = next((row for row in artifact_rows if isinstance(row, dict) and str(row.get("status") or "") == "ready"), None)
+        if isinstance(primary_row, dict):
+            _persist_solution_session_iteration_linkage(
+                session=session,
+                linkage_updates={
+                    "workspace_id": workspace_id,
+                    "application_id": application_id,
+                    "session_id": str(session.id),
+                    "status": "preview_ready",
+                    "activation_mode": "preview",
+                    "runtime_binding_id": "",
+                    "runtime_instance": {
+                        "id": str(primary_row.get("runtime_target_id") or "").strip(),
+                        "app_slug": str(primary_row.get("app_slug") or "").strip(),
+                        "status": "active",
+                    },
+                    "runtime_target": {
+                        "runtime_owner": str(primary_row.get("runtime_owner") or "sibling"),
+                        "runtime_base_url": str(primary_row.get("runtime_base_url") or "").strip(),
+                        "public_app_url": str(primary_row.get("public_app_url") or "").strip(),
+                        "compose_project": str(primary_row.get("compose_project") or "").strip(),
+                    },
+                    "activation": {
+                        "job_id": "",
+                        "draft_id": "",
+                        "source_build_job_ids": (
+                            ((preview_payload.get("build_deploy_evidence") or {}).get("source_build_job_ids") or [])
+                            if isinstance(preview_payload.get("build_deploy_evidence"), dict)
+                            else []
+                        ),
+                        "session_build_status": str((session_build or {}).get("status") or "").strip(),
+                    },
+                    "revision_anchor": {},
+                },
+                source="prepare_preview",
+            )
 
     staged["overall_state"] = "preview_ready" if status == "ready" else "preview_failed"
     staged["preview_prepared_at"] = now_iso
@@ -31727,13 +36776,306 @@ def _serialize_application_detail(application: Application) -> Dict[str, Any]:
     goals = list(application.goals.all().order_by("-updated_at", "-created_at"))
     factory_definition = get_application_factory(application.source_factory_key)
     members = list(application.artifact_memberships.select_related("artifact", "artifact__type").order_by("sort_order", "created_at"))
+    runtime_binding_payload = _application_runtime_binding_payload(application)
     return {
         **_serialize_application_summary(application),
         "factory": _serialize_application_factory_summary(factory_definition) if factory_definition else None,
         "goals": [_serialize_goal_summary(goal) for goal in goals],
         "artifact_memberships": [_serialize_application_artifact_membership(member) for member in members],
         "metadata": application.metadata_json if isinstance(application.metadata_json, dict) else {},
+        "runtime_binding": runtime_binding_payload.get("runtime_binding"),
+        "activation_composition": runtime_binding_payload.get("composition"),
     }
+
+
+def _solution_activation_memberships(
+    application: Application,
+) -> tuple[Optional[ApplicationArtifactMembership], Optional[ApplicationArtifactMembership]]:
+    memberships = list(
+        ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .order_by("sort_order", "created_at", "id")
+    )
+    app_memberships = [
+        row
+        for row in memberships
+        if row.artifact
+        and (
+            str(getattr(row.artifact.type, "slug", "") or "").strip() == "application"
+            or str(_artifact_slug(row.artifact) or "").strip().startswith("app.")
+        )
+    ]
+    if not app_memberships:
+        return None, None
+    preferred_roles = ("primary_ui", "primary_api")
+    selected_app = next((row for role in preferred_roles for row in app_memberships if row.role == role), app_memberships[0])
+    policy_candidates = [
+        row
+        for row in memberships
+        if row.artifact
+        and row.artifact_id != selected_app.artifact_id
+        and str(getattr(row.artifact.type, "slug", "") or "").strip() == "policy_bundle"
+    ]
+    policy_role_preference = {"supporting": 0, "policy": 1, "shared_library": 2}
+    policy_candidates.sort(
+        key=lambda row: (
+            policy_role_preference.get(str(row.role or "").strip(), 99),
+            int(row.sort_order or 0),
+            str(getattr(row, "created_at", "") or ""),
+            str(getattr(row, "id", "") or ""),
+        )
+    )
+    policy_member = policy_candidates[0] if policy_candidates else None
+    return selected_app, policy_member
+
+
+def _artifact_ref_payload(artifact: Optional[Artifact]) -> Dict[str, str]:
+    if artifact is None:
+        return {}
+    return {
+        "artifact_id": str(artifact.id),
+        "artifact_slug": str(_artifact_slug(artifact) or ""),
+        "artifact_version": str(artifact.package_version or ""),
+    }
+
+
+def _application_solution_slug(application: Application) -> str:
+    metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
+    return str(
+        metadata.get("solution_bundle_slug")
+        or metadata.get("generated_artifact_key")
+        or metadata.get("system_solution_key")
+        or ""
+    ).strip()
+
+
+def _application_install_source(application: Application) -> str:
+    metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
+    return str(metadata.get("solution_bundle_install_source") or "").strip()
+
+
+def _application_runtime_binding(application: Application) -> Optional[SolutionRuntimeBinding]:
+    return (
+        SolutionRuntimeBinding.objects.filter(application=application, workspace_id=application.workspace_id)
+        .select_related("runtime_instance", "primary_app_artifact", "policy_artifact")
+        .order_by("-updated_at", "-created_at")
+        .first()
+    )
+
+
+def _solution_runtime_binding_composition(
+    selected_app_member: Optional[ApplicationArtifactMembership],
+    selected_policy_member: Optional[ApplicationArtifactMembership],
+) -> Dict[str, Any]:
+    return {
+        "primary_app_artifact_ref": {
+            "artifact_id": str(getattr(selected_app_member, "artifact_id", "") or ""),
+            "artifact_slug": str(_artifact_slug(selected_app_member.artifact) or "") if selected_app_member and selected_app_member.artifact else "",
+            "artifact_version": str(getattr(selected_app_member.artifact, "package_version", "") or "") if selected_app_member and selected_app_member.artifact else "",
+        },
+        "policy_artifact_ref": {
+            "artifact_id": str(getattr(selected_policy_member, "artifact_id", "") or ""),
+            "artifact_slug": str(_artifact_slug(selected_policy_member.artifact) or "") if selected_policy_member and selected_policy_member.artifact else "",
+            "artifact_version": str(getattr(selected_policy_member.artifact, "package_version", "") or "") if selected_policy_member and selected_policy_member.artifact else "",
+        },
+    }
+
+
+def _solution_runtime_binding_composition_fingerprint(composition: Dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(composition, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _solution_runtime_binding_freshness(
+    *,
+    application: Application,
+    binding: SolutionRuntimeBinding,
+    composition: Dict[str, Any],
+) -> tuple[str, str]:
+    metadata = binding.metadata_json if isinstance(binding.metadata_json, dict) else {}
+    expected_fingerprint = _solution_runtime_binding_composition_fingerprint(composition)
+    recorded_fingerprint = str(metadata.get("composition_fingerprint") or "").strip()
+    if not recorded_fingerprint:
+        return "unknown", "missing_composition_fingerprint"
+    if recorded_fingerprint != expected_fingerprint:
+        return "stale_composition", "composition_fingerprint_mismatch"
+    if str(binding.status or "").strip() == "active":
+        runtime_instance = binding.runtime_instance
+        if not runtime_instance or str(runtime_instance.status or "").strip().lower() != "active":
+            return "stale_runtime", "runtime_instance_missing_or_inactive"
+        expected_app_slug = str(runtime_instance.app_slug or "").strip()
+        if not expected_app_slug:
+            return "stale_runtime", "runtime_instance_missing_app_slug"
+        runtime_record = _workspace_runtime_target(application.workspace, expected_app_slug)
+        if not isinstance(runtime_record, dict):
+            return "stale_runtime", "runtime_target_missing"
+        active_instance = runtime_record.get("instance")
+        if not active_instance or str(getattr(active_instance, "id", "") or "") != str(runtime_instance.id):
+            return "stale_runtime", "runtime_instance_mismatch"
+        runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record.get("runtime_target"), dict) else {}
+        expected_artifact_slug = str((composition.get("primary_app_artifact_ref") or {}).get("artifact_slug") or "").strip()
+        installed_artifact_slug = str(runtime_target.get("installed_artifact_slug") or "").strip()
+        if expected_artifact_slug and installed_artifact_slug and expected_artifact_slug != installed_artifact_slug:
+            return "stale_runtime", "runtime_target_artifact_mismatch"
+        return "current", ""
+    if str(binding.status or "").strip() in {"pending", "error"}:
+        return "unknown", f"binding_status_{str(binding.status or '').strip().lower()}"
+    return "unknown", "binding_status_unknown"
+
+
+def _serialize_solution_runtime_binding(
+    binding: SolutionRuntimeBinding,
+    *,
+    freshness: str = "unknown",
+    freshness_reason: str = "",
+) -> Dict[str, Any]:
+    runtime_instance = binding.runtime_instance
+    runtime_target = binding.runtime_target_json if isinstance(binding.runtime_target_json, dict) else {}
+    runtime_target = _refresh_runtime_target_localhost_url(runtime_target)
+    return {
+        "id": str(binding.id),
+        "workspace_id": str(binding.workspace_id),
+        "application_id": str(binding.application_id),
+        "status": str(binding.status or ""),
+        "activation_mode": str(binding.activation_mode or ""),
+        "freshness": freshness,
+        "freshness_reason": freshness_reason,
+        "primary_app_artifact_ref": {
+            "artifact_id": str(binding.primary_app_artifact_id or ""),
+            "artifact_slug": str(_artifact_slug(binding.primary_app_artifact) or "") if binding.primary_app_artifact else "",
+            "artifact_version": str(getattr(binding.primary_app_artifact, "package_version", "") or "") if binding.primary_app_artifact else "",
+        },
+        "policy_artifact_ref": {
+            "artifact_id": str(binding.policy_artifact_id or ""),
+            "artifact_slug": str(_artifact_slug(binding.policy_artifact) or "") if binding.policy_artifact else "",
+            "artifact_version": str(getattr(binding.policy_artifact, "package_version", "") or "") if binding.policy_artifact else "",
+        },
+        "runtime_instance": {
+            "id": str(getattr(runtime_instance, "id", "") or ""),
+            "app_slug": str(getattr(runtime_instance, "app_slug", "") or ""),
+            "fqdn": str(getattr(runtime_instance, "fqdn", "") or ""),
+            "status": str(getattr(runtime_instance, "status", "") or ""),
+        }
+        if runtime_instance
+        else None,
+        "runtime_target": runtime_target,
+        "metadata": binding.metadata_json if isinstance(binding.metadata_json, dict) else {},
+        "last_activation": binding.last_activation_json if isinstance(binding.last_activation_json, dict) else {},
+        "created_at": binding.created_at,
+        "updated_at": binding.updated_at,
+    }
+
+
+def _application_runtime_binding_payload(application: Application) -> Dict[str, Any]:
+    selected_app_member, selected_policy_member = _solution_activation_memberships(application)
+    binding = _application_runtime_binding(application)
+    composition = _solution_runtime_binding_composition(selected_app_member, selected_policy_member)
+    freshness = "unknown"
+    freshness_reason = ""
+    if binding:
+        freshness, freshness_reason = _solution_runtime_binding_freshness(
+            application=application,
+            binding=binding,
+            composition=composition,
+        )
+    return {
+        "application_id": str(application.id),
+        "workspace_id": str(application.workspace_id),
+        "composition": composition,
+        "runtime_binding": _serialize_solution_runtime_binding(
+            binding,
+            freshness=freshness,
+            freshness_reason=freshness_reason,
+        )
+        if binding
+        else None,
+    }
+
+
+def _record_solution_runtime_binding_from_activation(
+    *,
+    application: Application,
+    selected_app_artifact: Artifact,
+    activation_payload: Dict[str, Any],
+) -> SolutionRuntimeBinding:
+    status_value = str(activation_payload.get("status") or "").strip().lower()
+    runtime_status = "active" if status_value == "reused" else "pending"
+    activation_mode = "composed" if str(activation_payload.get("policy_source") or "") == "artifact" else "reconstructed"
+    runtime_instance_payload = (
+        activation_payload.get("runtime_instance")
+        if isinstance(activation_payload.get("runtime_instance"), dict)
+        else {}
+    )
+    runtime_instance_id = str(runtime_instance_payload.get("id") or "").strip()
+    runtime_instance = None
+    if runtime_instance_id:
+        runtime_instance = WorkspaceAppInstance.objects.filter(
+            id=runtime_instance_id,
+            workspace_id=application.workspace_id,
+        ).first()
+    policy_artifact_ref = (
+        activation_payload.get("policy_artifact_ref")
+        if isinstance(activation_payload.get("policy_artifact_ref"), dict)
+        else {}
+    )
+    policy_artifact = None
+    policy_artifact_id = str(policy_artifact_ref.get("artifact_id") or "").strip()
+    if policy_artifact_id:
+        policy_artifact = Artifact.objects.filter(id=policy_artifact_id, workspace_id=application.workspace_id).first()
+    runtime_target = activation_payload.get("runtime_target")
+    if not isinstance(runtime_target, dict):
+        runtime_target = {}
+    runtime_target = _refresh_runtime_target_localhost_url(runtime_target)
+    selected_app_member = ApplicationArtifactMembership(
+        application=application,
+        artifact=selected_app_artifact,
+    )
+    selected_policy_member = (
+        ApplicationArtifactMembership(
+            application=application,
+            artifact=policy_artifact,
+        )
+        if policy_artifact
+        else None
+    )
+    composition = _solution_runtime_binding_composition(selected_app_member, selected_policy_member)
+    composition_fingerprint = _solution_runtime_binding_composition_fingerprint(composition)
+    activation_metadata = {
+        "policy_source": str(activation_payload.get("policy_source") or "reconstructed"),
+        "policy_compatibility": str(activation_payload.get("policy_compatibility") or "unknown"),
+        "policy_compatibility_reason": str(activation_payload.get("policy_compatibility_reason") or ""),
+        "composition_fingerprint": composition_fingerprint,
+        "primary_app_artifact_ref": composition.get("primary_app_artifact_ref"),
+        "policy_artifact_ref": composition.get("policy_artifact_ref"),
+        "runtime_health_snapshot": {
+            "runtime_instance_present": bool(runtime_instance),
+            "runtime_target_present": bool(runtime_target),
+        },
+    }
+    if status_value == "reused":
+        activation_metadata["last_successful_activation_at"] = timezone.now().isoformat()
+    binding, _created = SolutionRuntimeBinding.objects.update_or_create(
+        workspace_id=application.workspace_id,
+        application=application,
+        defaults={
+            "runtime_instance": runtime_instance,
+            "primary_app_artifact": selected_app_artifact,
+            "policy_artifact": policy_artifact,
+            "activation_mode": activation_mode,
+            "status": runtime_status,
+            "runtime_target_json": runtime_target,
+            "last_activation_json": {
+                "status": status_value,
+                "activation": activation_payload.get("activation") if isinstance(activation_payload.get("activation"), dict) else {},
+                "policy_source": str(activation_payload.get("policy_source") or "reconstructed"),
+                "policy_compatibility": str(activation_payload.get("policy_compatibility") or "unknown"),
+                "policy_compatibility_reason": str(activation_payload.get("policy_compatibility_reason") or ""),
+            },
+            "metadata_json": activation_metadata,
+        },
+    )
+    return binding
 
 
 def _composer_stage_for_context(
@@ -31922,7 +37264,8 @@ def _serialize_composer_state(
             _serialize_composer_action(
                 action_type="prepare_solution_preview",
                 label="Prepare Preview Handoff",
-                enabled=session_execution_status in {"staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion"},
+                enabled=session_execution_status
+                in {"staged", "preview_preparing", "preview_ready", "validating", "ready_for_promotion", "committed", "promoted"},
                 target_kind="solution_change_session",
                 target_id=str(solution_change_session.id),
             )
@@ -31931,7 +37274,7 @@ def _serialize_composer_state(
             _serialize_composer_action(
                 action_type="validate_solution_change",
                 label="Validate Staged Change",
-                enabled=session_execution_status in {"preview_ready", "validating", "ready_for_promotion"},
+                enabled=session_execution_status in {"preview_ready", "validating", "ready_for_promotion", "committed", "promoted"},
                 target_kind="solution_change_session",
                 target_id=str(solution_change_session.id),
             )
@@ -34782,6 +40125,128 @@ def application_solution_change_session_detail(
 
 @csrf_exempt
 @login_required
+def application_solution_change_session_control(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    return _solution_change_session_control_envelope(
+        operation="inspect",
+        session=session,
+        application=application,
+        operation_status="ready",
+        operation_payload={"inspected": True},
+        http_status=200,
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_control_action(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    payload = _parse_json(request)
+    operation = str(payload.get("operation") or "").strip().lower()
+    supported_operations = [
+        "inspect",
+        "stage_apply",
+        "prepare_preview",
+        "inspect_preview",
+        "validate",
+        "commit",
+        "activate_in_root",
+        "promote",
+        "rollback",
+        "finalize",
+    ]
+    if operation not in set(supported_operations):
+        return JsonResponse(
+            {
+                "error": "unsupported operation",
+                "supported_operations": supported_operations,
+            },
+            status=400,
+        )
+    if operation == "inspect":
+        return _solution_change_session_control_envelope(
+            operation="inspect",
+            session=session,
+            application=application,
+            operation_status="ready",
+            operation_payload={"inspected": True},
+            http_status=200,
+        )
+    if operation == "inspect_preview":
+        preview = session.preview_json if isinstance(session.preview_json, dict) else {}
+        preview_status = str(preview.get("status") or "").strip().lower()
+        return _solution_change_session_control_envelope(
+            operation="inspect_preview",
+            session=session,
+            application=application,
+            operation_status="ready" if preview_status == "ready" else "blocked",
+            operation_payload={"preview_status": preview_status or "not_prepared"},
+            http_status=200,
+        )
+    operation_map = {
+        "stage_apply": application_solution_change_session_stage_apply,
+        "prepare_preview": application_solution_change_session_prepare_preview,
+        "validate": application_solution_change_session_validate,
+        "commit": application_solution_change_session_commit,
+        "activate_in_root": application_activate,
+        "promote": application_solution_change_session_promote,
+        "rollback": application_solution_change_session_rollback,
+        "finalize": application_solution_change_session_finalize,
+    }
+    handler = operation_map.get(operation)
+    if handler is None:
+        return JsonResponse({"error": "unsupported operation"}, status=400)
+    if operation == "activate_in_root":
+        response = handler(request, str(application.id))
+    else:
+        response = handler(request, str(application.id), str(session.id))
+    try:
+        operation_payload = json.loads(response.content.decode("utf-8")) if response.content else {}
+    except Exception:
+        operation_payload = {}
+    session.refresh_from_db()
+    if response.status_code >= 400:
+        operation_status = "blocked" if response.status_code in {400, 401, 403, 404, 409} else "failed"
+        return _solution_change_session_control_envelope(
+            operation=operation,
+            session=session,
+            application=application,
+            operation_status=operation_status,
+            operation_payload=operation_payload if isinstance(operation_payload, dict) else {"raw": operation_payload},
+            http_status=response.status_code,
+        )
+    return _solution_change_session_control_envelope(
+        operation=operation,
+        session=session,
+        application=application,
+        operation_status="succeeded",
+        operation_payload=operation_payload if isinstance(operation_payload, dict) else {"raw": operation_payload},
+        http_status=200,
+    )
+
+
+@csrf_exempt
+@login_required
 def application_solution_change_session_reply(
     request: HttpRequest, application_id: str, session_id: str
 ) -> JsonResponse:
@@ -34801,57 +40266,69 @@ def application_solution_change_session_reply(
     if not reply_text:
         return JsonResponse({"error": "reply_text is required"}, status=400)
     force_planner_fallback = bool(payload.get("use_planner_interpretation"))
-    interpretation = _interpret_solution_refinement(
+    source_turn_id = str(payload.get("source_turn_id") or "").strip()
+    response_payload = _process_solution_change_session_reply(
         session=session,
+        application=application,
+        identity=identity,
         reply_text=reply_text,
         force_planner_fallback=force_planner_fallback,
+        source_turn_id=source_turn_id,
     )
-    interpretation_type = str(interpretation.get("result_type") or "cannot_interpret")
-    _append_solution_planning_turn(
-        session=session,
-        actor="user",
-        kind="response",
-        payload={
-            "reply_text": reply_text,
-            "response_kind": "response",
-            "source_turn_id": str(payload.get("source_turn_id") or "").strip() or None,
-            "interpretation": interpretation,
-            "use_planner_interpretation": force_planner_fallback,
-        },
-        created_by=identity,
-    )
-    memberships = list(
-        ApplicationArtifactMembership.objects.filter(application=application)
-        .select_related("artifact", "artifact__type")
-        .order_by("sort_order", "created_at")
-    )
-    if interpretation_type in {"clarification_request", "cannot_interpret"}:
-        planner_question = str(interpretation.get("planner_message") or "").strip()
-        if not planner_question:
-            planner_question = (
-                "I could not safely interpret that refinement. Please clarify the request or provide a more specific constraint."
-                if interpretation_type == "cannot_interpret"
-                else "I need one clarification before I can revise the draft plan."
-            )
-        _append_solution_planning_turn(
-            session=session,
-            actor="planner",
-            kind="question",
-            payload={
-                "question": planner_question,
-                "reason": "cannot_interpret" if interpretation_type == "cannot_interpret" else "clarification_request",
-                "interpretation": interpretation,
+    return JsonResponse(response_payload)
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_continue(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    iteration_linkage = _solution_session_iteration_linkage(session)
+    if not iteration_linkage:
+        return JsonResponse(
+            {
+                "error": "continue iteration requires an anchored dev sibling context; activate or prepare preview first",
             },
+            status=409,
         )
-    else:
-        _advance_solution_planning_after_user_response(session=session, memberships=memberships)
-    memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
-    return JsonResponse(
-        {
-            "recorded": True,
-            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
-        }
+    payload = _parse_json(request)
+    reply_text = str(payload.get("reply_text") or payload.get("text") or "").strip()
+    if not reply_text:
+        return JsonResponse({"error": "reply_text is required"}, status=400)
+    force_planner_fallback = bool(payload.get("use_planner_interpretation"))
+    source_turn_id = str(payload.get("source_turn_id") or "").strip()
+    response_payload = _process_solution_change_session_reply(
+        session=session,
+        application=application,
+        identity=identity,
+        reply_text=reply_text,
+        force_planner_fallback=force_planner_fallback,
+        response_kind="continue_refinement",
+        source_turn_id=source_turn_id,
+        include_iteration_linkage=True,
     )
+    _persist_solution_session_iteration_linkage(
+        session=session,
+        linkage_updates={
+            "status": str(iteration_linkage.get("status") or ""),
+            "continued_at": timezone.now().isoformat(),
+            "last_reply_text": reply_text[:500],
+        },
+        source="continue_refinement",
+    )
+    response_payload["iteration_context"] = _solution_session_iteration_linkage(session)
+    return JsonResponse(response_payload)
 
 
 @csrf_exempt
@@ -34897,6 +40374,13 @@ def application_solution_change_session_select_option(
             break
     if selected_option is None:
         return JsonResponse({"error": "option_id is not part of the planner option set"}, status=400)
+    selected_artifact_id = str(selected_option.get("id") or option_id).strip() or option_id
+    current_selected_ids = _solution_change_session_selected_artifact_ids(session)
+    reordered_selected_ids = [selected_artifact_id] + [
+        artifact_id for artifact_id in current_selected_ids if artifact_id != selected_artifact_id
+    ]
+    session.selected_artifact_ids_json = reordered_selected_ids
+    session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
 
     _append_solution_planning_turn(
         session=session,
@@ -35007,19 +40491,32 @@ def application_solution_change_session_regenerate_options(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
-    options = _solution_option_rows(memberships)
+    analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+    ordered_artifact_ids = (
+        analysis.get("suggested_artifact_ids")
+        if isinstance(analysis.get("suggested_artifact_ids"), list)
+        else []
+    )
+    options = _solution_option_rows(
+        memberships,
+        ordered_artifact_ids=ordered_artifact_ids,
+        request_text=str(session.request_text or ""),
+    )
     if not options:
         return JsonResponse({"error": "no selectable artifacts are available for this solution"}, status=409)
     _append_solution_planning_turn(
         session=session,
-        actor="planner",
-        kind="option_set",
-        payload={
-            "prompt": "Select the first artifact focus for this planning session.",
-            "options": options,
-            "source": "regenerated",
-        },
-    )
+                actor="planner",
+                kind="option_set",
+                payload={
+                    "prompt": (
+                        "Select the initial artifact to focus planning on "
+                        "(you can still include multiple artifacts later)."
+                    ),
+                    "options": options,
+                    "source": "regenerated",
+                },
+            )
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {
@@ -35044,6 +40541,8 @@ def application_solution_change_session_plan(
         return JsonResponse({"error": "method not allowed"}, status=405)
     if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
         return JsonResponse({"error": "forbidden"}, status=403)
+    payload = _parse_json(request)
+    force_code_aware_planning = bool(payload.get("force_code_aware_planning")) if isinstance(payload, dict) else False
     session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
     memberships = list(
         ApplicationArtifactMembership.objects.filter(application=application)
@@ -35059,12 +40558,48 @@ def application_solution_change_session_plan(
     planning_state = _solution_planning_state(session)
     if planning_state.get("pending_question"):
         return JsonResponse({"error": "planner clarification is pending; submit a reply before generating a draft plan"}, status=409)
+    pending_option_set = planning_state.get("pending_option_set")
+    if pending_option_set:
+        pending_payload = pending_option_set.get("payload") if isinstance(pending_option_set.get("payload"), dict) else {}
+        pending_options = pending_payload.get("options") if isinstance(pending_payload.get("options"), list) else []
+        default_option = next(
+            (
+                item
+                for item in pending_options
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ),
+            None,
+        )
+        if default_option is not None:
+            selected_artifact_id = str(default_option.get("id") or "").strip()
+            current_selected_ids = _solution_change_session_selected_artifact_ids(session)
+            reordered_selected_ids = [selected_artifact_id] + [
+                artifact_id for artifact_id in current_selected_ids if artifact_id != selected_artifact_id
+            ]
+            session.selected_artifact_ids_json = reordered_selected_ids
+            session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+            _append_solution_planning_turn(
+                session=session,
+                actor="user",
+                kind="response",
+                payload={
+                    "response_kind": "option_selection",
+                    "source_turn_id": str(pending_option_set.get("id") or "").strip(),
+                    "option_id": selected_artifact_id,
+                    "option_label": str(default_option.get("label") or selected_artifact_id),
+                    "option_payload": default_option,
+                    "auto_selected": True,
+                },
+                created_by=identity,
+            )
+            planning_state = _solution_planning_state(session)
     if planning_state.get("pending_option_set"):
         return JsonResponse({"error": "planner option selection is pending; select an option before generating a draft plan"}, status=409)
     _record_solution_draft_plan(
         session=session,
         memberships=memberships,
         summary="Generated structured cross-artifact draft plan.",
+        force_code_aware_planning=force_code_aware_planning,
     )
     checkpoint = _reset_solution_stage_checkpoint(session=session)
     _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
@@ -35111,11 +40646,18 @@ def application_solution_change_session_stage_apply(
         return JsonResponse({"error": "planning approval checkpoint must be approved before staging"}, status=409)
     if not isinstance(session.plan_json, dict) or not session.plan_json:
         return JsonResponse({"error": "solution change session must have a generated plan before staging"}, status=409)
-    _stage_solution_change_session(session=session, memberships=memberships)
+    _stage_solution_change_session(
+        session=session,
+        memberships=memberships,
+        dispatch_runtime=True,
+        dispatch_user=request.user,
+    )
+    staged_changes = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {
             "staged": True,
+            "stage_apply_result": staged_changes.get("stage_apply_result") if isinstance(staged_changes.get("stage_apply_result"), dict) else {},
             "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
         }
     )
@@ -35191,6 +40733,661 @@ def application_solution_change_session_validate(
     return JsonResponse(
         {
             "validated": True,
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_promote(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    execution_status = str(session.execution_status or "").strip().lower()
+    promote_eligibility = _solution_change_session_promote_eligibility(session=session, application=application)
+    if not bool(promote_eligibility.get("can_promote")):
+        blocked_reason = str(promote_eligibility.get("blocked_reason") or "").strip().lower()
+        return JsonResponse(
+            {
+                "error": _solution_change_session_promote_blocked_error(promote_eligibility),
+                "blocked_reason": blocked_reason,
+                "promotion_eligibility": promote_eligibility,
+                "recommended_action": str(promote_eligibility.get("recommended_action") or ""),
+                "next_allowed_actions": promote_eligibility.get("next_allowed_actions") if isinstance(promote_eligibility.get("next_allowed_actions"), list) else [],
+            },
+            status=409,
+        )
+
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    promotion = metadata.get("promotion") if isinstance(metadata.get("promotion"), dict) else {}
+    if str(promotion.get("result") or "").strip().lower() == "success":
+        if execution_status != "promoted":
+            session.execution_status = "promoted"
+            session.save(update_fields=["execution_status", "updated_at"])
+        idempotent_meta = promotion if isinstance(promotion, dict) else {}
+        evidence = _record_solution_change_session_promotion_evidence(
+            session=session,
+            application=application,
+            identity=identity,
+            promote_eligibility=promote_eligibility,
+            promote_payload={},
+            promotion_meta=idempotent_meta,
+            already_up_to_date=True,
+        )
+        memberships_by_artifact_id = {
+            str(member.artifact_id): member
+            for member in ApplicationArtifactMembership.objects.filter(application=application)
+            .select_related("artifact", "artifact__type")
+            .all()
+        }
+        return JsonResponse(
+            {
+                "promoted": True,
+                "already_up_to_date": True,
+                "promotion_eligibility": promote_eligibility,
+                "evidence_ref": {"promotion_evidence_id": str(evidence.id)},
+                "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+            }
+        )
+
+    now_iso = timezone.now().isoformat()
+    payload = {
+        "name": "local",
+        # Do not force-recreate the currently active local stack from inside its own API
+        # request path; that can tear down the serving container mid-response and surface
+        # Bad Gateway in Composer.
+        "force": False,
+        "workspace_slug": str(getattr(application.workspace, "slug", "") or "").strip(),
+        "prefer_local_images": True,
+        "prefer_local_sources": True,
+    }
+    try:
+        response = _seed_api_request(
+            method="POST",
+            path="/api/v1/provision/local-instance",
+            payload=payload,
+            timeout=180,
+        )
+    except requests.RequestException as exc:
+        metadata["promotion"] = {
+            "promoted_at": "",
+            "attempted_at": now_iso,
+            "promote_mode": "local_runtime_update",
+            "target_runtime": "xyn-local",
+            "result": "failed",
+            "reason": "xyn_core_unreachable",
+            "details": exc.__class__.__name__,
+            "by_user_identity_id": str(identity.id),
+        }
+        session.metadata_json = metadata
+        session.save(update_fields=["metadata_json", "updated_at"])
+        return JsonResponse({"error": "failed to reach xyn-core for promotion"}, status=502)
+
+    content_type = str(response.headers.get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        metadata["promotion"] = {
+            "promoted_at": "",
+            "attempted_at": now_iso,
+            "promote_mode": "local_runtime_update",
+            "target_runtime": "xyn-local",
+            "result": "failed",
+            "reason": "invalid_response",
+            "details": response.text[:300],
+            "by_user_identity_id": str(identity.id),
+        }
+        session.metadata_json = metadata
+        session.save(update_fields=["metadata_json", "updated_at"])
+        return JsonResponse({"error": "unexpected xyn-core response during promotion"}, status=502)
+    try:
+        promote_payload = response.json() if response.content else {}
+    except ValueError:
+        promote_payload = {}
+    if response.status_code >= 400:
+        metadata["promotion"] = {
+            "promoted_at": "",
+            "attempted_at": now_iso,
+            "promote_mode": "local_runtime_update",
+            "target_runtime": "xyn-local",
+            "result": "failed",
+            "reason": "promotion_request_failed",
+            "details": str((promote_payload or {}).get("detail") or (promote_payload or {}).get("error") or response.text[:300]),
+            "by_user_identity_id": str(identity.id),
+        }
+        session.metadata_json = metadata
+        session.save(update_fields=["metadata_json", "updated_at"])
+        return JsonResponse(
+            {"error": "promotion request failed", "details": metadata["promotion"]["details"]},
+            status=409,
+        )
+
+    provision_status = str((promote_payload or {}).get("status") or "").strip().lower()
+    metadata["promotion"] = {
+        "promoted_at": now_iso,
+        "attempted_at": now_iso,
+        "promote_mode": "local_runtime_update",
+        "target_runtime": "xyn-local",
+        "result": "success",
+        "reason": "primary_local_runtime_reprovisioned" if provision_status == "succeeded" else "primary_local_runtime_reused",
+        "by_user_identity_id": str(identity.id),
+        "deployment_id": str((promote_payload or {}).get("deployment_id") or ""),
+        "compose_project": str((promote_payload or {}).get("compose_project") or ""),
+        "ui_url": str((promote_payload or {}).get("ui_url") or ""),
+        "api_url": str((promote_payload or {}).get("api_url") or ""),
+        "provision_status": provision_status,
+    }
+    session.metadata_json = metadata
+    session.execution_status = "promoted"
+    session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
+    evidence = _record_solution_change_session_promotion_evidence(
+        session=session,
+        application=application,
+        identity=identity,
+        promote_eligibility=_solution_change_session_promote_eligibility(session=session, application=application),
+        promote_payload=promote_payload if isinstance(promote_payload, dict) else {},
+        promotion_meta=metadata.get("promotion") if isinstance(metadata.get("promotion"), dict) else {},
+        already_up_to_date=provision_status == "reused",
+    )
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    return JsonResponse(
+        {
+            "promoted": True,
+            "already_up_to_date": provision_status == "reused",
+            "promotion_eligibility": _solution_change_session_promote_eligibility(session=session, application=application),
+            "evidence_ref": {"promotion_evidence_id": str(evidence.id)},
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_rollback(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    payload = _parse_json(request)
+    source_evidence_id = str(payload.get("evidence_id") or "").strip()
+    source_evidence = _solution_change_session_rollback_source_evidence(session=session, evidence_id=source_evidence_id)
+    rollback_eligibility = _solution_change_session_rollback_eligibility(
+        session=session,
+        application=application,
+        source_evidence=source_evidence,
+    )
+    if not bool(rollback_eligibility.get("can_rollback")):
+        blocked_reason = str(rollback_eligibility.get("blocked_reason") or "").strip().lower()
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "rollback_performed": False,
+                "blocked_reason": blocked_reason,
+                "application_id": str(application.id),
+                "change_session_id": str(session.id),
+                "source_evidence_ref": {"promotion_evidence_id": str(source_evidence.id)} if source_evidence else {},
+                "warnings": [],
+                "next_allowed_actions": rollback_eligibility.get("next_allowed_actions")
+                if isinstance(rollback_eligibility.get("next_allowed_actions"), list)
+                else [],
+                "recommended_action": str(rollback_eligibility.get("recommended_action") or ""),
+            },
+            status=409,
+        )
+    if source_evidence is None:
+        return JsonResponse(
+            {
+                "status": "blocked",
+                "rollback_performed": False,
+                "blocked_reason": "source_evidence_missing",
+                "application_id": str(application.id),
+                "change_session_id": str(session.id),
+                "source_evidence_ref": {},
+                "warnings": [],
+                "next_allowed_actions": ["inspect"],
+                "recommended_action": "select_source_evidence",
+            },
+            status=409,
+        )
+
+    superseded_target = (
+        source_evidence.superseded_active_state_json
+        if isinstance(source_evidence.superseded_active_state_json, dict)
+        else {}
+    )
+    selected_app_member, _selected_policy_member = _solution_activation_memberships(application)
+    app_slug = _artifact_runtime_app_slug(selected_app_member.artifact) if selected_app_member and selected_app_member.artifact else ""
+    current_root_target = _workspace_primary_runtime_target(application.workspace, app_slug)
+    binding, _created = SolutionRuntimeBinding.objects.get_or_create(
+        workspace=application.workspace,
+        application=application,
+        defaults={
+            "status": "active",
+            "runtime_target_json": superseded_target,
+            "last_activation_json": {},
+            "metadata_json": {},
+        },
+    )
+    binding.status = "active"
+    binding.runtime_target_json = superseded_target
+    binding.last_activation_json = {
+        "operation": "rollback",
+        "source_evidence_id": str(source_evidence.id),
+        "applied_at": timezone.now().isoformat(),
+    }
+    binding.save(update_fields=["status", "runtime_target_json", "last_activation_json", "updated_at"])
+
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    rollback_meta = {
+        "rolled_back_at": timezone.now().isoformat(),
+        "source_evidence_id": str(source_evidence.id),
+        "restored_target": superseded_target,
+    }
+    metadata["rollback"] = rollback_meta
+    session.metadata_json = metadata
+    session.execution_status = "committed"
+    session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
+    rollback_evidence = SolutionChangeSessionPromotionEvidence.objects.create(
+        workspace=session.workspace,
+        application=application,
+        solution_change_session=session,
+        operation="rollback",
+        promotion_status="success",
+        actor_source="human",
+        actor_identity=identity,
+        source_promotion_evidence=source_evidence,
+        targeted_artifacts_json=source_evidence.targeted_artifacts_json if isinstance(source_evidence.targeted_artifacts_json, list) else [],
+        preview_target_json=source_evidence.preview_target_json if isinstance(source_evidence.preview_target_json, dict) else {},
+        root_target_json=current_root_target if isinstance(current_root_target, dict) else {},
+        resulting_active_target_json=superseded_target,
+        superseded_active_state_json=current_root_target if isinstance(current_root_target, dict) else {},
+        control_result_json={"result": "success", "reason": "restored_superseded_active_target_pointer"},
+        provider_context_json=source_evidence.provider_context_json if isinstance(source_evidence.provider_context_json, dict) else {},
+        warnings_json=[],
+        blocked_context_json={},
+        rollback_link_json={"source_promotion_evidence_id": str(source_evidence.id)},
+    )
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    return JsonResponse(
+        {
+            "status": "succeeded",
+            "rollback_performed": True,
+            "blocked_reason": "",
+            "application_id": str(application.id),
+            "change_session_id": str(session.id),
+            "source_evidence_ref": {"promotion_evidence_id": str(source_evidence.id)},
+            "restored_target": superseded_target,
+            "superseded_target": current_root_target if isinstance(current_root_target, dict) else {},
+            "warnings": [],
+            "rollback_evidence_ref": {"promotion_evidence_id": str(rollback_evidence.id)},
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_promotion_evidence(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    evidence_id = str(request.GET.get("evidence_id") or "").strip()
+    evidence_qs = SolutionChangeSessionPromotionEvidence.objects.filter(
+        solution_change_session=session,
+        application=application,
+    ).order_by("-created_at", "-updated_at")
+    if evidence_id:
+        evidence = get_object_or_404(evidence_qs, id=evidence_id)
+        return JsonResponse(
+            {
+                "evidence": _serialize_solution_change_session_promotion_evidence(evidence),
+            }
+        )
+    return JsonResponse(
+        {
+            "evidence": [
+                _serialize_solution_change_session_promotion_evidence(item)
+                for item in evidence_qs[:50]
+            ]
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_commits(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    commits = list(
+        SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session)
+        .order_by("-created_at", "-updated_at")
+    )
+    return JsonResponse({"commits": [_serialize_solution_change_session_repo_commit(item) for item in commits]})
+
+
+def _solution_change_session_requires_commit_provenance(session: SolutionChangeSession) -> bool:
+    selected_ids = set(_solution_change_session_selected_artifact_ids(session))
+    if not selected_ids:
+        staged = session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {}
+        selected_ids = {str(item).strip() for item in (staged.get("selected_artifact_ids") or []) if str(item).strip()}
+    if not selected_ids:
+        return False
+    return Artifact.objects.filter(id__in=selected_ids, edit_mode="repo_backed").exists()
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_commit(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    execution_status = str(session.execution_status or "").strip().lower()
+    if execution_status not in {"ready_for_promotion", "committed"}:
+        return JsonResponse(
+            {
+                "error": "change session can only be committed after validation (execution_status=ready_for_promotion)",
+            },
+            status=409,
+        )
+    validation = session.validation_json if isinstance(session.validation_json, dict) else {}
+    validation_status = str(validation.get("status") or "").strip().lower()
+    if validation_status not in {"passed", "validated", "success"}:
+        return JsonResponse(
+            {
+                "error": "change session can only be committed after successful validation",
+            },
+            status=409,
+        )
+    repo_scopes = _solution_change_commit_repo_scopes(session)
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    if not repo_scopes:
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        metadata["commit"] = {
+            "at": timezone.now().isoformat(),
+            "by_user_identity_id": str(identity.id),
+            "repository_count": 0,
+            "repositories": [],
+            "result": "no_repo_backed_changes",
+        }
+        session.metadata_json = metadata
+        session.execution_status = "committed"
+        session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
+        return JsonResponse(
+            {
+                "committed": True,
+                "already_committed": False,
+                "no_changes": True,
+                "commits": [],
+                "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+            }
+        )
+    commit_message = _solution_change_commit_message(session)
+    commit_records: List[Dict[str, Any]] = []
+    no_changes_repos: List[str] = []
+    for repo_slug, allowed_paths in sorted(repo_scopes.items()):
+        managed_repo = ManagedRepository.objects.filter(slug=repo_slug, is_active=True).first()
+        fallback_branch = str(getattr(managed_repo, "default_branch", "") or "develop").strip() or "develop"
+        branch, _branch_source, branch_error = _resolve_stage_apply_target_branch(
+            repo_slug=repo_slug,
+            fallback_branch=fallback_branch,
+        )
+        if not branch:
+            return JsonResponse(
+                {"error": "unable to determine current branch for repository commit", "repository_slug": repo_slug, "details": branch_error},
+                status=409,
+            )
+        repo_root = _resolve_local_repo_root(repo_slug)
+        if repo_root is None:
+            return JsonResponse(
+                {"error": "unable to resolve local repository root for commit", "repository_slug": repo_slug},
+                status=409,
+            )
+        changed_files = _git_changed_files_for_paths(repo_root=repo_root, pathspecs=allowed_paths)
+        if not changed_files:
+            no_changes_repos.append(repo_slug)
+            continue
+        add_code, _add_out, add_err = _git_repo_command(
+            repo_root=repo_root,
+            args=["add", "--", *changed_files],
+        )
+        if add_code != 0:
+            return JsonResponse(
+                {
+                    "error": "failed to stage repository changes for commit",
+                    "repository_slug": repo_slug,
+                    "details": add_err or "git add failed",
+                },
+                status=409,
+            )
+        commit_code, _commit_out, commit_err = _git_repo_command(
+            repo_root=repo_root,
+            args=["commit", "-m", commit_message, "--", *changed_files],
+        )
+        if commit_code != 0:
+            if "nothing to commit" in str(commit_err or "").lower():
+                no_changes_repos.append(repo_slug)
+                continue
+            return JsonResponse(
+                {
+                    "error": "failed to create repository commit",
+                    "repository_slug": repo_slug,
+                    "details": commit_err or "git commit failed",
+                },
+                status=409,
+            )
+        sha_code, sha_out, sha_err = _git_repo_command(repo_root=repo_root, args=["rev-parse", "HEAD"])
+        if sha_code != 0 or not str(sha_out or "").strip():
+            return JsonResponse(
+                {
+                    "error": "commit created but commit SHA could not be resolved",
+                    "repository_slug": repo_slug,
+                    "details": sha_err or "git rev-parse failed",
+                },
+                status=409,
+            )
+        commit_sha = str(sha_out or "").strip()
+        record, _created = SolutionChangeSessionRepoCommit.objects.update_or_create(
+            workspace=session.workspace,
+            solution_change_session=session,
+            repository_slug=repo_slug,
+            commit_sha=commit_sha,
+            defaults={
+                "branch": branch,
+                "changed_files_json": changed_files,
+                "validation_status": "unknown",
+            },
+        )
+        commit_records.append(_serialize_solution_change_session_repo_commit(record))
+
+    existing_commits = list(
+        SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).order_by("-created_at", "-updated_at")
+    )
+    if not commit_records:
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        metadata["commit"] = {
+            "at": timezone.now().isoformat(),
+            "by_user_identity_id": str(identity.id),
+            "repository_count": len(existing_commits),
+            "repositories": [
+                {
+                    "repository_slug": str(item.repository_slug or "").strip(),
+                    "branch": str(item.branch or "").strip(),
+                    "commit_sha": str(item.commit_sha or "").strip(),
+                    "changed_files": item.changed_files_json if isinstance(item.changed_files_json, list) else [],
+                }
+                for item in existing_commits
+            ],
+            "result": "already_committed" if existing_commits else "no_changes",
+        }
+        session.metadata_json = metadata
+        session.execution_status = "committed"
+        session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
+        if existing_commits:
+            return JsonResponse(
+                {
+                    "committed": True,
+                    "already_committed": True,
+                    "no_changes": True,
+                    "commits": [_serialize_solution_change_session_repo_commit(item) for item in existing_commits],
+                    "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+                }
+            )
+        return JsonResponse(
+            {
+                "committed": False,
+                "already_committed": False,
+                "no_changes": True,
+                "no_changes_repositories": no_changes_repos,
+                "message": "No changes to commit.",
+                "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+            }
+        )
+
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    now_iso = timezone.now().isoformat()
+    metadata["commit"] = {
+        "at": now_iso,
+        "by_user_identity_id": str(identity.id),
+        "repository_count": len(commit_records),
+        "repositories": [
+            {
+                "repository_slug": str(item.get("repository_slug") or ""),
+                "branch": str(item.get("branch") or ""),
+                "commit_sha": str(item.get("commit_sha") or ""),
+                "changed_files": item.get("changed_files") if isinstance(item.get("changed_files"), list) else [],
+            }
+            for item in commit_records
+        ],
+    }
+    if len(commit_records) == 1:
+        metadata["commit"]["hash"] = str(commit_records[0].get("commit_sha") or "")
+    session.metadata_json = metadata
+    session.execution_status = "committed"
+    session.save(update_fields=["metadata_json", "execution_status", "updated_at"])
+    refreshed_commits = list(
+        SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).order_by("-created_at", "-updated_at")
+    )
+    return JsonResponse(
+        {
+            "committed": True,
+            "already_committed": False,
+            "no_changes": False,
+            "commits": [_serialize_solution_change_session_repo_commit(item) for item in refreshed_commits],
+            "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def application_solution_change_session_finalize(
+    request: HttpRequest, application_id: str, session_id: str
+) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
+    if not _workspace_membership(identity, str(application.workspace_id)):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+        return JsonResponse({"error": "forbidden"}, status=403)
+    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    execution_status = str(session.execution_status or "").strip().lower()
+    if execution_status != "promoted":
+        return JsonResponse(
+            {
+                "error": "change session can only be finalized after promotion (execution_status=promoted)",
+            },
+            status=409,
+        )
+    if _solution_change_session_requires_commit_provenance(session):
+        has_commit_provenance = SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session).exists()
+        if not has_commit_provenance:
+            return JsonResponse(
+                {
+                    "error": "code-changing sessions require at least one recorded repository commit before finalize",
+                },
+                status=409,
+            )
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    metadata["finalized"] = {
+        "at": timezone.now().isoformat(),
+        "by_user_identity_id": str(identity.id),
+    }
+    session.metadata_json = metadata
+    session.status = "archived"
+    session.save(update_fields=["status", "metadata_json", "updated_at"])
+    memberships_by_artifact_id = {
+        str(member.artifact_id): member
+        for member in ApplicationArtifactMembership.objects.filter(application=application)
+        .select_related("artifact", "artifact__type")
+        .all()
+    }
+    return JsonResponse(
+        {
+            "finalized": True,
             "session": _serialize_solution_change_session(session, memberships_by_artifact_id=memberships_by_artifact_id),
         }
     )
@@ -39499,11 +45696,49 @@ def dev_task_publish(request: HttpRequest, task_id: str) -> JsonResponse:
         return JsonResponse({"error": "not authenticated"}, status=401)
     task = get_object_or_404(DevTask, id=task_id)
     payload = _parse_json(request)
+    requested_session_id = str(
+        payload.get("solution_change_session_id")
+        or payload.get("session_id")
+        or request.GET.get("solution_change_session_id")
+        or request.GET.get("session_id")
+        or ""
+    ).strip()
+    if not requested_session_id:
+        policy = task.execution_policy if isinstance(task.execution_policy, dict) else {}
+        requested_session_id = str(
+            policy.get("solution_change_session_id")
+            or ((policy.get("solution_change_session") or {}) if isinstance(policy.get("solution_change_session"), dict) else {}).get("id")
+            or ""
+        ).strip()
+    solution_change_session = None
+    if requested_session_id:
+        solution_change_session = SolutionChangeSession.objects.filter(id=requested_session_id).select_related("application").first()
+        if solution_change_session is None:
+            return JsonResponse({"error": "solution_change_session_id was not found"}, status=404)
+        if not _workspace_membership(identity, str(solution_change_session.workspace_id)):
+            return JsonResponse({"error": "forbidden"}, status=403)
     push = str(request.GET.get("push") or payload.get("push") or "").strip().lower() in {"1", "true", "yes", "on"}
     try:
         result = publish_dev_task(task, user=request.user, push=push)
     except ExecutionPublishError as exc:
         return JsonResponse({"error": str(exc), "work_item": _serialize_work_item_detail(task)}, status=409)
+    if solution_change_session is not None:
+        commit_sha = str(result.get("commit") or "").strip()
+        repository_slug = str(result.get("repository_slug") or "").strip()
+        if commit_sha and repository_slug:
+            branch = str(result.get("branch") or "").strip()
+            changed_files = result.get("changed_files") if isinstance(result.get("changed_files"), list) else []
+            SolutionChangeSessionRepoCommit.objects.update_or_create(
+                solution_change_session=solution_change_session,
+                repository_slug=repository_slug,
+                commit_sha=commit_sha,
+                defaults={
+                    "workspace": solution_change_session.workspace,
+                    "branch": branch,
+                    "changed_files_json": [str(item).strip() for item in changed_files if str(item).strip()],
+                    "validation_status": "unknown",
+                },
+            )
     task.refresh_from_db()
     return JsonResponse({"status": result.get("status"), "push": push, "work_item": _serialize_work_item_detail(task)})
 
@@ -40204,6 +46439,7 @@ def _article_docs_surface_path(artifact: Artifact, workspace_id: Optional[str]) 
 def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[str] = None) -> Dict[str, Any]:
     manifest = _load_artifact_manifest(artifact)
     payload = _manifest_payload(manifest)
+    capability_source = payload if isinstance(payload.get("capability"), dict) else manifest
     suggestion_payload = payload
     if not isinstance(suggestion_payload.get("suggestions"), list) and isinstance(manifest.get("suggestions"), list):
         suggestion_payload = manifest
@@ -40232,7 +46468,7 @@ def _manifest_summary_for_artifact(artifact: Artifact, workspace_id: Optional[st
     summary = {
         "roles": unique_roles,
         "ui_mount_scope": _manifest_ui_mount_scope(payload),
-        "capability": _manifest_capability(payload),
+        "capability": _manifest_capability(capability_source),
         "suggestions": suggestions,
         "entities": [] if contract_issue else _resolved_manifest_entities(resolved),
         "surfaces": surfaces,

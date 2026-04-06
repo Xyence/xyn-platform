@@ -6,11 +6,13 @@ import { SolutionDetailPanel, SolutionListPanel } from "./SolutionPanels";
 
 const apiMocks = vi.hoisted(() => ({
   listApplications: vi.fn(),
+  activateApplication: vi.fn(),
   generateApplicationPlan: vi.fn(),
   applyApplicationPlan: vi.fn(),
   getApplication: vi.fn(),
   listApplicationArtifactMemberships: vi.fn(),
   listArtifacts: vi.fn(),
+  listArtifactSurfaces: vi.fn(),
   listSolutionChangeSessions: vi.fn(),
   createSolutionChangeSession: vi.fn(),
   deleteSolutionChangeSession: vi.fn(),
@@ -24,11 +26,13 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("../../../api/xyn", () => ({
   listApplications: apiMocks.listApplications,
+  activateApplication: apiMocks.activateApplication,
   generateApplicationPlan: apiMocks.generateApplicationPlan,
   applyApplicationPlan: apiMocks.applyApplicationPlan,
   getApplication: apiMocks.getApplication,
   listApplicationArtifactMemberships: apiMocks.listApplicationArtifactMemberships,
   listArtifacts: apiMocks.listArtifacts,
+  listArtifactSurfaces: apiMocks.listArtifactSurfaces,
   listSolutionChangeSessions: apiMocks.listSolutionChangeSessions,
   createSolutionChangeSession: apiMocks.createSolutionChangeSession,
   deleteSolutionChangeSession: apiMocks.deleteSolutionChangeSession,
@@ -43,6 +47,152 @@ vi.mock("../../../api/xyn", () => ({
 describe("Solution panels", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("opens solution in dev sibling via solution activation endpoint and shows composed mode", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+      runtime_binding: { activation_mode: "composed", freshness: "unknown" },
+      activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+    apiMocks.activateApplication.mockResolvedValue({
+      status: "reused",
+      artifact_id: "artifact-1",
+      sibling_ui_url: "http://smoke-real-estate-deal-finder-bbb291.localhost",
+      runtime_target: { public_app_url: "https://deal-finder.local.test" },
+      solution_runtime_binding: { activation_mode: "composed", freshness: "current" },
+      solution_activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1", undefined));
+    expect(openSpy).toHaveBeenCalledWith("http://smoke-real-estate-deal-finder-bbb291.localhost", "_blank", "noopener,noreferrer");
+    expect(screen.getByText(/Opened existing dev sibling runtime \(composed\)\./)).toBeInTheDocument();
+    openSpy.mockRestore();
+  });
+
+  it("falls back to raw runtime URL when sibling URL is unavailable", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+      runtime_binding: { activation_mode: "composed", freshness: "unknown" },
+      activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+    apiMocks.activateApplication.mockResolvedValue({
+      status: "reused",
+      artifact_id: "artifact-1",
+      runtime_target: { public_app_url: "https://deal-finder.local.test" },
+      solution_runtime_binding: { activation_mode: "composed", freshness: "current" },
+      solution_activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1", undefined));
+    expect(openSpy).toHaveBeenCalledWith("https://deal-finder.local.test", "_blank", "noopener,noreferrer");
+    openSpy.mockRestore();
+  });
+
+  it("shows queued-existing solution activation feedback with reconstructed mode", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+      runtime_binding: { activation_mode: "reconstructed", freshness: "unknown" },
+      activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "" },
+      },
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listArtifactSurfaces.mockResolvedValue({ artifact_id: "artifact-1", surfaces: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+    apiMocks.activateApplication.mockResolvedValue({
+      status: "queued_existing",
+      activation: { draft_id: "draft-1", job_id: "job-1" },
+      solution_runtime_binding: { activation_mode: "reconstructed", freshness: "unknown" },
+      solution_activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "" },
+      },
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1", undefined));
+    expect(screen.getByText(/Solution activation already in progress \(reconstructed\)\./)).toBeInTheDocument();
+    expect(screen.getByText(/Draft draft-1 · Job job-1/)).toBeInTheDocument();
+  });
+
+  it("does not open browser window when activation is queued", async () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+      runtime_binding: { activation_mode: "composed", freshness: "unknown" },
+      activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listArtifactSurfaces.mockResolvedValue({ artifact_id: "artifact-1", surfaces: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+    apiMocks.activateApplication.mockResolvedValue({
+      status: "queued",
+      activation: { draft_id: "draft-2", job_id: "job-2" },
+      solution_runtime_binding: { activation_mode: "composed", freshness: "unknown" },
+      solution_activation_composition: {
+        primary_app_artifact_ref: { artifact_slug: "app.real-estate-deal-finder" },
+        policy_artifact_ref: { artifact_slug: "policy.real-estate-deal-finder" },
+      },
+    });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Dev" }));
+    await waitFor(() => expect(apiMocks.activateApplication).toHaveBeenCalledWith("app-1", undefined));
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(screen.getByText(/Solution activation queued \(composed\)\./)).toBeInTheDocument();
+    openSpy.mockRestore();
   });
 
   it("renders solution list in panel and opens solution detail panel", async () => {
@@ -290,6 +440,23 @@ describe("Solution panels", () => {
     await waitFor(() => expect(apiMocks.listArtifacts).toHaveBeenCalledWith({ limit: 200, scope: "solution" }));
     await userEvent.selectOptions(screen.getByRole("combobox", { name: "Candidate scope" }), "all");
     await waitFor(() => expect(apiMocks.listArtifacts).toHaveBeenLastCalledWith({ limit: 200 }));
+  });
+
+  it("renders requested change input full width in new change session form", async () => {
+    apiMocks.getApplication.mockResolvedValue({
+      id: "app-1",
+      workspace_id: "ws-1",
+      name: "Deal Finder",
+      summary: "Summary",
+    });
+    apiMocks.listApplicationArtifactMemberships.mockResolvedValue({ memberships: [] });
+    apiMocks.listArtifacts.mockResolvedValue({ artifacts: [] });
+    apiMocks.listSolutionChangeSessions.mockResolvedValue({ sessions: [] });
+
+    render(<SolutionDetailPanel workspaceId="ws-1" applicationId="app-1" onOpenPanel={vi.fn()} />);
+
+    await waitFor(() => expect(apiMocks.getApplication).toHaveBeenCalledWith("app-1"));
+    expect(screen.getByRole("textbox", { name: "Requested change" })).toHaveClass("solution-requested-change-input");
   });
 
   it("shows guided next-step callout when impacted artifact analysis is missing", async () => {

@@ -4,6 +4,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
+from xyn_orchestrator import xyn_api
 from xyn_orchestrator.models import (
     Application,
     ApplicationArtifactMembership,
@@ -102,6 +103,96 @@ class PlatformBootstrapTests(TestCase):
         response = self.client.get("/xyn/api/me")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(ApplicationArtifactMembership.objects.filter(application=xyn_solution).count(), restored_count)
+        self.assertEqual(Workspace.objects.filter(slug="development").count(), 1)
+        self.assertEqual(
+            Application.objects.filter(
+                workspace=workspace,
+                metadata_json__system_solution_key="xyn-platform-default",
+            ).count(),
+            1,
+        )
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_dev_bootstrap_materializes_default_xyn_solution_memberships_from_platform_builder_artifacts(self):
+        platform_builder = Workspace.objects.create(
+            slug="platform-builder",
+            name="Platform Builder",
+            metadata_json={"xyn_system_workspace": True},
+        )
+        module_type, _ = ArtifactType.objects.get_or_create(
+            slug="module",
+            defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
+        )
+        for slug in ("core.workbench", "xyn-ui", "xyn-api"):
+            Artifact.objects.create(
+                workspace=platform_builder,
+                type=module_type,
+                title=slug,
+                slug=slug,
+                status="published",
+                visibility="team",
+            )
+
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        development = Workspace.objects.get(slug="development")
+        xyn_solution = Application.objects.get(
+            workspace=development,
+            metadata_json__system_solution_key="xyn-platform-default",
+        )
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=xyn_solution)
+            .select_related("artifact")
+            .order_by("sort_order", "created_at")
+        )
+        self.assertEqual(len(memberships), 3)
+        self.assertEqual([row.artifact.slug for row in memberships], ["core.workbench", "xyn-ui", "xyn-api"])
+        self.assertTrue(all(row.artifact.workspace_id == development.id for row in memberships))
+        ownership_by_slug = {row.artifact.slug: xyn_api.resolve_artifact_ownership(row.artifact) for row in memberships}
+        self.assertEqual(ownership_by_slug["core.workbench"]["repo_slug"], "xyn-platform")
+        self.assertEqual(ownership_by_slug["core.workbench"]["allowed_paths"], [])
+        self.assertEqual(ownership_by_slug["core.workbench"]["edit_mode"], "repo_backed")
+        self.assertEqual(ownership_by_slug["xyn-ui"]["repo_slug"], "xyn-platform")
+        self.assertEqual(ownership_by_slug["xyn-ui"]["allowed_paths"], ["apps/xyn-ui/"])
+        self.assertEqual(ownership_by_slug["xyn-ui"]["edit_mode"], "repo_backed")
+        self.assertEqual(ownership_by_slug["xyn-api"]["repo_slug"], "xyn-platform")
+        self.assertEqual(ownership_by_slug["xyn-api"]["allowed_paths"], ["services/xyn-api/backend/"])
+        self.assertEqual(ownership_by_slug["xyn-api"]["edit_mode"], "repo_backed")
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_resolve_artifact_ownership_returns_repo_and_path_prefixes(self):
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        workspace = Workspace.objects.get(slug="development")
+        artifact = Artifact.objects.get(workspace=workspace, slug="xyn-ui")
+        ownership = xyn_api.resolve_artifact_ownership(artifact)
+        self.assertEqual(
+            ownership,
+            {
+                "repo_slug": "xyn-platform",
+                "allowed_paths": ["apps/xyn-ui/"],
+                "edit_mode": "repo_backed",
+            },
+        )
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_dev_bootstrap_recovers_cleanly_after_partial_failure(self):
+        with mock.patch(
+            "xyn_orchestrator.xyn_api._ensure_default_workspace_artifact_bindings",
+            side_effect=[RuntimeError("transient bootstrap failure"), None],
+        ):
+            failed = self.client.get("/xyn/api/me")
+            self.assertEqual(failed.status_code, 500)
+
+            recovered = self.client.get("/xyn/api/me")
+            self.assertEqual(recovered.status_code, 200)
+
+        workspace = Workspace.objects.get(slug="development")
+        self.assertEqual(Workspace.objects.filter(slug="development").count(), 1)
+        self.assertEqual(
+            WorkspaceMembership.objects.filter(workspace=workspace, user_identity=self.identity).count(),
+            1,
+        )
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev", "XYN_WORKSPACE_SLUG": "local-dev"}, clear=False)
     def test_dev_me_uses_configured_workspace_slug(self):

@@ -6,6 +6,7 @@ import WorkbenchPanelHost from "./WorkbenchPanelHost";
 import { emitEntityChange } from "../../utils/entityChangeEvents";
 
 const apiMocks = vi.hoisted(() => ({
+  activateArtifact: vi.fn(),
   executeAppPalettePrompt: vi.fn(),
   listGoals: vi.fn(),
   getGoal: vi.fn(),
@@ -42,10 +43,16 @@ const apiMocks = vi.hoisted(() => ({
   getAiRoutingStatus: vi.fn(),
   listAiAgents: vi.fn(),
   getExecutionPlan: vi.fn(),
+  getSolutionChangeSessionControl: vi.fn(),
+  getSolutionChangeSessionPromotionEvidence: vi.fn(),
+  runSolutionChangeSessionControlAction: vi.fn(),
   generateSolutionChangePlan: vi.fn(),
   stageSolutionChangeApply: vi.fn(),
   prepareSolutionChangePreview: vi.fn(),
   validateSolutionChangeSession: vi.fn(),
+  promoteSolutionChangeSession: vi.fn(),
+  commitSolutionChangeSession: vi.fn(),
+  finalizeSolutionChangeSession: vi.fn(),
   replyToSolutionPlanningSession: vi.fn(),
   regenerateSolutionPlanningOptions: vi.fn(),
   selectSolutionPlanningOption: vi.fn(),
@@ -74,6 +81,7 @@ vi.mock("../../../api/xyn", async () => {
   const actual = await vi.importActual<typeof import("../../../api/xyn")>("../../../api/xyn");
   return {
     ...actual,
+    activateArtifact: apiMocks.activateArtifact,
     executeAppPalettePrompt: apiMocks.executeAppPalettePrompt,
     listGoals: apiMocks.listGoals,
     getGoal: apiMocks.getGoal,
@@ -110,10 +118,16 @@ vi.mock("../../../api/xyn", async () => {
     getAiRoutingStatus: apiMocks.getAiRoutingStatus,
     listAiAgents: apiMocks.listAiAgents,
     getExecutionPlan: apiMocks.getExecutionPlan,
+    getSolutionChangeSessionControl: apiMocks.getSolutionChangeSessionControl,
+    getSolutionChangeSessionPromotionEvidence: apiMocks.getSolutionChangeSessionPromotionEvidence,
+    runSolutionChangeSessionControlAction: apiMocks.runSolutionChangeSessionControlAction,
     generateSolutionChangePlan: apiMocks.generateSolutionChangePlan,
     stageSolutionChangeApply: apiMocks.stageSolutionChangeApply,
     prepareSolutionChangePreview: apiMocks.prepareSolutionChangePreview,
     validateSolutionChangeSession: apiMocks.validateSolutionChangeSession,
+    promoteSolutionChangeSession: apiMocks.promoteSolutionChangeSession,
+    commitSolutionChangeSession: apiMocks.commitSolutionChangeSession,
+    finalizeSolutionChangeSession: apiMocks.finalizeSolutionChangeSession,
     replyToSolutionPlanningSession: apiMocks.replyToSolutionPlanningSession,
     regenerateSolutionPlanningOptions: apiMocks.regenerateSolutionPlanningOptions,
     selectSolutionPlanningOption: apiMocks.selectSolutionPlanningOption,
@@ -132,6 +146,171 @@ vi.mock("../../utils/runtimeEventStream", async () => {
     subscribeRuntimeEventStream: streamMocks.subscribeRuntimeEventStream,
   };
 });
+
+function createComposerSession(overrides: Record<string, any> = {}) {
+  const draftPayload = {
+    objective: "Widen requested change input in solution pane.",
+    proposed_work: ["Update the requested change input layout in Solution detail."],
+    shared_contracts: [],
+    validation_plan: ["Apply planned changes"],
+    ...(overrides.draft_payload || {}),
+  };
+  const draftTurn = {
+    id: "turn-draft",
+    workspace_id: "ws-1",
+    session_id: "session-1",
+    actor: "planner",
+    kind: "draft_plan",
+    sequence: 2,
+    payload: draftPayload,
+    created_at: "2026-03-20T10:02:00Z",
+    updated_at: "2026-03-20T10:02:00Z",
+  };
+  const planning = {
+    turns: [
+      {
+        id: "turn-request",
+        workspace_id: "ws-1",
+        session_id: "session-1",
+        actor: "user",
+        kind: "request",
+        sequence: 1,
+        payload: { request_text: "Widen requested change input in solution pane." },
+        created_at: "2026-03-20T10:00:00Z",
+        updated_at: "2026-03-20T10:00:00Z",
+      },
+      draftTurn,
+    ],
+    checkpoints: [
+      {
+        id: "checkpoint-1",
+        workspace_id: "ws-1",
+        session_id: "session-1",
+        checkpoint_key: "plan_scope_confirmed",
+        label: "Approve planning scope before stage apply",
+        status: "approved",
+        required_before: "stage",
+        payload: {},
+        decided_by: "admin",
+        decided_at: "2026-03-20T10:02:10Z",
+        created_at: "2026-03-20T10:02:10Z",
+        updated_at: "2026-03-20T10:02:10Z",
+      },
+    ],
+    pending_question: null,
+    pending_option_set: null,
+    pending_checkpoints: [],
+    latest_draft_plan: draftTurn,
+    ...(overrides.planning || {}),
+  };
+  return {
+    id: "session-1",
+    workspace_id: "ws-1",
+    application_id: "app-1",
+    title: "Deal Finder Session",
+    request_text: "Widen requested change input in solution pane.",
+    status: "planned",
+    execution_status: "not_started",
+    selected_artifact_ids: ["artifact-1"],
+    planning,
+    staged_changes: null,
+    preview: null,
+    validation: null,
+    created_at: "2026-03-20T10:00:00Z",
+    updated_at: "2026-03-20T10:03:00Z",
+    ...overrides,
+  };
+}
+
+function createComposerState(session: Record<string, any>) {
+  return {
+    workspace_id: "ws-1",
+    stage: "application_overview",
+    context: {
+      factory_key: null,
+      application_plan_id: null,
+      application_id: "app-1",
+      goal_id: null,
+      thread_id: null,
+      solution_change_session_id: "session-1",
+    },
+    factory_catalog: [],
+    application_plans: [],
+    applications: [],
+    application_plan: null,
+    application: null,
+    goal: null,
+    thread: null,
+    solution_change_sessions: [session],
+    solution_change_session: session,
+    related_goals: [],
+    related_threads: [],
+    portfolio_context: null,
+    breadcrumbs: [{ kind: "composer", label: "Composer" }],
+    available_actions: [],
+  };
+}
+
+function createControlEnvelope(
+  session: Record<string, any>,
+  overrides: Record<string, any> = {}
+) {
+  const executionStatus = String(session.execution_status || "not_started");
+  const normalizedExecutionStatus = executionStatus.trim().toLowerCase();
+  const defaultNextActions =
+    normalizedExecutionStatus === "not_started" ? ["stage_apply"]
+    : normalizedExecutionStatus === "staged" ? ["prepare_preview"]
+    : normalizedExecutionStatus === "preview_ready" ? ["validate"]
+    : normalizedExecutionStatus === "ready_for_promotion" ? ["commit"]
+    : normalizedExecutionStatus === "committed" ? ["promote"]
+    : normalizedExecutionStatus === "promoted" ? ["finalize"]
+    : [];
+  const defaultControl = {
+    change_session_id: String(session.id || "session-1"),
+    application_id: String(session.application_id || "app-1"),
+    execution_status: executionStatus,
+    can_stage_apply: defaultNextActions.includes("stage_apply"),
+    can_prepare_preview: defaultNextActions.includes("prepare_preview"),
+    can_activate: true,
+    can_promote: defaultNextActions.includes("promote"),
+    can_rollback: false,
+    rollback_eligibility: {},
+    blocked_reason: "",
+    recommended_action: "",
+    next_allowed_actions: defaultNextActions,
+    session,
+  };
+  return {
+    operation: "inspect",
+    status: "ready",
+    change_session_id: String(session.id || "session-1"),
+    application_id: String(session.application_id || "app-1"),
+    control: {
+      ...defaultControl,
+      ...(overrides.control || {}),
+    },
+    operation_result: {},
+    ...overrides,
+  };
+}
+
+function createPromotionEvidenceEntry(overrides: Record<string, any> = {}) {
+  return {
+    id: "evidence-1",
+    workspace_id: "ws-1",
+    application_id: "app-1",
+    solution_change_session_id: "session-1",
+    operation: "promotion",
+    promotion_status: "success",
+    actor_source: "human",
+    source_promotion_evidence_id: "",
+    resulting_active_target: { public_app_url: "http://localhost" },
+    superseded_active_state: { public_app_url: "http://prior.localhost" },
+    created_at: "2026-04-04T12:00:00Z",
+    updated_at: "2026-04-04T12:00:00Z",
+    ...overrides,
+  };
+}
 
 describe("WorkbenchPanelHost entity refresh", () => {
   beforeEach(() => {
@@ -241,6 +420,11 @@ describe("WorkbenchPanelHost entity refresh", () => {
         },
       ],
     });
+    apiMocks.getSolutionChangeSessionControl.mockRejectedValue(new Error("control endpoint not mocked for this test"));
+    apiMocks.getSolutionChangeSessionPromotionEvidence.mockResolvedValue({ evidence: [] });
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(createComposerSession(), { operation: "inspect", status: "ready" })
+    );
   });
 
   it("does not append global ai routing/readiness cards inside panel content", async () => {
@@ -1343,6 +1527,121 @@ describe("WorkbenchPanelHost entity refresh", () => {
     const labels = screen.getAllByText("UI / presentation");
     expect(labels.length).toBeGreaterThanOrEqual(2);
     expect(screen.queryAllByText("No selected artifact set provided yet.")).toHaveLength(0);
+  });
+
+  it("prefers code-aware proposed_work over selected_artifact_ids in draft rendering", async () => {
+    const sessionPayload = {
+      id: "session-1",
+      workspace_id: "ws-1",
+      application_id: "app-1",
+      title: "Deal Finder Session",
+      request_text: "Widen requested change input in solution pane.",
+      status: "planned",
+      selected_artifact_ids: ["artifact-uuid-like-1"],
+      confirmed_workstreams: ["ui"],
+      planning: {
+        turns: [
+          {
+            id: "turn-draft",
+            workspace_id: "ws-1",
+            session_id: "session-1",
+            actor: "planner",
+            kind: "draft_plan",
+            sequence: 2,
+            payload: {
+              objective: "Widen requested change input in solution pane.",
+              selected_artifact_ids: ["ed714e7f-f012-4153-abac-21acb882c577"],
+              proposed_work: [
+                "Inspect apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx and widen Requested change input container.",
+                "Validate panel layout behavior in Composer and Solution detail views.",
+              ],
+              planning_mode: "code_aware",
+              candidate_files: ["apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx"],
+              shared_contracts: [],
+              validation_plan: ["Run focused UI regression checks for solution detail panel layout."],
+            },
+            created_at: "2026-03-20T10:02:00Z",
+            updated_at: "2026-03-20T10:02:00Z",
+          },
+        ],
+        checkpoints: [],
+        pending_question: null,
+        pending_option_set: null,
+        pending_checkpoints: [],
+        latest_draft_plan: {
+          id: "turn-draft",
+          workspace_id: "ws-1",
+          session_id: "session-1",
+          actor: "planner",
+          kind: "draft_plan",
+          sequence: 2,
+          payload: {
+            objective: "Widen requested change input in solution pane.",
+            selected_artifact_ids: ["ed714e7f-f012-4153-abac-21acb882c577"],
+            proposed_work: [
+              "Inspect apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx and widen Requested change input container.",
+              "Validate panel layout behavior in Composer and Solution detail views.",
+            ],
+            planning_mode: "code_aware",
+            candidate_files: ["apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx"],
+            shared_contracts: [],
+            validation_plan: ["Run focused UI regression checks for solution detail panel layout."],
+          },
+          created_at: "2026-03-20T10:02:00Z",
+          updated_at: "2026-03-20T10:02:00Z",
+        },
+      },
+      created_at: "2026-03-20T10:00:00Z",
+      updated_at: "2026-03-20T10:03:00Z",
+    };
+
+    apiMocks.getComposerState.mockResolvedValue({
+      workspace_id: "ws-1",
+      stage: "application_overview",
+      context: {
+        factory_key: null,
+        application_plan_id: null,
+        application_id: "app-1",
+        goal_id: null,
+        thread_id: null,
+        solution_change_session_id: "session-1",
+      },
+      factory_catalog: [],
+      application_plans: [],
+      applications: [],
+      application_plan: null,
+      application: null,
+      goal: null,
+      thread: null,
+      solution_change_sessions: [sessionPayload],
+      solution_change_session: sessionPayload,
+      related_goals: [],
+      related_threads: [],
+      portfolio_context: null,
+      breadcrumbs: [{ kind: "composer", label: "Composer" }],
+      available_actions: [],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-code-aware",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getAllByText("Deal Finder Session").length).toBeGreaterThan(0));
+    expect(screen.getAllByText(/Inspect apps\/xyn-ui\/src\/app\/components\/solutions\/SolutionPanels.tsx/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("ed714e7f-f012-4153-abac-21acb882c577")).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Code-aware draft/).length).toBeGreaterThan(0);
   });
 
   it("shows a regenerate-options fallback when planner option payload is empty", async () => {
@@ -5117,6 +5416,1074 @@ describe("WorkbenchPanelHost entity refresh", () => {
       screen.getByRole("button", { name: "Open Threads" }).click();
     });
     expect(onOpenPanel).toHaveBeenCalledWith(expect.objectContaining({ key: "thread_list" }));
+  });
+
+  it("shows one primary execution action per phase and derives next action from execution state", async () => {
+    const onOpenPanel = vi.fn();
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+          skipped_artifacts: 0,
+          total_artifacts: 1,
+        },
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(stagedSession));
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByText("Current phase")).toBeInTheDocument());
+    expect(screen.getAllByText("Staged").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Prepare preview environment").length).toBeGreaterThan(0);
+    expect(screen.getByText("Changes staged (1 task queued).")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Prepare Preview" })).toHaveClass("primary");
+    expect(screen.getByRole("button", { name: "Stage Apply" })).toHaveClass("ghost");
+    expect(screen.getByRole("button", { name: "Validate" })).toHaveClass("ghost");
+  });
+
+  it("updates feedback, phase, and preview evidence after preparing preview", async () => {
+    const onOpenPanel = vi.fn();
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+          skipped_artifacts: 0,
+          total_artifacts: 1,
+        },
+      },
+    });
+    const previewReadySession = createComposerSession({
+      execution_status: "preview_ready",
+      staged_changes: stagedSession.staged_changes,
+      preview: {
+        status: "ready",
+        source: "reused_runtime",
+        primary_url: "http://localhost:32932/app/",
+        session_build: {
+          status: "reused",
+          reason: "runtime_reused_live_target",
+        },
+      },
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(stagedSession))
+      .mockResolvedValueOnce(createComposerState(previewReadySession));
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(previewReadySession, {
+        operation: "prepare_preview",
+        status: "succeeded",
+        operation_result: { prepared: true, session: previewReadySession },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Prepare Preview" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Prepare Preview" }).click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "prepare_preview",
+      })
+    );
+    await waitFor(() => expect(screen.getAllByText("Preview ready (reused runtime).").length).toBeGreaterThan(0));
+    expect(screen.getByText("Preview URL")).toBeInTheDocument();
+    expect(screen.getByText("http://localhost:32932/app/")).toBeInTheDocument();
+    expect(screen.getByText("Session Build")).toBeInTheDocument();
+    expect(screen.getByText("Reused")).toBeInTheDocument();
+    expect(screen.getByText("Build Reason")).toBeInTheDocument();
+    expect(screen.getByText("runtime_reused_live_target")).toBeInTheDocument();
+    expect(screen.getAllByText("Preview Ready").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Validate changes").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Validate" })).toHaveClass("primary");
+  });
+
+  it("routes stage apply through the control contract and does not call legacy stage endpoint", async () => {
+    const onOpenPanel = vi.fn();
+    const initialSession = createComposerSession({
+      execution_status: "not_started",
+    });
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+          skipped_artifacts: 0,
+          total_artifacts: 1,
+        },
+      },
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(initialSession))
+      .mockResolvedValueOnce(createComposerState(stagedSession));
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(stagedSession, {
+        operation: "stage_apply",
+        status: "succeeded",
+        operation_result: { staged: true, session: stagedSession },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Stage Apply" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Stage Apply" }).click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "stage_apply",
+      })
+    );
+    expect(apiMocks.stageSolutionChangeApply).not.toHaveBeenCalled();
+  });
+
+  it("renders preview-ready message with clickable URL when preview is newly prepared", async () => {
+    const onOpenPanel = vi.fn();
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+          skipped_artifacts: 0,
+          total_artifacts: 1,
+        },
+      },
+    });
+    const previewReadySession = createComposerSession({
+      execution_status: "preview_ready",
+      staged_changes: stagedSession.staged_changes,
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://localhost:32932/app/",
+      },
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(stagedSession))
+      .mockResolvedValueOnce(createComposerState(previewReadySession));
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(previewReadySession, {
+        operation: "prepare_preview",
+        status: "succeeded",
+        operation_result: { prepared: true, session: previewReadySession },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Prepare Preview" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Prepare Preview" }).click();
+    });
+
+    const previewLink = await screen.findByRole("link", { name: "http://localhost:32932/app/" });
+    expect(previewLink).toHaveAttribute("href", "http://localhost:32932/app/");
+  });
+
+  it("shows open preview action only when preview is ready and opens the preview URL", async () => {
+    const onOpenPanel = vi.fn();
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const previewReadySession = createComposerSession({
+      execution_status: "preview_ready",
+      preview: {
+        status: "ready",
+        source: "reused_runtime",
+        primary_url: "http://localhost:32932/app/",
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(previewReadySession));
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open Preview (existing runtime)" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Open Preview (existing runtime)" }));
+    expect(openSpy).toHaveBeenCalledWith("http://localhost:32932/app/", "_blank", "noopener,noreferrer");
+    openSpy.mockRestore();
+  });
+
+  it("finalizes a promoted session and hides execution controls", async () => {
+    const onOpenPanel = vi.fn();
+    const promotedSession = createComposerSession({
+      execution_status: "promoted",
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+      },
+      preview: {
+        status: "ready",
+        source: "reused_runtime",
+        primary_url: "http://localhost:32932/app/",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    const finalizedSession = createComposerSession({
+      status: "completed",
+      execution_status: "completed",
+      preview: promotedSession.preview,
+      validation: promotedSession.validation,
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(promotedSession))
+      .mockResolvedValueOnce(createComposerState(finalizedSession));
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(finalizedSession, {
+        operation: "finalize",
+        status: "succeeded",
+        operation_result: { finalized: true, session: finalizedSession },
+      })
+    );
+    const linkedSessionUpdatedSpy = vi.spyOn(window, "dispatchEvent");
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Finalize Session" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Finalize Session" }).click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "finalize",
+      })
+    );
+    await waitFor(() => expect(screen.getAllByText("Session finalized.").length).toBeGreaterThan(0));
+    expect(screen.getByText("Session finalized. Execution controls are hidden.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stage Apply" })).not.toBeInTheDocument();
+    expect(linkedSessionUpdatedSpy).toHaveBeenCalled();
+    linkedSessionUpdatedSpy.mockRestore();
+  });
+
+  it("promotes a committed session and reports running-environment update", async () => {
+    const onOpenPanel = vi.fn();
+    const committedSession = createComposerSession({
+      execution_status: "committed",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-123.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    const promotedSession = createComposerSession({
+      execution_status: "promoted",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+      },
+      preview: committedSession.preview,
+      validation: committedSession.validation,
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(committedSession))
+      .mockResolvedValueOnce(createComposerState(promotedSession));
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(promotedSession, {
+        operation: "promote",
+        status: "succeeded",
+        operation_result: {
+          promoted: true,
+          already_up_to_date: false,
+          session: promotedSession,
+        },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Promote" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Promote" }).click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "promote",
+      })
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "http://localhost" })).toHaveAttribute("href", "http://localhost")
+    );
+    expect(screen.getByRole("button", { name: "Finalize Session" })).toBeEnabled();
+  });
+
+  it("routes rollback through the control contract when rollback is eligible", async () => {
+    const onOpenPanel = vi.fn();
+    const promotedSession = createComposerSession({
+      execution_status: "promoted",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+      },
+      evidence_ref: {
+        promotion_evidence_id: "evidence-promote-1",
+      },
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-123.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    const rolledBackSession = createComposerSession({
+      execution_status: "committed",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: {
+        rollback: {
+          rolled_back_at: "2026-04-04T12:00:00Z",
+          restored_target: {
+            runtime_base_url: "http://prior.localhost",
+            public_app_url: "http://prior.localhost",
+          },
+        },
+      },
+      evidence_ref: {
+        promotion_evidence_id: "evidence-rollback-1",
+      },
+      preview: promotedSession.preview,
+      validation: promotedSession.validation,
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(promotedSession))
+      .mockResolvedValueOnce(createComposerState(rolledBackSession));
+    apiMocks.getSolutionChangeSessionControl.mockResolvedValue(
+      createControlEnvelope(promotedSession, {
+        control: {
+          can_rollback: true,
+          rollback_eligibility: {
+            can_rollback: true,
+            blocked_reason: "",
+          },
+          next_allowed_actions: ["rollback", "finalize"],
+        },
+      })
+    );
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(rolledBackSession, {
+        operation: "rollback",
+        status: "succeeded",
+        control: {
+          can_rollback: false,
+          rollback_eligibility: {
+            can_rollback: false,
+            blocked_reason: "execution_not_promoted",
+          },
+          next_allowed_actions: ["promote"],
+        },
+        operation_result: {
+          status: "succeeded",
+          rollback_performed: true,
+          restored_target: {
+            runtime_base_url: "http://prior.localhost",
+            public_app_url: "http://prior.localhost",
+          },
+          rollback_evidence_ref: {
+            promotion_evidence_id: "evidence-rollback-1",
+          },
+          session: rolledBackSession,
+        },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getSolutionChangeSessionControl).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Rollback" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Rollback" }).click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "rollback",
+      })
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "http://prior.localhost" })).toHaveAttribute("href", "http://prior.localhost")
+    );
+  });
+
+  it("surfaces blocked rollback state from control eligibility", async () => {
+    const onOpenPanel = vi.fn();
+    const promotedSession = createComposerSession({
+      execution_status: "promoted",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+      },
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-123.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(promotedSession));
+    apiMocks.getSolutionChangeSessionControl.mockResolvedValue(
+      createControlEnvelope(promotedSession, {
+        control: {
+          can_rollback: false,
+          rollback_eligibility: {
+            can_rollback: false,
+            blocked_reason: "superseded_state_missing",
+            recommended_action: "select_evidence_with_superseded_state",
+          },
+          next_allowed_actions: ["finalize"],
+        },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getSolutionChangeSessionControl).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Rollback" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Rollback" })).toBeDisabled();
+    expect(screen.getByText(/does not contain a prior active state to restore/i)).toBeInTheDocument();
+  });
+
+  it("surfaces a self-development safeguard note when control contract status is unavailable", async () => {
+    const onOpenPanel = vi.fn();
+    const stagedSession = createComposerSession({
+      execution_status: "staged",
+      repo_commit_count: 0,
+      requires_commit_provenance: true,
+      staged_changes: {
+        execution_summary: {
+          queued_artifacts: 1,
+          failed_artifacts: 0,
+        },
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(stagedSession));
+    apiMocks.getSolutionChangeSessionControl.mockRejectedValue(new Error("control offline"));
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getSolutionChangeSessionControl).toHaveBeenCalled());
+    const preparePreview = screen.getByRole("button", { name: "Prepare Preview" });
+    expect(preparePreview).toBeEnabled();
+    expect(
+      screen.getByText(/self-development safeguard: execution actions are contract-driven/i)
+    ).toBeInTheDocument();
+  });
+
+  it("renders promotion and rollback evidence history for the selected session", async () => {
+    const onOpenPanel = vi.fn();
+    const promotedSession = createComposerSession({
+      execution_status: "promoted",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      evidence_ref: {
+        promotion_evidence_id: "evidence-rollback-1",
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(promotedSession));
+    apiMocks.getSolutionChangeSessionControl.mockResolvedValue(createControlEnvelope(promotedSession));
+    apiMocks.getSolutionChangeSessionPromotionEvidence.mockResolvedValue({
+      evidence: [
+        createPromotionEvidenceEntry({
+          id: "evidence-rollback-1",
+          operation: "rollback",
+          source_promotion_evidence_id: "evidence-promote-1",
+          resulting_active_target: { public_app_url: "http://prior.localhost" },
+          superseded_active_state: { public_app_url: "http://localhost" },
+        }),
+        createPromotionEvidenceEntry({
+          id: "evidence-promote-1",
+          operation: "promotion",
+          resulting_active_target: { public_app_url: "http://localhost" },
+          superseded_active_state: {},
+        }),
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(apiMocks.getSolutionChangeSessionPromotionEvidence).toHaveBeenCalled());
+    expect(screen.getByText("Promotion / Rollback History")).toBeInTheDocument();
+    expect(screen.getAllByText(/evidence-rollback-1/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/source evidence-promote-1/)).toBeInTheDocument();
+    expect(screen.getByText(/restored http:\/\/prior\.localhost/i)).toBeInTheDocument();
+  });
+
+  it("refreshes evidence history after a rollback control action", async () => {
+    const onOpenPanel = vi.fn();
+    const promotedSession = createComposerSession({
+      execution_status: "promoted",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: {
+        promotion: {
+          result: "success",
+          target_runtime: "xyn-local",
+          ui_url: "http://localhost",
+        },
+      },
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-123.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+      evidence_ref: {
+        promotion_evidence_id: "evidence-promote-1",
+      },
+    });
+    const rolledBackSession = createComposerSession({
+      execution_status: "committed",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: {
+        rollback: {
+          rolled_back_at: "2026-04-04T12:00:00Z",
+          restored_target: {
+            runtime_base_url: "http://prior.localhost",
+            public_app_url: "http://prior.localhost",
+          },
+        },
+      },
+      evidence_ref: {
+        promotion_evidence_id: "evidence-rollback-1",
+      },
+      preview: promotedSession.preview,
+      validation: promotedSession.validation,
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(promotedSession))
+      .mockResolvedValueOnce(createComposerState(rolledBackSession));
+    apiMocks.getSolutionChangeSessionControl.mockResolvedValue(
+      createControlEnvelope(promotedSession, {
+        control: {
+          can_rollback: true,
+          rollback_eligibility: {
+            can_rollback: true,
+            blocked_reason: "",
+          },
+          next_allowed_actions: ["rollback", "finalize"],
+        },
+      })
+    );
+    apiMocks.getSolutionChangeSessionPromotionEvidence
+      .mockResolvedValueOnce({
+        evidence: [
+          createPromotionEvidenceEntry({
+            id: "evidence-promote-1",
+            operation: "promotion",
+            resulting_active_target: { public_app_url: "http://localhost" },
+            superseded_active_state: {},
+          }),
+        ],
+      })
+      .mockResolvedValueOnce({
+        evidence: [
+          createPromotionEvidenceEntry({
+            id: "evidence-rollback-1",
+            operation: "rollback",
+            source_promotion_evidence_id: "evidence-promote-1",
+            resulting_active_target: { public_app_url: "http://prior.localhost" },
+            superseded_active_state: { public_app_url: "http://localhost" },
+          }),
+          createPromotionEvidenceEntry({
+            id: "evidence-promote-1",
+            operation: "promotion",
+            resulting_active_target: { public_app_url: "http://localhost" },
+            superseded_active_state: {},
+          }),
+        ],
+      });
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(rolledBackSession, {
+        operation: "rollback",
+        status: "succeeded",
+        control: {
+          can_rollback: false,
+          rollback_eligibility: {
+            can_rollback: false,
+            blocked_reason: "execution_not_promoted",
+          },
+          next_allowed_actions: ["promote"],
+        },
+        operation_result: {
+          status: "succeeded",
+          rollback_performed: true,
+          restored_target: {
+            runtime_base_url: "http://prior.localhost",
+            public_app_url: "http://prior.localhost",
+          },
+          rollback_evidence_ref: {
+            promotion_evidence_id: "evidence-rollback-1",
+          },
+          session: rolledBackSession,
+        },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Rollback" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Rollback" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.getSolutionChangeSessionPromotionEvidence).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getAllByText(/evidence-rollback-1/).length).toBeGreaterThan(0));
+  });
+
+  it("disables promote when root target is missing and shows explicit reason", async () => {
+    const onOpenPanel = vi.fn();
+    const committedSession = createComposerSession({
+      execution_status: "committed",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      promote_eligibility: {
+        can_promote: false,
+        blocked_reason: "solution_not_installed_in_root",
+        recommended_action: "install_in_root",
+      },
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-123.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    apiMocks.getComposerState.mockResolvedValue(createComposerState(committedSession));
+    apiMocks.getSolutionChangeSessionControl.mockResolvedValue(
+      createControlEnvelope(committedSession, {
+        control: {
+          can_promote: false,
+          blocked_reason: "solution_not_installed_in_root",
+          recommended_action: "install_in_root",
+          next_allowed_actions: ["install_in_root", "activate_in_root"],
+        },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Promote" })).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Promote" })).toBeDisabled();
+    expect(screen.getByText(/not installed in the root environment/i)).toBeInTheDocument();
+  });
+
+  it("requires commit before promote when commit provenance is required", async () => {
+    const onOpenPanel = vi.fn();
+    const readyForCommitSession = createComposerSession({
+      execution_status: "ready_for_promotion",
+      repo_commit_count: 0,
+      requires_commit_provenance: true,
+      preview: {
+        status: "ready",
+        source: "session_build",
+        primary_url: "http://xyn-preview-456.localhost",
+      },
+      validation: {
+        status: "validated",
+      },
+    });
+    const committedSession = createComposerSession({
+      execution_status: "committed",
+      repo_commit_count: 1,
+      requires_commit_provenance: true,
+      metadata: { commit: { hash: "abc123def456" } },
+      preview: readyForCommitSession.preview,
+      validation: readyForCommitSession.validation,
+    });
+    apiMocks.getComposerState
+      .mockResolvedValueOnce(createComposerState(readyForCommitSession))
+      .mockResolvedValueOnce(createComposerState(committedSession));
+    apiMocks.runSolutionChangeSessionControlAction.mockResolvedValue(
+      createControlEnvelope(committedSession, {
+        operation: "commit",
+        status: "succeeded",
+        operation_result: {
+          committed: true,
+          already_committed: false,
+          no_changes: false,
+          commits: [{ commit_sha: "abc123def4567890", repository_slug: "xyn-platform", branch: "main", changed_files: ["apps/xyn-ui/src/a.tsx"] }],
+          session: committedSession,
+        },
+      })
+    );
+
+    render(
+      <MemoryRouter>
+        <WorkbenchPanelHost
+          workspaceId="ws-1"
+          panel={{
+            panel_id: "composer-session-1",
+            panel_type: "detail",
+            instance_key: "composer:ws-1",
+            key: "composer_detail",
+            params: { workspace_id: "ws-1", application_id: "app-1", solution_change_session_id: "session-1" },
+          }}
+          onOpenPanel={onOpenPanel}
+        />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Commit Changes" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Promote" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Commit Changes" }).click();
+    });
+
+    await waitFor(() =>
+      expect(apiMocks.runSolutionChangeSessionControlAction).toHaveBeenCalledWith("app-1", "session-1", {
+        operation: "commit",
+      })
+    );
+    await waitFor(() => expect(screen.getAllByText(/Committed repository changes/i).length).toBeGreaterThan(0));
+    expect(screen.getByRole("button", { name: "Promote" })).toBeEnabled();
+  });
+
+  it("activates artifact detail into reusable dev sibling and opens runtime for reused status", async () => {
+    const onOpenPanel = vi.fn();
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    apiMocks.getArtifactConsoleDetailBySlug.mockResolvedValue({
+      artifact: {
+        id: "artifact-1",
+        slug: "app.demo",
+        title: "Demo App",
+        kind: "application",
+        version: "1",
+      },
+      manifest: {},
+      manifest_summary: { roles: [], surfaces: { manage: [], docs: [] } },
+      raw_artifact_json: {},
+      files: [],
+      surfaces: [],
+      runtime_roles: [],
+    });
+    apiMocks.activateArtifact.mockResolvedValue({
+      status: "reused",
+      workspace_id: "ws-2",
+      artifact_id: "artifact-1",
+      artifact_slug: "app.demo",
+      app_slug: "demo",
+      runtime_instance: { fqdn: "demo.local.test" },
+      runtime_target: { installed_artifact_slug: "app.demo" },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/w/ws-2/workbench"]}>
+        <Routes>
+          <Route
+            path="/w/:workspaceId/workbench"
+            element={
+              <WorkbenchPanelHost
+                workspaceId="ws-2"
+                panel={{ panel_id: "artifact-detail", panel_type: "detail", instance_key: "artifact:app.demo", key: "artifact_detail", params: { slug: "app.demo" } }}
+                onOpenPanel={onOpenPanel}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open in Dev Sibling" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Open in Dev Sibling" }).click();
+    });
+
+    await waitFor(() => expect(apiMocks.activateArtifact).toHaveBeenCalledWith("artifact-1"));
+    expect(openSpy).toHaveBeenCalledWith("https://demo.local.test", "_blank", "noopener,noreferrer");
+    expect(screen.getByText("Opened existing dev sibling runtime.")).toBeInTheDocument();
+    openSpy.mockRestore();
+  });
+
+  it("shows activation in-progress and queued feedback from backend statuses", async () => {
+    const onOpenPanel = vi.fn();
+    apiMocks.getArtifactConsoleDetailBySlug.mockResolvedValue({
+      artifact: {
+        id: "artifact-1",
+        slug: "app.demo",
+        title: "Demo App",
+        kind: "application",
+        version: "1",
+      },
+      manifest: {},
+      manifest_summary: { roles: [], surfaces: { manage: [], docs: [] } },
+      raw_artifact_json: {},
+      files: [],
+      surfaces: [],
+      runtime_roles: [],
+    });
+    apiMocks.activateArtifact
+      .mockResolvedValueOnce({
+        status: "queued_existing",
+        workspace_id: "ws-2",
+        artifact_id: "artifact-1",
+        artifact_slug: "app.demo",
+        app_slug: "demo",
+        activation: { draft_id: "draft-1", job_id: "job-1" },
+        in_flight: { draft_id: "draft-1", job_id: "job-1", status: "running", type: "deploy_app_local" },
+      })
+      .mockResolvedValueOnce({
+        status: "queued",
+        workspace_id: "ws-2",
+        artifact_id: "artifact-1",
+        artifact_slug: "app.demo",
+        app_slug: "demo",
+        activation: { draft_id: "draft-2", job_id: "job-2" },
+      });
+
+    render(
+      <MemoryRouter initialEntries={["/w/ws-2/workbench"]}>
+        <Routes>
+          <Route
+            path="/w/:workspaceId/workbench"
+            element={
+              <WorkbenchPanelHost
+                workspaceId="ws-2"
+                panel={{ panel_id: "artifact-detail", panel_type: "detail", instance_key: "artifact:app.demo", key: "artifact_detail", params: { slug: "app.demo" } }}
+                onOpenPanel={onOpenPanel}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open in Dev Sibling" })).toBeInTheDocument());
+    await act(async () => {
+      screen.getByRole("button", { name: "Open in Dev Sibling" }).click();
+    });
+    await waitFor(() => expect(screen.getByText("Activation is already in progress.")).toBeInTheDocument());
+    expect(screen.getByText("Draft draft-1 · Job job-1")).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Open in Dev Sibling" }).click();
+    });
+    await waitFor(() => expect(screen.getByText("Activation queued for dev sibling.")).toBeInTheDocument());
+    expect(screen.getByText("Draft draft-2 · Job job-2")).toBeInTheDocument();
   });
 
   it("shows a safe unavailable state for preserved artifact detail panels", async () => {

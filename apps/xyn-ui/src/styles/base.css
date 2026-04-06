@@ -234,24 +234,6 @@ input {
   font-weight: 600;
 }
 
-.workspace-selector {
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--card);
-  color: var(--text);
-  padding: 3px 10px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  min-width: 96px;
-  width: auto;
-  max-width: 170px;
-}
-
-.workspace-selector:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
 .header-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1176,6 +1158,30 @@ button.sm {
   min-height: 52px;
 }
 
+.linked-dev-session-banner {
+  margin: 0 0 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent-soft) 65%, var(--card));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.linked-dev-session-banner-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.linked-dev-session-banner-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 .preview-chip {
   margin-left: 8px;
   display: inline-flex;
@@ -1613,6 +1619,10 @@ button.sm {
   position: relative;
 }
 
+.workspace-menu-wrap {
+  color: var(--ink);
+}
+
 .user-menu-trigger {
   display: inline-flex;
   align-items: center;
@@ -1621,12 +1631,42 @@ button.sm {
   padding: 4px 8px;
 }
 
+.workspace-menu-trigger {
+  min-width: 96px;
+  max-width: 180px;
+}
+
+.workspace-menu-trigger-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .user-menu-popover {
   position: absolute;
   top: 40px;
   right: 0;
   width: 260px;
   z-index: 1200;
+}
+
+.workspace-menu-popover {
+  left: 0;
+  right: auto;
+  width: min(320px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  box-sizing: border-box;
+}
+
+.workspace-menu-popover .xyn-menu-item {
+  min-width: 0;
+}
+
+.workspace-menu-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .xyn-popover {
@@ -3248,6 +3288,10 @@ button.sm {
 .solution-card-compact h5,
 .solution-card-compact p {
   margin: 0;
+}
+
+.solution-requested-change-input {
+  width: 100%;
 }
 
 .solution-empty-state {

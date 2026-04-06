@@ -3,10 +3,20 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import HeaderUtilityMenu from "./HeaderUtilityMenu";
 
+const navigateMock = vi.hoisted(() => vi.fn());
 const apiMocks = vi.hoisted(() => ({
   getAiRoutingStatus: vi.fn(),
   getSystemReadiness: vi.fn(),
+  getWorkspaceLinkedChangeSession: vi.fn(),
 }));
+
+vi.mock("react-router-dom", async () => {
+  const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
+  return {
+    ...actual,
+    useNavigate: () => navigateMock,
+  };
+});
 
 vi.mock("../../../api/xyn", async () => {
   const actual = await vi.importActual<typeof import("../../../api/xyn")>("../../../api/xyn");
@@ -14,6 +24,7 @@ vi.mock("../../../api/xyn", async () => {
     ...actual,
     getAiRoutingStatus: apiMocks.getAiRoutingStatus,
     getSystemReadiness: apiMocks.getSystemReadiness,
+    getWorkspaceLinkedChangeSession: apiMocks.getWorkspaceLinkedChangeSession,
   };
 });
 
@@ -73,6 +84,7 @@ vi.mock("../../state/xynConsoleStore", () => ({
 describe("HeaderUtilityMenu", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    navigateMock.mockReset();
     apiMocks.getAiRoutingStatus.mockResolvedValue({
       routing: [
         { purpose: "default", resolved_agent_name: "Xyn Default Assistant", resolution_source: "explicit" },
@@ -86,6 +98,7 @@ describe("HeaderUtilityMenu", () => {
       summary: "Configuration required",
       checks: [{ component: "coding_agents", status: "missing", message: "No usable coding credentials." }],
     });
+    apiMocks.getWorkspaceLinkedChangeSession.mockResolvedValue({ linked_session: null });
   });
 
   it("renders consolidated utility sections and opens agent activity", async () => {
@@ -114,5 +127,126 @@ describe("HeaderUtilityMenu", () => {
 
     await waitFor(() => expect(apiMocks.getAiRoutingStatus).toHaveBeenCalled());
     await waitFor(() => expect(apiMocks.getSystemReadiness).toHaveBeenCalled());
+  });
+
+  it("shows resume control only when linked session is active and navigates to composer session route", async () => {
+    apiMocks.getWorkspaceLinkedChangeSession.mockResolvedValue({
+      linked_session: {
+        workspace_id: "ws-1",
+        application_id: "app-1",
+        solution_change_session_id: "scs-1",
+        status: "planned",
+        execution_status: "preview_ready",
+      },
+    });
+    render(
+      <MemoryRouter>
+        <HeaderUtilityMenu
+          workspaceId="ws-1"
+          actorRoles={["platform_admin"]}
+          actorLabel="user@example.com"
+          onOpenAgentActivity={vi.fn()}
+          onMessage={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Utilities" }));
+    const button = await screen.findByRole("button", { name: /Resume change session/i });
+    fireEvent.click(button);
+    expect(navigateMock).toHaveBeenCalledWith(
+      "/w/ws-1/workbench?panel=composer_detail&application_id=app-1&solution_change_session_id=scs-1"
+    );
+  });
+
+  it("shows feedback and skips navigation when linked session is already focused", async () => {
+    const onMessage = vi.fn();
+    apiMocks.getWorkspaceLinkedChangeSession.mockResolvedValue({
+      linked_session: {
+        workspace_id: "ws-1",
+        application_id: "app-1",
+        solution_change_session_id: "scs-1",
+        status: "planned",
+      },
+    });
+    render(
+      <MemoryRouter initialEntries={["/w/ws-1/workbench?panel=composer_detail&application_id=app-1&solution_change_session_id=scs-1"]}>
+        <HeaderUtilityMenu
+          workspaceId="ws-1"
+          actorRoles={["platform_admin"]}
+          actorLabel="user@example.com"
+          onOpenAgentActivity={vi.fn()}
+          onMessage={onMessage}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Utilities" }));
+    const button = await screen.findByRole("button", { name: /Resume change session/i });
+    fireEvent.click(button);
+    expect(navigateMock).not.toHaveBeenCalled();
+    expect(onMessage).toHaveBeenCalledWith({ level: "success", title: "Already viewing linked session" });
+  });
+
+  it("hides resume control when no linked session is present", async () => {
+    apiMocks.getWorkspaceLinkedChangeSession.mockResolvedValue({ linked_session: null });
+    render(
+      <MemoryRouter>
+        <HeaderUtilityMenu
+          workspaceId="ws-1"
+          actorRoles={["platform_admin"]}
+          actorLabel="user@example.com"
+          onOpenAgentActivity={vi.fn()}
+          onMessage={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Utilities" }));
+    await waitFor(() => expect(apiMocks.getWorkspaceLinkedChangeSession).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /Resume change session/i })).not.toBeInTheDocument();
+  });
+
+  it("hides resume control when linked session payload is malformed", async () => {
+    apiMocks.getWorkspaceLinkedChangeSession.mockResolvedValue({
+      linked_session: {
+        workspace_id: "ws-1",
+        application_id: "",
+        solution_change_session_id: "",
+      },
+    });
+    render(
+      <MemoryRouter>
+        <HeaderUtilityMenu
+          workspaceId="ws-1"
+          actorRoles={["platform_admin"]}
+          actorLabel="user@example.com"
+          onOpenAgentActivity={vi.fn()}
+          onMessage={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Utilities" }));
+    await waitFor(() => expect(apiMocks.getWorkspaceLinkedChangeSession).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /Resume change session/i })).not.toBeInTheDocument();
+  });
+
+  it("renders readiness component labels with expected acronym capitalization", async () => {
+    apiMocks.getSystemReadiness.mockResolvedValue({
+      ready: false,
+      summary: "Configuration required",
+      checks: [{ component: "ai_providers", status: "missing", message: "No providers configured." }],
+    });
+    render(
+      <MemoryRouter>
+        <HeaderUtilityMenu
+          workspaceId="ws-1"
+          actorRoles={["platform_admin"]}
+          actorLabel="user@example.com"
+          onOpenAgentActivity={vi.fn()}
+          onMessage={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Utilities" }));
+    expect(await screen.findByText("AI Providers")).toBeInTheDocument();
   });
 });

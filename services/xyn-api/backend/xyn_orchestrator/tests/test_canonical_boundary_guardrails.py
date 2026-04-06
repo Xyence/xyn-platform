@@ -1,4 +1,5 @@
 from pathlib import Path
+import tempfile
 
 from django.test import SimpleTestCase
 
@@ -57,3 +58,22 @@ class CanonicalBoundaryGuardrailTests(SimpleTestCase):
         self.assertIn("linked_campaign", watch_fields)
         self.assertNotIn("campaign", match_fields)
         self.assertIn("watch", match_fields)
+
+    def test_guardrail_flags_provider_specific_deployment_logic_outside_allowed_core_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            backend_root = Path(tmpdir)
+            runtime_root = backend_root / "xyn_orchestrator"
+            runtime_root.mkdir(parents=True, exist_ok=True)
+            bad_file = runtime_root / "deployment_helpers.py"
+            bad_file.write_text(
+                "\n".join(
+                    [
+                        "import boto3",
+                        "def deploy_runtime():",
+                        "    return boto3.client('ssm').send_command(DocumentName='AWS-RunShellScript')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            findings = scan_backend_canonical_drift(backend_root)
+            self.assertTrue(any("provider-specific deployment markers" in item for item in findings), findings)

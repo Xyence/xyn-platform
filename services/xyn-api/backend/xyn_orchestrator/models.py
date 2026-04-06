@@ -438,6 +438,258 @@ class ReleaseTarget(models.Model):
         return f"{self.blueprint} target {self.name}"
 
 
+class ReleaseTargetDeploymentPreparationEvidence(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    release_target = models.ForeignKey(
+        ReleaseTarget,
+        on_delete=models.CASCADE,
+        related_name="deployment_preparation_evidence",
+    )
+    blueprint = models.ForeignKey(
+        Blueprint,
+        on_delete=models.CASCADE,
+        related_name="release_target_deployment_preparation_evidence",
+    )
+    planning_mode = models.CharField(max_length=40, blank=True, default="")
+    operation = models.CharField(max_length=120, blank=True, default="")
+    provider_key = models.CharField(max_length=120, blank=True, default="")
+    provider_module_contract_ref = models.CharField(max_length=255, blank=True, default="")
+    execution_ready_in_principle = models.BooleanField(default=False)
+    mutation_performed = models.BooleanField(default=False)
+    requested_config_json = models.JSONField(default=dict, blank=True)
+    discovered_inputs_json = models.JSONField(default=list, blank=True)
+    missing_inputs_json = models.JSONField(default=list, blank=True)
+    steps_json = models.JSONField(default=list, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    staged_execution_intent_json = models.JSONField(default=dict, blank=True)
+    plan_snapshot_json = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="release_target_deployment_preparation_evidence_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["release_target", "created_at"], name="ix_rt_prep_target_time"),
+            models.Index(fields=["provider_key", "created_at"], name="ix_rt_prep_provider_time"),
+        ]
+
+    def clean(self):
+        if self.release_target_id and self.blueprint_id and str(self.release_target.blueprint_id) != str(self.blueprint_id):
+            raise ValidationError("blueprint must match release target blueprint")
+
+    def save(self, *args, **kwargs):
+        if self.release_target_id and not self.blueprint_id:
+            self.blueprint_id = self.release_target.blueprint_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.release_target_id}:{self.provider_key}:{self.created_at.isoformat() if self.created_at else ''}"
+
+
+class ReleaseTargetExecutionPreparationHandoff(models.Model):
+    STATUS_CHOICES = [
+        ("ready", "Ready"),
+        ("blocked", "Blocked"),
+        ("invalid", "Invalid"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    release_target = models.ForeignKey(
+        ReleaseTarget,
+        on_delete=models.CASCADE,
+        related_name="execution_preparation_handoffs",
+    )
+    blueprint = models.ForeignKey(
+        Blueprint,
+        on_delete=models.CASCADE,
+        related_name="release_target_execution_preparation_handoffs",
+    )
+    source_preparation_evidence = models.ForeignKey(
+        ReleaseTargetDeploymentPreparationEvidence,
+        on_delete=models.CASCADE,
+        related_name="execution_preparation_handoffs",
+    )
+    validation_status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="blocked")
+    blocked_reason = models.CharField(max_length=120, blank=True, default="")
+    mutation_performed = models.BooleanField(default=False)
+    handoff_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="release_target_execution_preparation_handoffs_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["release_target", "created_at"], name="ix_rt_exec_handoff_target_time"),
+            models.Index(fields=["validation_status", "created_at"], name="ix_rt_exec_handoff_status_time"),
+        ]
+
+    def clean(self):
+        if self.release_target_id and self.blueprint_id and str(self.release_target.blueprint_id) != str(self.blueprint_id):
+            raise ValidationError("blueprint must match release target blueprint")
+        if (
+            self.source_preparation_evidence_id
+            and self.release_target_id
+            and str(self.source_preparation_evidence.release_target_id) != str(self.release_target_id)
+        ):
+            raise ValidationError("source evidence must belong to the same release target")
+
+    def save(self, *args, **kwargs):
+        if self.release_target_id and not self.blueprint_id:
+            self.blueprint_id = self.release_target.blueprint_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.release_target_id}:{self.validation_status}:{self.created_at.isoformat() if self.created_at else ''}"
+
+
+class ReleaseTargetExecutionPreparationEvidence(models.Model):
+    STATUS_CHOICES = [
+        ("prepared", "Prepared"),
+        ("blocked", "Blocked"),
+        ("invalid", "Invalid"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    release_target = models.ForeignKey(
+        ReleaseTarget,
+        on_delete=models.CASCADE,
+        related_name="execution_preparation_evidence",
+    )
+    blueprint = models.ForeignKey(
+        Blueprint,
+        on_delete=models.CASCADE,
+        related_name="release_target_execution_preparation_evidence",
+    )
+    source_handoff = models.ForeignKey(
+        ReleaseTargetExecutionPreparationHandoff,
+        on_delete=models.CASCADE,
+        related_name="execution_preparation_evidence",
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="blocked")
+    blocked_reason = models.CharField(max_length=120, blank=True, default="")
+    approval_granted = models.BooleanField(default=False)
+    mutation_performed = models.BooleanField(default=False)
+    prepared_actions_json = models.JSONField(default=list, blank=True)
+    prepared_payload_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="release_target_execution_preparation_evidence_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["release_target", "created_at"], name="ix_rt_exec_prep_target_time"),
+            models.Index(fields=["status", "created_at"], name="ix_rt_exec_prep_status_time"),
+        ]
+
+    def clean(self):
+        if self.release_target_id and self.blueprint_id and str(self.release_target.blueprint_id) != str(self.blueprint_id):
+            raise ValidationError("blueprint must match release target blueprint")
+        if self.source_handoff_id and self.release_target_id and str(self.source_handoff.release_target_id) != str(self.release_target_id):
+            raise ValidationError("source handoff must belong to the same release target")
+
+    def save(self, *args, **kwargs):
+        if self.release_target_id and not self.blueprint_id:
+            self.blueprint_id = self.release_target.blueprint_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.release_target_id}:{self.status}:{self.created_at.isoformat() if self.created_at else ''}"
+
+
+class ReleaseTargetExecutionStepEvidence(models.Model):
+    STATUS_CHOICES = [
+        ("succeeded", "Succeeded"),
+        ("blocked", "Blocked"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    release_target = models.ForeignKey(
+        ReleaseTarget,
+        on_delete=models.CASCADE,
+        related_name="execution_step_evidence",
+    )
+    blueprint = models.ForeignKey(
+        Blueprint,
+        on_delete=models.CASCADE,
+        related_name="release_target_execution_step_evidence",
+    )
+    source_preparation_evidence = models.ForeignKey(
+        ReleaseTargetExecutionPreparationEvidence,
+        on_delete=models.CASCADE,
+        related_name="execution_step_evidence",
+    )
+    action_key = models.CharField(max_length=80, default="runtime_marker_probe")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="blocked")
+    blocked_reason = models.CharField(max_length=120, blank=True, default="")
+    approval_granted = models.BooleanField(default=False)
+    mutation_performed = models.BooleanField(default=False)
+    result_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="release_target_execution_step_evidence_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["release_target", "created_at"], name="ix_rt_exec_step_target_time"),
+            models.Index(fields=["status", "created_at"], name="ix_rt_exec_step_status_time"),
+        ]
+
+    def clean(self):
+        if self.release_target_id and self.blueprint_id and str(self.release_target.blueprint_id) != str(self.blueprint_id):
+            raise ValidationError("blueprint must match release target blueprint")
+        if (
+            self.source_preparation_evidence_id
+            and self.release_target_id
+            and str(self.source_preparation_evidence.release_target_id) != str(self.release_target_id)
+        ):
+            raise ValidationError("source preparation evidence must belong to the same release target")
+
+    def save(self, *args, **kwargs):
+        if self.release_target_id and not self.blueprint_id:
+            self.blueprint_id = self.release_target.blueprint_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.release_target_id}:{self.action_key}:{self.status}:{self.created_at.isoformat() if self.created_at else ''}"
+
+
 class IdentityProvider(models.Model):
     id = models.CharField(primary_key=True, max_length=120)
     display_name = models.CharField(max_length=200)
@@ -936,6 +1188,11 @@ class Artifact(models.Model):
         ("inactive", "Inactive"),
         ("error", "Error"),
     ]
+    EDIT_MODE_CHOICES = [
+        ("repo_backed", "Repo Backed"),
+        ("generated", "Generated"),
+        ("read_only", "Read Only"),
+    ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name="artifacts")
@@ -1004,6 +1261,9 @@ class Artifact(models.Model):
     verifiers_satisfied_json = models.JSONField(default=list, blank=True)
     provenance_json = models.JSONField(default=dict, blank=True)
     scope_json = models.JSONField(default=dict, blank=True)
+    owner_repo_slug = models.CharField(max_length=120, blank=True, default="")
+    owner_path_prefixes_json = models.JSONField(default=list, blank=True)
+    edit_mode = models.CharField(max_length=32, choices=EDIT_MODE_CHOICES, default="generated")
     video_spec_json = models.JSONField(null=True, blank=True)
     workflow_profile = models.CharField(max_length=40, blank=True, default="")
     workflow_spec_json = models.JSONField(null=True, blank=True)
@@ -1023,6 +1283,9 @@ class Artifact(models.Model):
         on_delete=models.SET_NULL,
         related_name="+",
     )
+    # Optional source/origin timestamp when known (for example exported/imported
+    # artifacts). `created_at` remains the local row creation timestamp.
+    source_created_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -4810,6 +5073,78 @@ class ApplicationArtifactMembership(models.Model):
         return f"{self.application_id}:{self.artifact_id}:{self.role}"
 
 
+class SolutionRuntimeBinding(models.Model):
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("active", "Active"),
+        ("error", "Error"),
+    ]
+    ACTIVATION_MODE_CHOICES = [
+        ("composed", "Composed"),
+        ("reconstructed", "Reconstructed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_runtime_bindings")
+    application = models.ForeignKey("Application", on_delete=models.CASCADE, related_name="runtime_bindings")
+    runtime_instance = models.ForeignKey(
+        "WorkspaceAppInstance",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="solution_runtime_bindings",
+    )
+    primary_app_artifact = models.ForeignKey(
+        "Artifact",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="solution_runtime_bindings_as_primary",
+    )
+    policy_artifact = models.ForeignKey(
+        "Artifact",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="solution_runtime_bindings_as_policy",
+    )
+    activation_mode = models.CharField(max_length=20, choices=ACTIVATION_MODE_CHOICES, default="reconstructed")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    runtime_target_json = models.JSONField(default=dict, blank=True)
+    last_activation_json = models.JSONField(default=dict, blank=True)
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "application"],
+                name="uniq_solution_runtime_binding_per_application",
+            )
+        ]
+
+    def clean(self):
+        if self.application_id and self.workspace_id and self.application.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match application workspace")
+        if self.runtime_instance_id and self.workspace_id and self.runtime_instance.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match runtime instance workspace")
+        if self.primary_app_artifact_id and self.workspace_id and self.primary_app_artifact.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match primary app artifact workspace")
+        if self.policy_artifact_id and self.workspace_id and self.policy_artifact.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match policy artifact workspace")
+
+    def save(self, *args, **kwargs):
+        if self.application_id and not self.workspace_id:
+            self.workspace_id = self.application.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.workspace_id}:{self.application_id}:{self.status}"
+
+
 class SolutionChangeSession(models.Model):
     STATUS_CHOICES = [
         ("draft", "Draft"),
@@ -4823,6 +5158,8 @@ class SolutionChangeSession(models.Model):
         ("preview_ready", "Preview Ready"),
         ("validating", "Validating"),
         ("ready_for_promotion", "Ready for Promotion"),
+        ("committed", "Committed"),
+        ("promoted", "Promoted"),
         ("failed", "Failed"),
     ]
 
@@ -4970,6 +5307,129 @@ class SolutionPlanningCheckpoint(models.Model):
 
     def __str__(self) -> str:
         return f"{self.session_id}:{self.checkpoint_key}:{self.required_before}:{self.status}"
+
+
+class SolutionChangeSessionRepoCommit(models.Model):
+    VALIDATION_STATUS_CHOICES = [
+        ("unknown", "Unknown"),
+        ("pending", "Pending"),
+        ("passed", "Passed"),
+        ("failed", "Failed"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_change_session_repo_commits")
+    solution_change_session = models.ForeignKey(
+        "SolutionChangeSession",
+        on_delete=models.CASCADE,
+        related_name="repo_commits",
+    )
+    repository_slug = models.CharField(max_length=120)
+    branch = models.CharField(max_length=120, blank=True, default="")
+    commit_sha = models.CharField(max_length=128)
+    changed_files_json = models.JSONField(default=list, blank=True)
+    validation_status = models.CharField(max_length=20, choices=VALIDATION_STATUS_CHOICES, default="unknown")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["solution_change_session", "repository_slug", "commit_sha"],
+                name="uniq_solution_change_session_repo_commit",
+            ),
+        ]
+
+    def clean(self):
+        if self.solution_change_session_id and self.workspace_id and self.solution_change_session.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match solution change session workspace")
+
+    def save(self, *args, **kwargs):
+        if self.solution_change_session_id and not self.workspace_id:
+            self.workspace_id = self.solution_change_session.workspace_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.solution_change_session_id}:{self.repository_slug}:{self.commit_sha}"
+
+
+class SolutionChangeSessionPromotionEvidence(models.Model):
+    OPERATION_CHOICES = [
+        ("promotion", "Promotion"),
+        ("rollback", "Rollback"),
+    ]
+    STATUS_CHOICES = [
+        ("success", "Success"),
+        ("blocked", "Blocked"),
+        ("failed", "Failed"),
+    ]
+    ACTOR_SOURCE_CHOICES = [
+        ("human", "Human"),
+        ("agent", "Agent"),
+        ("system", "System"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey("Workspace", on_delete=models.CASCADE, related_name="solution_change_session_promotion_evidence")
+    application = models.ForeignKey("Application", on_delete=models.CASCADE, related_name="promotion_evidence")
+    solution_change_session = models.ForeignKey(
+        "SolutionChangeSession",
+        on_delete=models.CASCADE,
+        related_name="promotion_evidence",
+    )
+    operation = models.CharField(max_length=24, choices=OPERATION_CHOICES, default="promotion")
+    promotion_status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="success")
+    actor_source = models.CharField(max_length=20, choices=ACTOR_SOURCE_CHOICES, default="human")
+    actor_identity = models.ForeignKey(
+        "UserIdentity",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="solution_change_session_promotion_evidence",
+    )
+    source_promotion_evidence = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="rollback_evidence",
+    )
+    targeted_artifacts_json = models.JSONField(default=list, blank=True)
+    preview_target_json = models.JSONField(default=dict, blank=True)
+    root_target_json = models.JSONField(default=dict, blank=True)
+    resulting_active_target_json = models.JSONField(default=dict, blank=True)
+    superseded_active_state_json = models.JSONField(default=dict, blank=True)
+    control_result_json = models.JSONField(default=dict, blank=True)
+    provider_context_json = models.JSONField(default=dict, blank=True)
+    warnings_json = models.JSONField(default=list, blank=True)
+    blocked_context_json = models.JSONField(default=dict, blank=True)
+    rollback_link_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def clean(self):
+        if self.solution_change_session_id and self.workspace_id and self.solution_change_session.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match solution change session workspace")
+        if self.application_id and self.workspace_id and self.application.workspace_id != self.workspace_id:
+            raise ValidationError("workspace must match application workspace")
+        if self.solution_change_session_id and self.application_id and self.solution_change_session.application_id != self.application_id:
+            raise ValidationError("application must match solution change session application")
+
+    def save(self, *args, **kwargs):
+        if self.solution_change_session_id and not self.workspace_id:
+            self.workspace_id = self.solution_change_session.workspace_id
+        if self.solution_change_session_id and not self.application_id:
+            self.application_id = self.solution_change_session.application_id
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.solution_change_session_id}:{self.promotion_status}:{self.created_at.isoformat() if self.created_at else ''}"
 
 
 class ApplicationPlan(models.Model):

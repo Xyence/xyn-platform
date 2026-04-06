@@ -553,6 +553,17 @@ class GeneratedAppCapabilityContractTests(TestCase):
             },
         )
 
+    def test_workspace_artifact_listing_uses_top_level_capability_when_content_omits_capability(self):
+        self._bind_generated_artifact(include_interfaces=False, package_version="0.0.1-dev")
+
+        response = self.client.get(f"/xyn/api/workspaces/{self.workspace.id}/artifacts")
+
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        row = response.json()["artifacts"][0]
+        capability = row.get("capability") or {}
+        self.assertEqual(capability.get("visibility"), "capabilities")
+        self.assertEqual(str(capability.get("label") or ""), "Generated Net Inventory")
+
     def test_workspace_artifact_listing_ignores_stale_top_level_generated_surfaces(self):
         self._bind_generated_artifact(
             include_interfaces=False,

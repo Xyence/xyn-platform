@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Compass, Settings2, Activity, Bot, ShieldCheck } from "lucide-react";
-import { useNavigate } from "react-router-dom";
-import { getAiRoutingStatus, getSystemReadiness } from "../../../api/xyn";
-import type { AiAgentResolution, AiRoutingStatusResponse, SystemReadinessResponse } from "../../../api/types";
+import { useLocation, useNavigate } from "react-router-dom";
+import { getAiRoutingStatus, getSystemReadiness, getWorkspaceLinkedChangeSession } from "../../../api/xyn";
+import type { AiAgentResolution, AiRoutingStatusResponse, SystemReadinessResponse, WorkspaceLinkedChangeSession } from "../../../api/types";
 import { toWorkspacePath } from "../../routing/workspaceRouting";
 import { useXynConsole } from "../../state/xynConsoleStore";
 import HeaderPreviewControl from "../preview/HeaderPreviewControl";
 import { type CapabilityEntry, useCapabilitySuggestions } from "../console/capabilitySuggestions";
+import { buildLinkedChangeSessionRoute, LINKED_SESSION_UPDATED_EVENT } from "./linkedChangeSessionRoute";
 
 const AI_ROUTING_UPDATED_EVENT = "xyn:ai-routing-updated";
 
@@ -30,10 +31,15 @@ function routingStatusLabel(row: AiAgentResolution | null): string {
 }
 
 function titleCaseToken(value: string): string {
+  const upperAcronyms = new Set(["ai"]);
   return String(value || "")
     .split(/[_\-\s]+/)
     .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .map((part) => {
+      const normalized = part.trim().toLowerCase();
+      if (upperAcronyms.has(normalized)) return normalized.toUpperCase();
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
     .join(" ");
 }
 
@@ -45,11 +51,13 @@ function readinessTone(readiness: SystemReadinessResponse | null): "ok" | "warni
 
 export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel, onOpenAgentActivity, onMessage }: Props) {
   const navigate = useNavigate();
+  const location = useLocation();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const { openPanel, setInputText, setOpen, requestSubmit } = useXynConsole();
   const [open, setOpenPopover] = useState(false);
   const [routingStatus, setRoutingStatus] = useState<AiRoutingStatusResponse | null>(null);
   const [systemReadiness, setSystemReadiness] = useState<SystemReadinessResponse | null>(null);
+  const [linkedSession, setLinkedSession] = useState<WorkspaceLinkedChangeSession | null>(null);
   const { capabilities, platform } = useCapabilitySuggestions(workspaceId);
 
   const refreshAiRoutingStatus = useCallback(() => {
@@ -75,6 +83,28 @@ export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel,
       .catch(() => setSystemReadiness(null));
   }, [workspaceId]);
 
+  const refreshLinkedSession = useCallback(() => {
+    if (!workspaceId) {
+      setLinkedSession(null);
+      return Promise.resolve();
+    }
+    return getWorkspaceLinkedChangeSession(workspaceId, window.location.origin)
+      .then((payload) => {
+        const linked = payload?.linked_session;
+        if (!linked || !linked.application_id || !linked.solution_change_session_id) {
+          setLinkedSession(null);
+          return;
+        }
+        setLinkedSession(linked);
+      })
+      .catch(() => setLinkedSession(null));
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!open) return;
+    void refreshLinkedSession();
+  }, [open, refreshLinkedSession]);
+
   useEffect(() => {
     refreshAiRoutingStatus();
   }, [refreshAiRoutingStatus, workspaceId]);
@@ -91,6 +121,15 @@ export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel,
     window.addEventListener(AI_ROUTING_UPDATED_EVENT, onRoutingUpdated as EventListener);
     return () => window.removeEventListener(AI_ROUTING_UPDATED_EVENT, onRoutingUpdated as EventListener);
   }, [refreshAiRoutingStatus]);
+
+  useEffect(() => {
+    const onLinkedSessionUpdated = () => {
+      if (!open) return;
+      void refreshLinkedSession();
+    };
+    window.addEventListener(LINKED_SESSION_UPDATED_EVENT, onLinkedSessionUpdated);
+    return () => window.removeEventListener(LINKED_SESSION_UPDATED_EVENT, onLinkedSessionUpdated);
+  }, [open, refreshLinkedSession]);
 
   const openCapability = (entry: CapabilityEntry) => {
     const target = entry.managePath || entry.docsPath;
@@ -136,9 +175,14 @@ export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel,
       { purpose: "Default", row: routingPurposeRow(routingStatus?.routing || [], "default") },
       { purpose: "Planning", row: routingPurposeRow(routingStatus?.routing || [], "planning") },
       { purpose: "Coding", row: routingPurposeRow(routingStatus?.routing || [], "coding") },
+      { purpose: "Palette", row: routingPurposeRow(routingStatus?.routing || [], "palette") },
     ],
     [routingStatus?.routing],
   );
+
+  const linkedSessionRoute = useMemo(() => {
+    return buildLinkedChangeSessionRoute(workspaceId, linkedSession);
+  }, [linkedSession, workspaceId]);
 
   return (
     <div className="header-utility-wrap" ref={rootRef}>
@@ -190,6 +234,27 @@ export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel,
             >
               Open Agent Activity
             </button>
+            {linkedSession && linkedSessionRoute ? (
+              <>
+                <p className="muted small">Linked dev session</p>
+                <button
+                  type="button"
+                  className="ghost sm"
+                  onClick={() => {
+                    const currentRoute = `${location.pathname}${location.search}`;
+                    if (linkedSessionRoute === currentRoute) {
+                      onMessage({ level: "success", title: "Already viewing linked session" });
+                      setOpenPopover(false);
+                      return;
+                    }
+                    navigate(linkedSessionRoute);
+                    setOpenPopover(false);
+                  }}
+                >
+                  Resume change session
+                </button>
+              </>
+            ) : null}
           </div>
 
           <div className="header-utility-section">
@@ -254,4 +319,3 @@ export default function HeaderUtilityMenu({ workspaceId, actorRoles, actorLabel,
     </div>
   );
 }
-

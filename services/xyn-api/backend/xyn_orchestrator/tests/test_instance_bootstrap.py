@@ -4,6 +4,7 @@ from unittest import mock
 from django.test import TestCase
 
 from xyn_orchestrator.instances import bootstrap
+from xyn_orchestrator.bootstrap_guard import BootstrapReadiness
 
 
 class InstanceBootstrapTests(TestCase):
@@ -13,6 +14,7 @@ class InstanceBootstrapTests(TestCase):
         os.environ.pop("KUBERNETES_SERVICE_HOST", None)
         os.environ.pop("XYENCE_LOCAL_INSTANCE_ID", None)
         os.environ.pop("XYENCE_LOCAL_INSTANCE_NAME", None)
+        bootstrap._BOOTSTRAP_DONE = False
 
     def test_discover_ec2_identity_from_imds(self) -> None:
         def make_response(status=200, text="", payload=None):
@@ -96,3 +98,32 @@ class InstanceBootstrapTests(TestCase):
             get_mock.return_value = metadata
             instance_id = bootstrap.upsert_local_instance_record("local")
         self.assertIsNotNone(instance_id)
+
+    def test_bootstrap_registration_retries_after_partial_failure(self) -> None:
+        metadata = bootstrap.InstanceMetadata(
+            substrate="local",
+            instance_id="local:retry-host",
+            name="retry-host",
+            region="local",
+            instance_type="local",
+            ami_id="local",
+            status="running",
+        )
+        with mock.patch("xyn_orchestrator.instances.bootstrap.get_instance_metadata", return_value=metadata), mock.patch(
+            "xyn_orchestrator.instances.bootstrap.upsert_local_instance_record",
+            side_effect=[RuntimeError("transient"), "inst-1"],
+        ) as upsert_mock:
+            bootstrap.bootstrap_instance_registration()
+            self.assertFalse(bootstrap._BOOTSTRAP_DONE)
+            bootstrap.bootstrap_instance_registration()
+            self.assertTrue(bootstrap._BOOTSTRAP_DONE)
+            self.assertEqual(upsert_mock.call_count, 2)
+
+    def test_bootstrap_registration_defers_when_schema_not_ready(self) -> None:
+        with mock.patch("xyn_orchestrator.instances.bootstrap.get_instance_metadata") as metadata_mock, mock.patch(
+            "xyn_orchestrator.instances.bootstrap.schema_bootstrap_readiness",
+            return_value=BootstrapReadiness(ready=False, reason="pending_migrations"),
+        ):
+            bootstrap.bootstrap_instance_registration()
+            self.assertFalse(bootstrap._BOOTSTRAP_DONE)
+            metadata_mock.assert_not_called()

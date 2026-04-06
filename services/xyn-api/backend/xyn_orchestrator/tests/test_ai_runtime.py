@@ -29,6 +29,10 @@ class AiRuntimeTests(TestCase):
             "XYN_AI_CODING_PROVIDER",
             "XYN_AI_CODING_MODEL",
             "XYN_AI_CODING_API_KEY",
+            "XYN_AI_ROUTING_DEFAULT_AGENT_SLUG",
+            "XYN_AI_ROUTING_PLANNING_AGENT_SLUG",
+            "XYN_AI_ROUTING_CODING_AGENT_SLUG",
+            "XYN_AI_ROUTING_PALETTE_AGENT_SLUG",
         ):
             os.environ.pop(key, None)
 
@@ -152,6 +156,37 @@ class AiRuntimeTests(TestCase):
         self.assertTrue(coding_purpose.default_context_pack_refs_json)
         self.assertEqual(ContextPack.objects.filter(name="xyn-planner-canon", purpose="planner").count(), 1)
         self.assertEqual(ContextPack.objects.filter(name="xyn-coder-canon", purpose="coder").count(), 1)
+
+    def test_bootstrap_prunes_unused_duplicate_bootstrap_model_configs(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-dup-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+            canonical = AgentDefinition.objects.get(slug="default-assistant").model_config
+            provider = canonical.provider
+            duplicate_credential = ProviderCredential.objects.create(
+                provider=provider,
+                name="openai-bootstrap-dup00000",
+                auth_type="env_ref",
+                env_var_name="XYN_OPENAI_API_KEY",
+                enabled=True,
+            )
+            ModelConfig.objects.create(provider=provider, model_name="gpt-5-mini", credential=duplicate_credential, enabled=True)
+            ModelConfig.objects.create(provider=provider, model_name="gpt-5-mini", credential=None, enabled=True)
+
+            ensure_default_ai_seeds()
+
+        self.assertEqual(
+            ModelConfig.objects.filter(provider__slug="openai", model_name="gpt-5-mini", enabled=True).count(),
+            1,
+        )
+        self.assertFalse(ModelConfig.objects.filter(credential_id=duplicate_credential.id).exists())
 
     def test_bootstrap_preserves_explicit_custom_purpose_default_assignments(self):
         with patch.dict(
@@ -386,6 +421,92 @@ class AiRuntimeTests(TestCase):
         self.assertEqual(routing.get("purpose"), "documentation")
         self.assertEqual(routing.get("resolution_source"), "default_fallback")
         self.assertEqual(routing.get("resolved_agent_name"), "Xyn Default Assistant")
+
+    def test_resolve_agent_routing_palette_falls_back_to_default(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+        routing = resolve_agent_routing(purpose_slug="palette")
+        self.assertEqual(routing.get("purpose"), "palette")
+        self.assertEqual(routing.get("resolution_source"), "default_fallback")
+        self.assertEqual(routing.get("resolved_agent_name"), "Xyn Default Assistant")
+
+    def test_env_routing_overrides_set_default_assignments(self):
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_PROVIDER": "openai",
+                "XYN_AI_MODEL": "gpt-5-mini",
+                "XYN_OPENAI_API_KEY": "sk-default-openai",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+        shared_provider = ModelProvider.objects.get(slug="openai")
+        shared_model = ModelConfig.objects.create(provider=shared_provider, model_name="gpt-5.4", enabled=True)
+        default_agent = AgentDefinition.objects.create(
+            slug="env-default",
+            name="Env Default",
+            model_config=shared_model,
+            enabled=True,
+            is_default=False,
+        )
+        planning_agent = AgentDefinition.objects.create(
+            slug="env-planning",
+            name="Env Planning",
+            model_config=shared_model,
+            enabled=True,
+            is_default=False,
+        )
+        coding_agent = AgentDefinition.objects.create(
+            slug="env-coding",
+            name="Env Coding",
+            model_config=shared_model,
+            enabled=True,
+            is_default=False,
+        )
+        palette_agent = AgentDefinition.objects.create(
+            slug="env-palette",
+            name="Env Palette",
+            model_config=shared_model,
+            enabled=True,
+            is_default=False,
+        )
+        for agent, purpose_slug in [
+            (default_agent, "planning"),
+            (default_agent, "coding"),
+            (default_agent, "palette"),
+            (planning_agent, "planning"),
+            (coding_agent, "coding"),
+            (palette_agent, "palette"),
+        ]:
+            purpose = AgentPurpose.objects.get(slug=purpose_slug)
+            AgentDefinitionPurpose.objects.get_or_create(agent_definition=agent, purpose=purpose)
+
+        with patch.dict(
+            os.environ,
+            {
+                "XYN_AI_ROUTING_DEFAULT_AGENT_SLUG": "env-default",
+                "XYN_AI_ROUTING_PLANNING_AGENT_SLUG": "env-planning",
+                "XYN_AI_ROUTING_CODING_AGENT_SLUG": "env-coding",
+                "XYN_AI_ROUTING_PALETTE_AGENT_SLUG": "env-palette",
+            },
+            clear=False,
+        ):
+            ensure_default_ai_seeds()
+
+        default_agent.refresh_from_db()
+        self.assertTrue(default_agent.is_default)
+        self.assertEqual(resolve_agent_routing(purpose_slug="planning").get("resolved_agent_name"), "Env Planning")
+        self.assertEqual(resolve_agent_routing(purpose_slug="coding").get("resolved_agent_name"), "Env Coding")
+        self.assertEqual(resolve_agent_routing(purpose_slug="palette").get("resolved_agent_name"), "Env Palette")
 
     def test_resolve_agent_routing_returns_unresolved_when_no_enabled_agents_exist(self):
         AgentDefinition.objects.all().delete()

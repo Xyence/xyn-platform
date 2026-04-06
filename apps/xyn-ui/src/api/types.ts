@@ -2822,6 +2822,42 @@ export type ApplicationDetail = ApplicationSummary & {
   goals: GoalSummary[];
   portfolio_state?: GoalPortfolioState;
   artifact_memberships?: ApplicationArtifactMembership[];
+  runtime_binding?: SolutionRuntimeBindingView | null;
+  activation_composition?: SolutionActivationComposition | null;
+};
+
+export type SolutionArtifactRef = {
+  artifact_id?: string;
+  artifact_slug?: string;
+  artifact_version?: string;
+};
+
+export type SolutionActivationComposition = {
+  primary_app_artifact_ref?: SolutionArtifactRef;
+  policy_artifact_ref?: SolutionArtifactRef;
+};
+
+export type SolutionRuntimeBindingView = {
+  id?: string;
+  workspace_id?: string;
+  application_id?: string;
+  status?: string;
+  activation_mode?: "composed" | "reconstructed" | string;
+  freshness?: "current" | "stale_composition" | "stale_runtime" | "unknown" | string;
+  freshness_reason?: string;
+  primary_app_artifact_ref?: SolutionArtifactRef;
+  policy_artifact_ref?: SolutionArtifactRef;
+  runtime_instance?: {
+    id?: string;
+    app_slug?: string;
+    fqdn?: string;
+    status?: string;
+  } | null;
+  runtime_target?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  last_activation?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type ApplicationArtifactMembership = {
@@ -2870,6 +2906,8 @@ export type SolutionChangeSession = {
     | "preview_ready"
     | "validating"
     | "ready_for_promotion"
+    | "committed"
+    | "promoted"
     | "failed"
     | string;
   created_by?: string | null;
@@ -2887,9 +2925,92 @@ export type SolutionChangeSession = {
   preview?: Record<string, unknown>;
   validation?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  evidence_ref?: Record<string, unknown>;
+  repo_commit_count?: number;
+  requires_commit_provenance?: boolean;
+  promote_eligibility?: {
+    can_promote?: boolean;
+    blocked_reason?: string;
+    root_target_present?: boolean;
+    root_target_identity?: Record<string, unknown>;
+    recommended_action?: string;
+    next_allowed_actions?: string[];
+  };
   planning?: SolutionPlanningState;
   created_at: string;
   updated_at: string;
+};
+
+export type SolutionChangeSessionControlStatus = {
+  change_session_id: string;
+  application_id: string;
+  execution_status?: string;
+  targeted_artifacts?: Array<Record<string, unknown>>;
+  per_repo_results?: Array<Record<string, unknown>>;
+  preview_target?: Record<string, unknown>;
+  root_target_present?: boolean;
+  root_target_identity?: Record<string, unknown>;
+  can_stage_apply?: boolean;
+  can_prepare_preview?: boolean;
+  can_activate?: boolean;
+  can_promote?: boolean;
+  can_rollback?: boolean;
+  rollback_eligibility?: Record<string, unknown>;
+  blocked_reason?: string;
+  recommended_action?: string;
+  next_allowed_actions?: string[];
+  evidence_ref?: Record<string, unknown>;
+  warnings?: string[];
+  session?: SolutionChangeSession;
+};
+
+export type SolutionChangeSessionControlEnvelope = {
+  operation: string;
+  status: string;
+  change_session_id: string;
+  application_id: string;
+  control: SolutionChangeSessionControlStatus;
+  operation_result?: Record<string, unknown>;
+};
+
+export type SolutionChangeSessionPromotionEvidence = {
+  id: string;
+  workspace_id: string;
+  application_id: string;
+  solution_change_session_id: string;
+  operation: "promotion" | "rollback" | string;
+  promotion_status: string;
+  actor_source?: string;
+  actor_identity_id?: string;
+  source_promotion_evidence_id?: string;
+  targeted_artifacts?: Array<Record<string, unknown>>;
+  preview_target?: Record<string, unknown>;
+  root_target?: Record<string, unknown>;
+  resulting_active_target?: Record<string, unknown>;
+  superseded_active_state?: Record<string, unknown>;
+  control_result?: Record<string, unknown>;
+  provider_context?: Record<string, unknown>;
+  warnings?: string[];
+  blocked_context?: Record<string, unknown>;
+  rollback_link?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type SolutionChangeSessionPromotionEvidenceResponse = {
+  evidence: SolutionChangeSessionPromotionEvidence[] | SolutionChangeSessionPromotionEvidence;
+};
+
+export type WorkspaceLinkedChangeSession = {
+  workspace_id: string;
+  application_id: string;
+  application_name?: string;
+  solution_change_session_id: string;
+  session_title?: string;
+  status?: string;
+  execution_status?: string;
+  current_origin?: string;
+  origin_candidates?: string[];
 };
 
 export type SolutionPlanningTurn = {
@@ -4259,6 +4380,49 @@ export type ArtifactConsoleFilesResponse = {
     slug: string;
   };
   files: ArtifactConsoleFileRow[];
+};
+
+export type ArtifactActivationResponse = {
+  status: "reused" | "queued" | "queued_existing";
+  workspace_id: string;
+  artifact_id: string;
+  artifact_slug: string;
+  app_slug: string;
+  revision_anchor?: Record<string, unknown>;
+  runtime_target?: Record<string, unknown>;
+  sibling_ui_url?: string;
+  sibling_api_url?: string;
+  runtime_instance?: {
+    id?: string;
+    app_slug?: string;
+    fqdn?: string;
+    status?: string;
+  };
+  activation?: {
+    draft_id?: string;
+    job_id?: string;
+  };
+  in_flight?: {
+    draft_id?: string;
+    job_id?: string;
+    status?: string;
+    type?: string;
+  };
+  reuse_blocked_reason?: string;
+};
+
+export type SolutionActivationResponse = ArtifactActivationResponse & {
+  solution_runtime_binding?: SolutionRuntimeBindingView;
+  solution_activation_composition?: SolutionActivationComposition;
+  solution_activation?: {
+    application_id?: string;
+    workspace_id?: string;
+    interaction_rule?: string;
+  };
+  policy_source?: "artifact" | "reconstructed" | string;
+  policy_compatibility?: "match" | "mismatch" | "unknown" | string;
+  policy_compatibility_reason?: string;
+  policy_artifact_ref?: SolutionArtifactRef;
 };
 
 export type RuleBrowserBundle = {

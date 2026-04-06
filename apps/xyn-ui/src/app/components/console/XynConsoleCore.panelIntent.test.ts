@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { resolveDirectPanelOpenParams, resolvePanelCommand } from "./XynConsoleCore";
+import { buildUiActionFromPrompt, resolveDirectPanelOpenParams, resolvePanelCommand } from "./XynConsoleCore";
 
 describe("resolveDirectPanelOpenParams", () => {
   beforeEach(() => {
@@ -161,9 +161,18 @@ describe("resolvePanelCommand", () => {
       panelKey: "solution_list",
       params: { create_solution_objective: "stabilize watcher evaluation" },
     });
-    expect(resolvePanelCommand("campaigns")).toBeNull();
-    expect(resolvePanelCommand("show campaigns")).toBeNull();
-    expect(resolvePanelCommand("open campaigns")).toBeNull();
+    expect(resolvePanelCommand("campaigns")).toEqual({
+      panelKey: "campaign_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("show campaigns")).toEqual({
+      panelKey: "campaign_list",
+      params: {},
+    });
+    expect(resolvePanelCommand("open campaigns")).toEqual({
+      panelKey: "campaign_list",
+      params: {},
+    });
     expect(resolvePanelCommand("new campaign")).toBeNull();
     expect(resolvePanelCommand("create campaign")).toBeNull();
 
@@ -267,6 +276,101 @@ describe("resolvePanelCommand", () => {
     });
     expect(resolvePanelCommand("show me artifacts with status draft")).toBeNull();
     expect(resolvePanelCommand("summarize artifact changes from the last run")).toBeNull();
+  });
+
+  it("keeps explicit artifact detail intent mapped to detail open action", () => {
+    expect(
+      buildUiActionFromPrompt("open artifact core.authn-jwt", {
+        view_type: "table",
+        dataset: { name: "artifacts", primary_key: "slug", columns: [{ key: "slug", searchable: true }] },
+        query: { entity: "artifacts", filters: [], sort: [{ field: "updated_at", dir: "desc" }], limit: 50, offset: 0 },
+        selection: { selected_row_ids: [], focused_row_id: null, row_order_ids: [] },
+        pagination: { limit: 50, offset: 0, total_count: 0 },
+        ui: { active_panel_id: "panel-artifacts", panel_id: "panel-artifacts" },
+      } as never)
+    ).toEqual({
+      type: "ui.action",
+      action: {
+        name: "canvas.open_detail",
+        params: {
+          entity_type: "artifact",
+          entity_id: "core.authn-jwt",
+          open_in: "new_panel",
+          placement: "right",
+        },
+      },
+    });
+  });
+
+  it("preserves direct panel intent precedence in artifact table context", () => {
+    const artifactTableContext = {
+      view_type: "table",
+      dataset: { name: "artifacts", primary_key: "slug", columns: [{ key: "slug", searchable: true }] },
+      query: { entity: "artifacts", filters: [], sort: [{ field: "updated_at", dir: "desc" }], limit: 50, offset: 0 },
+      selection: { selected_row_ids: [], focused_row_id: null, row_order_ids: [] },
+      pagination: { limit: 50, offset: 0, total_count: 0 },
+      ui: { active_panel_id: "panel-artifacts", panel_id: "panel-artifacts" },
+    } as never;
+
+    // A direct panel intent that is not mapped to local canvas ui.action
+    // should return null so submitPrompt can execute the direct panel branch.
+    expect(buildUiActionFromPrompt("open solutions", artifactTableContext)).toBeNull();
+    expect(buildUiActionFromPrompt("open composer", artifactTableContext)).toBeNull();
+    expect(buildUiActionFromPrompt("open campaigns", artifactTableContext)).toBeNull();
+
+    // Nearby direct panel commands that are intentionally mapped to table opens
+    // should continue producing deterministic ui.action envelopes.
+    expect(buildUiActionFromPrompt("open drafts", artifactTableContext)).toEqual({
+      type: "ui.action",
+      action: {
+        name: "canvas.open_table",
+        params: {
+          dataset: "drafts",
+          query: {
+            entity: "drafts",
+            filters: [],
+            sort: [{ field: "updated_at", dir: "desc" }],
+            limit: 50,
+            offset: 0,
+          },
+          title: "drafts",
+          open_in: "new_panel",
+          placement: "center",
+        },
+      },
+    });
+    expect(buildUiActionFromPrompt("open jobs", artifactTableContext)).toEqual({
+      type: "ui.action",
+      action: {
+        name: "canvas.open_table",
+        params: {
+          dataset: "jobs",
+          query: {
+            entity: "jobs",
+            filters: [],
+            sort: [{ field: "created_at", dir: "desc" }],
+            limit: 50,
+            offset: 0,
+          },
+          title: "jobs",
+          open_in: "new_panel",
+          placement: "center",
+        },
+      },
+    });
+  });
+
+  it("preserves direct panel intent precedence in non-artifact table context", () => {
+    const runsTableContext = {
+      view_type: "table",
+      dataset: { name: "runs", primary_key: "id", columns: [{ key: "id", searchable: true }] },
+      query: { entity: "runs", filters: [], sort: [{ field: "created_at", dir: "desc" }], limit: 50, offset: 0 },
+      selection: { selected_row_ids: [], focused_row_id: null, row_order_ids: [] },
+      pagination: { limit: 50, offset: 0, total_count: 0 },
+      ui: { active_panel_id: "panel-runs", panel_id: "panel-runs" },
+    } as never;
+
+    expect(buildUiActionFromPrompt("open solutions", runsTableContext)).toBeNull();
   });
 
   it("parses artifact detail/raw/files commands", () => {

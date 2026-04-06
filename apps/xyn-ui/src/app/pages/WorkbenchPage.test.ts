@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldReuseExistingLayoutOnWorkspaceSwitch } from "./WorkbenchPage";
+import { shouldReopenComposerForRouteParams, shouldReuseExistingLayoutOnWorkspaceSwitch } from "./WorkbenchPage";
 
 describe("shouldReuseExistingLayoutOnWorkspaceSwitch", () => {
   it("preserves active layout when switching between workspaces with open panels", () => {
@@ -33,3 +33,37 @@ describe("shouldReuseExistingLayoutOnWorkspaceSwitch", () => {
   });
 });
 
+describe("shouldReopenComposerForRouteParams", () => {
+  it("reopens when composer panel is not active", () => {
+    expect(
+      shouldReopenComposerForRouteParams({
+        activePanel: null,
+        routeParams: { application_id: "app-1", solution_change_session_id: "scs-1" },
+      })
+    ).toBe(true);
+  });
+
+  it("reopens when route session differs from active composer session", () => {
+    expect(
+      shouldReopenComposerForRouteParams({
+        activePanel: {
+          key: "composer_detail",
+          params: { application_id: "app-1", solution_change_session_id: "scs-old" },
+        },
+        routeParams: { application_id: "app-1", solution_change_session_id: "scs-1" },
+      })
+    ).toBe(true);
+  });
+
+  it("does not reopen when active composer already matches route params", () => {
+    expect(
+      shouldReopenComposerForRouteParams({
+        activePanel: {
+          key: "composer_detail",
+          params: { application_id: "app-1", solution_change_session_id: "scs-1" },
+        },
+        routeParams: { application_id: "app-1", solution_change_session_id: "scs-1" },
+      })
+    ).toBe(false);
+  });
+});

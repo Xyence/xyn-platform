@@ -42,6 +42,12 @@ BOOTSTRAP_ROLE_ENV_PREFIX = {
     "planning": "XYN_AI_PLANNING",
     "coding": "XYN_AI_CODING",
 }
+BOOTSTRAP_ROUTING_ENV_KEYS = {
+    "default": "XYN_AI_ROUTING_DEFAULT_AGENT_SLUG",
+    "planning": "XYN_AI_ROUTING_PLANNING_AGENT_SLUG",
+    "coding": "XYN_AI_ROUTING_CODING_AGENT_SLUG",
+    "palette": "XYN_AI_ROUTING_PALETTE_AGENT_SLUG",
+}
 BOOTSTRAP_ROLE_AGENT_META = {
     "default": {
         "slug": "default-assistant",
@@ -301,10 +307,26 @@ def _ensure_bootstrap_credential(
     credential_cache: Dict[tuple[str, str], ProviderCredential],
 ) -> ProviderCredential:
     fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+    bootstrap_name = f"{provider.slug}-bootstrap-{fingerprint[:8]}"
     cache_key = (str(provider.id), fingerprint)
     cached = credential_cache.get(cache_key)
     if cached:
         return cached
+
+    # Prefer deterministic bootstrap-name matches first. This keeps bootstrap idempotent
+    # even when secret-ref lookups are temporarily unavailable.
+    same_name = list(
+        ProviderCredential.objects.filter(provider=provider, name=bootstrap_name).order_by("-updated_at", "-created_at")
+    )
+    if same_name:
+        canonical = same_name[0]
+        for duplicate in same_name[1:]:
+            if duplicate.id == canonical.id:
+                continue
+            ModelConfig.objects.filter(credential_id=duplicate.id).update(credential=canonical)
+            duplicate.delete()
+        credential_cache[cache_key] = canonical
+        return canonical
 
     for credential in ProviderCredential.objects.filter(provider=provider, enabled=True).order_by("-is_default", "name", "-updated_at"):
         if _credential_api_key(credential, provider.slug) == api_key:
@@ -315,7 +337,7 @@ def _ensure_bootstrap_credential(
     if not store:
         credential = ProviderCredential.objects.create(
             provider=provider,
-            name=f"{provider.slug}-bootstrap-{fingerprint[:8]}",
+            name=bootstrap_name,
             auth_type="api_key",
             api_key_encrypted=encrypt_api_key(api_key),
             is_default=False,
@@ -352,7 +374,7 @@ def _ensure_bootstrap_credential(
         secret_ref.save(update_fields=["external_ref", "metadata_json", "updated_at"])
         credential = ProviderCredential.objects.create(
             provider=provider,
-            name=f"{provider.slug}-bootstrap-{fingerprint[:8]}",
+            name=bootstrap_name,
             auth_type="api_key",
             secret_ref=secret_ref,
             is_default=False,
@@ -361,7 +383,7 @@ def _ensure_bootstrap_credential(
     except Exception:
         credential = ProviderCredential.objects.create(
             provider=provider,
-            name=f"{provider.slug}-bootstrap-{fingerprint[:8]}",
+            name=bootstrap_name,
             auth_type="env_ref",
             env_var_name=PROVIDER_ENV_API_KEY.get(provider.slug, [""])[0] or "",
             is_default=False,
@@ -369,6 +391,32 @@ def _ensure_bootstrap_credential(
         )
     credential_cache[cache_key] = credential
     return credential
+
+
+def _prune_unused_bootstrap_model_config_duplicates(role_models: Dict[str, ModelConfig]) -> None:
+    canonical_by_provider_model: Dict[tuple[str, str], ModelConfig] = {}
+    for config in role_models.values():
+        canonical_by_provider_model[(str(config.provider_id), str(config.model_name or "").strip())] = config
+
+    for (provider_id, model_name), canonical in canonical_by_provider_model.items():
+        duplicates = (
+            ModelConfig.objects.select_related("credential", "provider")
+            .filter(provider_id=provider_id, model_name=model_name, enabled=True)
+            .exclude(id=canonical.id)
+        )
+        for duplicate in duplicates:
+            in_use = (
+                AgentDefinition.objects.filter(model_config_id=duplicate.id).exists()
+                or AgentPurpose.objects.filter(model_config_id=duplicate.id).exists()
+            )
+            if in_use:
+                continue
+            credential_name = str(getattr(duplicate.credential, "name", "") or "").strip().lower()
+            is_bootstrap_credential = credential_name.startswith(f"{canonical.provider.slug}-bootstrap-")
+            # Keep this narrowly scoped to bootstrap cleanup: only drop clearly bootstrap/empty
+            # duplicates that are currently unused.
+            if duplicate.credential_id is None or is_bootstrap_credential:
+                duplicate.delete()
 
 
 def _ensure_bootstrap_model_config(*, provider: ModelProvider, model_name: str, credential: ProviderCredential) -> ModelConfig:
@@ -572,7 +620,7 @@ def resolve_agent_routing(*, purpose_slug: Optional[str] = None, agent_slug: Opt
             reason=f"purpose '{purpose}' has an explicit default agent assignment",
         )
 
-    if purpose in {"planning", "coding"}:
+    if purpose in {"planning", "coding", "palette"}:
         if fallback_default:
             return _build_resolution_payload(
                 purpose=purpose,
@@ -993,6 +1041,9 @@ def ensure_default_ai_seeds() -> None:
         )
         role_models[role] = model_config
 
+    if role_models:
+        _prune_unused_bootstrap_model_config_duplicates(role_models)
+
     default_model = role_models.get("default")
 
     coding, _ = AgentPurpose.objects.get_or_create(
@@ -1028,6 +1079,17 @@ def ensure_default_ai_seeds() -> None:
             "model_config": default_model,
         },
     )
+    palette, _ = AgentPurpose.objects.get_or_create(
+        slug="palette",
+        defaults={
+            "name": "Palette",
+            "description": "Palette and assistant command routing",
+            "status": "active",
+            "enabled": True,
+            "preamble": "Purpose: palette. Resolve concise, deterministic command interpretation and execution guidance.",
+            "model_config": default_model,
+        },
+    )
 
     if not coding.name:
         coding.name = "Coding"
@@ -1053,6 +1115,13 @@ def ensure_default_ai_seeds() -> None:
     if default_model and documentation.model_config_id != default_model.id:
         documentation.model_config = default_model
     documentation.save(update_fields=["name", "preamble", "model_config", "updated_at"])
+    if not palette.name:
+        palette.name = "Palette"
+    if not palette.preamble:
+        palette.preamble = "Purpose: palette. Resolve concise, deterministic command interpretation and execution guidance."
+    if default_model and palette.model_config_id != default_model.id:
+        palette.model_config = default_model
+    palette.save(update_fields=["name", "preamble", "model_config", "updated_at"])
 
     role_agents: Dict[str, AgentDefinition] = {}
     for role, meta in BOOTSTRAP_ROLE_AGENT_META.items():
@@ -1090,10 +1159,51 @@ def ensure_default_ai_seeds() -> None:
     if "default" in role_agents:
         AgentDefinition.objects.exclude(id=role_agents["default"].id).filter(is_default=True).update(is_default=False)
     bootstrap_managed_agent_slugs = {"default-assistant", "planning-assistant", "coding-assistant"}
+
+    # Apply deterministic env-driven routing defaults before bootstrap fallback ownership.
+    default_override_slug = str(os.environ.get(BOOTSTRAP_ROUTING_ENV_KEYS["default"]) or "").strip()
+    if default_override_slug:
+        override_default = AgentDefinition.objects.filter(slug=default_override_slug, enabled=True).first()
+        if override_default:
+            AgentDefinition.objects.exclude(id=override_default.id).filter(is_default=True).update(is_default=False)
+            if not override_default.is_default:
+                override_default.is_default = True
+                override_default.save(update_fields=["is_default", "updated_at"])
+        else:
+            logger.warning("AI routing bootstrap override skipped: default agent slug not found", extra={"slug": default_override_slug})
+
+    env_purpose_overrides: Dict[str, Optional[AgentDefinition]] = {}
+    for purpose_slug in ("planning", "coding", "palette"):
+        override_slug = str(os.environ.get(BOOTSTRAP_ROUTING_ENV_KEYS[purpose_slug]) or "").strip()
+        if not override_slug:
+            continue
+        override_agent = AgentDefinition.objects.filter(slug=override_slug, enabled=True).first()
+        if not override_agent:
+            logger.warning(
+                "AI routing bootstrap override skipped: purpose agent slug not found",
+                extra={"purpose": purpose_slug, "slug": override_slug},
+            )
+            continue
+        env_purpose_overrides[purpose_slug] = override_agent
+
     for purpose_slug, owner_role in {
         "planning": "planning" if "planning" in role_agents else "default",
         "coding": "coding" if "coding" in role_agents else "default",
+        "palette": "default",
     }.items():
+        env_override = env_purpose_overrides.get(purpose_slug)
+        if env_override:
+            purpose_obj = AgentPurpose.objects.filter(slug=purpose_slug).first()
+            if not purpose_obj:
+                continue
+            AgentDefinitionPurpose.objects.filter(purpose__slug=purpose_slug, is_default_for_purpose=True).exclude(
+                agent_definition=env_override
+            ).update(is_default_for_purpose=False)
+            link, _ = AgentDefinitionPurpose.objects.get_or_create(agent_definition=env_override, purpose=purpose_obj)
+            if not link.is_default_for_purpose:
+                link.is_default_for_purpose = True
+                link.save(update_fields=["is_default_for_purpose"])
+            continue
         current_default = (
             AgentDefinitionPurpose.objects.select_related("agent_definition")
             .filter(purpose__slug=purpose_slug, is_default_for_purpose=True)

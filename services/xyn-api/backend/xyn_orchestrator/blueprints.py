@@ -67,6 +67,11 @@ from .deployments import (
 from .execution_briefs import ensure_execution_brief_ready
 from .managed_storage import delete_local_artifact, load_local_artifact_json, store_local_artifact
 from .artifact_links import ensure_blueprint_artifact, ensure_context_pack_artifact, ensure_draft_session_artifact, ensure_module_artifact
+from .deployment_provider_contract import (
+    derive_deployment_dns_deploy_preparation_actions,
+    evaluate_deployment_execution_preflight_readiness,
+    evaluate_deployment_dns_deploy_preparation_readiness,
+)
 
 _executor = ThreadPoolExecutor(max_workers=2)
 logger = logging.getLogger(__name__)
@@ -825,6 +830,12 @@ def _release_target_payload(target: ReleaseTarget) -> Dict[str, Any]:
     runtime = target.runtime_json or {}
     tls = target.tls_json or {}
     ingress = (target.config_json or {}).get("ingress") or {}
+    dns_provider = (target.config_json or {}).get("dns_provider") if isinstance((target.config_json or {}).get("dns_provider"), dict) else {}
+    deployment_provider_profile = (
+        (target.config_json or {}).get("deployment_provider_profile")
+        if isinstance((target.config_json or {}).get("deployment_provider_profile"), dict)
+        else {}
+    )
     env = target.env_json or {}
     secret_refs = target.secret_refs_json or []
     payload = {
@@ -845,6 +856,8 @@ def _release_target_payload(target: ReleaseTarget) -> Dict[str, Any]:
         ),
         "fqdn": target.fqdn,
         "dns": dns,
+        "dns_provider": dns_provider,
+        "deployment_provider_profile": deployment_provider_profile,
         "runtime": runtime,
         "tls": tls,
         "ingress": ingress,
@@ -1539,10 +1552,35 @@ def _generate_implementation_plan(
     release_dns = release_target.get("dns") if isinstance(release_target, dict) else {}
     release_runtime = release_target.get("runtime") if isinstance(release_target, dict) else {}
     release_tls = release_target.get("tls") if isinstance(release_target, dict) else {}
+    release_profile = (
+        release_target.get("deployment_provider_profile")
+        if isinstance(release_target, dict) and isinstance(release_target.get("deployment_provider_profile"), dict)
+        else {}
+    )
     image_deploy_enabled = _normalize_runtime_mode(release_runtime) == "compose_images"
     if release_dns:
         dns_provider = release_dns.get("provider") or dns_provider
     route53_requested = dns_provider == "route53" or "dns-route53" in modules_required
+    selected_provider_key = str((release_profile or {}).get("selected_provider_key") or "").strip().lower()
+    dns_provider_for_preparation = str(dns_provider or ("route53" if route53_requested else "")).strip().lower()
+    dns_provider_config = (
+        release_target.get("dns_provider")
+        if isinstance(release_target, dict) and isinstance(release_target.get("dns_provider"), dict)
+        else {}
+    )
+    dns_preparation_readiness = evaluate_deployment_dns_deploy_preparation_readiness(
+        dns_provider=dns_provider_for_preparation,
+        fqdn=str((release_target or {}).get("fqdn") or "") if isinstance(release_target, dict) else "",
+        target_instance_id=str((release_target or {}).get("target_instance_id") or "") if isinstance(release_target, dict) else "",
+        dns_config=dns_provider_config,
+        selected_provider_key=selected_provider_key,
+    )
+    dns_preparation_actions = derive_deployment_dns_deploy_preparation_actions(
+        dns_provider=dns_provider_for_preparation,
+        fqdn=str((release_target or {}).get("fqdn") or "") if isinstance(release_target, dict) else "",
+        target_instance_id=str((release_target or {}).get("target_instance_id") or "") if isinstance(release_target, dict) else "",
+        selected_provider_key=selected_provider_key,
+    )
     deploy_ssm_requested = "deploy-ssm-compose" in modules_required
     tls_acme_requested = any(module in modules_required for module in ("ingress-nginx-acme", "ingress-traefik-acme"))
     runtime_requested = "runtime-web-static-nginx" in modules_required
@@ -1574,31 +1612,41 @@ def _generate_implementation_plan(
     preferred_ingress_module = "ingress-traefik-acme" if tls_mode == "host-ingress" else "ingress-nginx-acme"
     if not tls_acme_requested:
         tls_acme_requested = tls_mode in {"nginx+acme", "acme", "letsencrypt", "host-ingress"}
-    if route53_requested and not any(item.get("id") == "dns.ensure_record.route53" for item in work_items):
-        work_items.append(
-            {
-                "id": "dns.ensure_record.route53",
-                "title": "Ensure Route53 DNS record",
-                "description": "Ensure the public hostname resolves to the target instance via Route53.",
-                "type": "deploy",
-                "repo_targets": [
-                    {
-                        "name": "xyn-api",
-                        "url": "https://github.com/Xyence/xyn-api",
-                        "ref": "main",
-                        "path_root": ".",
-                        "auth": "https_token",
-                        "allow_write": False,
-                    }
-                ],
-                "inputs": {"artifacts": ["implementation_plan.json", "release_target.json"]},
-                "outputs": {"paths": [], "artifacts": ["dns_change_result.json"]},
-                "acceptance_criteria": ["DNS record exists and resolves to target public IP."],
-                "verify": [{"name": "dns-ensure", "command": "echo 'handled by runner'", "cwd": "."}],
-                "depends_on": [],
-                "labels": ["deploy", "dns", "module:dns-route53", "capability:dns.route53.records"],
-            }
-        )
+    if route53_requested and bool(dns_preparation_readiness.get("can_prepare")):
+        for action in dns_preparation_actions:
+            action_step_id = str((action or {}).get("step_id") or "").strip() or "dns.ensure_record.route53"
+            if any(item.get("id") == action_step_id for item in work_items):
+                continue
+            action_capability = str((action or {}).get("capability") or "").strip() or "dns.route53.records"
+            action_reason = str((action or {}).get("reason") or "").strip()
+            labels = ["deploy", "dns", "module:dns-route53", f"capability:{action_capability}"]
+            if action_reason:
+                labels.append(f"provider_action:{action_reason}")
+            work_items.append(
+                {
+                    "id": action_step_id,
+                    "title": str((action or {}).get("title") or "Ensure Route53 DNS record"),
+                    "description": "Ensure the public hostname resolves to the target instance via provider DNS configuration.",
+                    "type": "deploy",
+                    "repo_targets": [
+                        {
+                            "name": "xyn-api",
+                            "url": "https://github.com/Xyence/xyn-api",
+                            "ref": "main",
+                            "path_root": ".",
+                            "auth": "https_token",
+                            "allow_write": False,
+                        }
+                    ],
+                    "inputs": {"artifacts": ["implementation_plan.json", "release_target.json"]},
+                    "outputs": {"paths": [], "artifacts": ["dns_change_result.json"]},
+                    "acceptance_criteria": ["DNS record exists and resolves to target public IP."],
+                    "verify": [{"name": "dns-ensure", "command": "echo 'handled by runner'", "cwd": "."}],
+                    "depends_on": [],
+                    "labels": labels,
+                    "provider_preparation_action": action,
+                }
+            )
     if image_deploy_enabled:
         work_items = [item for item in work_items if item.get("id") != "deploy.apply_remote_compose.ssm"]
         for item in work_items:
@@ -2088,6 +2136,17 @@ def _generate_implementation_plan(
         plan_rationale["modules_selected"] = modules_selected
     if route53_requested and "dns-route53" not in plan_rationale.get("modules_selected", []):
         plan_rationale.setdefault("modules_selected", []).append("dns-route53")
+    if route53_requested and not bool(dns_preparation_readiness.get("can_prepare")):
+        blocked_reason = str(dns_preparation_readiness.get("blocked_reason") or "").strip()
+        missing_inputs = dns_preparation_readiness.get("missing_inputs") if isinstance(dns_preparation_readiness.get("missing_inputs"), list) else []
+        reason_parts: List[str] = []
+        if blocked_reason:
+            reason_parts.append(blocked_reason)
+        if missing_inputs:
+            reason_parts.append("missing inputs: " + ", ".join(str(value) for value in missing_inputs if str(value).strip()))
+        if not reason_parts:
+            reason_parts.append("provider deploy-preparation readiness check failed")
+        plan_rationale.setdefault("why_next", []).append("DNS ensure action gated: " + "; ".join(reason_parts))
     if deploy_ssm_requested and "deploy-ssm-compose" not in plan_rationale.get("modules_selected", []):
         plan_rationale.setdefault("modules_selected", []).append("deploy-ssm-compose")
     if tls_acme_requested and preferred_ingress_module not in plan_rationale.get("modules_selected", []):
@@ -2150,6 +2209,10 @@ def _generate_implementation_plan(
         "work_items": work_items,
         "tasks": tasks,
         "plan_rationale": plan_rationale,
+        "provider_preparation": {
+            "dns_deploy_readiness": dns_preparation_readiness,
+            "dns_deploy_actions": dns_preparation_actions,
+        },
     }
     if release_target:
         plan["release_target_id"] = release_target.get("id")
@@ -5752,12 +5815,35 @@ def internal_release_target_check_drift(request: HttpRequest, target_id: str) ->
         "compose_sha256": (state.get("compose") or {}).get("content_hash") if state else "",
     }
     runtime = (release_target.config_json or {}).get("runtime") if hasattr(release_target, "config_json") else {}
+    deployment_provider_profile = (
+        (release_target.config_json or {}).get("deployment_provider_profile")
+        if isinstance((release_target.config_json or {}).get("deployment_provider_profile"), dict)
+        else {}
+    )
+    selected_provider_key = str((deployment_provider_profile or {}).get("selected_provider_key") or "").strip().lower()
     if (runtime or {}).get("remote_root"):
         remote_root = str((runtime or {}).get("remote_root"))
     else:
         project_key = f"{blueprint.namespace}.{blueprint.name}" if blueprint else ""
         remote_root_slug = re.sub(r"[^a-z0-9]+", "-", project_key.lower()).strip("-") or "default"
         remote_root = f"/opt/xyn/apps/{remote_root_slug}"
+    preflight = evaluate_deployment_execution_preflight_readiness(
+        operation="check_drift",
+        runtime_config=runtime if isinstance(runtime, dict) else {},
+        target_instance_id=str(instance.instance_id or ""),
+        aws_region=str(instance.aws_region or ""),
+        remote_root=remote_root,
+        selected_provider_key=selected_provider_key,
+    )
+    if not bool(preflight.get("can_probe_runtime_marker")):
+        return JsonResponse(
+            {
+                "error": "execution_preflight_blocked",
+                "preflight": preflight,
+                "expected": expected,
+            },
+            status=400,
+        )
     actual = _ssm_fetch_runtime_marker(instance.instance_id, instance.aws_region or "", remote_root)
     drift = False
     if expected.get("release_uuid") and expected.get("release_uuid") != actual.get("release_uuid"):
@@ -5766,7 +5852,7 @@ def internal_release_target_check_drift(request: HttpRequest, target_id: str) ->
         drift = True
     if expected.get("compose_sha256") and expected.get("compose_sha256") != actual.get("compose_sha256"):
         drift = True
-    return JsonResponse({"drift": drift, "expected": expected, "actual": actual})
+    return JsonResponse({"drift": drift, "expected": expected, "actual": actual, "preflight": preflight})
 
 
 @csrf_exempt

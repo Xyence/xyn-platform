@@ -13,6 +13,7 @@ from xyn_orchestrator.execution_briefs import (
     valid_execution_brief_review_transition,
 )
 from xyn_orchestrator.models import DevTask
+from xyn_orchestrator.models import Artifact, ArtifactType, Workspace
 
 
 class ExecutionBriefTests(TestCase):
@@ -190,3 +191,31 @@ class ExecutionBriefTests(TestCase):
         self.assertEqual(review["target_repository_slug"], "xyn-platform")
         self.assertIn("mark_ready", review["available_actions"])
         self.assertIn("approve", review["available_actions"])
+
+    def test_fallback_execution_brief_includes_artifact_allowed_paths(self):
+        workspace = Workspace.objects.create(slug=f"ws-{uuid.uuid4().hex[:8]}", name="Workspace")
+        artifact_type, _ = ArtifactType.objects.get_or_create(
+            slug="application",
+            defaults={"name": "Application", "description": "Generated app artifact."},
+        )
+        artifact = Artifact.objects.create(
+            workspace=workspace,
+            type=artifact_type,
+            title="xyn-api",
+            slug=f"app-{uuid.uuid4().hex[:8]}",
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["services/xyn-api/backend/"],
+            edit_mode="repo_backed",
+        )
+        task = self._task(
+            source_entity_type="artifact",
+            source_entity_id=artifact.id,
+            execution_policy={"require_brief_approval": True},
+        )
+
+        resolved = resolve_execution_brief(task)
+        review = serialize_execution_brief_review(task)
+
+        self.assertEqual((resolved.brief.get("target") or {}).get("repository_slug"), "xyn-platform")
+        self.assertEqual((resolved.brief.get("target") or {}).get("allowed_paths"), ["services/xyn-api/backend/"])
+        self.assertEqual(review["target_allowed_paths"], ["services/xyn-api/backend/"])

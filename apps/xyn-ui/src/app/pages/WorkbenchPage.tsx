@@ -21,6 +21,29 @@ export function shouldReuseExistingLayoutOnWorkspaceSwitch(input: {
   return input.panelCount > 0;
 }
 
+export function shouldReopenComposerForRouteParams(input: {
+  activePanel: { key?: string; params?: Record<string, unknown> } | null;
+  routeParams: Record<string, unknown>;
+}): boolean {
+  const active = input.activePanel;
+  if (!active || String(active.key || "") !== "composer_detail") return true;
+  const activeParams = active.params || {};
+  const keys: Array<keyof typeof input.routeParams> = [
+    "application_id",
+    "application_plan_id",
+    "goal_id",
+    "thread_id",
+    "factory_key",
+    "solution_change_session_id",
+  ];
+  for (const key of keys) {
+    const expected = String(input.routeParams[key] || "").trim();
+    const current = String(activeParams[String(key)] || "").trim();
+    if (expected !== current) return true;
+  }
+  return false;
+}
+
 export default function WorkbenchPage({
   workspaceName = "",
   workspaceColor = "#6c7a89",
@@ -204,6 +227,23 @@ export default function WorkbenchPage({
       next.delete("panel");
       setSearchParams(next, { replace: true });
       return;
+    } else if (panelKey === "campaign_list") {
+      const create = ["1", "true", "yes"].includes(String(searchParams.get("create") || "").trim().toLowerCase());
+      const nextParams: Record<string, unknown> = {};
+      if (create) nextParams.create = true;
+      const activeCreate = Boolean(activePanel?.params?.create === true);
+      if (!activePanel || activePanel.key !== "campaign_list" || activeCreate !== create) {
+        openPanel({
+          key: "campaign_list",
+          params: nextParams,
+          open_in: "current_panel",
+        });
+      }
+      const next = new URLSearchParams(searchParams);
+      next.delete("create");
+      next.delete("panel");
+      setSearchParams(next, { replace: true });
+      return;
     } else if (panelKey === "composer_detail" || panelKey === "composer") {
       const nextParams: Record<string, unknown> = {};
       const applicationId = String(searchParams.get("application_id") || "").trim();
@@ -218,7 +258,7 @@ export default function WorkbenchPage({
       if (threadId) nextParams.thread_id = threadId;
       if (factoryKey) nextParams.factory_key = factoryKey;
       if (solutionChangeSessionId) nextParams.solution_change_session_id = solutionChangeSessionId;
-      if (!activePanel || activePanel.key !== "composer_detail") {
+      if (shouldReopenComposerForRouteParams({ activePanel, routeParams: nextParams })) {
         openPanel({
           key: "composer_detail",
           params: nextParams,

@@ -1,4 +1,5 @@
 import type { ArtifactSurface } from "../../api/types";
+import { isCompatibilityFallbackSurface } from "../pages/shellSurfaceRenderers";
 
 export type PromptSurfaceScope = "global" | "workspace";
 
@@ -358,7 +359,9 @@ export function resolvePromptSurfaceTarget(
     };
   }
 
-  const globalSurfaces = (options.globalSurfaces || []).filter((surface) => isGlobalSurface(surface));
+  const globalSurfaces = (options.globalSurfaces || [])
+    .filter((surface) => isGlobalSurface(surface))
+    .filter((surface) => !isCompatibilityFallbackSurface(surface));
   const globalMatch = matchSurfaceByPrompt(prompt, globalSurfaces);
   if (globalMatch) {
     return {
@@ -369,7 +372,9 @@ export function resolvePromptSurfaceTarget(
     };
   }
 
-  const workspaceSurfaces = (options.workspaceSurfaces || []).filter((surface) => isWorkspaceSurface(surface));
+  const workspaceSurfaces = (options.workspaceSurfaces || [])
+    .filter((surface) => isWorkspaceSurface(surface))
+    .filter((surface) => !isCompatibilityFallbackSurface(surface));
   const workspaceMatch = matchSurfaceByPrompt(prompt, workspaceSurfaces);
   if (workspaceMatch) {
     return {

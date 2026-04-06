@@ -215,6 +215,9 @@ export function resolvePanelCommand(input: string): ResolvedPanelCommand | null 
   if (/^(show|list|open)\s+solutions?$/.test(normalized)) {
     return { panelKey: "solution_list", params: {} };
   }
+  if (/^(show|list|open)\s+campaigns?$/.test(normalized) || /^campaigns?$/.test(normalized)) {
+    return { panelKey: "campaign_list", params: {} };
+  }
   match = normalized.match(/^(create|build)\s+solution\s+(.+)$/);
   if (match && match[2]) {
     return {
@@ -610,6 +613,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
 
   const directPanel = resolvePanelCommand(prompt);
   if (directPanel) {
+    let handledDirectPanel = false;
     const dataset =
       directPanel.panelKey === "workspaces"
         ? "workspaces"
@@ -631,6 +635,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
                         ? "ems_registrations_timeseries"
                         : "";
     if (dataset) {
+      handledDirectPanel = true;
       const paramsWithQuery =
         directPanel.params && typeof directPanel.params === "object" && "query" in directPanel.params
           ? (directPanel.params as { query?: Record<string, unknown> })
@@ -656,6 +661,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
       };
     }
     if (directPanel.panelKey === "artifact_detail" && directPanel.params.slug) {
+      handledDirectPanel = true;
       return {
         type: "ui.action",
         action: {
@@ -670,6 +676,7 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
       };
     }
     if (directPanel.panelKey === "run_detail" && directPanel.params.run_id) {
+      handledDirectPanel = true;
       return {
         type: "ui.action",
         action: {
@@ -682,6 +689,12 @@ export function buildUiActionFromPrompt(rawPrompt: string, canvasContext: Consol
           },
         },
       };
+    }
+    if (!handledDirectPanel) {
+      // Preserve direct panel intent precedence. If we recognized a direct
+      // panel command but do not map it to a local canvas action here, return
+      // null so submitPrompt can execute the direct panel-open path.
+      return null;
     }
   }
 
@@ -1564,6 +1577,14 @@ export default function XynConsoleCore({ mode, onRequestClose, onOpenPanel }: Pr
           });
         }
       })();
+      return;
+    }
+    const preSurfaceDirectPanel = resolvePanelCommand(prompt);
+    if (preSurfaceDirectPanel?.panelKey === "campaign_list" && onOpenPanel) {
+      onOpenPanel(preSurfaceDirectPanel.panelKey, resolveDirectPanelOpenParams(preSurfaceDirectPanel, workspaceIdFromPath));
+      setInputText("");
+      clearSessionResolution();
+      if (isOverlay) setOpen(false);
       return;
     }
     // Resolve canonical core prompt surfaces without relying on surface API fetches.

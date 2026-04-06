@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -248,6 +249,7 @@ def _effective_codegen_repo_targets(task: Dict[str, Any], work_item: Dict[str, A
                 repository=repository,
                 repository_slug=explicit_repo,
                 branch=explicit_branch or (repository.default_branch if repository else None),
+                allowed_paths=(),
                 source_kind="task_explicit",
                 application_id=None,
                 application_plan_id=None,
@@ -2611,6 +2613,88 @@ def _ssm_fetch_runtime_marker(instance_id: str, aws_region: str, root_dir: str) 
         "release_uuid": lines[1] if len(lines) > 1 else "",
         "manifest_sha256": lines[2] if len(lines) > 2 else "",
         "compose_sha256": lines[3] if len(lines) > 3 else "",
+    }
+
+
+def _ssm_prepare_runtime_root_marker(
+    instance_id: str,
+    aws_region: str,
+    root_dir: str,
+    *,
+    marker_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    root = str(root_dir or "").strip()
+    if not root:
+        raise RuntimeError("remote_root is required for runtime root marker preparation")
+    payload = json.dumps(marker_payload or {}, sort_keys=True)
+    marker_path = f"{root.rstrip('/')}/.xyn_execution_prepared.json"
+    result = _run_ssm_commands(
+        instance_id,
+        aws_region,
+        [
+            "set -euo pipefail",
+            f"ROOT={shlex.quote(root)}",
+            "mkdir -p \"$ROOT\"",
+            f"MARKER={shlex.quote(marker_path)}",
+            f"printf '%s' {shlex.quote(payload)} > \"$MARKER\"",
+            "wc -c < \"$MARKER\"",
+        ],
+    )
+    if result.get("invocation_status") != "Success":
+        raise RuntimeError(result.get("stderr") or "SSM runtime root marker write failed")
+    line = (result.get("stdout") or "").strip().splitlines()
+    bytes_written = 0
+    if line:
+        try:
+            bytes_written = int(line[-1].strip())
+        except ValueError:
+            bytes_written = 0
+    return {
+        "marker_path": marker_path,
+        "bytes_written": bytes_written,
+        "invocation_status": str(result.get("invocation_status") or ""),
+    }
+
+
+def _ssm_stage_execution_manifest(
+    instance_id: str,
+    aws_region: str,
+    root_dir: str,
+    *,
+    manifest_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    root = str(root_dir or "").strip()
+    if not root:
+        raise RuntimeError("remote_root is required for execution manifest staging")
+    payload = json.dumps(manifest_payload or {}, sort_keys=True)
+    marker_path = f"{root.rstrip('/')}/.xyn_execution_manifest.json"
+    payload_sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    result = _run_ssm_commands(
+        instance_id,
+        aws_region,
+        [
+            "set -euo pipefail",
+            f"ROOT={shlex.quote(root)}",
+            "mkdir -p \"$ROOT\"",
+            f"MANIFEST={shlex.quote(marker_path)}",
+            f"printf '%s' {shlex.quote(payload)} > \"$MANIFEST\"",
+            "wc -c < \"$MANIFEST\"",
+        ],
+    )
+    if result.get("invocation_status") != "Success":
+        raise RuntimeError(result.get("stderr") or "SSM execution manifest write failed")
+    line = (result.get("stdout") or "").strip().splitlines()
+    bytes_written = 0
+    if line:
+        try:
+            bytes_written = int(line[-1].strip())
+        except ValueError:
+            bytes_written = 0
+    return {
+        "manifest_path": marker_path,
+        "manifest_sha256": payload_sha,
+        "bytes_written": bytes_written,
+        "invocation_status": str(result.get("invocation_status") or ""),
     }
 
 

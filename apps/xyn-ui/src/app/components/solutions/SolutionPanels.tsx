@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { ApplicationArtifactMembership, ApplicationDetail, ApplicationSummary, SolutionChangeSession, UnifiedArtifact } from "../../../api/types";
 import {
+  activateApplication,
   applyApplicationPlan,
   createSolutionChangeSession,
   deleteSolutionChangeSession,
@@ -290,6 +291,8 @@ export function SolutionDetailPanel({
   const [stagingSession, setStagingSession] = useState<boolean>(false);
   const [preparingPreview, setPreparingPreview] = useState<boolean>(false);
   const [validatingSession, setValidatingSession] = useState<boolean>(false);
+  const [activationBusy, setActivationBusy] = useState<boolean>(false);
+  const [activationFeedback, setActivationFeedback] = useState<{ tone: "info" | "warn" | "error"; title: string; body?: string } | null>(null);
 
   async function refreshSessions(preferredSessionId?: string | null) {
     if (!applicationId) return;
@@ -564,6 +567,95 @@ export function SolutionDetailPanel({
     }
   }
 
+  function resolveRuntimeTargetUrl(runtimeTarget: Record<string, unknown>, runtimeInstance: Record<string, unknown>): string {
+    const candidates = [
+      String(runtimeTarget.runtime_url || "").trim(),
+      String(runtimeTarget.app_url || "").trim(),
+      String(runtimeTarget.public_app_url || "").trim(),
+      String(runtimeTarget.url || "").trim(),
+      String(runtimeTarget.fqdn || "").trim(),
+      String(runtimeInstance.fqdn || "").trim(),
+    ].filter(Boolean);
+    const first = candidates[0] || "";
+    if (!first) return "";
+    if (/^https?:\/\//i.test(first)) return first;
+    if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(first)) return `https://${first}`;
+    return "";
+  }
+
+  async function handleActivateSolution() {
+    if (!applicationId || activationBusy) return;
+    setActivationBusy(true);
+    setActivationFeedback(null);
+    try {
+      const response = await activateApplication(
+        applicationId,
+        activeSessionId ? { solution_change_session_id: activeSessionId } : undefined
+      );
+      const runtimeTarget = response.runtime_target && typeof response.runtime_target === "object" ? response.runtime_target : {};
+      const runtimeInstance = response.runtime_instance && typeof response.runtime_instance === "object" ? response.runtime_instance : {};
+      const binding = response.solution_runtime_binding && typeof response.solution_runtime_binding === "object" ? response.solution_runtime_binding : {};
+      const mode = String((binding as Record<string, unknown>).activation_mode || response.policy_source || "reconstructed");
+      const modeLabel = mode === "composed" ? "composed" : "reconstructed";
+      const composition = response.solution_activation_composition && typeof response.solution_activation_composition === "object"
+        ? response.solution_activation_composition
+        : {};
+      const primarySlug = String(
+        ((composition as Record<string, unknown>).primary_app_artifact_ref as Record<string, unknown> | undefined)?.artifact_slug || ""
+      ).trim();
+      const policySlug = String(
+        ((composition as Record<string, unknown>).policy_artifact_ref as Record<string, unknown> | undefined)?.artifact_slug || ""
+      ).trim();
+      const compositionLabel = `Primary ${primarySlug || "—"} · Policy ${policySlug || "none"} · Mode ${modeLabel}`;
+
+      if (response.status === "reused") {
+        const siblingTarget = String(response.sibling_ui_url || "").trim();
+        const target = resolveRuntimeTargetUrl(runtimeTarget as Record<string, unknown>, runtimeInstance as Record<string, unknown>);
+        const openTarget = siblingTarget || target;
+        if (openTarget) {
+          window.open(openTarget, "_blank", "noopener,noreferrer");
+          setActivationFeedback({
+            tone: "info",
+            title: `Opened existing dev sibling runtime (${modeLabel}).`,
+            body: `${compositionLabel} · ${siblingTarget ? `Sibling ${siblingTarget}` : target}`,
+          });
+        } else {
+          setActivationFeedback({
+            tone: "info",
+            title: `Reused existing dev sibling runtime (${modeLabel}).`,
+            body: `${compositionLabel} · Runtime target is active, but no openable URL was returned.`,
+          });
+        }
+        return;
+      }
+      if (response.status === "queued_existing") {
+        const draftId = String(response.activation?.draft_id || response.in_flight?.draft_id || "").trim();
+        const jobId = String(response.activation?.job_id || response.in_flight?.job_id || "").trim();
+        setActivationFeedback({
+          tone: "info",
+          title: `Solution activation already in progress (${modeLabel}).`,
+          body: `${compositionLabel} · Draft ${draftId || "—"} · Job ${jobId || "—"}`,
+        });
+        return;
+      }
+      const draftId = String(response.activation?.draft_id || "").trim();
+      const jobId = String(response.activation?.job_id || "").trim();
+      setActivationFeedback({
+        tone: "info",
+        title: `Solution activation queued (${modeLabel}).`,
+        body: `${compositionLabel} · Draft ${draftId || "—"} · Job ${jobId || "—"}`,
+      });
+    } catch (err) {
+      setActivationFeedback({
+        tone: "error",
+        title: "Failed to open solution in dev sibling.",
+        body: err instanceof Error ? err.message : "Request failed",
+      });
+    } finally {
+      setActivationBusy(false);
+    }
+  }
+
   function toggleArtifactSelection(artifactIdValue: string, checked: boolean) {
     setSelectedArtifactIds((prev) => {
       if (checked) return prev.includes(artifactIdValue) ? prev : [...prev, artifactIdValue];
@@ -615,6 +707,16 @@ export function SolutionDetailPanel({
   const planSharedContracts = (activePlan.shared_contracts as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
   const planImplementationSteps = (activePlan.implementation_steps as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
   const planValidationSteps = (activePlan.validation_plan as unknown[] | undefined)?.map((item) => String(item || "").trim()).filter(Boolean) || [];
+  const iterationLinkage = (
+    (activeSession?.metadata as Record<string, unknown> | undefined)?.iteration_linkage as Record<string, unknown> | undefined
+  ) || {};
+  const iterationAnchorUrl = String(
+    ((iterationLinkage.runtime_target as Record<string, unknown> | undefined)?.public_app_url as string | undefined) || ""
+  ).trim();
+  const iterationAnchorAppSlug = String(
+    ((iterationLinkage.runtime_instance as Record<string, unknown> | undefined)?.app_slug as string | undefined) || ""
+  ).trim();
+  const hasIterationAnchor = Object.keys(iterationLinkage).length > 0;
 
   const planningState = (activeSession?.planning as Record<string, unknown> | undefined) || {};
   const pendingCheckpoints = Array.isArray(planningState?.pending_checkpoints)
@@ -695,6 +797,14 @@ export function SolutionDetailPanel({
           <h3>{application?.name || "Solution"}</h3>
           <div className="inline-action-row">
             <button
+              className="button sm"
+              type="button"
+              disabled={activationBusy}
+              onClick={() => void handleActivateSolution()}
+            >
+              {activationBusy ? "Activating…" : "Open in Dev"}
+            </button>
+            <button
               className="ghost sm"
               type="button"
               onClick={() =>
@@ -734,6 +844,29 @@ export function SolutionDetailPanel({
             <span className="field-value">{application?.artifact_member_count || memberships.length || 0}</span>
           </div>
         </div>
+        {activationFeedback ? (
+          <p className={`${activationFeedback.tone === "error" ? "danger" : "muted"} small`}>
+            <strong>{activationFeedback.title}</strong>
+            {activationFeedback.body ? ` ${activationFeedback.body}` : ""}
+          </p>
+        ) : null}
+        <p className="muted small">
+          Activation mode:{" "}
+          <strong>{String(application.runtime_binding?.activation_mode || "reconstructed")}</strong>
+          {" · "}
+          Freshness: <strong>{String(application.runtime_binding?.freshness || "unknown")}</strong>
+          {" · "}
+          Primary: <strong>{String(application.activation_composition?.primary_app_artifact_ref?.artifact_slug || "—")}</strong>
+          {" · "}
+          Policy: <strong>{String(application.activation_composition?.policy_artifact_ref?.artifact_slug || "none")}</strong>
+        </p>
+        {activeSession ? (
+          <p className="muted small">
+            Iteration anchor:{" "}
+            <strong>{hasIterationAnchor ? "linked to current dev sibling context" : "not yet linked"}</strong>
+            {hasIterationAnchor ? ` · ${iterationAnchorUrl || iterationAnchorAppSlug || "runtime target recorded"}` : ""}
+          </p>
+        ) : null}
       </section>
 
       <div className="solution-detail-grid">
@@ -749,6 +882,7 @@ export function SolutionDetailPanel({
               <label className="field">
                 <span className="field-label">Requested change</span>
                 <textarea
+                  className="solution-requested-change-input"
                   aria-label="Requested change"
                   rows={3}
                   value={changeRequest}

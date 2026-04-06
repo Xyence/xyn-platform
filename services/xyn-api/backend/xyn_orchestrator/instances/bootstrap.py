@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from xyn_orchestrator.bootstrap_guard import schema_bootstrap_readiness
+
 
 logger = logging.getLogger(__name__)
 
@@ -230,33 +232,52 @@ def upsert_local_instance_record(subtype: Optional[str] = None) -> Optional[str]
 
 def bootstrap_instance_registration() -> None:
     global _BOOTSTRAP_DONE
-    if _BOOTSTRAP_DONE:
-        return
     with _BOOTSTRAP_LOCK:
         if _BOOTSTRAP_DONE:
             return
-        _BOOTSTRAP_DONE = True
-    try:
-        from django.core.cache import cache
+        cache = None
         lock_key = "xyn:instance-bootstrap"
-        if cache and not cache.add(lock_key, "1", timeout=120):
-            logger.info("Instance bootstrap already handled by another worker.")
-            return
-    except Exception:
-        pass
-    try:
-        metadata = get_instance_metadata()
-        logger.info(
-            "Detected runtime substrate=%s instance_id=%s region=%s type=%s",
-            metadata.substrate,
-            metadata.instance_id,
-            metadata.region,
-            metadata.instance_type,
-        )
-        instance_id = upsert_local_instance_record(metadata.substrate)
-        logger.info("Instance registration completed id=%s", instance_id)
-    except Exception as exc:
-        logger.warning("Instance bootstrap failed: %s", exc)
+        lock_acquired = False
+        try:
+            from django.core.cache import cache as django_cache
+            from xyn_orchestrator.models import ProvisionedInstance
+
+            cache = django_cache
+            readiness = schema_bootstrap_readiness(required_tables={"xyn_orchestrator_provisionedinstance"})
+            if not readiness.ready:
+                logger.info("Instance bootstrap deferred until schema is ready (%s).", readiness.reason)
+                return
+
+            if cache and not cache.add(lock_key, "1", timeout=120):
+                logger.info("Instance bootstrap already handled by another worker.")
+                return
+            lock_acquired = True
+
+            metadata = get_instance_metadata()
+            logger.info(
+                "Detected runtime substrate=%s instance_id=%s region=%s type=%s",
+                metadata.substrate,
+                metadata.instance_id,
+                metadata.region,
+                metadata.instance_type,
+            )
+            instance_id = upsert_local_instance_record(metadata.substrate)
+            duplicate_count = ProvisionedInstance.objects.filter(instance_id=metadata.instance_id).count()
+            if duplicate_count > 1:
+                logger.warning(
+                    "Instance bootstrap expected one record for instance_id=%s but found=%s",
+                    metadata.instance_id,
+                    duplicate_count,
+                )
+            logger.info("Instance registration completed id=%s", instance_id)
+            _BOOTSTRAP_DONE = True
+        except Exception as exc:
+            if lock_acquired and cache:
+                try:
+                    cache.delete(lock_key)
+                except Exception:
+                    pass
+            logger.warning("Instance bootstrap failed: %s", exc)
 
 
 def _apply_overrides(metadata: InstanceMetadata) -> InstanceMetadata:

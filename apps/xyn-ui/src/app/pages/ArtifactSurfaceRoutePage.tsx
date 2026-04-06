@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { resolveArtifactSurface } from "../../api/xyn";
 import type { ArtifactSurfaceResolveResponse } from "../../api/types";
 import ArtifactsArticlesPage from "./ArtifactsArticlesPage";
 import ArtifactsWorkflowsPage from "./ArtifactsWorkflowsPage";
 import ArtifactDetailPage from "./ArtifactDetailPage";
 import CampaignMapWorkflowPage from "./CampaignMapWorkflowPage";
-import { resolveShellSurfaceRenderer } from "./shellSurfaceRenderers";
+import { isCompatibilityFallbackSurface, resolveShellSurfaceRenderer } from "./shellSurfaceRenderers";
+import { toWorkspacePath } from "../routing/workspaceRouting";
 
 export function toSurfaceResolvePath(pathname: string): string {
   const raw = String(pathname || "").trim();
@@ -111,11 +112,31 @@ export default function ArtifactSurfaceRoutePage({
     );
   }
 
+  const resolvedSurfaceRoute = toSurfaceResolvePath(String(resolved?.surface?.route || requestPath));
+  if (resolved && isCompatibilityFallbackSurface(resolved.surface || {})) {
+    if (resolvedSurfaceRoute === "/app/campaigns") {
+      return <Navigate to={toWorkspacePath(workspaceId, "workbench?panel=campaign_list")} replace />;
+    }
+    if (resolvedSurfaceRoute === "/app/campaigns/new") {
+      return <Navigate to={toWorkspacePath(workspaceId, "workbench?panel=campaign_list&create=1")} replace />;
+    }
+    return (
+      <div className="card stack">
+        <h2>{resolved?.surface?.title || "Surface unavailable"}</h2>
+        <p className="muted">
+          This artifact surface is not supported in the current workbench UI.
+        </p>
+        <p className="small muted">
+          Route: <code>{resolvedSurfaceRoute}</code>
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="card stack">
       <h2>{resolved?.surface?.title || "Artifact surface"}</h2>
-      <p className="muted">Renderer is declared but no compatible UI mapping exists in this build.</p>
-      <pre className="code-block">{JSON.stringify(resolved, null, 2)}</pre>
+      <p className="muted">Surface renderer is not supported in this build.</p>
     </div>
   );
 }

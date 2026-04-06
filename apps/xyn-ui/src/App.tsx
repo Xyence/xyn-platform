@@ -7,7 +7,7 @@ import PublicShell from "./public/PublicShell";
 import PageRoute from "./public/pages/PageRoute";
 import ArticlesIndex from "./public/pages/ArticlesIndex";
 import ArticleDetail from "./public/pages/ArticleDetail";
-import HomePage from "./public/pages/HomePage";
+import RootEntry from "./public/pages/RootEntry";
 
 function RouteLoadingShell() {
   return <div style={{ padding: 24 }}>Loading…</div>;
@@ -56,7 +56,7 @@ export default function App() {
         <Route path="/open-console" element={<OpenConsoleBridge />} />
         <Route path="/app/*" element={<LegacyAppRedirect />} />
         <Route path="/*" element={<PublicShell />}>
-          <Route index element={<HomePage />} />
+          <Route index element={<RootEntry />} />
           <Route path="articles" element={<ArticlesIndex />} />
           <Route path="articles/:slug" element={<ArticleDetail />} />
           <Route path=":category/:slug" element={<ArticleDetail />} />
