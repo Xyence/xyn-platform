@@ -336,6 +336,8 @@ from .deployments import (
     compute_idempotency_base,
     execute_release_plan_deploy,
     infer_app_id,
+    _run_ssm_commands,
+    _redact_output,
     maybe_trigger_rollback,
     load_release_plan_json,
 )
@@ -1751,6 +1753,25 @@ def _validate_release_target_payload(payload: Dict[str, Any]) -> list[str]:
     fqdn = payload.get("fqdn") or ""
     if " " in fqdn or "." not in fqdn:
         errors.append("fqdn: must be a valid hostname")
+    topology = payload.get("topology") if isinstance(payload.get("topology"), dict) else {}
+    topology_kind = str((topology or {}).get("kind") or "").strip().lower()
+    if topology_kind and topology_kind not in {"sibling", "root"}:
+        errors.append("topology.kind: must be one of sibling, root")
+    provider_binding = payload.get("provider_binding") if isinstance(payload.get("provider_binding"), dict) else {}
+    if provider_binding and not (
+        str(provider_binding.get("provider_key") or "").strip()
+        or str(provider_binding.get("module_fqn") or "").strip()
+    ):
+        errors.append("provider_binding: provider_key or module_fqn is required when provider_binding is present")
+    artifact_binding = payload.get("artifact_binding") if isinstance(payload.get("artifact_binding"), dict) else {}
+    if artifact_binding and not (
+        str(artifact_binding.get("artifact_id") or "").strip()
+        or str(artifact_binding.get("artifact_slug") or "").strip()
+        or str(artifact_binding.get("artifact_family_id") or "").strip()
+    ):
+        errors.append(
+            "artifact_binding: artifact_id, artifact_slug, or artifact_family_id is required when artifact_binding is present"
+        )
     secret_refs = payload.get("secret_refs") or []
     name_re = re.compile(r"^[A-Z0-9_]+$")
     for idx, ref in enumerate(secret_refs):
@@ -2010,6 +2031,14 @@ def _normalize_release_target_payload(
         tls_config=tls,
         selected_provider_key=selected_provider_key,
     )
+    topology = payload.get("topology") if isinstance(payload.get("topology"), dict) else {}
+    artifact_binding = payload.get("artifact_binding") if isinstance(payload.get("artifact_binding"), dict) else {}
+    provider_binding = payload.get("provider_binding") if isinstance(payload.get("provider_binding"), dict) else {}
+    topology_kind = (
+        str(topology.get("kind") or "").strip().lower()
+        or str(payload.get("topology_kind") or "").strip().lower()
+        or "sibling"
+    )
     normalized = {
         "schema_version": "release_target.v1",
         "id": target_id or payload.get("id") or str(uuid.uuid4()),
@@ -2029,13 +2058,14 @@ def _normalize_release_target_payload(
         "runtime": {
             "type": runtime.get("type") or "docker-compose",
             "transport": runtime.get("transport") or "ssm",
+            "mode": runtime.get("mode") or "compose_build",
             "remote_root": runtime.get("remote_root") or "",
             "compose_file_path": runtime.get("compose_file_path") or "",
         },
         "tls": {
             "mode": tls.get("mode") or "none",
-            "termination": tls.get("termination") or "",
-            "provider": tls.get("provider") or "",
+            "termination": tls.get("termination") or "host",
+            "provider": tls.get("provider") or "traefik",
             "acme_email": tls.get("acme_email") or "",
             "expose_http": bool(tls.get("expose_http", True)),
             "expose_https": bool(tls.get("expose_https", True)),
@@ -2050,6 +2080,21 @@ def _normalize_release_target_payload(
         "dns_provider": normalized_dns_provider_payload,
         "deployment_provider_profile": dns_provider_profile,
         "deployment_preparation": deployment_preparation,
+        "topology": {
+            "kind": topology_kind,
+            "lineage_origin_target_id": str(topology.get("lineage_origin_target_id") or "").strip(),
+        },
+        "artifact_binding": {
+            "artifact_id": str(artifact_binding.get("artifact_id") or payload.get("artifact_id") or "").strip(),
+            "artifact_slug": str(artifact_binding.get("artifact_slug") or payload.get("artifact_slug") or "").strip(),
+            "artifact_family_id": str(
+                artifact_binding.get("artifact_family_id") or payload.get("artifact_family_id") or ""
+            ).strip(),
+        },
+        "provider_binding": {
+            "provider_key": str(provider_binding.get("provider_key") or payload.get("provider_key") or "").strip(),
+            "module_fqn": str(provider_binding.get("module_fqn") or payload.get("module_fqn") or "").strip(),
+        },
         "auto_generated": bool(payload.get("auto_generated", False)),
         "editable": bool(payload.get("editable", True)),
         "created_at": payload.get("created_at") or timezone.now().isoformat(),
@@ -2082,6 +2127,13 @@ def _serialize_release_target(target: ReleaseTarget) -> Dict[str, Any]:
             "ingress": (target.config_json or {}).get("ingress") or {},
             "env": target.env_json or {},
             "secret_refs": target.secret_refs_json or [],
+            "topology": (target.config_json or {}).get("topology") if isinstance(target.config_json, dict) else {},
+            "artifact_binding": (target.config_json or {}).get("artifact_binding")
+            if isinstance(target.config_json, dict)
+            else {},
+            "provider_binding": (target.config_json or {}).get("provider_binding")
+            if isinstance(target.config_json, dict)
+            else {},
             "auto_generated": bool(target.auto_generated),
             "editable": bool((target.config_json or {}).get("editable", True)),
             "created_at": target.created_at.isoformat() if target.created_at else "",
@@ -2089,7 +2141,107 @@ def _serialize_release_target(target: ReleaseTarget) -> Dict[str, Any]:
         }
     payload.setdefault("auto_generated", bool(target.auto_generated))
     payload.setdefault("editable", bool((target.config_json or {}).get("editable", True)))
+    # Always emit canonical model identity for downstream read paths.
+    payload["id"] = str(target.id)
+    payload["blueprint_id"] = str(target.blueprint_id)
     return payload
+
+
+def _resolve_blueprint_for_release_target_payload(payload: Dict[str, Any]) -> Optional[Blueprint]:
+    blueprint_id = str(payload.get("blueprint_id") or "").strip()
+    if blueprint_id:
+        return Blueprint.objects.filter(id=blueprint_id).first()
+
+    artifact_id = str(payload.get("artifact_id") or "").strip()
+    artifact_slug = str(payload.get("artifact_slug") or "").strip()
+    artifact_binding = payload.get("artifact_binding") if isinstance(payload.get("artifact_binding"), dict) else {}
+    if not artifact_id:
+        artifact_id = str(artifact_binding.get("artifact_id") or "").strip()
+    if not artifact_slug:
+        artifact_slug = str(artifact_binding.get("artifact_slug") or "").strip()
+    if not artifact_id and not artifact_slug:
+        return None
+
+    artifact_qs = Artifact.objects.all()
+    artifact = None
+    if artifact_id:
+        artifact = artifact_qs.filter(id=artifact_id).first()
+    if artifact is None and artifact_slug:
+        artifact = artifact_qs.filter(slug=artifact_slug).first()
+    if artifact is None:
+        return None
+
+    if str(artifact.source_ref_type or "") == "Blueprint" and str(artifact.source_ref_id or "").strip():
+        return Blueprint.objects.filter(id=str(artifact.source_ref_id)).first()
+    if getattr(artifact, "source_blueprint_id", None):
+        return Blueprint.objects.filter(id=str(artifact.source_blueprint_id)).first()
+    return None
+
+
+def _deployment_provider_capabilities_for_module(module: Module) -> List[str]:
+    spec = module.latest_module_spec_json or {}
+    spec_module = spec.get("module") if isinstance(spec.get("module"), dict) else {}
+    capabilities = module.capabilities_provided_json
+    if not isinstance(capabilities, list):
+        capabilities = spec_module.get("capabilitiesProvided") if isinstance(spec_module.get("capabilitiesProvided"), list) else []
+    normalized: List[str] = []
+    for value in capabilities or []:
+        capability = str(value or "").strip()
+        if capability:
+            normalized.append(capability)
+    return normalized
+
+
+def _deployment_provider_supported_operations(module: Module, capabilities: Sequence[str]) -> List[str]:
+    operations: List[str] = ["plan"]
+    if capabilities:
+        operations.append("prepare")
+    if any(cap.startswith(("deploy.", "runtime.", "dns.")) for cap in capabilities):
+        operations.append("execute")
+    return list(dict.fromkeys(operations))
+
+
+def _deployment_provider_supported_topologies(module: Module) -> List[str]:
+    spec = module.latest_module_spec_json or {}
+    metadata = spec.get("metadata") if isinstance(spec.get("metadata"), dict) else {}
+    labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+    raw = labels.get("topology")
+    if isinstance(raw, str):
+        value = raw.strip()
+        return [value] if value else []
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return []
+
+
+def _is_deployment_provider_module(module: Module) -> bool:
+    capabilities = _deployment_provider_capabilities_for_module(module)
+    if any(cap.startswith(("deploy.", "dns.", "runtime.")) for cap in capabilities):
+        return True
+    name = str(module.name or "").strip().lower()
+    return bool(name.startswith("deploy-") or name.startswith("dns-") or "runtime" in name)
+
+
+def _serialize_deployment_provider(module: Module) -> Dict[str, Any]:
+    spec = module.latest_module_spec_json or {}
+    description = str(spec.get("description") or "").strip()
+    capabilities = _deployment_provider_capabilities_for_module(module)
+    return {
+        "provider_key": str(module.name),
+        "module_fqn": str(module.fqn),
+        "module_version": str(module.current_version or ""),
+        "supported_operations": _deployment_provider_supported_operations(module, capabilities),
+        "known_capabilities": capabilities,
+        "supported_topologies": _deployment_provider_supported_topologies(module),
+        "description": description,
+        "status": str(module.status or ""),
+    }
+
+
+def _deployment_provider_rows() -> List[Dict[str, Any]]:
+    maybe_sync_modules_from_registry()
+    modules = Module.objects.all().order_by("namespace", "name")
+    return [_serialize_deployment_provider(module) for module in modules if _is_deployment_provider_module(module)]
 
 
 def _blueprint_identifier(blueprint: Blueprint) -> str:
@@ -27509,10 +27661,15 @@ def release_targets_collection(request: HttpRequest) -> JsonResponse:
         return staff_error
     if request.method == "POST":
         payload = _parse_json(request)
-        blueprint_id = payload.get("blueprint_id")
-        if not blueprint_id:
-            return JsonResponse({"error": "blueprint_id is required"}, status=400)
-        blueprint = get_object_or_404(Blueprint, id=blueprint_id)
+        blueprint = _resolve_blueprint_for_release_target_payload(payload)
+        if blueprint is None:
+            return JsonResponse(
+                {
+                    "error": "release_target_blueprint_unresolved",
+                    "details": "Provide blueprint_id, or artifact_id/artifact_slug bound to a Blueprint.",
+                },
+                status=400,
+            )
         normalized = _normalize_release_target_payload(payload, str(blueprint.id))
         errors = _validate_release_target_payload(normalized)
         if errors:
@@ -27590,6 +27747,40 @@ def release_target_detail(request: HttpRequest, target_id: str) -> JsonResponse:
     target.updated_by = request.user
     target.save()
     return JsonResponse({"id": str(target.id)})
+
+
+@csrf_exempt
+@login_required
+def deployment_providers_collection(request: HttpRequest) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    rows = _deployment_provider_rows()
+    return JsonResponse({"providers": rows, "count": len(rows)})
+
+
+@csrf_exempt
+@login_required
+def deployment_provider_detail(request: HttpRequest, provider_key: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    target_key = str(provider_key or "").strip().lower()
+    rows = _deployment_provider_rows()
+    row = next(
+        (
+            item
+            for item in rows
+            if str(item.get("provider_key") or "").strip().lower() == target_key
+            or str(item.get("module_fqn") or "").strip().lower() == target_key
+        ),
+        None,
+    )
+    if not row:
+        return JsonResponse({"error": "provider_not_found", "provider_key": provider_key}, status=404)
+    return JsonResponse({"provider": row})
 
 
 @login_required
@@ -27991,6 +28182,826 @@ def release_target_check_drift_action(request: HttpRequest, target_id: str) -> J
     return internal_release_target_check_drift(internal_request, target_id)
 
 
+@login_required
+def release_target_deployment_plan(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "GET":
+        return JsonResponse({"error": "GET required"}, status=405)
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    plan_payload = _build_release_target_deployment_plan_payload(target)
+    return JsonResponse(plan_payload)
+
+
+def _build_release_target_deployment_plan_payload(target: ReleaseTarget) -> Dict[str, Any]:
+    target_payload = _serialize_release_target(target)
+    runtime = target_payload.get("runtime") if isinstance(target_payload.get("runtime"), dict) else {}
+    dns = target_payload.get("dns") if isinstance(target_payload.get("dns"), dict) else {}
+    topology = target_payload.get("topology") if isinstance(target_payload.get("topology"), dict) else {}
+
+    target_instance_id = str(target_payload.get("target_instance_id") or "").strip()
+    fqdn = str(target_payload.get("fqdn") or "").strip()
+    runtime_transport = str(runtime.get("transport") or "").strip()
+    runtime_type = str(runtime.get("type") or "").strip()
+
+    missing_inputs: List[str] = []
+    if not target_instance_id:
+        missing_inputs.append("target_instance_id")
+    if not fqdn:
+        missing_inputs.append("fqdn")
+    if not runtime_transport:
+        missing_inputs.append("runtime.transport")
+    if not runtime_type:
+        missing_inputs.append("runtime.type")
+
+    execution_ready = not missing_inputs
+    plan_status = "ready" if execution_ready else "blocked"
+    steps = [
+        {
+            "id": "resolve_release_target",
+            "status": "ready",
+            "details": {"release_target_id": str(target.id), "blueprint_id": str(target.blueprint_id)},
+        },
+        {
+            "id": "validate_runtime_binding",
+            "status": "ready" if runtime_transport and runtime_type else "blocked",
+            "missing_inputs": [item for item in ["runtime.transport", "runtime.type"] if item in missing_inputs],
+            "details": {"runtime_transport": runtime_transport, "runtime_type": runtime_type},
+        },
+        {
+            "id": "validate_target_identity",
+            "status": "ready" if target_instance_id and fqdn else "blocked",
+            "missing_inputs": [item for item in ["target_instance_id", "fqdn"] if item in missing_inputs],
+            "details": {"target_instance_id": target_instance_id, "fqdn": fqdn},
+        },
+        {
+            "id": "plan_dns_exposure",
+            "status": "ready" if str(dns.get("provider") or "").strip() else "blocked",
+            "missing_inputs": [] if str(dns.get("provider") or "").strip() else ["dns.provider"],
+            "details": {"provider": str(dns.get("provider") or "").strip(), "zone_name": str(dns.get("zone_name") or "").strip()},
+        },
+    ]
+    return {
+        "release_target_id": str(target.id),
+        "status": plan_status,
+        "execution_ready_in_principle": execution_ready,
+        "missing_inputs": missing_inputs,
+        "target": target_payload,
+        "plan": {
+            "operation": "deployment_plan",
+            "mode": "non_destructive",
+            "provider_key": str((target_payload.get("provider_binding") or {}).get("provider_key") or ""),
+            "topology_kind": str(topology.get("kind") or ""),
+            "steps": steps,
+            "warnings": [] if execution_ready else ["deployment plan is blocked until required inputs are populated"],
+        },
+    }
+
+
+def _resolve_deployment_provider_capabilities_for_target_payload(target_payload: Dict[str, Any]) -> List[str]:
+    provider_binding = target_payload.get("provider_binding") if isinstance(target_payload.get("provider_binding"), dict) else {}
+    provider_key = str(provider_binding.get("provider_key") or "").strip().lower()
+    module_fqn = str(provider_binding.get("module_fqn") or "").strip().lower()
+    for row in _deployment_provider_rows():
+        if not isinstance(row, dict):
+            continue
+        row_key = str(row.get("provider_key") or "").strip().lower()
+        row_fqn = str(row.get("module_fqn") or "").strip().lower()
+        if (provider_key and row_key == provider_key) or (module_fqn and row_fqn == module_fqn):
+            caps = row.get("known_capabilities")
+            if isinstance(caps, list):
+                return [str(item).strip() for item in caps if str(item).strip()]
+            return []
+    return []
+
+
+def _derive_prepared_execution_actions(target_payload: Dict[str, Any], source_evidence: Dict[str, Any]) -> List[str]:
+    actions: List[str] = ["runtime_marker_probe"]
+    runtime = target_payload.get("runtime") if isinstance(target_payload.get("runtime"), dict) else {}
+    transport = str(runtime.get("transport") or "").strip().lower()
+    runtime_type = str(runtime.get("type") or "").strip().lower()
+    target_instance_id = str(target_payload.get("target_instance_id") or "").strip()
+    remote_root = str(runtime.get("remote_root") or "").strip()
+    compose_file_path = str(runtime.get("compose_file_path") or "docker-compose.yml").strip()
+    capabilities = _resolve_deployment_provider_capabilities_for_target_payload(target_payload)
+    has_apply_capability = "runtime.compose.apply_remote" in capabilities
+    if (
+        has_apply_capability
+        and transport == "ssm"
+        and runtime_type == "docker-compose"
+        and target_instance_id
+        and remote_root
+        and compose_file_path
+    ):
+        actions.append("runtime.compose.apply_remote")
+    return list(dict.fromkeys(actions))
+
+
+def _evaluate_runtime_compose_apply_remote_readiness(
+    target_payload: Dict[str, Any],
+    *,
+    perform_remote_probe: bool = False,
+) -> Dict[str, Any]:
+    runtime = target_payload.get("runtime") if isinstance(target_payload.get("runtime"), dict) else {}
+    provider_binding = target_payload.get("provider_binding") if isinstance(target_payload.get("provider_binding"), dict) else {}
+    provider_key = str(provider_binding.get("provider_key") or "").strip()
+    module_fqn = str(provider_binding.get("module_fqn") or "").strip()
+    capabilities = _resolve_deployment_provider_capabilities_for_target_payload(target_payload)
+    target_instance_id = str(target_payload.get("target_instance_id") or "").strip()
+    transport = str(runtime.get("transport") or "").strip().lower()
+    runtime_type = str(runtime.get("type") or "").strip().lower()
+    remote_root = str(runtime.get("remote_root") or "").strip()
+    compose_file_path = str(runtime.get("compose_file_path") or "").strip()
+    missing_inputs: List[str] = []
+    warnings: List[str] = []
+    checked: List[Dict[str, Any]] = []
+    blocked_reason = ""
+    can_apply_remote = True
+
+    def _check(name: str, ok: bool, detail: str, *, field: Optional[str] = None, reason: Optional[str] = None) -> None:
+        nonlocal can_apply_remote, blocked_reason
+        checked.append({"name": name, "ok": bool(ok), "detail": str(detail)})
+        if ok:
+            return
+        can_apply_remote = False
+        if field:
+            missing_inputs.append(field)
+        if reason and not blocked_reason:
+            blocked_reason = reason
+
+    has_capability = "runtime.compose.apply_remote" in capabilities
+    _check(
+        "provider_capability.runtime.compose.apply_remote",
+        has_capability,
+        "supported" if has_capability else "missing",
+        reason="provider_capability_missing",
+    )
+    _check(
+        "runtime.transport",
+        transport == "ssm",
+        transport or "missing",
+        field="runtime.transport",
+        reason="runtime_transport_not_supported",
+    )
+    _check(
+        "runtime.type",
+        runtime_type == "docker-compose",
+        runtime_type or "missing",
+        field="runtime.type",
+        reason="runtime_type_not_supported",
+    )
+    _check(
+        "target_instance_id",
+        bool(target_instance_id),
+        target_instance_id or "missing",
+        field="target_instance_id",
+        reason="target_instance_missing",
+    )
+    _check(
+        "runtime.remote_root",
+        bool(remote_root),
+        remote_root or "missing",
+        field="runtime.remote_root",
+        reason="runtime_remote_root_missing",
+    )
+    _check(
+        "runtime.compose_file_path",
+        bool(compose_file_path),
+        compose_file_path or "missing",
+        field="runtime.compose_file_path",
+        reason="runtime_compose_file_path_missing",
+    )
+
+    instance = ProvisionedInstance.objects.filter(id=target_instance_id).first() if target_instance_id else None
+    instance_ok = instance is not None
+    _check(
+        "target_instance_lookup",
+        instance_ok,
+        "found" if instance_ok else "not_found",
+        reason="target_instance_missing",
+    )
+    if instance_ok:
+        _check(
+            "target_instance.aws_region",
+            bool(str(instance.aws_region or "").strip()),
+            str(instance.aws_region or "missing"),
+            reason="target_instance_region_missing",
+        )
+
+    if perform_remote_probe and can_apply_remote and instance is not None:
+        probe_cmd = (
+            "set -euo pipefail; "
+            "command -v docker >/dev/null 2>&1; "
+            "docker compose version >/dev/null 2>&1; "
+            f"test -d \"{remote_root}\"; "
+            f"test -f \"{remote_root}/{compose_file_path}\""
+        )
+        try:
+            probe = _run_ssm_commands(str(instance.instance_id), str(instance.aws_region), [probe_cmd])
+            probe_response_code = probe.get("response_code")
+            try:
+                probe_response_code_int = int(probe_response_code) if probe_response_code is not None else 1
+            except (TypeError, ValueError):
+                probe_response_code_int = 1
+            probe_ok = probe.get("invocation_status") == "Success" and probe_response_code_int == 0
+            checked.append(
+                {
+                    "name": "remote_preflight.ssm_compose_apply",
+                    "ok": bool(probe_ok),
+                    "detail": str(probe.get("invocation_status") or ""),
+                    "ssm_command_id": str(probe.get("ssm_command_id") or ""),
+                }
+            )
+            if not probe_ok:
+                can_apply_remote = False
+                blocked_reason = blocked_reason or "apply_remote_preflight_failed"
+                warnings.append("remote_preflight_failed")
+        except Exception as exc:
+            can_apply_remote = False
+            blocked_reason = blocked_reason or "apply_remote_preflight_error"
+            warnings.append("remote_preflight_error")
+            checked.append({"name": "remote_preflight.ssm_compose_apply", "ok": False, "detail": str(exc)})
+    else:
+        checked.append(
+            {
+                "name": "remote_preflight.ssm_compose_apply",
+                "ok": False if perform_remote_probe else True,
+                "detail": "skipped",
+                "reason": "insufficient_local_preconditions" if perform_remote_probe and not can_apply_remote else "probe_not_requested",
+            }
+        )
+
+    if not blocked_reason and not can_apply_remote:
+        blocked_reason = "apply_remote_not_ready"
+
+    return {
+        "action_key": "runtime.compose.apply_remote",
+        "can_apply_remote": bool(can_apply_remote),
+        "blocked_reason": blocked_reason,
+        "missing_inputs": list(dict.fromkeys(missing_inputs)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "checked_preconditions": checked,
+        "provider_context": {
+            "provider_key": provider_key,
+            "module_fqn": module_fqn,
+            "known_capabilities": capabilities,
+        },
+        "runtime_context": {
+            "transport": transport,
+            "type": runtime_type,
+            "target_instance_id": target_instance_id,
+            "remote_root": remote_root,
+            "compose_file_path": compose_file_path,
+        },
+    }
+
+
+@csrf_exempt
+@login_required
+def release_target_deployment_preparation_evidence(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    config = dict(target.config_json or {})
+    history = config.get("deployment_preparation_evidence_history")
+    if not isinstance(history, list):
+        history = []
+
+    if request.method == "GET":
+        limit = int(request.GET.get("limit") or 10)
+        rows = history[-max(limit, 0) :] if limit > 0 else history
+        rows = list(reversed(rows))
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "evidence": rows,
+                "count": len(rows),
+            }
+        )
+
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    payload = _parse_json(request)
+    plan_payload = _build_release_target_deployment_plan_payload(target)
+    steps = ((plan_payload.get("plan") or {}).get("steps") or [])
+    ready_steps = [str(step.get("id") or "") for step in steps if str(step.get("status") or "") == "ready"]
+    blocked_steps = [str(step.get("id") or "") for step in steps if str(step.get("status") or "") == "blocked"]
+    evidence = {
+        "evidence_id": str(uuid.uuid4()),
+        "created_at": timezone.now().isoformat(),
+        "operation": "deployment_preparation_evidence",
+        "release_target_id": str(target.id),
+        "provider_key": str((((plan_payload.get("plan") or {}).get("provider_key")) or "")),
+        "module_fqn": str((((plan_payload.get("target") or {}).get("provider_binding") or {}).get("module_fqn") or "")),
+        "status": str(plan_payload.get("status") or "blocked"),
+        "execution_ready_in_principle": bool(plan_payload.get("execution_ready_in_principle")),
+        "missing_inputs": plan_payload.get("missing_inputs") if isinstance(plan_payload.get("missing_inputs"), list) else [],
+        "ready_steps": ready_steps,
+        "blocked_steps": blocked_steps,
+        "staged_execution_intent": {
+            "promotable_to_execution_in_principle": bool(plan_payload.get("execution_ready_in_principle")),
+            "required_future_inputs": plan_payload.get("missing_inputs") if isinstance(plan_payload.get("missing_inputs"), list) else [],
+        },
+        "warnings": list(((plan_payload.get("plan") or {}).get("warnings") or [])),
+        "mutation_performed": False,
+        "source": payload if isinstance(payload, dict) else {},
+    }
+    history.append(evidence)
+    config["deployment_preparation_evidence_history"] = history[-100:]
+    target.config_json = config
+    target.updated_by = request.user
+    target.save(update_fields=["config_json", "updated_by", "updated_at"])
+    return JsonResponse(
+        {
+            "target_id": str(target.id),
+            "evidence": evidence,
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_preparation_handoff(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    config = dict(target.config_json or {})
+    prep_history = config.get("deployment_preparation_evidence_history")
+    if not isinstance(prep_history, list):
+        prep_history = []
+    handoff_history = config.get("execution_preparation_handoff_history")
+    if not isinstance(handoff_history, list):
+        handoff_history = []
+
+    if request.method == "GET":
+        limit = int(request.GET.get("limit") or 10)
+        rows = handoff_history[-max(limit, 0) :] if limit > 0 else handoff_history
+        rows = list(reversed(rows))
+        return JsonResponse({"target_id": str(target.id), "handoffs": rows, "count": len(rows)})
+
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    payload = _parse_json(request)
+    requested_evidence_id = str(payload.get("evidence_id") or "").strip() if isinstance(payload, dict) else ""
+    source = None
+    if requested_evidence_id:
+        for row in reversed(prep_history):
+            if str((row or {}).get("evidence_id") or "") == requested_evidence_id:
+                source = row
+                break
+    elif prep_history:
+        source = prep_history[-1]
+    if not isinstance(source, dict):
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "deployment_preparation_evidence_missing",
+                "next_allowed_actions": ["create_release_target_deployment_preparation_evidence"],
+            },
+            status=409,
+        )
+
+    ready_steps = list(source.get("ready_steps") or [])
+    blocked_steps = list(source.get("blocked_steps") or [])
+    required_inputs = list((((source.get("staged_execution_intent") or {}).get("required_future_inputs")) or source.get("missing_inputs") or []))
+    promotable = bool(((source.get("staged_execution_intent") or {}).get("promotable_to_execution_in_principle")))
+    status = "ready" if promotable and not blocked_steps else "blocked"
+    handoff = {
+        "handoff_id": str(uuid.uuid4()),
+        "created_at": timezone.now().isoformat(),
+        "operation": "execution_preparation_handoff",
+        "release_target_id": str(target.id),
+        "source_evidence_ref": str(source.get("evidence_id") or ""),
+        "provider_key": str(source.get("provider_key") or ""),
+        "module_fqn": str(source.get("module_fqn") or ""),
+        "status": status,
+        "promotable_to_execution_in_principle": bool(promotable),
+        "ready_steps": ready_steps,
+        "blocked_steps": blocked_steps,
+        "required_future_inputs": required_inputs,
+        "warnings": list(source.get("warnings") or []),
+        "mutation_performed": False,
+        "validation_status": "valid" if status == "ready" else "blocked",
+    }
+    handoff_history.append(handoff)
+    config["execution_preparation_handoff_history"] = handoff_history[-100:]
+    target.config_json = config
+    target.updated_by = request.user
+    target.save(update_fields=["config_json", "updated_by", "updated_at"])
+    return JsonResponse({"target_id": str(target.id), "handoff": handoff})
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_preparation_approval(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    payload = _parse_json(request)
+    config = dict(target.config_json or {})
+    handoff_history = config.get("execution_preparation_handoff_history")
+    if not isinstance(handoff_history, list):
+        handoff_history = []
+    approval_history = config.get("execution_preparation_approval_history")
+    if not isinstance(approval_history, list):
+        approval_history = []
+
+    handoff_id = str(payload.get("handoff_id") or "").strip() if isinstance(payload, dict) else ""
+    handoff = None
+    if handoff_id:
+        for row in reversed(handoff_history):
+            if str((row or {}).get("handoff_id") or "") == handoff_id:
+                handoff = row
+                break
+    elif handoff_history:
+        handoff = handoff_history[-1]
+    if not isinstance(handoff, dict):
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "execution_preparation_handoff_missing",
+                "next_allowed_actions": ["create_release_target_execution_preparation_handoff"],
+            },
+            status=409,
+        )
+    if str(handoff.get("status") or "") != "ready":
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "handoff_not_ready",
+                "source_handoff_ref": str(handoff.get("handoff_id") or ""),
+            },
+            status=409,
+        )
+
+    approval = {
+        "approval_id": str(uuid.uuid4()),
+        "created_at": timezone.now().isoformat(),
+        "operation": "execution_preparation_approval",
+        "release_target_id": str(target.id),
+        "source_handoff_ref": str(handoff.get("handoff_id") or ""),
+        "provider_key": str(handoff.get("provider_key") or ""),
+        "module_fqn": str(handoff.get("module_fqn") or ""),
+        "approved": True,
+        "approval_context": payload if isinstance(payload, dict) else {},
+        "approved_by_user_id": str(request.user.id),
+        "approved_by_username": str(getattr(request.user, "username", "") or ""),
+        "mutation_performed": False,
+    }
+    approval_history.append(approval)
+    config["execution_preparation_approval_history"] = approval_history[-100:]
+    target.config_json = config
+    target.updated_by = request.user
+    target.save(update_fields=["config_json", "updated_by", "updated_at"])
+    return JsonResponse({"target_id": str(target.id), "approval": approval})
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_preparation_consume(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    payload = _parse_json(request)
+    config = dict(target.config_json or {})
+    handoff_history = config.get("execution_preparation_handoff_history")
+    if not isinstance(handoff_history, list):
+        handoff_history = []
+    approval_history = config.get("execution_preparation_approval_history")
+    if not isinstance(approval_history, list):
+        approval_history = []
+    prep_exec_history = config.get("execution_preparation_evidence_history")
+    if not isinstance(prep_exec_history, list):
+        prep_exec_history = []
+
+    requested_handoff_id = str(payload.get("handoff_id") or "").strip() if isinstance(payload, dict) else ""
+    approve = bool(payload.get("approve_execution_preparation")) if isinstance(payload, dict) else False
+    handoff = None
+    if requested_handoff_id:
+        for row in reversed(handoff_history):
+            if str((row or {}).get("handoff_id") or "") == requested_handoff_id:
+                handoff = row
+                break
+    elif handoff_history:
+        handoff = handoff_history[-1]
+    if not isinstance(handoff, dict):
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "execution_preparation_handoff_missing",
+                "next_allowed_actions": ["create_release_target_execution_preparation_handoff"],
+            },
+            status=409,
+        )
+    has_recorded_approval = any(
+        str((row or {}).get("source_handoff_ref") or "") == str(handoff.get("handoff_id") or "")
+        and bool((row or {}).get("approved"))
+        for row in approval_history
+        if isinstance(row, dict)
+    )
+    if not approve and not has_recorded_approval:
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "approval_required",
+                "source_handoff_ref": str(handoff.get("handoff_id") or ""),
+                "next_allowed_actions": [
+                    "approve_release_target_execution_preparation",
+                    "consume_release_target_execution_preparation",
+                ],
+            },
+            status=409,
+        )
+    if str(handoff.get("status") or "") != "ready":
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "handoff_not_ready",
+                "source_handoff_ref": str(handoff.get("handoff_id") or ""),
+            },
+            status=409,
+        )
+    target_payload = _serialize_release_target(target)
+    prepared_execution_actions = _derive_prepared_execution_actions(target_payload, handoff)
+    apply_readiness = _evaluate_runtime_compose_apply_remote_readiness(target_payload, perform_remote_probe=False)
+    execution_action_readiness = {
+        "runtime.compose.apply_remote": apply_readiness,
+    }
+
+    evidence = {
+        "preparation_evidence_id": str(uuid.uuid4()),
+        "created_at": timezone.now().isoformat(),
+        "operation": "execution_preparation_consume",
+        "release_target_id": str(target.id),
+        "source_handoff_ref": str(handoff.get("handoff_id") or ""),
+        "approval_source": "payload" if approve else "recorded_approval",
+        "provider_key": str(handoff.get("provider_key") or ""),
+        "module_fqn": str(handoff.get("module_fqn") or ""),
+        "status": "prepared",
+        "ready_steps": list(handoff.get("ready_steps") or []),
+        "blocked_steps": list(handoff.get("blocked_steps") or []),
+        "required_future_inputs": list(handoff.get("required_future_inputs") or []),
+        "prepared_execution_actions": prepared_execution_actions,
+        "execution_action_readiness": execution_action_readiness,
+        "mutation_performed": False,
+        "warnings": list(handoff.get("warnings") or []),
+    }
+    prep_exec_history.append(evidence)
+    config["execution_preparation_evidence_history"] = prep_exec_history[-100:]
+    target.config_json = config
+    target.updated_by = request.user
+    target.save(update_fields=["config_json", "updated_by", "updated_at"])
+    return JsonResponse({"target_id": str(target.id), "evidence": evidence})
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_step_approval(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    payload = _parse_json(request)
+    config = dict(target.config_json or {})
+    prep_history = config.get("execution_preparation_evidence_history")
+    if not isinstance(prep_history, list):
+        prep_history = []
+    approval_history = config.get("execution_step_approval_history")
+    if not isinstance(approval_history, list):
+        approval_history = []
+
+    prep_ref = str(payload.get("preparation_evidence_id") or "").strip() if isinstance(payload, dict) else ""
+    action_key = str(payload.get("action_key") or "runtime_marker_probe").strip() if isinstance(payload, dict) else "runtime_marker_probe"
+    source = None
+    if prep_ref:
+        for row in reversed(prep_history):
+            if str((row or {}).get("preparation_evidence_id") or "") == prep_ref:
+                source = row
+                break
+    elif prep_history:
+        source = prep_history[-1]
+    if not isinstance(source, dict) or str(source.get("status") or "") != "prepared":
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "prepared_execution_evidence_missing",
+                "next_allowed_actions": ["consume_release_target_execution_preparation"],
+            },
+            status=409,
+        )
+    prepared_actions = list(source.get("prepared_execution_actions") or [])
+    if action_key not in prepared_actions:
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "action_not_prepared",
+                "action_key": action_key,
+                "prepared_execution_actions": prepared_actions,
+            },
+            status=409,
+        )
+
+    approval = {
+        "approval_id": str(uuid.uuid4()),
+        "created_at": timezone.now().isoformat(),
+        "operation": "execution_step_approval",
+        "release_target_id": str(target.id),
+        "source_preparation_evidence_ref": str(source.get("preparation_evidence_id") or ""),
+        "action_key": action_key,
+        "approved": True,
+        "approved_by_user_id": str(request.user.id),
+        "approved_by_username": str(getattr(request.user, "username", "") or ""),
+        "approval_context": payload if isinstance(payload, dict) else {},
+        "mutation_performed": False,
+    }
+    approval_history.append(approval)
+    config["execution_step_approval_history"] = approval_history[-200:]
+    target.config_json = config
+    target.updated_by = request.user
+    target.save(update_fields=["config_json", "updated_by", "updated_at"])
+    return JsonResponse({"target_id": str(target.id), "approval": approval})
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_step(request: HttpRequest, target_id: str) -> JsonResponse:
+    if staff_error := _require_staff(request):
+        return staff_error
+    target = get_object_or_404(ReleaseTarget, id=target_id)
+    config = dict(target.config_json or {})
+    history = config.get("execution_step_history")
+    if not isinstance(history, list):
+        history = []
+
+    if request.method == "GET":
+        limit = int(request.GET.get("limit") or 10)
+        rows = history[-max(limit, 0) :] if limit > 0 else history
+        rows = list(reversed(rows))
+        return JsonResponse({"target_id": str(target.id), "steps": rows, "count": len(rows)})
+
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+
+    payload = _parse_json(request)
+    action_key = str(payload.get("action_key") or "runtime_marker_probe").strip() if isinstance(payload, dict) else "runtime_marker_probe"
+    approve = bool(payload.get("approve_execution_step")) if isinstance(payload, dict) else False
+    prep_history = config.get("execution_preparation_evidence_history")
+    if not isinstance(prep_history, list):
+        prep_history = []
+    step_approval_history = config.get("execution_step_approval_history")
+    if not isinstance(step_approval_history, list):
+        step_approval_history = []
+    prep_ref = str(payload.get("preparation_evidence_id") or "").strip() if isinstance(payload, dict) else ""
+    source = None
+    if prep_ref:
+        for row in reversed(prep_history):
+            if str((row or {}).get("preparation_evidence_id") or "") == prep_ref:
+                source = row
+                break
+    elif prep_history:
+        source = prep_history[-1]
+    if not isinstance(source, dict) or str(source.get("status") or "") != "prepared":
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "prepared_execution_evidence_missing",
+                "next_allowed_actions": ["consume_release_target_execution_preparation"],
+            },
+            status=409,
+        )
+    has_recorded_approval = any(
+        str((row or {}).get("source_preparation_evidence_ref") or "") == str(source.get("preparation_evidence_id") or "")
+        and str((row or {}).get("action_key") or "") == action_key
+        and bool((row or {}).get("approved"))
+        for row in step_approval_history
+        if isinstance(row, dict)
+    )
+    if not approve and not has_recorded_approval:
+        return JsonResponse(
+            {
+                "target_id": str(target.id),
+                "status": "blocked",
+                "blocked_reason": "approval_required",
+                "source_preparation_evidence_ref": str(source.get("preparation_evidence_id") or ""),
+                "action_key": action_key,
+                "next_allowed_actions": [
+                    "approve_release_target_execution_step",
+                    "run_release_target_execution_step",
+                ],
+            },
+            status=409,
+        )
+
+    mutation_performed = False
+    step_status = "succeeded"
+    warnings: List[str] = []
+    result_payload: Dict[str, Any] = {}
+    if action_key == "runtime_marker_probe":
+        result_payload = {"probe": "ok", "target_instance_id": str(target.target_instance_id or "")}
+        mutation_performed = False
+    elif action_key == "runtime.compose.apply_remote":
+        target_payload = _serialize_release_target(target)
+        apply_readiness = _evaluate_runtime_compose_apply_remote_readiness(target_payload, perform_remote_probe=True)
+        if not bool(apply_readiness.get("can_apply_remote")):
+            step_status = "blocked"
+            mutation_performed = False
+            blocked = str(apply_readiness.get("blocked_reason") or "apply_remote_not_ready")
+            warnings.append(blocked)
+            result_payload = {
+                "blocked_reason": blocked,
+                "readiness": apply_readiness,
+            }
+        else:
+            runtime = target_payload.get("runtime") if isinstance(target_payload.get("runtime"), dict) else {}
+            remote_root = str(runtime.get("remote_root") or "").strip()
+            compose_file_path = str(runtime.get("compose_file_path") or "docker-compose.yml").strip()
+            target_instance_id = str(target.target_instance_id or target.target_instance_ref or "").strip()
+            instance = ProvisionedInstance.objects.filter(id=target_instance_id).first() if target_instance_id else None
+            if not instance:
+                step_status = "blocked"
+                warnings.append("target_instance_missing")
+                result_payload = {"blocked_reason": "target_instance_missing", "readiness": apply_readiness}
+            else:
+                apply_cmd = (
+                    "set -euo pipefail; "
+                    "command -v docker >/dev/null 2>&1 || { echo 'docker_missing'; exit 41; }; "
+                    f"cd \"{remote_root}\"; "
+                    f"docker compose -f \"{compose_file_path}\" up -d --remove-orphans"
+                )
+                try:
+                    exec_result = _run_ssm_commands(str(instance.instance_id), str(instance.aws_region), [apply_cmd])
+                    response_code = exec_result.get("response_code")
+                    try:
+                        response_code_int = int(response_code) if response_code is not None else 1
+                    except (TypeError, ValueError):
+                        response_code_int = 1
+                    ok = exec_result.get("invocation_status") == "Success" and response_code_int == 0
+                    step_status = "succeeded" if ok else "failed"
+                    mutation_performed = bool(ok)
+                    result_payload = {
+                        "ssm_command_id": str(exec_result.get("ssm_command_id") or ""),
+                        "invocation_status": str(exec_result.get("invocation_status") or ""),
+                        "response_code": exec_result.get("response_code"),
+                        "stdout": _redact_output(str(exec_result.get("stdout") or "")),
+                        "stderr": _redact_output(str(exec_result.get("stderr") or "")),
+                        "remote_root": remote_root,
+                        "compose_file_path": compose_file_path,
+                        "target_instance_id": str(instance.instance_id),
+                        "readiness": apply_readiness,
+                    }
+                except Exception as exc:
+                    step_status = "failed"
+                    mutation_performed = False
+                    warnings.append("runtime_compose_apply_remote_error")
+                    result_payload = {
+                        "error": str(exc),
+                        "remote_root": remote_root,
+                        "compose_file_path": compose_file_path,
+                        "target_instance_id": str(instance.instance_id),
+                        "readiness": apply_readiness,
+                    }
+    else:
+        step_status = "blocked"
+        warnings.append("unsupported_execution_action")
+        result_payload = {"supported_actions": ["runtime_marker_probe", "runtime.compose.apply_remote"]}
+
+    step = {
+        "step_evidence_id": str(uuid.uuid4()),
+        "created_at": timezone.now().isoformat(),
+        "operation": "execution_step",
+        "release_target_id": str(target.id),
+        "source_preparation_evidence_ref": str(source.get("preparation_evidence_id") or ""),
+        "action_key": action_key,
+        "approval_source": "payload" if approve else "recorded_approval",
+        "status": step_status,
+        "warnings": warnings,
+        "result": result_payload,
+        "mutation_performed": mutation_performed,
+    }
+    history.append(step)
+    config["execution_step_history"] = history[-200:]
+    target.config_json = config
+    target.updated_by = request.user
+    target.save(update_fields=["config_json", "updated_by", "updated_at"])
+    return JsonResponse({"target_id": str(target.id), "step": step}, status=200 if step_status == "succeeded" else 409)
+
+
 @csrf_exempt
 @login_required
 def release_target_deployment_plan_action(request: HttpRequest, target_id: str) -> JsonResponse:
@@ -28318,6 +29329,12 @@ def release_target_execution_preparation_handoff_action(request: HttpRequest, ta
     }
     status_code = 200 if str(record.validation_status) == "ready" else 409
     return JsonResponse(response_payload, status=status_code)
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_preparation_approval_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    return release_target_execution_preparation_approval(request=request, target_id=target_id)
 
 
 def _serialize_release_target_execution_preparation_evidence(
@@ -28850,6 +29867,12 @@ def release_target_execution_step_action(request: HttpRequest, target_id: str) -
     if status == "failed":
         return JsonResponse(response_payload, status=500)
     return JsonResponse(response_payload, status=409)
+
+
+@csrf_exempt
+@login_required
+def release_target_execution_step_approval_action(request: HttpRequest, target_id: str) -> JsonResponse:
+    return release_target_execution_step_approval(request=request, target_id=target_id)
 
 
 @csrf_exempt

@@ -149,8 +149,12 @@ from xyn_orchestrator.api.runtime import (
     release_target_deployment_plan_action,
     release_target_deployment_preparation_evidence_action,
     release_target_execution_preparation_handoff_action,
+    release_target_execution_preparation_approval_action,
     release_target_execution_preparation_consume_action,
+    release_target_execution_step_approval_action,
     release_target_execution_step_action,
+    deployment_providers_collection,
+    deployment_provider_detail,
     map_collection,
     release_target_deploy_latest_action,
     release_target_rollback_last_success_action,
@@ -794,13 +798,23 @@ urlpatterns = [
         release_target_execution_preparation_handoff_action,
     ),
     path(
+        "xyn/api/release-targets/<uuid:target_id>/execution_preparation_approval",
+        release_target_execution_preparation_approval_action,
+    ),
+    path(
         "xyn/api/release-targets/<uuid:target_id>/execution_preparation_consume",
         release_target_execution_preparation_consume_action,
+    ),
+    path(
+        "xyn/api/release-targets/<uuid:target_id>/execution_step_approval",
+        release_target_execution_step_approval_action,
     ),
     path(
         "xyn/api/release-targets/<uuid:target_id>/execution_step",
         release_target_execution_step_action,
     ),
+    path("xyn/api/deployment-providers", deployment_providers_collection),
+    path("xyn/api/deployment-providers/<str:provider_key>", deployment_provider_detail),
     path("xyn/api/release-targets/<uuid:target_id>/deploy_latest", release_target_deploy_latest_action),
     path("xyn/api/release-targets/<uuid:target_id>/rollback_last_success", release_target_rollback_last_success_action),
     path("xyn/api/release-targets/<uuid:target_id>/check_drift", release_target_check_drift_action),
@@ -1041,6 +1055,7 @@ if ENABLE_BLUEPRINTS_LEGACY:
 
 urlpatterns += [
     path("xyn/api/blueprints", blueprints_collection),
+    path("xyn/api/blueprints/<uuid:blueprint_id>", blueprint_detail),
     path("xyn/api/blueprints/<uuid:blueprint_id>/submit", blueprint_submit),
     path("xyn/api/blueprints/<uuid:blueprint_id>/runs", blueprint_runs),
     path("xyn/api/blueprints/<uuid:blueprint_id>/draft-sessions", blueprint_draft_sessions),
