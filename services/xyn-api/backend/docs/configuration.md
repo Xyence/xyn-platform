@@ -49,3 +49,19 @@ Production compose disables `env_file` loading and relies on injected env only.
 
 - `simple` (default): no OIDC bearer verification path.
 - `oidc`: OIDC bearer verification and social auth restrictions are enabled.
+
+### OIDC First-User Bootstrap (Production)
+
+Use an explicit bootstrap-admin allowlist for first login authorization:
+
+- `XYN_BOOTSTRAP_ADMIN_EMAILS` (comma-separated emails allowed to receive initial `platform_admin` when no existing `platform_admin` binding exists)
+
+Optional fallback when no allowlist is configured:
+
+- `XYN_BOOTSTRAP_FIRST_OIDC_ADMIN_FALLBACK=true` (allows exactly the first successful OIDC identity to receive `platform_admin` when zero `platform_admin` bindings exist)
+
+Operational guidance:
+
+- Prefer `XYN_BOOTSTRAP_ADMIN_EMAILS` in production.
+- Keep fallback disabled unless you are intentionally bootstrapping a brand-new environment.
+- Neither mode escalates users after a `platform_admin` binding already exists.

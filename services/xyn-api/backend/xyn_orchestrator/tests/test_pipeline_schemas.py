@@ -210,7 +210,7 @@ class OIDCAuthTests(TestCase):
         response = _view(request)
         self.assertEqual(response.status_code, 403)
 
-    def test_first_admin_bootstrap_guarded(self):
+    def test_first_admin_bootstrap_allowlist_assigns_admin(self):
         env = self._make_env()
         session = self.client.session
         session["oidc_state"] = "state-123"
@@ -218,7 +218,7 @@ class OIDCAuthTests(TestCase):
         session["environment_id"] = str(env.id)
         session.save()
         with (
-            mock.patch.dict(os.environ, {"ALLOW_FIRST_ADMIN_BOOTSTRAP": "true"}),
+            mock.patch.dict(os.environ, {"XYN_BOOTSTRAP_ADMIN_EMAILS": "admin@xyence.io"}),
             mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
             mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
             mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
@@ -236,6 +236,72 @@ class OIDCAuthTests(TestCase):
         self.assertEqual(response.status_code, 302)
         identity = UserIdentity.objects.get(subject="sub-abc")
         self.assertTrue(RoleBinding.objects.filter(user_identity=identity, role="platform_admin").exists())
+
+    def test_non_allowlisted_login_is_denied_with_no_roles(self):
+        env = self._make_env()
+        session = self.client.session
+        session["oidc_state"] = "state-123"
+        session["oidc_nonce"] = "nonce-123"
+        session["environment_id"] = str(env.id)
+        session.save()
+        with (
+            mock.patch.dict(os.environ, {"XYN_BOOTSTRAP_ADMIN_EMAILS": "admin@xyence.io"}),
+            mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
+            mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
+            mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
+            mock.patch.object(xyn_api_module.requests, "post") as post_request,
+        ):
+            get_config.return_value = {"token_endpoint": "https://issuer.example.com/token"}
+            resolve_secret.return_value = "secret"
+            decode_token.return_value = {
+                "sub": "sub-user",
+                "email": "user@xyence.io",
+                "name": "Normal User",
+            }
+            post_request.side_effect = self._mock_token_post
+            response = self.client.get("/auth/callback?code=abc&state=state-123")
+        self.assertEqual(response.status_code, 403)
+        body = response.json()
+        self.assertEqual(body.get("error"), "no roles assigned")
+        identity = UserIdentity.objects.get(subject="sub-user")
+        self.assertFalse(RoleBinding.objects.filter(user_identity=identity, role="platform_admin").exists())
+
+    def test_first_user_fallback_assigns_only_first_identity(self):
+        env = self._make_env()
+        with (
+            mock.patch.dict(os.environ, {"XYN_BOOTSTRAP_FIRST_OIDC_ADMIN_FALLBACK": "true"}, clear=False),
+            mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
+            mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
+            mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
+            mock.patch.object(xyn_api_module.requests, "post") as post_request,
+        ):
+            get_config.return_value = {"token_endpoint": "https://issuer.example.com/token"}
+            resolve_secret.return_value = "secret"
+            post_request.side_effect = self._mock_token_post
+
+            # First OIDC user: gets bootstrap admin.
+            session = self.client.session
+            session["oidc_state"] = "state-first"
+            session["oidc_nonce"] = "nonce-first"
+            session["environment_id"] = str(env.id)
+            session.save()
+            decode_token.return_value = {"sub": "sub-first", "email": "first@xyence.io", "name": "First User"}
+            first_response = self.client.get("/auth/callback?code=abc&state=state-first")
+            self.assertEqual(first_response.status_code, 302)
+            first_identity = UserIdentity.objects.get(subject="sub-first")
+            self.assertTrue(RoleBinding.objects.filter(user_identity=first_identity, role="platform_admin").exists())
+
+            # Second OIDC user: should not auto-escalate.
+            session = self.client.session
+            session["oidc_state"] = "state-second"
+            session["oidc_nonce"] = "nonce-second"
+            session["environment_id"] = str(env.id)
+            session.save()
+            decode_token.return_value = {"sub": "sub-second", "email": "second@xyence.io", "name": "Second User"}
+            second_response = self.client.get("/auth/callback?code=abc&state=state-second")
+            self.assertEqual(second_response.status_code, 403)
+            second_identity = UserIdentity.objects.get(subject="sub-second")
+            self.assertFalse(RoleBinding.objects.filter(user_identity=second_identity, role="platform_admin").exists())
 
     def test_environment_resolution_prefers_host_mapping(self):
         env = self._make_env()

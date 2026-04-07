@@ -7191,6 +7191,51 @@ def _apply_first_login_role_mappings(
     }
 
 
+def _bootstrap_admin_allowlist() -> Set[str]:
+    raw = str(os.environ.get("XYN_BOOTSTRAP_ADMIN_EMAILS", "")).strip()
+    if not raw:
+        return set()
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def _bootstrap_first_user_fallback_enabled() -> bool:
+    return str(os.environ.get("XYN_BOOTSTRAP_FIRST_OIDC_ADMIN_FALLBACK", "")).strip().lower() in {"1", "true", "yes"}
+
+
+def _assign_bootstrap_platform_admin_if_eligible(identity: UserIdentity, email: str) -> Dict[str, Any]:
+    allowlist = _bootstrap_admin_allowlist()
+    normalized_email = str(email or "").strip().lower()
+    allowlist_configured = bool(allowlist)
+
+    with transaction.atomic():
+        if connection.vendor == "postgresql":
+            # Serialize first-login bootstrap role assignment attempts across processes.
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_xact_lock(%s)", [93821477])
+
+        has_platform_admin = RoleBinding.objects.filter(scope_kind="platform", role="platform_admin").exists()
+        if has_platform_admin:
+            return {"assigned": False, "reason": "platform_admin_exists"}
+
+        if allowlist_configured:
+            if not normalized_email or normalized_email not in allowlist:
+                return {"assigned": False, "reason": "not_in_allowlist"}
+        else:
+            if not _bootstrap_first_user_fallback_enabled():
+                return {"assigned": False, "reason": "fallback_disabled"}
+
+        _, created = RoleBinding.objects.get_or_create(
+            user_identity=identity,
+            scope_kind="platform",
+            scope_id=None,
+            role="platform_admin",
+        )
+        return {
+            "assigned": bool(created),
+            "reason": "allowlist" if allowlist_configured else "first_user_fallback",
+        }
+
+
 def _load_oidc_flow(request: HttpRequest, state: str) -> Dict[str, Any]:
     if not state:
         return {}
@@ -7449,8 +7494,7 @@ def oidc_callback(request: HttpRequest, provider_id: str) -> HttpResponse:
                 "updated_at",
             ]
         )
-    if not RoleBinding.objects.exists() and os.environ.get("ALLOW_FIRST_ADMIN_BOOTSTRAP", "").lower() == "true":
-        RoleBinding.objects.create(user_identity=identity, scope_kind="platform", role="platform_admin")
+    _assign_bootstrap_platform_admin_if_eligible(identity, email)
     assignment = _apply_first_login_role_mappings(identity, provider, claims)
     extracted_groups = assignment.get("remote_groups") or []
     if len(extracted_groups) > 25:
@@ -8110,12 +8154,7 @@ def auth_callback(request: HttpRequest) -> HttpResponse:
         }
         identity.last_login_at = timezone.now()
         identity.save(update_fields=["email", "display_name", "claims_json", "last_login_at", "updated_at"])
-    if not RoleBinding.objects.exists() and os.environ.get("ALLOW_FIRST_ADMIN_BOOTSTRAP", "").lower() == "true":
-        RoleBinding.objects.create(
-            user_identity=identity,
-            scope_kind="platform",
-            role="platform_admin",
-        )
+    _assign_bootstrap_platform_admin_if_eligible(identity, email)
     roles = _get_roles(identity)
     User = get_user_model()
     issuer_hash = hashlib.sha256(issuer.encode("utf-8")).hexdigest()[:12]
