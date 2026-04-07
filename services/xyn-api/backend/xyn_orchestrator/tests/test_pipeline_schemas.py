@@ -130,6 +130,28 @@ class OIDCAuthTests(TestCase):
         self.assertIn("oidc_state", session)
         self.assertIn("oidc_nonce", session)
 
+    def test_get_oidc_env_config_prefers_canonical_xyn_env_vars(self):
+        env = Environment(name="Dev", slug="dev", metadata_json={})
+        with mock.patch.dict(
+            os.environ,
+            {
+                "XYN_OIDC_ISSUER": "https://issuer.xyence.io",
+                "XYN_OIDC_CLIENT_ID": "xyn-client-id",
+                "XYN_OIDC_CLIENT_SECRET": "secret-value",
+                "XYN_OIDC_REDIRECT_URI": "https://xyn.xyence.io/auth/callback",
+                "XYN_OIDC_SCOPES": "openid profile email",
+                "XYN_OIDC_ALLOWED_DOMAINS": "xyence.io",
+            },
+            clear=False,
+        ):
+            config = xyn_api_module._get_oidc_env_config(env)
+        self.assertIsNotNone(config)
+        self.assertEqual(config["issuer_url"], "https://issuer.xyence.io")
+        self.assertEqual(config["client_id"], "xyn-client-id")
+        self.assertEqual(config["client_secret_ref"], {"ref": "env:XYN_OIDC_CLIENT_SECRET"})
+        self.assertEqual(config["redirect_uri"], "https://xyn.xyence.io/auth/callback")
+        self.assertEqual(config["allowed_email_domains"], ["xyence.io"])
+
     def test_oidc_callback_upserts_identity_and_session(self):
         env = self._make_env()
         identity = UserIdentity.objects.create(

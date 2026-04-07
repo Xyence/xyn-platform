@@ -2612,18 +2612,26 @@ def _resolve_environment(request: HttpRequest) -> Optional[Environment]:
 def _get_oidc_env_config(env: Environment) -> Optional[Dict[str, Any]]:
     config = (env.metadata_json or {}).get("oidc") or {}
     if not config.get("issuer_url") or not config.get("client_id"):
-        issuer = os.environ.get("OIDC_ISSUER", "").strip()
-        client_id = os.environ.get("OIDC_CLIENT_ID", "").strip()
+        issuer = os.environ.get("XYN_OIDC_ISSUER", "").strip() or os.environ.get("OIDC_ISSUER", "").strip()
+        client_id = os.environ.get("XYN_OIDC_CLIENT_ID", "").strip() or os.environ.get("OIDC_CLIENT_ID", "").strip()
+        client_secret_key = (
+            "XYN_OIDC_CLIENT_SECRET"
+            if os.environ.get("XYN_OIDC_CLIENT_SECRET", "").strip()
+            else "OIDC_CLIENT_SECRET"
+        )
+        redirect_uri = os.environ.get("XYN_OIDC_REDIRECT_URI", "").strip() or os.environ.get("OIDC_REDIRECT_URI", "").strip()
+        scopes = os.environ.get("XYN_OIDC_SCOPES", "").strip() or os.environ.get("OIDC_SCOPES", "openid profile email")
+        domains_raw = os.environ.get("XYN_OIDC_ALLOWED_DOMAINS", "").strip() or os.environ.get("OIDC_ALLOWED_DOMAINS", "")
         if issuer and client_id:
             return {
                 "issuer_url": issuer,
                 "client_id": client_id,
-                "client_secret_ref": {"ref": "env:OIDC_CLIENT_SECRET"},
-                "redirect_uri": os.environ.get("OIDC_REDIRECT_URI", "").strip(),
-                "scopes": os.environ.get("OIDC_SCOPES", "openid profile email"),
+                "client_secret_ref": {"ref": f"env:{client_secret_key}"},
+                "redirect_uri": redirect_uri,
+                "scopes": scopes,
                 "allowed_email_domains": [
                     domain.strip()
-                    for domain in os.environ.get("OIDC_ALLOWED_DOMAINS", "").split(",")
+                    for domain in domains_raw.split(",")
                     if domain.strip()
                 ],
             }
