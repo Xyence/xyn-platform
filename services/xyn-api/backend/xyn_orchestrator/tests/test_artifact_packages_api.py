@@ -3,6 +3,7 @@ import json
 import zipfile
 import uuid
 import datetime as dt
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -294,14 +295,15 @@ class ArtifactPackagesApiTests(TestCase):
         self.assertEqual(imported.status_code, 200, imported.content.decode())
         package_id = imported.json()["package"]["id"]
 
-        install = self.client.post(
-            f"/xyn/api/artifacts/packages/{package_id}/install",
-            data=json.dumps({}),
-            content_type="application/json",
+        package = ArtifactPackage.objects.get(id=package_id)
+        receipt = artifact_packages.install_package(
+            package,
+            installed_by=self.user,
+            target_workspace=self.workspace,
         )
-        self.assertEqual(install.status_code, 200, install.content.decode())
+        self.assertEqual(receipt.status, "success")
 
-        artifact = Artifact.objects.get(type__slug="app_shell", slug="xyn-api")
+        artifact = Artifact.objects.get(workspace=self.workspace, type__slug="app_shell", slug="xyn-api")
         WorkspaceMembership.objects.get_or_create(
             workspace=artifact.workspace,
             user_identity=self.identity,
@@ -314,6 +316,90 @@ class ArtifactPackagesApiTests(TestCase):
         self.assertEqual(provenance.get("kind"), "git")
         self.assertEqual(provenance.get("repo_key"), "xyn-platform")
         self.assertEqual(provenance.get("commit_sha"), "0123456789abcdef0123456789abcdef01234567")
+
+    def test_export_runtime_artifact_package_emits_canonical_git_provenance(self):
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=module_type,
+            title="xyn-api",
+            slug="xyn-api",
+            status="published",
+            package_version="1.0.0",
+            scope_json={"manifest_ref": "registry/modules/xyn-api.artifact.manifest.json"},
+            provenance_json={"source_system": "seed-kernel", "source_id": "xyn-api"},
+            source_ref_type="",
+            source_ref_id="",
+        )
+        ArtifactRevision.objects.create(
+            artifact=artifact,
+            revision_number=1,
+            created_by=self.identity,
+            content_json={"entrypoint": "xyn_orchestrator.xyn_api"},
+        )
+
+        with mock.patch.dict("os.environ", {"XYN_RUNTIME_SOURCE_COMMIT_SHA": "931dd41"}, clear=False):
+            package_blob = artifact_packages.export_artifact_package(
+                root_artifact=artifact,
+                package_name="xyn-api",
+                package_version="1.0.0",
+            )
+
+        artifact.refresh_from_db()
+        self.assertEqual(artifact.source_ref_type, "GitSource")
+        self.assertEqual(artifact.source_ref_id, "xyn-platform|services/xyn-api/backend|931dd41")
+        with zipfile.ZipFile(io.BytesIO(package_blob), "r") as archive:
+            artifact_payload = json.loads(archive.read("artifacts/module/xyn-api/1.0.0/artifact.json").decode("utf-8"))
+        provenance = ((artifact_payload.get("metadata") or {}).get("provenance") or {})
+        source = provenance.get("source") if isinstance(provenance.get("source"), dict) else {}
+        self.assertEqual(source.get("kind"), "git")
+        self.assertEqual(source.get("repo_key"), "xyn-platform")
+        self.assertEqual(source.get("repo_url"), "https://github.com/Xyence/xyn-platform")
+        self.assertEqual(source.get("monorepo_subpath"), "services/xyn-api/backend")
+        self.assertEqual(source.get("commit_sha"), "931dd41")
+
+    def test_export_runtime_artifact_package_rejects_missing_git_commit(self):
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=module_type,
+            title="xyn-api",
+            slug="xyn-api",
+            status="published",
+            package_version="1.0.1",
+            scope_json={"manifest_ref": "registry/modules/xyn-api.artifact.manifest.json"},
+            provenance_json={
+                "source_system": "seed-kernel",
+                "source_id": "xyn-api",
+                "source": {
+                    "kind": "git",
+                    "repo_key": "xyn-platform",
+                    "repo_url": "https://github.com/Xyence/xyn-platform",
+                    "monorepo_subpath": "services/xyn-api/backend",
+                },
+            },
+        )
+        ArtifactRevision.objects.create(
+            artifact=artifact,
+            revision_number=1,
+            created_by=self.identity,
+            content_json={"entrypoint": "xyn_orchestrator.xyn_api"},
+        )
+
+        with mock.patch.dict(
+            "os.environ",
+            {"XYN_RUNTIME_SOURCE_COMMIT_SHA": "", "XYN_RUNTIME_REPO_MAP": "{}", "XYN_API_IMAGE": "xyn-api:latest"},
+            clear=False,
+        ):
+            with mock.patch("xyn_orchestrator.runtime_artifact_provenance._repo_root_candidates", return_value=[]):
+                with self.assertRaises(artifact_packages.ArtifactPackageValidationError) as exc:
+                    artifact_packages.export_artifact_package(
+                        root_artifact=artifact,
+                        package_name="xyn-api",
+                        package_version="1.0.1",
+                    )
+
+        self.assertIn("source.commit_sha", " ".join(exc.exception.errors))
 
     def test_generated_artifact_import_preserves_manifest_summary_in_workspace_registry(self):
         blob = self._package_blob(

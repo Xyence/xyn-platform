@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import subprocess
 from typing import Any, Dict, Tuple
 
 
@@ -12,7 +14,7 @@ DEFAULT_REPO_URLS: Dict[str, str] = {
 }
 
 RUNTIME_PROVENANCE_HINTS: Dict[str, Dict[str, str]] = {
-    "xyn-api": {"repo_key": "xyn-platform", "monorepo_subpath": "services/xyn-api"},
+    "xyn-api": {"repo_key": "xyn-platform", "monorepo_subpath": "services/xyn-api/backend"},
     "xyn-ui": {"repo_key": "xyn-platform", "monorepo_subpath": "apps/xyn-ui"},
     "core.workbench": {"repo_key": "xyn-platform", "monorepo_subpath": "apps/xyn-ui"},
     "core.xyn-runtime": {"repo_key": "xyn", "monorepo_subpath": "core"},
@@ -101,6 +103,35 @@ def merge_runtime_provenance(existing: Any, canonical_git: Dict[str, str]) -> Di
     return merged
 
 
+def is_code_backed_runtime_artifact(slug: str) -> bool:
+    token = str(slug or "").strip().lower()
+    return token in RUNTIME_PROVENANCE_HINTS
+
+
+def canonical_git_provenance_missing_fields(provenance: Any) -> list[str]:
+    payload = dict(provenance) if isinstance(provenance, dict) else {}
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    source_view = {
+        "kind": str(source.get("kind") or payload.get("kind") or "").strip().lower(),
+        "repo_key": str(source.get("repo_key") or payload.get("repo_key") or "").strip(),
+        "repo_url": str(source.get("repo_url") or payload.get("repo_url") or "").strip(),
+        "monorepo_subpath": str(source.get("monorepo_subpath") or payload.get("monorepo_subpath") or "").strip(),
+        "commit_sha": str(source.get("commit_sha") or payload.get("commit_sha") or "").strip().lower(),
+    }
+    missing: list[str] = []
+    if source_view["kind"] != "git":
+        missing.append("source.kind")
+    if not source_view["repo_key"]:
+        missing.append("source.repo_key")
+    if not source_view["repo_url"]:
+        missing.append("source.repo_url")
+    if not source_view["monorepo_subpath"]:
+        missing.append("source.monorepo_subpath")
+    if not source_view["commit_sha"]:
+        missing.append("source.commit_sha")
+    return missing
+
+
 def runtime_git_source_ref(canonical_git: Dict[str, str]) -> Tuple[str, str]:
     if str(canonical_git.get("kind") or "").strip().lower() != "git":
         return "", ""
@@ -135,6 +166,9 @@ def _commit_from_env(*, repo_key: str, slug: str) -> str:
         commit = _commit_from_image_ref(image_ref)
         if commit:
             return commit
+    commit = _commit_from_repo_checkout(repo_key=repo_key)
+    if commit:
+        return commit
     return ""
 
 
@@ -146,3 +180,77 @@ def _commit_from_image_ref(image_ref: str) -> str:
     if _COMMIT_RE.match(tag):
         return tag
     return ""
+
+
+def _commit_from_repo_checkout(*, repo_key: str) -> str:
+    for repo_root in _repo_root_candidates(repo_key):
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except Exception:
+            continue
+        if proc.returncode != 0:
+            continue
+        commit = str(proc.stdout or "").strip().lower()
+        if _COMMIT_RE.match(commit):
+            return commit
+    return ""
+
+
+def _repo_root_candidates(repo_key: str) -> list[str]:
+    candidates: list[str] = []
+    runtime_repo_map_raw = str(os.getenv("XYN_RUNTIME_REPO_MAP", "") or "").strip()
+    if runtime_repo_map_raw:
+        try:
+            parsed_map = json.loads(runtime_repo_map_raw)
+        except (TypeError, ValueError):
+            parsed_map = {}
+        mapped = parsed_map.get(repo_key) if isinstance(parsed_map, dict) else []
+        if isinstance(mapped, list):
+            for item in mapped:
+                token = str(item or "").strip()
+                if token:
+                    candidates.append(token)
+        elif isinstance(mapped, str):
+            token = str(mapped).strip()
+            if token:
+                candidates.append(token)
+
+    if repo_key == "xyn-platform":
+        for token in (
+            os.getenv("XYN_PLATFORM_REPO_ROOT", ""),
+            "/workspace/xyn-platform",
+            "/home/jrestivo/src/xyn-platform",
+        ):
+            normalized = str(token or "").strip()
+            if normalized:
+                candidates.append(normalized)
+    elif repo_key == "xyn":
+        for token in (
+            os.getenv("XYN_REPO_ROOT", ""),
+            "/workspace/xyn",
+            "/home/jrestivo/src/xyn",
+        ):
+            normalized = str(token or "").strip()
+            if normalized:
+                candidates.append(normalized)
+
+    unique: list[str] = []
+    seen = set()
+    for candidate in candidates:
+        try:
+            resolved = os.path.realpath(candidate)
+        except Exception:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if os.path.isdir(resolved):
+            unique.append(resolved)
+    return unique

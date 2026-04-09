@@ -1,8 +1,10 @@
 import json
 import importlib
+import io
 import os
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
@@ -95,7 +97,7 @@ class WorkspaceArtifactRegistryTests(TestCase):
             slug="xyn-api",
             status="draft",
             source_ref_type="GitSource",
-            source_ref_id="xyn-platform|services/xyn-api|931dd41",
+            source_ref_id="xyn-platform|services/xyn-api/backend|931dd41",
             provenance_json={
                 "source_system": "seed-kernel",
                 "source_id": "xyn-api",
@@ -104,14 +106,14 @@ class WorkspaceArtifactRegistryTests(TestCase):
                 "repo_url": "https://github.com/Xyence/xyn-platform",
                 "commit_sha": "931dd41",
                 "branch_hint": "develop",
-                "monorepo_subpath": "services/xyn-api",
+                "monorepo_subpath": "services/xyn-api/backend",
                 "source": {
                     "kind": "git",
                     "repo_key": "xyn-platform",
                     "repo_url": "https://github.com/Xyence/xyn-platform",
                     "commit_sha": "931dd41",
                     "branch_hint": "develop",
-                    "monorepo_subpath": "services/xyn-api",
+                    "monorepo_subpath": "services/xyn-api/backend",
                 },
             },
         )
@@ -120,11 +122,11 @@ class WorkspaceArtifactRegistryTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content.decode())
         artifact.refresh_from_db()
         self.assertEqual(artifact.source_ref_type, "GitSource")
-        self.assertEqual(artifact.source_ref_id, "xyn-platform|services/xyn-api|931dd41")
+        self.assertEqual(artifact.source_ref_id, "xyn-platform|services/xyn-api/backend|931dd41")
         provenance = artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {}
         self.assertEqual(provenance.get("kind"), "git")
         self.assertEqual(provenance.get("repo_key"), "xyn-platform")
-        self.assertEqual(provenance.get("monorepo_subpath"), "services/xyn-api")
+        self.assertEqual(provenance.get("monorepo_subpath"), "services/xyn-api/backend")
 
     def test_backfill_runtime_artifact_provenance_command_populates_xyn_api_fields(self):
         module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
@@ -148,7 +150,66 @@ class WorkspaceArtifactRegistryTests(TestCase):
         source = provenance.get("source") if isinstance(provenance.get("source"), dict) else {}
         self.assertEqual(provenance.get("kind"), "git")
         self.assertEqual(source.get("repo_key"), "xyn-platform")
-        self.assertEqual(source.get("monorepo_subpath"), "services/xyn-api")
+        self.assertEqual(source.get("monorepo_subpath"), "services/xyn-api/backend")
+
+    def test_backfill_runtime_artifact_provenance_command_is_idempotent(self):
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=module_type,
+            title="xyn-api",
+            slug="xyn-api",
+            status="published",
+            source_ref_type="",
+            source_ref_id="",
+            scope_json={"manifest_ref": "registry/modules/xyn-api.artifact.manifest.json"},
+            provenance_json={"source_system": "seed-kernel", "source_id": "xyn-api"},
+        )
+
+        with mock.patch.dict("os.environ", {"XYN_RUNTIME_SOURCE_COMMIT_SHA": "931dd41"}, clear=False):
+            call_command("backfill_runtime_artifact_provenance", workspace_slug=self.workspace.slug)
+        artifact.refresh_from_db()
+        first_source_ref = artifact.source_ref_id
+        self.assertEqual(artifact.source_ref_id, "xyn-platform|services/xyn-api/backend|931dd41")
+
+        out = io.StringIO()
+        with mock.patch.dict("os.environ", {"XYN_RUNTIME_SOURCE_COMMIT_SHA": "931dd41"}, clear=False):
+            call_command("backfill_runtime_artifact_provenance", workspace_slug=self.workspace.slug, stdout=out)
+        output = out.getvalue()
+        artifact.refresh_from_db()
+        self.assertEqual(artifact.source_ref_id, first_source_ref)
+        self.assertIn("updated=0", output)
+
+    def test_backfill_runtime_artifact_provenance_command_strict_fails_when_commit_missing(self):
+        module_type, _ = ArtifactType.objects.get_or_create(slug="module", defaults={"name": "Module"})
+        Artifact.objects.create(
+            workspace=self.workspace,
+            type=module_type,
+            title="xyn-api",
+            slug="xyn-api",
+            status="published",
+            source_ref_type="",
+            source_ref_id="",
+            scope_json={"manifest_ref": "registry/modules/xyn-api.artifact.manifest.json"},
+            provenance_json={
+                "source_system": "seed-kernel",
+                "source_id": "xyn-api",
+                "source": {
+                    "kind": "git",
+                    "repo_key": "xyn-platform",
+                    "repo_url": "https://github.com/Xyence/xyn-platform",
+                    "monorepo_subpath": "services/xyn-api/backend",
+                },
+            },
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {"XYN_RUNTIME_SOURCE_COMMIT_SHA": "", "XYN_RUNTIME_REPO_MAP": "{}", "XYN_API_IMAGE": "xyn-api:latest"},
+            clear=False,
+        ):
+            with mock.patch("xyn_orchestrator.runtime_artifact_provenance._repo_root_candidates", return_value=[]):
+                with self.assertRaises(SystemExit):
+                    call_command("backfill_runtime_artifact_provenance", workspace_slug=self.workspace.slug, strict=True)
 
     def test_moderator_can_hide_comment_and_event_logged(self):
         WorkspaceMembership.objects.create(workspace=self.workspace, user_identity=self.admin_identity, role="moderator")
