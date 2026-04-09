@@ -75,6 +75,8 @@ class ArtifactPackagesApiTests(TestCase):
                 },
                 "content": item.get("content") or {},
             }
+            if isinstance(item.get("metadata"), dict):
+                artifact_payload["metadata"] = item.get("metadata")
             base = f"artifacts/{item['type']}/{item['slug']}/{item['version']}"
             artifact_path = f"{base}/artifact.json"
             payload_path = f"{base}/payload/payload.json"
@@ -209,6 +211,109 @@ class ArtifactPackagesApiTests(TestCase):
         app = application_rows.first()
         self.assertIsNotNone(app)
         self.assertEqual(ApplicationArtifactMembership.objects.filter(application=app).count(), 1)
+
+    def test_install_maps_canonical_git_provenance_and_source_refs_for_xyn_api(self):
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "app_shell",
+                    "slug": "xyn-api",
+                    "version": "1.2.3",
+                    "title": "xyn-api",
+                    "content": {"entrypoint": "xyn_orchestrator.xyn_api"},
+                    "metadata": {
+                        "manifest_ref": "xyn-api/artifact.manifest.json",
+                        "provenance": {
+                            "source": {
+                                "kind": "git",
+                                "repo_key": "xyn-platform",
+                                "repo_url": "https://github.com/xyence/xyn-platform",
+                                "commit_sha": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+                                "branch_hint": "develop",
+                                "monorepo_subpath": "services/xyn-api/backend",
+                                "manifest_ref": "xyn-api/artifact.manifest.json",
+                            }
+                        },
+                    },
+                }
+            ],
+            package_name="xyn-api",
+            package_version="1.2.3",
+        )
+        imported = self._import_package(blob)
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+        package_id = imported.json()["package"]["id"]
+
+        install = self.client.post(
+            f"/xyn/api/artifacts/packages/{package_id}/install",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(install.status_code, 200, install.content.decode())
+
+        artifact = Artifact.objects.get(type__slug="app_shell", slug="xyn-api")
+        provenance = artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {}
+        self.assertEqual(provenance.get("kind"), "git")
+        self.assertEqual(provenance.get("repo_key"), "xyn-platform")
+        self.assertEqual(provenance.get("repo_url"), "https://github.com/xyence/xyn-platform")
+        self.assertEqual(provenance.get("commit_sha"), "abcdef0123456789abcdef0123456789abcdef01")
+        self.assertEqual(provenance.get("branch_hint"), "develop")
+        self.assertEqual(provenance.get("monorepo_subpath"), "services/xyn-api/backend")
+        self.assertEqual(provenance.get("manifest_ref"), "xyn-api/artifact.manifest.json")
+        self.assertEqual(artifact.source_ref_type, "GitSource")
+        self.assertIn("xyn-platform", str(artifact.source_ref_id or ""))
+
+    def test_workspace_artifact_detail_returns_canonical_git_provenance(self):
+        blob = self._package_blob(
+            artifacts=[
+                {
+                    "type": "app_shell",
+                    "slug": "xyn-api",
+                    "version": "2.0.0",
+                    "title": "xyn-api",
+                    "content": {"entrypoint": "xyn_orchestrator.xyn_api"},
+                    "metadata": {
+                        "provenance": {
+                            "source": {
+                                "kind": "git",
+                                "repo_key": "xyn-platform",
+                                "repo_url": "https://github.com/xyence/xyn-platform",
+                                "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+                                "branch_hint": "main",
+                                "monorepo_subpath": "services/xyn-api/backend",
+                                "manifest_ref": "xyn-api/artifact.manifest.json",
+                            }
+                        }
+                    },
+                }
+            ],
+            package_name="xyn-api",
+            package_version="2.0.0",
+        )
+        imported = self._import_package(blob)
+        self.assertEqual(imported.status_code, 200, imported.content.decode())
+        package_id = imported.json()["package"]["id"]
+
+        install = self.client.post(
+            f"/xyn/api/artifacts/packages/{package_id}/install",
+            data=json.dumps({}),
+            content_type="application/json",
+        )
+        self.assertEqual(install.status_code, 200, install.content.decode())
+
+        artifact = Artifact.objects.get(type__slug="app_shell", slug="xyn-api")
+        WorkspaceMembership.objects.get_or_create(
+            workspace=artifact.workspace,
+            user_identity=self.identity,
+            defaults={"role": "admin", "termination_authority": True},
+        )
+        detail = self.client.get(f"/xyn/api/workspaces/{artifact.workspace_id}/artifacts/{artifact.id}")
+        self.assertEqual(detail.status_code, 200, detail.content.decode())
+        payload = detail.json()
+        provenance = payload.get("provenance_json") if isinstance(payload.get("provenance_json"), dict) else {}
+        self.assertEqual(provenance.get("kind"), "git")
+        self.assertEqual(provenance.get("repo_key"), "xyn-platform")
+        self.assertEqual(provenance.get("commit_sha"), "0123456789abcdef0123456789abcdef01234567")
 
     def test_generated_artifact_import_preserves_manifest_summary_in_workspace_registry(self):
         blob = self._package_blob(

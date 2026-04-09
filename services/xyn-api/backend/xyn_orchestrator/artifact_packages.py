@@ -93,6 +93,84 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _canonical_git_provenance(artifact_json: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, str]:
+    metadata = artifact_json.get("metadata") if isinstance(artifact_json.get("metadata"), dict) else {}
+    provenance = metadata.get("provenance") if isinstance(metadata.get("provenance"), dict) else {}
+    source = provenance.get("source") if isinstance(provenance.get("source"), dict) else {}
+    artifact_block = artifact_json.get("artifact") if isinstance(artifact_json.get("artifact"), dict) else {}
+    artifact_source = artifact_block.get("source") if isinstance(artifact_block.get("source"), dict) else {}
+
+    def _pick(key: str) -> str:
+        for candidate in (
+            source.get(key),
+            provenance.get(key),
+            artifact_source.get(key),
+            artifact_block.get(key),
+            metadata.get(key),
+            item.get(key),
+        ):
+            value = str(candidate or "").strip()
+            if value:
+                return value
+        return ""
+
+    kind = _pick("kind").lower()
+    repo_key = _pick("repo_key")
+    repo_url = _pick("repo_url")
+    commit_sha = _pick("commit_sha").lower()
+    branch_hint = _pick("branch_hint")
+    monorepo_subpath = _pick("monorepo_subpath")
+    manifest_ref = _pick("manifest_ref")
+
+    if not any((repo_key, repo_url, commit_sha, branch_hint, monorepo_subpath, manifest_ref)):
+        return {}
+    if not kind:
+        kind = "git"
+
+    result = {
+        "kind": kind,
+        "repo_key": repo_key,
+        "repo_url": repo_url,
+        "commit_sha": commit_sha,
+        "branch_hint": branch_hint,
+        "monorepo_subpath": monorepo_subpath,
+        "manifest_ref": manifest_ref,
+    }
+    return {key: value for key, value in result.items() if str(value or "").strip()}
+
+
+def _merge_provenance_json(existing: Any, canonical_git: Dict[str, str]) -> Dict[str, Any]:
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    if not canonical_git:
+        return merged
+    source = merged.get("source") if isinstance(merged.get("source"), dict) else {}
+    for key, value in canonical_git.items():
+        if str(value or "").strip():
+            merged[key] = value
+            source[key] = value
+    if source:
+        merged["source"] = source
+    return merged
+
+
+def _canonical_git_source_ref(canonical_git: Dict[str, str]) -> Tuple[str, str]:
+    if str(canonical_git.get("kind") or "").strip().lower() != "git":
+        return "", ""
+    repo_identity = str(canonical_git.get("repo_key") or canonical_git.get("repo_url") or "").strip()
+    if not repo_identity:
+        return "", ""
+    suffix = str(canonical_git.get("monorepo_subpath") or canonical_git.get("manifest_ref") or "").strip()
+    commit = str(canonical_git.get("commit_sha") or "").strip().lower()
+    if commit:
+        commit = commit[:12]
+    source_ref_id = "|".join([part for part in [repo_identity, suffix, commit] if part])
+    if len(source_ref_id) > 120:
+        digest = hashlib.sha1(source_ref_id.encode("utf-8")).hexdigest()[:12]
+        head = source_ref_id[: 120 - len(digest) - 1]
+        source_ref_id = f"{head}:{digest}"
+    return "GitSource", source_ref_id
+
+
 def _parse_semver(value: str) -> Optional[Tuple[int, int, int]]:
     raw = str(value or "").strip()
     if not SEMVER_RE.match(raw):
@@ -783,8 +861,24 @@ def install_package(
                         ).get("source_created_at")
                     )
                 )
+                canonical_git = _canonical_git_provenance(artifact_json, item)
                 existing = Artifact.objects.filter(type=type_row, slug=item_slug).first()
                 if existing and str(existing.package_version or "") == item_version and str(existing.content_hash or "") == item_hash:
+                    refresh_fields: List[str] = []
+                    merged_provenance = _merge_provenance_json(existing.provenance_json, canonical_git)
+                    if merged_provenance != (existing.provenance_json if isinstance(existing.provenance_json, dict) else {}):
+                        existing.provenance_json = merged_provenance
+                        refresh_fields.append("provenance_json")
+                    canonical_ref_type, canonical_ref_id = _canonical_git_source_ref(canonical_git)
+                    if canonical_ref_type and canonical_ref_id:
+                        if str(existing.source_ref_type or "") != canonical_ref_type:
+                            existing.source_ref_type = canonical_ref_type
+                            refresh_fields.append("source_ref_type")
+                        if str(existing.source_ref_id or "") != canonical_ref_id:
+                            existing.source_ref_id = canonical_ref_id
+                            refresh_fields.append("source_ref_id")
+                    if refresh_fields:
+                        existing.save(update_fields=[*refresh_fields, "updated_at"])
                     operations.append(
                         {
                             "step": "install_artifact",
@@ -838,6 +932,11 @@ def install_package(
                     existing.content_hash = item_hash
                     existing.artifact_state = "canonical"
                     existing.scope_json = imported_scope
+                    existing.provenance_json = _merge_provenance_json(existing.provenance_json, canonical_git)
+                    canonical_ref_type, canonical_ref_id = _canonical_git_source_ref(canonical_git)
+                    if canonical_ref_type and canonical_ref_id:
+                        existing.source_ref_type = canonical_ref_type
+                        existing.source_ref_id = canonical_ref_id
                     if source_created_at is not None:
                         existing.source_created_at = source_created_at
                     existing.save(
@@ -853,6 +952,9 @@ def install_package(
                             "content_hash",
                             "artifact_state",
                             "scope_json",
+                            "provenance_json",
+                            "source_ref_type",
+                            "source_ref_id",
                             "source_created_at",
                             "updated_at",
                         ]
@@ -863,6 +965,12 @@ def install_package(
                     # for DB constraints; the full artifact path remains in
                     # content_ref for provenance/debugging.
                     package_source_ref = f"{package.id}:{hashlib.sha1(artifact_json_path.encode('utf-8')).hexdigest()[:16]}"
+                    source_ref_type = "ArtifactPackage"
+                    source_ref_id = package_source_ref
+                    canonical_ref_type, canonical_ref_id = _canonical_git_source_ref(canonical_git)
+                    if canonical_ref_type and canonical_ref_id:
+                        source_ref_type = canonical_ref_type
+                        source_ref_id = canonical_ref_id
                     artifact = Artifact.objects.create(
                         workspace=workspace,
                         type=type_row,
@@ -881,10 +989,11 @@ def install_package(
                         status="active",
                         artifact_state="canonical",
                         content_hash=item_hash,
-                        source_ref_type="ArtifactPackage",
-                        source_ref_id=package_source_ref,
+                        source_ref_type=source_ref_type,
+                        source_ref_id=source_ref_id,
                         visibility="private",
                         scope_json=imported_scope,
+                        provenance_json=_merge_provenance_json({}, canonical_git),
                         source_created_at=source_created_at,
                     )
 
@@ -1095,6 +1204,7 @@ def export_artifact_package(*, root_artifact: Artifact, package_name: str, packa
                 "exported_at": _now_iso(),
                 "source_created_at": entry.get("source_created_at"),
                 "content_ref": artifact.content_ref if isinstance(artifact.content_ref, dict) else {},
+                "provenance": artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {},
             },
         }
         raw_artifact = json.dumps(artifact_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
