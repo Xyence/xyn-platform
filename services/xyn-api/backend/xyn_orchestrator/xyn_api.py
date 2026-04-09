@@ -331,6 +331,11 @@ from .artifact_packages import (
     install_package,
     validate_package_install,
 )
+from .runtime_artifact_provenance import (
+    build_runtime_artifact_git_provenance,
+    merge_runtime_provenance,
+    runtime_git_source_ref,
+)
 from .module_registry import maybe_sync_modules_from_registry
 from .deployments import (
     compute_idempotency_base,
@@ -23137,6 +23142,9 @@ def _ensure_runtime_artifact(
     )
     artifact = Artifact.objects.filter(workspace=workspace, slug=slug).order_by("-updated_at", "-created_at").first()
     ownership = _runtime_artifact_ownership_for_slug(slug)
+    canonical_git = build_runtime_artifact_git_provenance(slug=slug, manifest_ref=manifest_ref)
+    source_ref_type, source_ref_id = runtime_git_source_ref(canonical_git)
+    merged_provenance = merge_runtime_provenance({"source_system": "seed-kernel", "source_id": slug}, canonical_git)
     if artifact is None:
         artifact = Artifact.objects.create(
             workspace=workspace,
@@ -23147,7 +23155,9 @@ def _ensure_runtime_artifact(
             visibility="team",
             summary=summary,
             scope_json={"slug": slug, "manifest_ref": manifest_ref, "summary": summary},
-            provenance_json={"source_system": "seed-kernel", "source_id": slug},
+            provenance_json=merged_provenance,
+            source_ref_type=source_ref_type,
+            source_ref_id=source_ref_id,
             owner_repo_slug=str(ownership.get("repo_slug") or "").strip(),
             owner_path_prefixes_json=list(ownership.get("allowed_paths") or []),
             edit_mode=str(ownership.get("edit_mode") or "generated").strip().lower() or "generated",
@@ -23183,6 +23193,23 @@ def _ensure_runtime_artifact(
     if scope_changed:
         artifact.scope_json = scope
         update_fields.append("scope_json")
+    existing_provenance = artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {}
+    canonical_git = build_runtime_artifact_git_provenance(
+        slug=slug,
+        manifest_ref=manifest_ref,
+        existing_provenance=existing_provenance,
+    )
+    merged_provenance = merge_runtime_provenance(existing_provenance, canonical_git)
+    if merged_provenance != existing_provenance:
+        artifact.provenance_json = merged_provenance
+        update_fields.append("provenance_json")
+    source_ref_type, source_ref_id = runtime_git_source_ref(canonical_git)
+    if str(artifact.source_ref_type or "") != source_ref_type:
+        artifact.source_ref_type = source_ref_type
+        update_fields.append("source_ref_type")
+    if str(artifact.source_ref_id or "") != source_ref_id:
+        artifact.source_ref_id = source_ref_id
+        update_fields.append("source_ref_id")
     if update_fields:
         update_fields.append("updated_at")
         artifact.save(update_fields=update_fields)
