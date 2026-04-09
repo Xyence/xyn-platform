@@ -3,6 +3,11 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand
 
 from xyn_orchestrator.models import Artifact, ArtifactType, Workspace, WorkspaceArtifactBinding
+from xyn_orchestrator.runtime_artifact_provenance import (
+    build_runtime_artifact_git_provenance,
+    merge_runtime_provenance,
+    runtime_git_source_ref,
+)
 
 
 class Command(BaseCommand):
@@ -61,6 +66,11 @@ class Command(BaseCommand):
         created_artifacts = 0
         created_bindings = 0
         for spec in specs:
+            canonical_git = build_runtime_artifact_git_provenance(
+                slug=spec["slug"],
+                manifest_ref=spec["manifest_ref"],
+            )
+            source_ref_type, source_ref_id = runtime_git_source_ref(canonical_git)
             artifact, created = Artifact.objects.get_or_create(
                 workspace=workspace,
                 slug=spec["slug"],
@@ -74,10 +84,12 @@ class Command(BaseCommand):
                         "manifest_ref": spec["manifest_ref"],
                         "summary": f"Kernel-loaded artifact for {spec['title']}",
                     },
-                    "provenance_json": {
-                        "source_system": "seed-kernel",
-                        "source_id": spec["slug"],
-                    },
+                    "provenance_json": merge_runtime_provenance(
+                        {"source_system": "seed-kernel", "source_id": spec["slug"]},
+                        canonical_git,
+                    ),
+                    "source_ref_type": source_ref_type,
+                    "source_ref_id": source_ref_id,
                 },
             )
             if created:
@@ -87,7 +99,29 @@ class Command(BaseCommand):
                 if scope.get("manifest_ref") != spec["manifest_ref"]:
                     scope["manifest_ref"] = spec["manifest_ref"]
                     artifact.scope_json = scope
-                    artifact.save(update_fields=["scope_json", "updated_at"])
+                existing_provenance = artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {}
+                canonical_git = build_runtime_artifact_git_provenance(
+                    slug=spec["slug"],
+                    manifest_ref=spec["manifest_ref"],
+                    existing_provenance=existing_provenance,
+                )
+                merged_provenance = merge_runtime_provenance(existing_provenance, canonical_git)
+                source_ref_type, source_ref_id = runtime_git_source_ref(canonical_git)
+                update_fields = []
+                if artifact.scope_json != scope:
+                    artifact.scope_json = scope
+                    update_fields.append("scope_json")
+                if merged_provenance != existing_provenance:
+                    artifact.provenance_json = merged_provenance
+                    update_fields.append("provenance_json")
+                if str(artifact.source_ref_type or "") != source_ref_type:
+                    artifact.source_ref_type = source_ref_type
+                    update_fields.append("source_ref_type")
+                if str(artifact.source_ref_id or "") != source_ref_id:
+                    artifact.source_ref_id = source_ref_id
+                    update_fields.append("source_ref_id")
+                if update_fields:
+                    artifact.save(update_fields=[*update_fields, "updated_at"])
             _, binding_created = WorkspaceArtifactBinding.objects.get_or_create(
                 workspace=workspace,
                 artifact=artifact,

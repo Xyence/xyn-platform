@@ -9,7 +9,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from django.utils import timezone
 
-from xyn_orchestrator import xyn_api
+from xyn_orchestrator import artifact_packages, xyn_api
 from xyn_orchestrator.models import (
     Application,
     ApplicationArtifactMembership,
@@ -243,15 +243,15 @@ class ArtifactPackagesApiTests(TestCase):
         imported = self._import_package(blob)
         self.assertEqual(imported.status_code, 200, imported.content.decode())
         package_id = imported.json()["package"]["id"]
-
-        install = self.client.post(
-            f"/xyn/api/artifacts/packages/{package_id}/install",
-            data=json.dumps({}),
-            content_type="application/json",
+        package = ArtifactPackage.objects.get(id=package_id)
+        receipt = artifact_packages.install_package(
+            package,
+            installed_by=self.user,
+            target_workspace=self.workspace,
         )
-        self.assertEqual(install.status_code, 200, install.content.decode())
+        self.assertEqual(receipt.status, "success")
 
-        artifact = Artifact.objects.get(type__slug="app_shell", slug="xyn-api")
+        artifact = Artifact.objects.get(workspace=self.workspace, type__slug="app_shell", slug="xyn-api")
         provenance = artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {}
         self.assertEqual(provenance.get("kind"), "git")
         self.assertEqual(provenance.get("repo_key"), "xyn-platform")

@@ -4,6 +4,7 @@ import sys
 import logging
 
 from .bootstrap_guard import DEFAULT_BOOTSTRAP_REQUIRED_TABLES, schema_bootstrap_readiness
+from .runtime_repo_map_validation import validate_runtime_repo_map_targets
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class XynOrchestratorConfig(AppConfig):
         argv = " ".join(sys.argv).lower()
         if any(cmd in argv for cmd in ("migrate", "makemigrations", "collectstatic", "shell", "test", "seed_packs")):
             return
+        _validate_runtime_repo_map_startup()
         if not _bootstrap_db_ready():
             logger.info("Skipping startup bootstrap until DB schema is ready.")
             return
@@ -41,3 +43,24 @@ class XynOrchestratorConfig(AppConfig):
         except Exception as exc:
             logger.warning("Startup bootstrap did not complete: %s", exc)
             return
+
+
+def _validate_runtime_repo_map_startup() -> None:
+    mode = str(os.getenv("XYN_RUNTIME_REPO_MAP_VALIDATION", "warn") or "").strip().lower() or "warn"
+    if mode in {"off", "false", "0", "disabled"}:
+        return
+    should_fail = mode in {"fail", "strict", "error"}
+    try:
+        warnings = validate_runtime_repo_map_targets()
+    except Exception as exc:
+        message = f"Runtime repo map configuration is invalid: {exc}"
+        if should_fail:
+            raise RuntimeError(message) from exc
+        logger.warning(message)
+        return
+    if not warnings:
+        return
+    for warning in warnings:
+        logger.warning(warning)
+    if should_fail:
+        raise RuntimeError("Runtime repo map validation failed; missing repo-map targets.")
