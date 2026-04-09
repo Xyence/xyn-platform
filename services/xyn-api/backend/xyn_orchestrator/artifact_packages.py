@@ -26,6 +26,13 @@ from .models import (
     PlatformConfigDocument,
     Workspace,
 )
+from .runtime_artifact_provenance import (
+    build_runtime_artifact_git_provenance,
+    canonical_git_provenance_missing_fields,
+    is_code_backed_runtime_artifact,
+    merge_runtime_provenance,
+    runtime_git_source_ref,
+)
 
 MANIFEST_FORMAT_VERSION = 1
 PACKAGE_STORAGE_ROOT = Path(os.environ.get("XYN_ARTIFACT_PACKAGE_ROOT") or "/tmp/xyn-artifact-packages")
@@ -1186,6 +1193,34 @@ def export_artifact_package(*, root_artifact: Artifact, package_name: str, packa
         manifest_artifacts.append(entry)
 
         artifact_path, payload_path, surfaces_path, runtime_roles_path = _artifact_paths(entry)
+        scope = artifact.scope_json if isinstance(artifact.scope_json, dict) else {}
+        provenance_json = artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {}
+        if is_code_backed_runtime_artifact(artifact.slug):
+            canonical_git = build_runtime_artifact_git_provenance(
+                slug=str(artifact.slug or ""),
+                manifest_ref=str(scope.get("manifest_ref") or ""),
+                existing_provenance=provenance_json,
+            )
+            merged_provenance = merge_runtime_provenance(provenance_json, canonical_git)
+            source_ref_type, source_ref_id = runtime_git_source_ref(canonical_git)
+            update_fields: List[str] = []
+            if merged_provenance != provenance_json:
+                artifact.provenance_json = merged_provenance
+                update_fields.append("provenance_json")
+            if str(artifact.source_ref_type or "") != source_ref_type:
+                artifact.source_ref_type = source_ref_type
+                update_fields.append("source_ref_type")
+            if str(artifact.source_ref_id or "") != source_ref_id:
+                artifact.source_ref_id = source_ref_id
+                update_fields.append("source_ref_id")
+            if update_fields:
+                artifact.save(update_fields=[*update_fields, "updated_at"])
+            provenance_json = merged_provenance
+            missing = canonical_git_provenance_missing_fields(provenance_json)
+            if missing:
+                raise ArtifactPackageValidationError(
+                    [f"code-backed artifact '{artifact.slug}' missing canonical git provenance fields: {', '.join(missing)}"]
+                )
         artifact_payload = {
             "artifact": {
                 "type": entry["type"],
@@ -1204,7 +1239,7 @@ def export_artifact_package(*, root_artifact: Artifact, package_name: str, packa
                 "exported_at": _now_iso(),
                 "source_created_at": entry.get("source_created_at"),
                 "content_ref": artifact.content_ref if isinstance(artifact.content_ref, dict) else {},
-                "provenance": artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {},
+                "provenance": provenance_json,
             },
         }
         raw_artifact = json.dumps(artifact_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")

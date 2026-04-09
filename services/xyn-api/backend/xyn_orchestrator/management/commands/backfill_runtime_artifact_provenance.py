@@ -4,7 +4,9 @@ from django.core.management.base import BaseCommand
 
 from xyn_orchestrator.models import Artifact
 from xyn_orchestrator.runtime_artifact_provenance import (
+    RUNTIME_PROVENANCE_HINTS,
     build_runtime_artifact_git_provenance,
+    canonical_git_provenance_missing_fields,
     merge_runtime_provenance,
     runtime_git_source_ref,
 )
@@ -28,13 +30,20 @@ class Command(BaseCommand):
             help="Optional workspace slug filter.",
         )
         parser.add_argument("--dry-run", action="store_true", dest="dry_run")
+        parser.add_argument(
+            "--strict",
+            action="store_true",
+            dest="strict",
+            help="Fail command if any targeted runtime artifact is missing canonical git provenance fields.",
+        )
 
     def handle(self, *args, **options):
         slugs = [str(item).strip() for item in (options.get("slugs") or []) if str(item).strip()]
         if not slugs:
-            slugs = ["xyn-api", "xyn-ui", "core.workbench", "core.xyn-runtime"]
+            slugs = list(RUNTIME_PROVENANCE_HINTS.keys())
         workspace_slug = str(options.get("workspace_slug") or "").strip()
         dry_run = bool(options.get("dry_run"))
+        strict = bool(options.get("strict"))
 
         qs = Artifact.objects.filter(slug__in=slugs).select_related("workspace").order_by("-updated_at", "-created_at")
         if workspace_slug:
@@ -42,6 +51,7 @@ class Command(BaseCommand):
         rows = list(qs)
         updated = 0
         scanned = 0
+        invalid = 0
         for artifact in rows:
             scanned += 1
             scope = artifact.scope_json if isinstance(artifact.scope_json, dict) else {}
@@ -54,6 +64,13 @@ class Command(BaseCommand):
             if not canonical_git:
                 continue
             merged = merge_runtime_provenance(existing, canonical_git)
+            missing = canonical_git_provenance_missing_fields(merged)
+            if missing:
+                invalid += 1
+                self.stdout.write(
+                    f"[warning] artifact={artifact.slug} workspace={artifact.workspace.slug} missing={','.join(missing)}"
+                )
+                continue
             source_ref_type, source_ref_id = runtime_git_source_ref(canonical_git)
             change_fields = []
             if merged != existing:
@@ -75,8 +92,11 @@ class Command(BaseCommand):
                 continue
             artifact.save(update_fields=[*change_fields, "updated_at"])
 
+        if strict and invalid > 0:
+            raise SystemExit(f"runtime_artifact_provenance_backfill strict failure: invalid={invalid}")
         self.stdout.write(
             self.style.SUCCESS(
-                f"runtime_artifact_provenance_backfill scanned={scanned} updated={updated} dry_run={str(dry_run).lower()}"
+                "runtime_artifact_provenance_backfill "
+                f"scanned={scanned} updated={updated} invalid={invalid} dry_run={str(dry_run).lower()}"
             )
         )
