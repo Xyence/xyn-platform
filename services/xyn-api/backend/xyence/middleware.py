@@ -7,6 +7,7 @@ import jwt
 import requests
 from django.http import JsonResponse
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from xyn_orchestrator.models import UserIdentity, RoleBinding
 
 
@@ -29,11 +30,14 @@ class ApiTokenAuthMiddleware:
             else:
                 claims = _verify_oidc_token(token) if _auth_mode() == "oidc" else None
                 if claims:
-                    user = _get_or_create_user_from_claims(claims)
+                    identity = _get_or_create_identity_from_claims(claims)
+                    user = _get_or_create_user_from_identity(identity) if identity else _get_or_create_user_from_claims(claims)
                     if user:
                         request.user = user
                         request._cached_user = user
                         request._dont_enforce_csrf_checks = True
+                        if identity:
+                            setattr(request, "_xyn_user_identity_id", str(identity.id))
         if not getattr(request, "user", None) or not request.user.is_authenticated:
             identity_id = getattr(request, "session", {}).get("user_identity_id")
             if identity_id:
@@ -175,6 +179,41 @@ def _get_or_create_user_from_claims(claims: Dict[str, Any]):
         user.email = email
         user.save(update_fields=["is_staff", "is_active", "email"])
     return user
+
+
+def _get_or_create_identity_from_claims(claims: Dict[str, Any]) -> Optional[UserIdentity]:
+    issuer = str(claims.get("iss") or os.environ.get("OIDC_ISSUER", "")).strip()
+    subject = str(claims.get("sub") or "").strip()
+    if not issuer or not subject:
+        return None
+    email = str(claims.get("email") or "").strip().lower()
+    if claims.get("email_verified") is False:
+        return None
+    display_name = str(claims.get("name") or claims.get("preferred_username") or email or subject).strip()
+    provider_id = str(claims.get("azp") or claims.get("aud") or "oidc").strip()
+    if isinstance(claims.get("aud"), list):
+        aud = claims.get("aud") or []
+        provider_id = str(aud[0] if aud else provider_id).strip()
+    identity = UserIdentity.objects.filter(issuer=issuer, subject=subject).first()
+    if identity is None and email:
+        identity = UserIdentity.objects.filter(email__iexact=email).order_by("-updated_at").first()
+    if identity is None:
+        identity = UserIdentity(
+            provider="oidc",
+            provider_id=provider_id,
+            issuer=issuer,
+            subject=subject,
+        )
+    identity.provider = "oidc"
+    identity.provider_id = provider_id
+    identity.issuer = issuer
+    identity.subject = subject
+    identity.email = email
+    identity.display_name = display_name
+    identity.claims_json = claims
+    identity.last_login_at = timezone.now()
+    identity.save()
+    return identity
 
 
 def _get_or_create_user_from_identity(identity: UserIdentity):

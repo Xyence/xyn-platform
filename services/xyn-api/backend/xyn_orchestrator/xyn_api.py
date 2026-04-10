@@ -2805,12 +2805,23 @@ def _decode_id_token(id_token: str, issuer: str, client_id: str, nonce: str) -> 
 
 
 def _require_authenticated(request: HttpRequest) -> Optional[UserIdentity]:
-    identity_id = request.session.get("user_identity_id")
-    if not identity_id:
-        return None
-    identity = UserIdentity.objects.filter(id=identity_id).first()
+    cached_identity = getattr(request, "_xyn_resolved_identity", None)
+    if isinstance(cached_identity, UserIdentity):
+        identity = cached_identity
+    else:
+        identity = None
+    identity_id = ""
+    if identity is None:
+        identity_id = str(getattr(request, "_xyn_user_identity_id", "") or "").strip()
+        if not identity_id:
+            identity_id = str(request.session.get("user_identity_id") or "").strip()
+        if identity_id:
+            identity = UserIdentity.objects.filter(id=identity_id).first()
+    if identity is None:
+        identity = _identity_from_user(getattr(request, "user", None))
     if not identity:
         return None
+    setattr(request, "_xyn_resolved_identity", identity)
     actor_roles = list(
         RoleBinding.objects.filter(user_identity=identity, scope_kind="platform")
         .values_list("role", flat=True)
