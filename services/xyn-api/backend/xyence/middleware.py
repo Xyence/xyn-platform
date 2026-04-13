@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 import jwt
 import requests
 from django.http import JsonResponse
+from django.http.response import HttpResponseRedirectBase
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from xyn_orchestrator.models import UserIdentity, RoleBinding
@@ -47,7 +48,10 @@ class ApiTokenAuthMiddleware:
                     if user:
                         request.user = user
                         request._cached_user = user
-        return self.get_response(request)
+        response = self.get_response(request)
+        if _is_workflow_api_unauth_redirect(request, response):
+            return JsonResponse({"error": "not authenticated"}, status=401)
+        return response
 
 
 PREVIEW_SESSION_KEY = "xyn.preview.v1"
@@ -214,6 +218,28 @@ def _get_or_create_identity_from_claims(claims: Dict[str, Any]) -> Optional[User
     identity.last_login_at = timezone.now()
     identity.save()
     return identity
+
+
+_WORKFLOW_API_PREFIXES = (
+    "/xyn/api/applications",
+    "/xyn/api/runs",
+    "/xyn/api/runtime/runs",
+    "/api/runs",
+    "/api/runtime/runs",
+)
+
+
+def _is_workflow_api_unauth_redirect(request, response) -> bool:
+    path = str(getattr(request, "path", "") or "")
+    if not any(path.startswith(prefix) for prefix in _WORKFLOW_API_PREFIXES):
+        return False
+    if not isinstance(response, HttpResponseRedirectBase):
+        return False
+    location = str(getattr(response, "url", "") or response.headers.get("Location", "") or "")
+    if not location:
+        return False
+    lower = location.lower()
+    return "/accounts/login" in lower or "/auth/login" in lower
 
 
 def _get_or_create_user_from_identity(identity: UserIdentity):

@@ -101,6 +101,20 @@ class BearerWorkflowAuthTests(TestCase):
         )
         self.assertEqual(response.status_code, 200, response.content.decode())
         self.assertEqual(response.json().get("runs"), [])
+        self.assertFalse(response.has_header("Location"))
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
+    @mock.patch("xyence.middleware._verify_oidc_token")
+    def test_bearer_can_access_runs_collection(self, mock_verify: mock.Mock):
+        mock_verify.return_value = self._bearer_claims()
+        response = self.client.get(
+            "/xyn/api/runs",
+            HTTP_AUTHORIZATION="Bearer token-ok",
+        )
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertIn("runs", payload)
+        self.assertFalse(response.has_header("Location"))
 
     def test_session_auth_still_works_for_applications(self):
         User = get_user_model()
@@ -127,7 +141,20 @@ class BearerWorkflowAuthTests(TestCase):
             {"workspace_id": str(self.workspace.id)},
             HTTP_AUTHORIZATION="Bearer invalid",
         )
-        self.assertIn(response.status_code, {302, 401, 403})
+        self.assertEqual(response.status_code, 401, response.content.decode())
+        self.assertFalse(response.has_header("Location"))
+        self.assertEqual(response.json().get("error"), "not authenticated")
+
+    def test_missing_auth_returns_json_unauthorized_for_applications_and_runs(self):
+        app_response = self.client.get("/xyn/api/applications", {"workspace_id": str(self.workspace.id)})
+        self.assertEqual(app_response.status_code, 401, app_response.content.decode())
+        self.assertFalse(app_response.has_header("Location"))
+        self.assertEqual(app_response.json().get("error"), "not authenticated")
+
+        runs_response = self.client.get("/xyn/api/runs")
+        self.assertEqual(runs_response.status_code, 401, runs_response.content.decode())
+        self.assertFalse(runs_response.has_header("Location"))
+        self.assertEqual(runs_response.json().get("error"), "not authenticated")
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
     @mock.patch("xyence.middleware._verify_oidc_token")
