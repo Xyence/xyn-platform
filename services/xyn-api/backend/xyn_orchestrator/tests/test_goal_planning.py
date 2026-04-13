@@ -5429,6 +5429,59 @@ class GoalPlanningTests(TestCase):
 
         self.assertEqual(changed, ["apps/xyn-ui/src/app/components/solutions/SolutionPanels.tsx"])
 
+    def test_stage_apply_dispatch_wrapper_delegates_to_solution_workflow_module(self):
+        session = mock.sentinel.session
+        selected_members = [mock.sentinel.member]
+        staged_artifacts = [{"artifact_id": "artifact-1"}]
+        planned_work_by_artifact = {"artifact-1": ["step 1"]}
+        plan = {"proposed_work": ["step 1"]}
+        dispatch_user = mock.sentinel.user
+        expected_payload = {"execution_runs": [], "per_repo_results": []}
+
+        with mock.patch(
+            "xyn_orchestrator.solution_change_session.stage_apply_workflow.stage_solution_change_dispatch_dev_tasks",
+            return_value=expected_payload,
+        ) as workflow_mock:
+            payload = xyn_api._stage_solution_change_dispatch_dev_tasks(
+                session=session,
+                selected_members=selected_members,
+                staged_artifacts=staged_artifacts,
+                planned_work_by_artifact=planned_work_by_artifact,
+                plan=plan,
+                dispatch_user=dispatch_user,
+            )
+
+        self.assertIs(payload, expected_payload)
+        self.assertEqual(workflow_mock.call_count, 1)
+        kwargs = workflow_mock.call_args.kwargs
+        self.assertIs(kwargs.get("session"), session)
+        self.assertIs(kwargs.get("resolve_stage_apply_target_branch"), xyn_api._resolve_stage_apply_target_branch)
+        self.assertIs(kwargs.get("git_repo_dirty_files"), xyn_api._git_repo_dirty_files)
+        self.assertIs(kwargs.get("submit_dev_task_runtime_run"), xyn_api._submit_dev_task_runtime_run)
+
+    def test_stage_apply_session_wrapper_delegates_to_solution_workflow_module(self):
+        session = mock.sentinel.session
+        memberships = [mock.sentinel.member]
+        expected_payload = {"overall_state": "staged"}
+
+        with mock.patch(
+            "xyn_orchestrator.solution_change_session.stage_apply_workflow.stage_solution_change_session",
+            return_value=expected_payload,
+        ) as workflow_mock:
+            payload = xyn_api._stage_solution_change_session(
+                session=session,
+                memberships=memberships,
+                dispatch_runtime=True,
+                dispatch_user=mock.sentinel.user,
+            )
+
+        self.assertIs(payload, expected_payload)
+        self.assertEqual(workflow_mock.call_count, 1)
+        kwargs = workflow_mock.call_args.kwargs
+        self.assertIs(kwargs.get("session"), session)
+        self.assertEqual(kwargs.get("memberships"), memberships)
+        self.assertIs(kwargs.get("stage_solution_change_dispatch_dev_tasks"), xyn_api._stage_solution_change_dispatch_dev_tasks)
+
     def test_solution_change_session_continue_requires_iteration_linkage(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
