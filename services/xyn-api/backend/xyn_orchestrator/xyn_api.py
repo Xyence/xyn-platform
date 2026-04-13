@@ -32614,21 +32614,42 @@ def _apply_refinement_rewrite_to_plan_payload(
             conditional_candidates.append(matched)
 
     if bool(directives.get("rewrite_proposed_work")):
+        forbids_ui_changes = _request_forbids_ui_changes(request_text)
+        structural_backend_refactor = _request_signals_structural_backend_refactor(request_text)
         if primary_candidate:
-            rewritten_steps: List[str] = [
-                f"Inspect `{primary_candidate}` and confirm ownership of the affected header/dropdown styling behavior.",
-                f"Apply a minimal UI/layout fix in `{primary_candidate}` to address: {str(request_text or '').strip()[:140]}.",
-            ]
-            if conditional_candidates:
-                rewritten_steps.append(
-                    f"Include `{conditional_candidates[0]}` only if evidence shows shared styling/component coupling requires it."
-                )
-            rewritten_steps.extend(
-                [
-                    "Validate the dropdown styling/width behavior in the live header shell and check adjacent control parity.",
-                    "Add or update a focused regression test for this UI behavior.",
+            if forbids_ui_changes or structural_backend_refactor:
+                rewritten_steps = [
+                    f"Inspect `{primary_candidate}` and identify solution-change-session workflow code to extract into modules.",
+                    f"Move extracted workflow logic from `{primary_candidate}` into focused backend modules with delegation wrappers.",
                 ]
-            )
+            else:
+                rewritten_steps = [
+                    f"Inspect `{primary_candidate}` and confirm ownership of the affected header/dropdown styling behavior.",
+                    f"Apply a minimal UI/layout fix in `{primary_candidate}` to address: {str(request_text or '').strip()[:140]}.",
+                ]
+            if conditional_candidates:
+                if forbids_ui_changes or structural_backend_refactor:
+                    rewritten_steps.append(
+                        f"Include `{conditional_candidates[0]}` only if shared backend workflow coupling requires coordinated extraction."
+                    )
+                else:
+                    rewritten_steps.append(
+                        f"Include `{conditional_candidates[0]}` only if evidence shows shared styling/component coupling requires it."
+                    )
+            if forbids_ui_changes or structural_backend_refactor:
+                rewritten_steps.extend(
+                    [
+                        "Verify request/response behavior remains identical after extraction.",
+                        "Add or update focused regression tests for extracted backend workflow paths.",
+                    ]
+                )
+            else:
+                rewritten_steps.extend(
+                    [
+                        "Validate the dropdown styling/width behavior in the live header shell and check adjacent control parity.",
+                        "Add or update a focused regression test for this UI behavior.",
+                    ]
+                )
             updated["implementation_steps"] = rewritten_steps[:5]
             updated["proposed_work"] = rewritten_steps[:5]
         else:
@@ -33233,10 +33254,12 @@ def _solution_option_rows(
         ordered_members.append(member)
 
     lowered_request = str(request_text or "").strip().lower()
+    forbids_ui_changes = _request_forbids_ui_changes(lowered_request)
     ui_context_tokens = {"ui", "ux", "frontend", "view", "screen", "page", "panel", "layout", "input", "component"}
     ui_code_change_tokens = {"resize", "width", "height", "css", "style", "component", "input", "textarea", "field", "layout"}
     is_ui_code_change_request = (
         bool(lowered_request)
+        and not forbids_ui_changes
         and any(token in lowered_request for token in ui_context_tokens)
         and any(token in lowered_request for token in ui_code_change_tokens)
     )
@@ -33552,6 +33575,7 @@ def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
     lowered = str(request_text or "").strip().lower()
     if not lowered:
         return []
+    forbids_ui_changes = _request_forbids_ui_changes(request_text)
     workstreams: List[str] = []
 
     def _append_once(token: str) -> None:
@@ -33564,7 +33588,7 @@ def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
     workflow_tokens = {"flow", "workflow", "session", "planner", "stage", "apply", "preview", "validate", "orchestration", "pipeline", "job"}
     behavior_tokens = {"logic", "behavior", "rule", "validation", "condition"}
 
-    if any(token in lowered for token in ui_tokens):
+    if (not forbids_ui_changes) and any(token in lowered for token in ui_tokens):
         _append_once("ui")
     if any(token in lowered for token in api_tokens):
         _append_once("api")
@@ -33582,6 +33606,9 @@ def _analyze_solution_impacted_artifacts(
 ) -> Dict[str, Any]:
     text = str(request_text or "").strip().lower()
     tokens = [token for token in re.findall(r"[a-z0-9_]+", text) if len(token) >= 3]
+    path_hints = _request_path_hints(request_text)
+    forbids_ui_changes = _request_forbids_ui_changes(request_text)
+    structural_backend_refactor = _request_signals_structural_backend_refactor(request_text)
     ui_context_tokens = {
         "ui",
         "ux",
@@ -33636,8 +33663,8 @@ def _analyze_solution_impacted_artifacts(
         "response",
         "request",
     }
-    has_ui_context = any(token in text for token in ui_context_tokens)
-    has_ui_code_change_signal = any(token in text for token in ui_code_change_tokens)
+    has_ui_context = (not forbids_ui_changes) and any(token in text for token in ui_context_tokens)
+    has_ui_code_change_signal = (not forbids_ui_changes) and any(token in text for token in ui_code_change_tokens)
     is_ui_code_change_request = has_ui_context and has_ui_code_change_signal
     is_api_change_request = any(token in text for token in api_change_tokens) and not is_ui_code_change_request
     role_signals: Dict[str, List[str]] = {
@@ -33672,6 +33699,29 @@ def _analyze_solution_impacted_artifacts(
         ).lower()
         artifact_ui_signal = any(token in artifact_intent_text for token in {" ui", "frontend", "workbench", "panel", "layout"})
         artifact_api_signal = any(token in artifact_intent_text for token in {"api", "backend", "endpoint", "service"})
+        owner_paths = [
+            str(item or "").strip().lower()
+            for item in (
+                artifact.owner_path_prefixes_json
+                if isinstance(getattr(artifact, "owner_path_prefixes_json", None), list)
+                else []
+            )
+            if str(item or "").strip()
+        ]
+        matched_path_hint = any(
+            _path_hint_matches_owner_scope(path_hint, owner_prefix)
+            for path_hint in path_hints
+            for owner_prefix in owner_paths
+        )
+        path_hint_targets_python_backend = any(
+            token in path_hint for path_hint in path_hints for token in ("xyn_orchestrator", "xyn_api.py", ".py")
+        )
+        if matched_path_hint:
+            score += 10
+            reasons.append("explicit request path overlaps artifact owned source paths")
+        elif path_hints and path_hint_targets_python_backend and artifact_api_signal:
+            score += 5
+            reasons.append("request references backend python module and artifact has API/backend intent")
         if member.role in matched_roles:
             score += 4
             reasons.append(f"request mentions {member.role.replace('_', ' ')} concerns")
@@ -33718,6 +33768,12 @@ def _analyze_solution_impacted_artifacts(
             elif artifact_ui_signal:
                 score -= 2
                 reasons.append("api change request de-prioritizes UI-oriented artifacts")
+        if forbids_ui_changes and artifact_ui_signal:
+            score -= 5
+            reasons.append("request explicitly forbids UI/styling/layout changes")
+        if structural_backend_refactor and artifact_api_signal:
+            score += 3
+            reasons.append("request indicates structural backend refactor")
         if score <= 0:
             continue
         impacted_rows.append(
@@ -33896,6 +33952,17 @@ _CODE_AWARE_STYLE_HINT_TOKENS: Set[str] = {
     "layout",
 }
 
+_PLAN_UI_FORBIDDEN_TERMS: Tuple[str, ...] = (
+    "width",
+    "min-width",
+    "max-width",
+    "anchoring",
+    "header",
+    "navigation",
+    "styling",
+    "layout",
+)
+
 _CODE_AWARE_HEADER_PATH_HINTS: Tuple[str, ...] = (
     "/components/common/",
     "/components/layout/",
@@ -33912,6 +33979,8 @@ def _request_appears_implementation_specific(request_text: str) -> bool:
     lowered = str(request_text or "").strip().lower()
     if not lowered:
         return False
+    if _request_signals_structural_backend_refactor(request_text):
+        return True
     tokens = set(re.findall(r"[a-z0-9_]+", lowered))
     return any(token in tokens for token in _CODE_AWARE_IMPLEMENTATION_TOKENS)
 
@@ -33920,8 +33989,201 @@ def _request_appears_ui_implementation_specific(request_text: str) -> bool:
     lowered = str(request_text or "").strip().lower()
     if not lowered:
         return False
+    if _request_forbids_ui_changes(request_text):
+        return False
     tokens = set(re.findall(r"[a-z0-9_]+", lowered))
     return any(token in tokens for token in _CODE_AWARE_UI_HINT_TOKENS)
+
+
+def _request_forbids_ui_changes(request_text: str) -> bool:
+    text = str(request_text or "").strip().lower()
+    if not text:
+        return False
+    patterns = (
+        r"\bno\s+ui\b",
+        r"\bno\s+styling\b",
+        r"\bno\s+layout\b",
+        r"\bdo\s+not\s+modify\s+ui\b",
+        r"\bdo\s+not\s+change\s+ui\b",
+        r"\bdo\s+not\s+modify\s+styling\b",
+        r"\bdo\s+not\s+modify\s+layout\b",
+        r"\bdo\s+not\s+touch\s+ui\b",
+        r"\bwithout\s+ui\s+changes\b",
+        r"\bwithout\s+layout\s+changes\b",
+        r"\bwithout\s+styling\s+changes\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _request_signals_structural_backend_refactor(request_text: str) -> bool:
+    text = str(request_text or "").strip().lower()
+    if not text:
+        return False
+    signals = (
+        "strict refactor",
+        "structural refactor",
+        "extract into modules",
+        "extract into smaller modules",
+        "decompose",
+        "delegation wrappers",
+        "replace with delegation wrappers",
+        "preserve behavior",
+        "maintain identical request/response behavior",
+        "no feature additions",
+        "do not introduce new features",
+    )
+    return any(signal in text for signal in signals)
+
+
+def _derive_plan_prohibitions(request_text: str) -> Dict[str, Any]:
+    text = str(request_text or "").strip().lower()
+    if not text:
+        return {
+            "ui_changes_forbidden": False,
+            "feature_additions_forbidden": False,
+            "behavior_changes_forbidden": False,
+            "active_categories": [],
+        }
+    ui_changes_forbidden = _request_forbids_ui_changes(text)
+    feature_additions_forbidden = any(
+        token in text
+        for token in ("no new features", "do not introduce new features", "no feature additions")
+    )
+    behavior_changes_forbidden = any(
+        token in text
+        for token in ("preserve behavior", "maintain identical request/response behavior", "keep behavior identical")
+    )
+    active_categories: List[str] = []
+    if ui_changes_forbidden:
+        active_categories.append("ui_changes_forbidden")
+    if feature_additions_forbidden:
+        active_categories.append("feature_additions_forbidden")
+    if behavior_changes_forbidden:
+        active_categories.append("behavior_changes_forbidden")
+    return {
+        "ui_changes_forbidden": ui_changes_forbidden,
+        "feature_additions_forbidden": feature_additions_forbidden,
+        "behavior_changes_forbidden": behavior_changes_forbidden,
+        "active_categories": active_categories,
+    }
+
+
+def _step_violates_plan_prohibitions(step_text: str, prohibitions: Dict[str, Any]) -> bool:
+    lowered = str(step_text or "").strip().lower()
+    if not lowered:
+        return False
+    if bool(prohibitions.get("ui_changes_forbidden")):
+        for token in _PLAN_UI_FORBIDDEN_TERMS:
+            if token in lowered:
+                return True
+    return False
+
+
+def _sanitize_plan_step_list_for_prohibitions(
+    *,
+    values: List[str],
+    prohibitions: Dict[str, Any],
+) -> Tuple[List[str], int]:
+    sanitized: List[str] = []
+    removed = 0
+    for value in values:
+        token = str(value or "").strip()
+        if not token:
+            continue
+        if _step_violates_plan_prohibitions(token, prohibitions):
+            removed += 1
+            continue
+        if token not in sanitized:
+            sanitized.append(token)
+    return sanitized, removed
+
+
+def _apply_plan_prohibition_guardrails(*, plan: Dict[str, Any], request_text: str) -> Dict[str, Any]:
+    if not isinstance(plan, dict):
+        return plan
+    prohibitions = _derive_plan_prohibitions(request_text)
+    active_categories = prohibitions.get("active_categories") if isinstance(prohibitions.get("active_categories"), list) else []
+    if not active_categories:
+        return plan
+    sanitized_plan = copy.deepcopy(plan)
+    total_removed = 0
+    for field in ("implementation_steps", "proposed_work", "validation_plan"):
+        raw_values = sanitized_plan.get(field) if isinstance(sanitized_plan.get(field), list) else []
+        values = [str(item).strip() for item in raw_values if str(item).strip()]
+        sanitized, removed = _sanitize_plan_step_list_for_prohibitions(values=values, prohibitions=prohibitions)
+        total_removed += removed
+        sanitized_plan[field] = sanitized
+    next_action = str(sanitized_plan.get("next_action") or "").strip()
+    if next_action and _step_violates_plan_prohibitions(next_action, prohibitions):
+        total_removed += 1
+        fallback_next_action = next(
+            (
+                str(item).strip()
+                for item in (sanitized_plan.get("implementation_steps") if isinstance(sanitized_plan.get("implementation_steps"), list) else [])
+                if str(item).strip()
+            ),
+            "",
+        )
+        if not fallback_next_action:
+            fallback_next_action = (
+                "Extract existing backend workflow logic into focused modules while preserving behavior and avoiding new feature work."
+            )
+        sanitized_plan["next_action"] = fallback_next_action
+    if not (sanitized_plan.get("implementation_steps") if isinstance(sanitized_plan.get("implementation_steps"), list) else []):
+        sanitized_plan["implementation_steps"] = [
+            "Extract existing backend workflow logic into focused modules and keep delegation wrappers at existing call sites.",
+            "Preserve identical request/response behavior and avoid introducing new features.",
+        ]
+    if not (sanitized_plan.get("proposed_work") if isinstance(sanitized_plan.get("proposed_work"), list) else []):
+        sanitized_plan["proposed_work"] = [str(item).strip() for item in sanitized_plan.get("implementation_steps", []) if str(item).strip()]
+    if not (sanitized_plan.get("validation_plan") if isinstance(sanitized_plan.get("validation_plan"), list) else []):
+        sanitized_plan["validation_plan"] = [
+            str(sanitized_plan.get("next_action") or "").strip()
+            or "Confirm prohibited categories are respected before staging.",
+        ]
+    if total_removed > 0:
+        annotations = [
+            str(item).strip()
+            for item in (sanitized_plan.get("guardrail_annotations") if isinstance(sanitized_plan.get("guardrail_annotations"), list) else [])
+            if str(item).strip()
+        ]
+        annotation = (
+            "Plan guardrail enforcement: removed "
+            f"{total_removed} contradictory step(s) to honor explicit constraints ({', '.join(active_categories)})."
+        )
+        if annotation not in annotations:
+            annotations.append(annotation)
+        sanitized_plan["guardrail_annotations"] = annotations
+        logger.info(
+            "solution plan guardrail rewrite applied categories=%s removed_steps=%s",
+            ",".join(active_categories),
+            total_removed,
+        )
+    return sanitized_plan
+
+
+def _request_path_hints(request_text: str) -> List[str]:
+    raw_text = str(request_text or "")
+    if not raw_text:
+        return []
+    hints: List[str] = []
+    for match in re.findall(r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_]+", raw_text):
+        token = str(match or "").strip().replace("\\", "/")
+        if token and token not in hints:
+            hints.append(token.lower())
+    for token in re.findall(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", raw_text):
+        normalized = str(token or "").strip().replace("\\", "/")
+        if "/" in normalized and "." not in normalized and normalized.lower() not in hints:
+            hints.append(normalized.lower())
+    return hints[:12]
+
+
+def _path_hint_matches_owner_scope(path_hint: str, owner_prefix: str) -> bool:
+    hint = str(path_hint or "").strip().replace("\\", "/").lower().strip("/")
+    owner = str(owner_prefix or "").strip().replace("\\", "/").lower().strip("/")
+    if not hint or not owner:
+        return False
+    return hint.startswith(owner) or owner.startswith(hint) or hint in owner or owner in hint
 
 
 def _plan_lacks_concrete_targets(plan: Dict[str, Any]) -> bool:
@@ -34456,21 +34718,41 @@ def _format_code_aware_steps(base_steps: List[str], *, code_context: Dict[str, A
         return base_steps
     steps: List[str] = []
     first_file = candidate_files[0]
-    issue_summary = _humanize_request_issue(request_text)
-    steps.append(
-        f"Inspect the owning UI component in `{first_file}` to confirm whether width, min-width, max-width, or anchoring is causing {issue_summary}."
-    )
-    steps.append(
-        f"Apply the narrowest styling/positioning fix in `{first_file}` so the control remains visible and aligned within the viewport."
-    )
-    steps.append("Verify the updated control alignment does not regress neighboring header/navigation controls.")
+    forbids_ui_changes = _request_forbids_ui_changes(request_text)
+    structural_backend_refactor = _request_signals_structural_backend_refactor(request_text)
+    if forbids_ui_changes or structural_backend_refactor:
+        steps.append(
+            f"Inspect `{first_file}` and isolate solution-change-session workflow logic for modular extraction."
+        )
+        steps.append(
+            f"Extract workflow logic from `{first_file}` into focused backend modules and keep delegation wrappers at call sites."
+        )
+        steps.append("Verify request/response behavior remains identical after extraction and delegation.")
+    else:
+        issue_summary = _humanize_request_issue(request_text)
+        steps.append(
+            f"Inspect the owning UI component in `{first_file}` to confirm whether width, min-width, max-width, or anchoring is causing {issue_summary}."
+        )
+        steps.append(
+            f"Apply the narrowest styling/positioning fix in `{first_file}` so the control remains visible and aligned within the viewport."
+        )
+        steps.append("Verify the updated control alignment does not regress neighboring header/navigation controls.")
     if len(candidate_files) > 1:
         secondary = candidate_files[1]
         if _candidate_file_is_strongly_supported(secondary, code_context=code_context):
-            steps.append(f"Review `{secondary}` if shared dropdown logic or styles are referenced during implementation.")
+            if forbids_ui_changes or structural_backend_refactor:
+                steps.append(f"Review `{secondary}` only if shared backend workflow code must move with extraction.")
+            else:
+                steps.append(f"Review `{secondary}` if shared dropdown logic or styles are referenced during implementation.")
         else:
-            steps.append(f"Review `{secondary}` only if implementation evidence shows shared dropdown logic.")
-    steps.append("Add or update a focused regression check for the affected UI behavior.")
+            if forbids_ui_changes or structural_backend_refactor:
+                steps.append(f"Review `{secondary}` only if implementation evidence shows shared backend workflow coupling.")
+            else:
+                steps.append(f"Review `{secondary}` only if implementation evidence shows shared dropdown logic.")
+    if forbids_ui_changes or structural_backend_refactor:
+        steps.append("Add or update focused regression checks for extracted backend workflow paths.")
+    else:
+        steps.append("Add or update a focused regression check for the affected UI behavior.")
     unique_steps: List[str] = []
     for item in [*steps, *base_steps]:
         token = str(item or "").strip()
@@ -34563,6 +34845,8 @@ def _generate_code_aware_solution_change_plan(
     ui_only_request = any(token in lowered_request for token in {"field", "input", "textarea", "width", "layout", "panel"}) and not any(
         token in lowered_request for token in {"api", "endpoint", "schema", "payload", "contract", "response"}
     )
+    if _request_forbids_ui_changes(request_text):
+        ui_only_request = False
     if ui_only_request:
         shared_contracts = [
             item
@@ -34734,9 +35018,13 @@ def _generate_solution_change_plan(
             selected_members=selected_members_for_plan,
             force_code_aware_planning=force_code_aware_planning,
         )
-        return _apply_refinement_rewrite_to_plan_payload(
+        rewritten = _apply_refinement_rewrite_to_plan_payload(
             plan=finalized,
             directives=plan_rewrite_directives,
+            request_text=original_request,
+        )
+        return _apply_plan_prohibition_guardrails(
+            plan=rewritten,
             request_text=original_request,
         )
 

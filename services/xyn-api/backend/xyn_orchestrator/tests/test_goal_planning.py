@@ -1382,6 +1382,126 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(suggested_ids)
         self.assertEqual(suggested_ids[0], str(xyn_api_artifact.id))
 
+    def test_solution_change_session_strict_backend_refactor_prefers_xyn_api_and_suppresses_ui_routing(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        request_text = (
+            "STRICT REFACTOR: Decompose xyn_orchestrator/xyn_api.py into smaller modules by extracting "
+            "solution-change-session workflow logic only. DO NOT modify UI, styling, layout, or behavior. "
+            "DO NOT introduce new features. Only move existing logic into new modules and replace with delegation "
+            "wrappers. Maintain identical request/response behavior."
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Strict backend refactor",
+                    "request_text": request_text,
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_api_artifact.id))
+        self.assertNotEqual(suggested_ids[0], str(xyn_ui_artifact.id))
+        planning = ((payload.get("session") or {}).get("planning") or {})
+        option_turn = planning.get("pending_option_set") or {}
+        option_payload = option_turn.get("payload") if isinstance(option_turn.get("payload"), dict) else {}
+        options = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+        self.assertTrue(options)
+        self.assertEqual(str((options[0] or {}).get("id") or ""), str(xyn_api_artifact.id))
+
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=application)
+            .select_related("artifact", "artifact__type")
+            .order_by("sort_order", "created_at")
+        )
+        direct_analysis = xyn_api._analyze_solution_impacted_artifacts(
+            application=application,
+            request_text=request_text,
+            memberships=memberships,
+        )
+        impacted = direct_analysis.get("impacted_artifacts") if isinstance(direct_analysis.get("impacted_artifacts"), list) else []
+        self.assertTrue(impacted)
+        self.assertEqual(str((impacted[0] or {}).get("artifact_id") or ""), str(xyn_api_artifact.id))
+        top_reasons = [str(item).lower() for item in ((impacted[0] or {}).get("reasons") or [])]
+        self.assertFalse(any("ui code-change request" in item for item in top_reasons))
+        self.assertTrue(any("structural backend refactor" in item or "backend python module" in item for item in top_reasons))
+
+    def test_solution_change_session_explicit_backend_file_path_dominates_routing(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        request_text = (
+            "Refactor services/xyn-api/backend/xyn_orchestrator/xyn_api.py by extracting solution change session handlers "
+            "into dedicated backend modules and preserve external behavior."
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "Backend module extraction", "request_text": request_text}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_api_artifact.id))
+        self.assertNotEqual(suggested_ids[0], str(xyn_ui_artifact.id))
+
+    def test_solution_change_session_negative_ui_constraints_suppress_ui_ranking_without_ui_file_target(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        request_text = (
+            "Backend-only cleanup for change session orchestration. No UI changes. "
+            "No styling changes. No layout changes. Keep behavior identical."
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "Backend only cleanup", "request_text": request_text}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        impacted = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
+        self.assertTrue(impacted)
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_api_artifact.id))
+        ui_row = next((row for row in impacted if str((row or {}).get("artifact_id") or "") == str(xyn_ui_artifact.id)), None)
+        api_row = next((row for row in impacted if str((row or {}).get("artifact_id") or "") == str(xyn_api_artifact.id)), None)
+        self.assertIsNotNone(ui_row)
+        self.assertIsNotNone(api_row)
+        self.assertLess(int((ui_row or {}).get("score") or 0), int((api_row or {}).get("score") or 0))
+
+    def test_solution_change_session_negative_ui_constraints_with_explicit_ui_file_can_still_target_ui(self):
+        application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        request_text = (
+            "Patch apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx. "
+            "No UI changes, no styling changes, no layout changes. "
+            "Only extract duplicated menu utility code into a sibling module."
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "UI path explicitly targeted", "request_text": request_text}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_ui_artifact.id))
+
     def test_solution_change_session_option_set_orders_by_impacted_artifact_ranking(self):
         application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         create_request = self._request(
@@ -3928,6 +4048,108 @@ class GoalPlanningTests(TestCase):
         self.assertFalse(any(re.search(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b", item, re.I) for item in proposed_work))
         self.assertTrue(any("HeaderUtilityMenu" in item or "header" in item.lower() for item in proposed_work))
 
+    def test_solution_change_session_explicit_ui_request_still_generates_ui_oriented_steps(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn UI",
+            slug=f"xyn-ui-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform shell",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Fix header utility menu layout",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Header layout fix",
+            request_text=(
+                "Fix apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx layout and width behavior "
+                "for the workspace dropdown in the header."
+            ),
+            created_by=self.identity,
+            analysis_json={"impacted_artifacts": [], "suggested_artifact_ids": [str(ui_artifact.id)]},
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+        )
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api.gather_solution_change_code_context",
+            return_value={
+                "available": True,
+                "summary": "Used repo context from xyn-ui.",
+                "candidate_files": ["apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx"],
+                "candidate_components": ["HeaderUtilityMenu"],
+            },
+        ):
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(plan_response.status_code, 200)
+        payload = json.loads(plan_response.content)
+        plan = ((payload.get("session") or {}).get("plan") or {})
+        proposed_work = " ".join(str(item) for item in (plan.get("proposed_work") or [])).lower()
+        self.assertIn("width", proposed_work)
+        self.assertTrue(any(token in proposed_work for token in ("header", "layout", "styling")))
+
+    def test_solution_change_plan_guardrail_rewrites_conflicting_ui_steps_when_ui_forbidden(self):
+        request_text = (
+            "STRICT REFACTOR: extract into modules only. "
+            "DO NOT modify UI, styling, or layout. "
+            "Preserve behavior and do not introduce new features."
+        )
+        base_plan = {
+            "implementation_steps": [
+                "Update header layout width and anchoring in the navigation shell.",
+                "Extract solution-change-session workflow into backend modules and keep delegation wrappers.",
+            ],
+            "proposed_work": [
+                "Apply styling and max-width updates to header navigation controls.",
+                "Extract backend workflow handlers into focused modules.",
+            ],
+            "validation_plan": [
+                "Validate header layout and styling behavior in navigation.",
+                "Run regression checks for solution-change-session request/response behavior.",
+            ],
+            "next_action": "Adjust header layout and styling constraints first.",
+        }
+        rewritten = xyn_api._apply_plan_prohibition_guardrails(plan=base_plan, request_text=request_text)
+        self.assertTrue(isinstance(rewritten, dict))
+        rendered = " ".join(
+            [
+                *[str(item) for item in (rewritten.get("implementation_steps") or [])],
+                *[str(item) for item in (rewritten.get("proposed_work") or [])],
+                *[str(item) for item in (rewritten.get("validation_plan") or [])],
+                str(rewritten.get("next_action") or ""),
+            ]
+        ).lower()
+        for forbidden in ("width", "min-width", "max-width", "anchoring", "header", "navigation", "layout", "styling"):
+            self.assertNotIn(forbidden, rendered)
+        self.assertIn("extract", rendered)
+        annotations = [str(item) for item in (rewritten.get("guardrail_annotations") or []) if str(item).strip()]
+        self.assertTrue(annotations)
+        self.assertTrue(any("guardrail enforcement" in item.lower() for item in annotations))
+
     def test_solution_change_session_structural_fallback_triggers_when_classifier_misses_ui_request(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
@@ -3991,6 +4213,87 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(plan.get("planning_mode"), "code_aware")
         self.assertTrue(plan.get("proposed_work"))
         gather_mock.assert_called_once()
+
+    def test_solution_change_session_strict_backend_refactor_plan_avoids_ui_layout_language(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-api",
+            slug=f"xyn-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["services/xyn-api/backend/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform backend",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Decompose change-session workflow handlers",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        request_text = (
+            "STRICT REFACTOR: Decompose xyn_orchestrator/xyn_api.py into smaller modules by extracting "
+            "solution-change-session workflow logic only. DO NOT modify UI, styling, layout, or behavior. "
+            "DO NOT introduce new features. Only move existing logic into new modules and replace with delegation "
+            "wrappers. Maintain identical request/response behavior."
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Strict backend refactor plan",
+            request_text=request_text,
+            created_by=self.identity,
+            analysis_json={"impacted_artifacts": [], "suggested_artifact_ids": [str(api_artifact.id)]},
+            selected_artifact_ids_json=[str(api_artifact.id)],
+        )
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api.gather_solution_change_code_context",
+            return_value={
+                "available": True,
+                "summary": "Used repo context from xyn-platform backend.",
+                "candidate_files": [
+                    "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                    "services/xyn-api/backend/xyn_orchestrator/change_sessions.py",
+                ],
+                "candidate_components": ["SolutionChangeSession"],
+            },
+        ):
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(plan_response.status_code, 200)
+        payload = json.loads(plan_response.content)
+        plan = ((payload.get("session") or {}).get("plan") or {})
+        self.assertEqual(plan.get("planning_mode"), "code_aware")
+        proposed_work = [str(item) for item in (plan.get("proposed_work") or [])]
+        self.assertTrue(proposed_work)
+        rendered = " ".join(proposed_work).lower()
+        self.assertIn("extract", rendered)
+        self.assertIn("delegation wrappers", rendered)
+        for forbidden in ("width", "min-width", "max-width", "anchoring", "header", "navigation", "layout", "styling"):
+            self.assertNotIn(forbidden, rendered)
+        next_action = str(plan.get("next_action") or "").lower()
+        for forbidden in ("width", "min-width", "max-width", "anchoring", "header", "navigation", "layout", "styling"):
+            self.assertNotIn(forbidden, next_action)
+        annotations = [str(item) for item in (plan.get("guardrail_annotations") or []) if str(item).strip()]
+        self.assertTrue(annotations)
+        self.assertTrue(any("guardrail enforcement" in item.lower() for item in annotations))
 
     def test_solution_change_session_validation_plan_is_lifecycle_aligned(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
