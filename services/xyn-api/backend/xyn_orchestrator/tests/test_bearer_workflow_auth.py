@@ -73,6 +73,36 @@ class BearerWorkflowAuthTests(TestCase):
         self.assertEqual(len(payload.get("applications") or []), 1)
         self.assertEqual(payload["applications"][0]["id"], str(self.application.id))
 
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
+    @mock.patch("xyence.middleware._verify_oidc_token")
+    def test_platform_admin_without_membership_can_list_and_read_application_sessions(self, mock_verify: mock.Mock):
+        WorkspaceMembership.objects.filter(workspace=self.workspace, user_identity=self.identity).delete()
+        mock_verify.return_value = self._bearer_claims()
+
+        list_response = self.client.get(
+            "/xyn/api/applications",
+            {"workspace_id": str(self.workspace.id)},
+            HTTP_AUTHORIZATION="Bearer token-platform-admin",
+        )
+        self.assertEqual(list_response.status_code, 200, list_response.content.decode())
+        list_payload = list_response.json()
+        self.assertEqual(len(list_payload.get("applications") or []), 1)
+        self.assertEqual(list_payload["applications"][0]["id"], str(self.application.id))
+
+        detail_response = self.client.get(
+            f"/xyn/api/applications/{self.application.id}",
+            HTTP_AUTHORIZATION="Bearer token-platform-admin",
+        )
+        self.assertEqual(detail_response.status_code, 200, detail_response.content.decode())
+        self.assertEqual(detail_response.json().get("id"), str(self.application.id))
+
+        sessions_response = self.client.get(
+            f"/xyn/api/applications/{self.application.id}/change-sessions",
+            HTTP_AUTHORIZATION="Bearer token-platform-admin",
+        )
+        self.assertEqual(sessions_response.status_code, 200, sessions_response.content.decode())
+        self.assertEqual(sessions_response.json().get("application_id"), str(self.application.id))
+
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc", "OIDC_ISSUER": "https://issuer.example.com", "OIDC_CLIENT_ID": "xyn-ui"}, clear=False)
     @mock.patch("xyence.middleware.jwt.decode", side_effect=Exception("bad_jwt"))
     @mock.patch("xyence.middleware._get_jwks_client")
@@ -192,6 +222,16 @@ class BearerWorkflowAuthTests(TestCase):
         self.assertEqual(runs_response.status_code, 401, runs_response.content.decode())
         self.assertFalse(runs_response.has_header("Location"))
         self.assertEqual(runs_response.json().get("error"), "not authenticated")
+
+        detail_response = self.client.get(f"/xyn/api/applications/{self.application.id}")
+        self.assertEqual(detail_response.status_code, 401, detail_response.content.decode())
+        self.assertFalse(detail_response.has_header("Location"))
+        self.assertEqual(detail_response.json().get("error"), "not authenticated")
+
+        sessions_response = self.client.get(f"/xyn/api/applications/{self.application.id}/change-sessions")
+        self.assertEqual(sessions_response.status_code, 401, sessions_response.content.decode())
+        self.assertFalse(sessions_response.has_header("Location"))
+        self.assertEqual(sessions_response.json().get("error"), "not authenticated")
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
     @mock.patch("xyence.middleware._verify_oidc_token")
