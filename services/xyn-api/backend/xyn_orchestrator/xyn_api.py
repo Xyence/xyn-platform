@@ -4518,6 +4518,10 @@ def _workspace_membership(identity: UserIdentity, workspace_id: str) -> Optional
     return WorkspaceMembership.objects.filter(workspace_id=workspace_id, user_identity=identity).first()
 
 
+def _workspace_accessible_for_identity(identity: UserIdentity, workspace_id: str) -> bool:
+    return _resolve_workspace_for_identity(identity, workspace_id) is not None
+
+
 def _app_roles_for_identity(identity: UserIdentity, workspace_id: str) -> List[str]:
     membership = _workspace_membership(identity, workspace_id)
     workspace_role = membership.role if membership else ""
@@ -39891,7 +39895,7 @@ def application_detail(request: HttpRequest, application_id: str) -> JsonRespons
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace", "requested_by", "target_repository").prefetch_related("goals__threads__work_items", "goals__work_items"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method == "PATCH":
         payload = _parse_json(request)
@@ -40041,7 +40045,7 @@ def application_solution_change_sessions_collection(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     memberships = list(
         ApplicationArtifactMembership.objects.filter(application=application)
@@ -40108,7 +40112,7 @@ def application_solution_change_session_detail(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     session = get_object_or_404(
         SolutionChangeSession.objects.select_related("created_by"),
