@@ -38,11 +38,17 @@ class ApiTokenAuthMiddlewareTests(TestCase):
 
         request = _with_session(self.factory.get("/xyn/api/applications", HTTP_AUTHORIZATION="Bearer token-ok"))
         middleware = ApiTokenAuthMiddleware(
-            lambda req: JsonResponse({"authenticated": bool(getattr(req, "user", None) and req.user.is_authenticated)})
+            lambda req: JsonResponse(
+                {
+                    "authenticated": bool(getattr(req, "user", None) and req.user.is_authenticated),
+                    "identity_bound": bool(str(getattr(req, "_xyn_user_identity_id", "") or "").strip()),
+                }
+            )
         )
         response = middleware(request)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json().get("authenticated"))
+        self.assertTrue(response.json().get("identity_bound"))
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc", "OIDC_ISSUER": "https://issuer.example.com", "OIDC_CLIENT_ID": "xyn-ui"}, clear=False)
     @mock.patch("xyence.middleware.jwt.decode", side_effect=Exception("bad_jwt"))
@@ -72,11 +78,17 @@ class ApiTokenAuthMiddlewareTests(TestCase):
 
         request = _with_session(self.factory.get("/xyn/api/applications", HTTP_AUTHORIZATION="Bearer token-ok"))
         middleware = ApiTokenAuthMiddleware(
-            lambda req: JsonResponse({"authenticated": bool(getattr(req, "user", None) and req.user.is_authenticated)})
+            lambda req: JsonResponse(
+                {
+                    "authenticated": bool(getattr(req, "user", None) and req.user.is_authenticated),
+                    "identity_bound": bool(str(getattr(req, "_xyn_user_identity_id", "") or "").strip()),
+                }
+            )
         )
         response = middleware(request)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json().get("authenticated"))
+        self.assertTrue(response.json().get("identity_bound"))
         identity = UserIdentity.objects.filter(subject="userinfo-subject", issuer="https://issuer.example.com").first()
         self.assertIsNotNone(identity)
 
@@ -108,3 +120,24 @@ class ApiTokenAuthMiddlewareTests(TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertFalse(response.has_header("Location"))
         self.assertEqual(response.json().get("error"), "not authenticated")
+
+    @mock.patch.dict("os.environ", {"XYN_UI_BEARER_TOKEN": "service-token-123", "XYN_UI_BEARER_USER": "xyn-mcp"}, clear=False)
+    def test_service_bearer_sets_user_and_identity(self):
+        request = _with_session(
+            self.factory.get(
+                "/xyn/api/applications",
+                HTTP_AUTHORIZATION="Bearer service-token-123",
+            )
+        )
+        middleware = ApiTokenAuthMiddleware(
+            lambda req: JsonResponse(
+                {
+                    "authenticated": bool(getattr(req, "user", None) and req.user.is_authenticated),
+                    "identity_bound": bool(str(getattr(req, "_xyn_user_identity_id", "") or "").strip()),
+                }
+            )
+        )
+        response = middleware(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json().get("authenticated"))
+        self.assertTrue(response.json().get("identity_bound"))
