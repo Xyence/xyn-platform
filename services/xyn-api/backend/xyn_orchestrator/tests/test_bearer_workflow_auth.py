@@ -118,6 +118,69 @@ class BearerWorkflowAuthTests(TestCase):
         self.assertEqual(session_detail_response.status_code, 200, session_detail_response.content.decode())
         self.assertEqual(session_detail_response.json().get("id"), str(self.change_session.id))
 
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
+    @mock.patch("xyence.middleware._verify_oidc_token")
+    @mock.patch("xyn_orchestrator.xyn_api._maybe_emit_solution_checkpoint_turn")
+    @mock.patch("xyn_orchestrator.xyn_api._reset_solution_stage_checkpoint")
+    @mock.patch("xyn_orchestrator.xyn_api._record_solution_draft_plan")
+    @mock.patch("xyn_orchestrator.xyn_api._solution_planning_state")
+    @mock.patch("xyn_orchestrator.xyn_api._build_solution_impacted_analysis")
+    @mock.patch("xyn_orchestrator.xyn_api._stage_solution_change_session")
+    def test_platform_admin_without_membership_can_create_control_plan_and_stage_apply(
+        self,
+        mock_stage: mock.Mock,
+        mock_analysis: mock.Mock,
+        mock_planning_state: mock.Mock,
+        mock_record_plan: mock.Mock,
+        mock_reset_checkpoint: mock.Mock,
+        mock_emit_checkpoint: mock.Mock,
+        mock_verify: mock.Mock,
+    ):
+        WorkspaceMembership.objects.filter(workspace=self.workspace, user_identity=self.identity).delete()
+        mock_verify.return_value = self._bearer_claims()
+        mock_analysis.return_value = {"suggested_artifact_ids": []}
+        mock_planning_state.return_value = {"pending_question": None, "pending_option_set": None, "latest_draft_plan": {"ok": True}}
+        mock_reset_checkpoint.return_value = None
+        mock_record_plan.return_value = None
+        mock_emit_checkpoint.return_value = None
+        mock_stage.return_value = None
+
+        create_response = self.client.post(
+            f"/xyn/api/applications/{self.application.id}/change-sessions",
+            data=json.dumps({"request_text": "do a change"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer token-platform-admin",
+        )
+        self.assertEqual(create_response.status_code, 201, create_response.content.decode())
+        session_id = str(((create_response.json().get("session") or {}).get("id") or "")).strip()
+        self.assertTrue(session_id)
+
+        control_response = self.client.get(
+            f"/xyn/api/applications/{self.application.id}/change-sessions/{session_id}/control",
+            HTTP_AUTHORIZATION="Bearer token-platform-admin",
+        )
+        self.assertEqual(control_response.status_code, 200, control_response.content.decode())
+
+        plan_response = self.client.post(
+            f"/xyn/api/applications/{self.application.id}/change-sessions/{session_id}/plan",
+            data=json.dumps({}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer token-platform-admin",
+        )
+        self.assertEqual(plan_response.status_code, 200, plan_response.content.decode())
+
+        session = SolutionChangeSession.objects.get(id=session_id)
+        session.plan_json = {"summary": "ready"}
+        session.save(update_fields=["plan_json", "updated_at"])
+
+        stage_response = self.client.post(
+            f"/xyn/api/applications/{self.application.id}/change-sessions/{session_id}/control/actions",
+            data=json.dumps({"operation": "stage_apply"}),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer token-platform-admin",
+        )
+        self.assertIn(stage_response.status_code, {200, 202}, stage_response.content.decode())
+
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc", "OIDC_ISSUER": "https://issuer.example.com", "OIDC_CLIENT_ID": "xyn-ui"}, clear=False)
     @mock.patch("xyence.middleware.jwt.decode", side_effect=Exception("bad_jwt"))
     @mock.patch("xyence.middleware._get_jwks_client")
@@ -248,6 +311,13 @@ class BearerWorkflowAuthTests(TestCase):
         self.assertFalse(sessions_response.has_header("Location"))
         self.assertEqual(sessions_response.json().get("error"), "not authenticated")
 
+        control_response = self.client.get(
+            f"/xyn/api/applications/{self.application.id}/change-sessions/{self.change_session.id}/control"
+        )
+        self.assertEqual(control_response.status_code, 401, control_response.content.decode())
+        self.assertFalse(control_response.has_header("Location"))
+        self.assertEqual(control_response.json().get("error"), "not authenticated")
+
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
     @mock.patch("xyence.middleware._verify_oidc_token")
     def test_missing_workspace_membership_fails_under_bearer(self, mock_verify: mock.Mock):
@@ -281,6 +351,24 @@ class BearerWorkflowAuthTests(TestCase):
             data=json.dumps({"request_text": "do a change"}),
             content_type="application/json",
             HTTP_AUTHORIZATION="Bearer token-reader",
+        )
+        self.assertEqual(response.status_code, 403, response.content.decode())
+        self.assertEqual(response.json().get("error"), "forbidden")
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
+    @mock.patch("xyence.middleware._verify_oidc_token")
+    def test_change_session_control_forbidden_without_workspace_access(self, mock_verify: mock.Mock):
+        outsider = UserIdentity.objects.create(
+            provider="oidc",
+            issuer="https://issuer.example.com",
+            subject="outsider-subject",
+            email="outsider@example.com",
+            display_name="Outsider",
+        )
+        mock_verify.return_value = self._bearer_claims(email=outsider.email, sub=outsider.subject)
+        response = self.client.get(
+            f"/xyn/api/applications/{self.application.id}/change-sessions/{self.change_session.id}/control",
+            HTTP_AUTHORIZATION="Bearer token-outsider",
         )
         self.assertEqual(response.status_code, 403, response.content.decode())
         self.assertEqual(response.json().get("error"), "forbidden")

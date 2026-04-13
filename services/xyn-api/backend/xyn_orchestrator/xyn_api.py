@@ -40221,7 +40221,7 @@ def application_solution_change_session_control(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40245,7 +40245,7 @@ def application_solution_change_session_control_action(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40343,7 +40343,7 @@ def application_solution_change_session_reply(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40376,7 +40376,7 @@ def application_solution_change_session_continue(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40429,7 +40429,7 @@ def application_solution_change_session_select_option(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40508,7 +40508,7 @@ def application_solution_change_session_checkpoint_decision(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40568,7 +40568,7 @@ def application_solution_change_session_regenerate_options(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40624,7 +40624,7 @@ def application_solution_change_session_plan(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40710,7 +40710,7 @@ def application_solution_change_session_stage_apply(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40761,7 +40761,7 @@ def application_solution_change_session_prepare_preview(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40802,7 +40802,7 @@ def application_solution_change_session_validate(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -40836,7 +40836,7 @@ def application_solution_change_session_promote(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -41013,7 +41013,7 @@ def application_solution_change_session_rollback(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -41151,7 +41151,7 @@ def application_solution_change_session_promotion_evidence(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -41187,7 +41187,7 @@ def application_solution_change_session_commits(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -41218,7 +41218,7 @@ def application_solution_change_session_commit(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
@@ -41436,7 +41436,7 @@ def application_solution_change_session_finalize(
     if not identity:
         return JsonResponse({"error": "not authenticated"}, status=401)
     application = get_object_or_404(Application.objects.select_related("workspace"), id=application_id)
-    if not _workspace_membership(identity, str(application.workspace_id)):
+    if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "POST":
         return JsonResponse({"error": "method not allowed"}, status=405)
