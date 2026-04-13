@@ -1,6 +1,7 @@
 import os
 import time
 import hashlib
+import logging
 from typing import Any, Dict, Optional
 
 import jwt
@@ -10,6 +11,8 @@ from django.http.response import HttpResponseRedirectBase
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from xyn_orchestrator.models import UserIdentity, RoleBinding
+
+logger = logging.getLogger(__name__)
 
 
 def _auth_mode() -> str:
@@ -119,6 +122,17 @@ def _get_service_user():
 
 _JWKS_CLIENT: Optional[jwt.PyJWKClient] = None
 _JWKS_CLIENT_TS: float = 0.0
+_OIDC_DISCOVERY_CACHE: Dict[str, Dict[str, Any]] = {}
+_OIDC_DISCOVERY_CACHE_TS: Dict[str, float] = {}
+_OIDC_DISCOVERY_TTL_SECONDS = 3600.0
+
+
+def _reset_oidc_caches_for_tests() -> None:
+    global _JWKS_CLIENT, _JWKS_CLIENT_TS
+    _JWKS_CLIENT = None
+    _JWKS_CLIENT_TS = 0.0
+    _OIDC_DISCOVERY_CACHE.clear()
+    _OIDC_DISCOVERY_CACHE_TS.clear()
 
 
 def _verify_oidc_token(token: str) -> Optional[Dict[str, Any]]:
@@ -126,23 +140,24 @@ def _verify_oidc_token(token: str) -> Optional[Dict[str, Any]]:
         return None
     issuer = os.environ.get("OIDC_ISSUER", "https://accounts.google.com").strip()
     audience = os.environ.get("OIDC_CLIENT_ID", "").strip()
-    if not audience:
-        return None
-    try:
-        jwk_client = _get_jwks_client(issuer)
-        if not jwk_client:
-            return None
-        signing_key = jwk_client.get_signing_key_from_jwt(token).key
-        return jwt.decode(
-            token,
-            signing_key,
-            algorithms=["RS256"],
-            audience=audience,
-            issuer=issuer,
-            options={"verify_exp": True},
-        )
-    except Exception:
-        return None
+    if audience:
+        try:
+            jwk_client = _get_jwks_client(issuer)
+            if jwk_client:
+                signing_key = jwk_client.get_signing_key_from_jwt(token).key
+                claims = jwt.decode(
+                    token,
+                    signing_key,
+                    algorithms=["RS256"],
+                    audience=audience,
+                    issuer=issuer,
+                    options={"verify_exp": True},
+                )
+                logger.info("oidc_jwks_authenticated issuer=%s", issuer)
+                return claims
+        except Exception as exc:
+            logger.info("oidc_jwt_validation_failed_using_userinfo_fallback reason=%s", exc.__class__.__name__)
+    return _verify_oidc_token_via_userinfo(token=token, issuer=issuer, audience=audience)
 
 
 def _get_jwks_client(issuer: str) -> Optional[jwt.PyJWKClient]:
@@ -160,6 +175,68 @@ def _get_jwks_client(issuer: str) -> Optional[jwt.PyJWKClient]:
         return _JWKS_CLIENT
     except Exception:
         return None
+
+
+def _oidc_discovery_doc(issuer: str) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    cached = _OIDC_DISCOVERY_CACHE.get(issuer)
+    cached_at = _OIDC_DISCOVERY_CACHE_TS.get(issuer, 0.0)
+    if cached and now - cached_at < _OIDC_DISCOVERY_TTL_SECONDS:
+        return cached
+    try:
+        response = requests.get(f"{issuer.rstrip('/')}/.well-known/openid-configuration", timeout=5)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return None
+        _OIDC_DISCOVERY_CACHE[issuer] = payload
+        _OIDC_DISCOVERY_CACHE_TS[issuer] = now
+        return payload
+    except Exception as exc:
+        logger.warning("oidc_discovery_failed issuer=%s reason=%s", issuer, exc.__class__.__name__)
+        return None
+
+
+def _verify_oidc_token_via_userinfo(*, token: str, issuer: str, audience: str = "") -> Optional[Dict[str, Any]]:
+    discovery = _oidc_discovery_doc(issuer)
+    if not discovery:
+        return None
+    userinfo_endpoint = str(discovery.get("userinfo_endpoint") or "").strip()
+    if not userinfo_endpoint:
+        logger.info("oidc_userinfo_endpoint_missing issuer=%s", issuer)
+        return None
+    try:
+        response = requests.get(
+            userinfo_endpoint,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5,
+        )
+    except Exception as exc:
+        logger.warning("oidc_userinfo_request_failed issuer=%s reason=%s", issuer, exc.__class__.__name__)
+        return None
+    if response.status_code != 200:
+        logger.info("oidc_userinfo_rejected issuer=%s status=%s", issuer, response.status_code)
+        return None
+    try:
+        claims = response.json()
+    except Exception:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    claims = dict(claims)
+    claims.setdefault("iss", issuer)
+    if not str(claims.get("sub") or "").strip():
+        return None
+    aud = claims.get("aud")
+    if audience and aud is not None:
+        if isinstance(aud, str) and aud and aud != audience:
+            logger.info("oidc_userinfo_audience_mismatch issuer=%s", issuer)
+            return None
+        if isinstance(aud, list) and aud and audience not in [str(item) for item in aud]:
+            logger.info("oidc_userinfo_audience_mismatch issuer=%s", issuer)
+            return None
+    logger.info("oidc_userinfo_fallback_authenticated issuer=%s", issuer)
+    return claims
 
 
 def _get_or_create_user_from_claims(claims: Dict[str, Any]):
