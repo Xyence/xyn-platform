@@ -24,6 +24,8 @@ class ApiTokenAuthMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
+        auth_method = "none"
+        identity_bound = False
         token = _extract_bearer_token(request)
         if token:
             expected = os.environ.get("XYN_UI_BEARER_TOKEN", os.environ.get("XYENCE_UI_BEARER_TOKEN", "")).strip()
@@ -31,9 +33,16 @@ class ApiTokenAuthMiddleware:
                 request.user = _get_service_user()
                 request._cached_user = request.user
                 request._dont_enforce_csrf_checks = True
+                auth_method = "service_token"
+                identity = _get_or_create_service_identity(request.user)
+                if identity:
+                    setattr(request, "_xyn_user_identity_id", str(identity.id))
+                    identity_bound = True
             else:
                 claims = _verify_oidc_token(token) if _auth_mode() == "oidc" else None
                 if claims:
+                    claims = dict(claims)
+                    auth_method = str(claims.pop("_xyn_auth_source", "") or "oidc")
                     identity = _get_or_create_identity_from_claims(claims)
                     user = _get_or_create_user_from_identity(identity) if identity else _get_or_create_user_from_claims(claims)
                     if user:
@@ -42,6 +51,7 @@ class ApiTokenAuthMiddleware:
                         request._dont_enforce_csrf_checks = True
                         if identity:
                             setattr(request, "_xyn_user_identity_id", str(identity.id))
+                            identity_bound = True
         if not getattr(request, "user", None) or not request.user.is_authenticated:
             identity_id = getattr(request, "session", {}).get("user_identity_id")
             if identity_id:
@@ -51,6 +61,18 @@ class ApiTokenAuthMiddleware:
                     if user:
                         request.user = user
                         request._cached_user = user
+                        auth_method = "session"
+                        setattr(request, "_xyn_user_identity_id", str(identity.id))
+                        identity_bound = True
+        if auth_method != "none":
+            logger.info(
+                "api_auth_resolved method=%s identity_bound=%s path=%s",
+                auth_method,
+                bool(identity_bound),
+                str(getattr(request, "path", "") or ""),
+            )
+        elif token:
+            logger.info("api_auth_failed method=bearer path=%s", str(getattr(request, "path", "") or ""))
         response = self.get_response(request)
         if _is_workflow_api_unauth_redirect(request, response):
             return JsonResponse({"error": "not authenticated"}, status=401)
@@ -120,6 +142,54 @@ def _get_service_user():
     return user
 
 
+def _get_or_create_service_identity(user) -> Optional[UserIdentity]:
+    username = str(getattr(user, "username", "") or "").strip() or "xyn-ui"
+    issuer = str(os.environ.get("XYN_SERVICE_IDENTITY_ISSUER", "local://xyn-service")).strip() or "local://xyn-service"
+    subject = str(os.environ.get("XYN_UI_BEARER_SUBJECT", f"service:{username}")).strip() or f"service:{username}"
+    email = str(
+        os.environ.get("XYN_UI_BEARER_EMAIL", "")
+        or getattr(user, "email", "")
+        or ""
+    ).strip().lower()
+    identity, _ = UserIdentity.objects.get_or_create(
+        issuer=issuer,
+        subject=subject,
+        defaults={
+            "provider": "service_token",
+            "provider_id": "xyn_ui_bearer",
+            "email": email,
+            "display_name": username,
+            "claims_json": {"auth_method": "service_token"},
+        },
+    )
+    changed = False
+    if identity.provider != "service_token":
+        identity.provider = "service_token"
+        changed = True
+    if identity.provider_id != "xyn_ui_bearer":
+        identity.provider_id = "xyn_ui_bearer"
+        changed = True
+    if email and identity.email != email:
+        identity.email = email
+        changed = True
+    if identity.display_name != username:
+        identity.display_name = username
+        changed = True
+    identity.last_login_at = timezone.now()
+    changed = True
+    if changed:
+        identity.save()
+
+    role_name = str(os.environ.get("XYN_UI_BEARER_ROLE", "platform_admin")).strip() or "platform_admin"
+    RoleBinding.objects.get_or_create(
+        user_identity=identity,
+        scope_kind="platform",
+        scope_id=None,
+        role=role_name,
+    )
+    return identity
+
+
 _JWKS_CLIENT: Optional[jwt.PyJWKClient] = None
 _JWKS_CLIENT_TS: float = 0.0
 _OIDC_DISCOVERY_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -153,6 +223,8 @@ def _verify_oidc_token(token: str) -> Optional[Dict[str, Any]]:
                     issuer=issuer,
                     options={"verify_exp": True},
                 )
+                claims = dict(claims)
+                claims["_xyn_auth_source"] = "oidc_jwt"
                 logger.info("oidc_jwks_authenticated issuer=%s", issuer)
                 return claims
         except Exception as exc:
@@ -225,6 +297,7 @@ def _verify_oidc_token_via_userinfo(*, token: str, issuer: str, audience: str = 
         return None
     claims = dict(claims)
     claims.setdefault("iss", issuer)
+    claims["_xyn_auth_source"] = "oidc_userinfo"
     if not str(claims.get("sub") or "").strip():
         return None
     aud = claims.get("aud")

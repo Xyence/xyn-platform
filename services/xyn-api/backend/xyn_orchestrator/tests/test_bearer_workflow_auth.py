@@ -9,6 +9,7 @@ from xyence.middleware import _reset_oidc_caches_for_tests
 from xyn_orchestrator.models import (
     Application,
     RoleBinding,
+    SolutionChangeSession,
     UserIdentity,
     Workspace,
     WorkspaceMembership,
@@ -47,6 +48,13 @@ class BearerWorkflowAuthTests(TestCase):
             source_factory_key="manual",
             requested_by=self.identity,
             status="active",
+        )
+        self.change_session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=self.application,
+            title="Session 1",
+            request_text="Initial change request",
+            created_by=self.identity,
         )
 
     def _bearer_claims(self, *, email: str = "member@example.com", sub: str = "user-subject"):
@@ -102,6 +110,13 @@ class BearerWorkflowAuthTests(TestCase):
         )
         self.assertEqual(sessions_response.status_code, 200, sessions_response.content.decode())
         self.assertEqual(sessions_response.json().get("application_id"), str(self.application.id))
+
+        session_detail_response = self.client.get(
+            f"/xyn/api/applications/{self.application.id}/change-sessions/{self.change_session.id}",
+            HTTP_AUTHORIZATION="Bearer token-platform-admin",
+        )
+        self.assertEqual(session_detail_response.status_code, 200, session_detail_response.content.decode())
+        self.assertEqual(session_detail_response.json().get("id"), str(self.change_session.id))
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc", "OIDC_ISSUER": "https://issuer.example.com", "OIDC_CLIENT_ID": "xyn-ui"}, clear=False)
     @mock.patch("xyence.middleware.jwt.decode", side_effect=Exception("bad_jwt"))
@@ -269,3 +284,12 @@ class BearerWorkflowAuthTests(TestCase):
         )
         self.assertEqual(response.status_code, 403, response.content.decode())
         self.assertEqual(response.json().get("error"), "forbidden")
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
+    @mock.patch("xyence.middleware._verify_oidc_token")
+    def test_artifacts_endpoint_still_works_with_bearer_auth(self, mock_verify: mock.Mock):
+        mock_verify.return_value = self._bearer_claims()
+        response = self.client.get("/xyn/api/artifacts", HTTP_AUTHORIZATION="Bearer token-ok")
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = response.json()
+        self.assertIn("artifacts", payload)
