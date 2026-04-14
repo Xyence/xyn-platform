@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.test import SimpleTestCase
 
 from xyn_orchestrator.solution_change_session.planner_engine import (
@@ -81,6 +83,9 @@ class SolutionPlannerEngineTests(SimpleTestCase):
         ranked = plan.get("artifact_relevance") or []
         self.assertTrue(ranked)
         self.assertEqual((ranked[0] or {}).get("slug"), "xyn-api")
+        self.assertEqual((plan.get("resolved_artifact") or {}).get("slug"), "xyn-api")
+        self.assertEqual(plan.get("scope_mode"), "minimal")
+        self.assertLessEqual(len(plan.get("selected_artifact_ids") or []), 1)
 
     def test_case_c_negative_ui_constraints_penalize_ui_artifacts(self):
         request_text = "Backend workflow refactor for API orchestration, no UI changes, no styling changes, no layout changes."
@@ -120,6 +125,17 @@ class SolutionPlannerEngineTests(SimpleTestCase):
         self.assertIn("delegation", steps)
         self.assertIn("preserv", steps)
 
+    def test_behavior_only_request_stays_modify_existing_system(self):
+        request_text = "Modify existing endpoint behavior in-place and preserve current contracts."
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=["api-1"],
+        )
+        self.assertEqual(plan.get("planning_mode"), "modify_existing_system")
+        self.assertEqual(plan.get("plan_kind"), "incremental_change")
+
     def test_create_new_application_mode_returns_scaffold_plan(self):
         request_text = "Create new application from scratch with Python API and initial UI."
         plan = build_solution_change_execution_plan(
@@ -133,15 +149,48 @@ class SolutionPlannerEngineTests(SimpleTestCase):
         self.assertTrue(plan.get("file_operations"))
 
     def test_cross_artifact_change_mode_for_ui_and_api_request(self):
-        request_text = "Update API payload and matching UI form rendering for the same workflow."
+        request_text = "Coordinate a cross-artifact API/UI contract transition across backend and frontend artifacts."
         plan = build_solution_change_execution_plan(
             request_text=request_text,
             base_plan={},
             artifacts=self._artifacts(),
             selected_artifact_ids=["api-1", "ui-1"],
+            planner_hints={"requires_multiple_artifacts": True},
         )
         self.assertEqual(plan.get("planning_mode"), "cross_artifact_change")
         self.assertGreaterEqual(len(plan.get("selected_artifact_ids") or []), 2)
+        self.assertEqual(plan.get("scope_mode"), "cross_artifact")
+        self.assertTrue(plan.get("additional_artifacts"))
+
+    def test_ui_api_wording_without_multi_artifact_requirement_stays_modify(self):
+        request_text = "Update API payload and UI rendering, but keep scope narrow and in-place."
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=[],
+            analysis={"impacted_artifacts": [{"artifact_id": "api-1", "score": 8}, {"artifact_id": "ui-1", "score": 4}]},
+        )
+        self.assertEqual(plan.get("planning_mode"), "modify_existing_system")
+        self.assertLessEqual(len(plan.get("selected_artifact_ids") or []), 1)
+
+    def test_multi_artifact_scope_allowed_when_strongly_implied_by_analysis(self):
+        request_text = "Coordinate backend and frontend contract transition across artifacts."
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=[],
+            analysis={
+                "impacted_artifacts": [
+                    {"artifact_id": "api-1", "score": 9},
+                    {"artifact_id": "ui-1", "score": 8},
+                ]
+            },
+        )
+        self.assertEqual(plan.get("planning_mode"), "cross_artifact_change")
+        self.assertGreaterEqual(len(plan.get("selected_artifact_ids") or []), 2)
+        self.assertEqual(plan.get("scope_mode"), "cross_artifact")
 
     def test_execution_ready_fields_are_non_empty_for_code_bearing_request(self):
         request_text = "Modify backend endpoint behavior in services/xyn-api/backend/xyn_orchestrator/xyn_api.py."
@@ -184,6 +233,96 @@ class SolutionPlannerEngineTests(SimpleTestCase):
         self.assertTrue(plan.get("compatibility_shims"))
         self.assertTrue(plan.get("ordered_migration_steps"))
         self.assertIn("xyn_orchestrator.tests.test_goal_planning", plan.get("affected_tests") or [])
+        self.assertTrue(plan.get("file_operations"))
+        self.assertTrue(plan.get("test_operations"))
+        self.assertTrue(plan.get("candidate_files"))
+        forbidden_placeholders = ("inspect file", "update as needed", "confirm behavior", "adjust tests")
+        steps = "\n".join(plan.get("implementation_steps") or []).lower()
+        for token in forbidden_placeholders:
+            self.assertNotIn(token, steps)
+
+    def test_decomposition_plan_biases_to_existing_xyn_orchestrator_destination_modules(self):
+        request_text = "Decompose backend/xyn_orchestrator/xyn_api.py by moving handlers into existing modules."
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=["api-1"],
+            planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
+            analysis={
+                "large_function_signals": [{"name": "application_solution_change_session_control_action", "line_count": 300}],
+                "coupling_hotspots": [{"module": "backend/xyn_orchestrator/xyn_api.py", "fan_in": 18, "fan_out": 34}],
+            },
+        )
+        self.assertEqual(plan.get("planning_mode"), "decompose_existing_system")
+        destinations = plan.get("destination_modules") or []
+        self.assertIn("backend/xyn_orchestrator/api/solutions.py", destinations)
+        self.assertIn("backend/xyn_orchestrator/api/runtime.py", destinations)
+        self.assertIn("backend/xyn_orchestrator/planning/plan_service.py", destinations)
+        self.assertTrue(plan.get("extraction_seams"))
+        self.assertTrue(plan.get("file_operations"))
+        self.assertTrue(plan.get("test_operations"))
+        codebase_signals = (((plan.get("planner_state") or {}).get("codebase_analysis") or {}).get("signals") or {})
+        self.assertTrue(codebase_signals.get("coupling_hotspots"))
+        self.assertTrue(codebase_signals.get("large_function_signals"))
+
+    def test_decomposition_execution_package_is_stage_apply_ready(self):
+        request_text = "Decompose backend/xyn_orchestrator/xyn_api.py and preserve route behavior."
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=["api-1"],
+            planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
+        )
+        package = plan.get("execution_package") or {}
+        self.assertTrue(package)
+        self.assertEqual(package.get("planning_mode"), "decompose_existing_system")
+        self.assertTrue(package.get("ordered_work_items"))
+        self.assertTrue(package.get("targeted_tests"))
+        self.assertTrue(package.get("validation_order"))
+        self.assertTrue(package.get("compatibility_constraints"))
+        self.assertTrue(package.get("rollback_instructions"))
+
+    def test_vague_decomposition_plan_is_rejected_by_packaging_guard(self):
+        request_text = "Decompose backend/xyn_orchestrator/xyn_api.py"
+        with patch(
+            "xyn_orchestrator.solution_change_session.planner_engine.PythonMonolithDecompositionPlanner.synthesize",
+            return_value={
+                "implementation_steps": ["Inspect file", "Update as needed", "Confirm behavior", "Adjust tests"],
+                "file_operations": [],
+                "test_operations": [],
+            },
+        ):
+            with self.assertRaises(ValueError):
+                build_solution_change_execution_plan(
+                    request_text=request_text,
+                    base_plan={},
+                    artifacts=self._artifacts(),
+                    selected_artifact_ids=["api-1"],
+                    planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
+                )
+
+    def test_route_preserving_decomposition_plan_packages_successfully(self):
+        request_text = "Decompose backend/xyn_orchestrator/xyn_api.py while preserving existing routes."
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=["api-1"],
+            analysis={
+                "affected_routes": [
+                    "/xyn/api/applications",
+                    "/xyn/api/applications/{application_id}/change-sessions",
+                ]
+            },
+            planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
+        )
+        package = plan.get("execution_package") or {}
+        route_updates = package.get("route_registration_updates") or []
+        rendered = "\n".join(str(item) for item in route_updates)
+        self.assertIn("/xyn/api/applications", rendered)
+        self.assertIn("Preserve existing route contract", rendered)
 
     def test_decomposition_mode_narrows_to_dominant_artifact(self):
         request_text = (
@@ -198,3 +337,18 @@ class SolutionPlannerEngineTests(SimpleTestCase):
         )
         selected = plan.get("selected_artifact_ids") or []
         self.assertEqual(selected, ["api-1"])
+        self.assertEqual(plan.get("scope_mode"), "minimal")
+
+    def test_resolves_xyn_api_without_dragging_weak_related_artifacts(self):
+        request_text = "Please decompose backend/xyn_orchestrator/xyn_api.py into focused modules."
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=[],
+        )
+        self.assertEqual(plan.get("planning_mode"), "decompose_existing_system")
+        self.assertEqual((plan.get("resolved_artifact") or {}).get("slug"), "xyn-api")
+        self.assertEqual(plan.get("selected_artifact_ids"), ["api-1"])
+        self.assertEqual(plan.get("scope_mode"), "minimal")
+        self.assertEqual(plan.get("additional_artifacts"), [])
