@@ -270,6 +270,7 @@ from .solution_change_session import stage_apply_workflow as _solution_stage_app
 from .solution_change_session.planner_engine import (
     PlannerArtifactInput,
     build_solution_change_execution_plan,
+    validate_decomposition_plan_quality,
 )
 from .execution_queue import (
     evaluate_dev_task_queue_state,
@@ -33366,6 +33367,7 @@ def _record_solution_draft_plan(
         memberships=memberships,
         force_code_aware_planning=force_code_aware_planning,
     )
+    validate_decomposition_plan_quality(plan if isinstance(plan, dict) else {})
     objective_summary = str(
         plan.get("planner_objective_text")
         or plan.get("request_text")
@@ -33444,6 +33446,7 @@ def _reset_solution_stage_checkpoint(*, session: SolutionChangeSession) -> Solut
 def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
     payload = plan if isinstance(plan, dict) else {}
     file_operations_scope: List[Dict[str, str]] = []
+    test_operations_scope: List[Dict[str, str]] = []
     file_operations = payload.get("file_operations") if isinstance(payload.get("file_operations"), list) else []
     for row in file_operations:
         if not isinstance(row, dict):
@@ -33468,6 +33471,30 @@ def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
             str(item.get("destination") or ""),
         ),
     )
+    test_operations = payload.get("test_operations") if isinstance(payload.get("test_operations"), list) else []
+    for row in test_operations:
+        if not isinstance(row, dict):
+            continue
+        operation = str(row.get("operation") or "").strip().lower()
+        target = str(row.get("target") or "").strip()
+        scope = str(row.get("scope") or "").strip()
+        if not operation and not target and not scope:
+            continue
+        test_operations_scope.append(
+            {
+                "operation": operation,
+                "target": target,
+                "scope": scope,
+            }
+        )
+    test_operations_scope = sorted(
+        test_operations_scope,
+        key=lambda item: (
+            str(item.get("operation") or ""),
+            str(item.get("target") or ""),
+            str(item.get("scope") or ""),
+        ),
+    )
     return {
         "planning_mode": str(payload.get("planning_mode") or ""),
         "plan_kind": str(payload.get("plan_kind") or ""),
@@ -33489,6 +33516,24 @@ def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
                 if str(item).strip()
             }
         )[:20],
+        "source_files": sorted(
+            {
+                str(item).strip()
+                for item in (payload.get("source_files") if isinstance(payload.get("source_files"), list) else [])
+                if str(item).strip()
+            }
+        )[:20],
+        "destination_modules": sorted(
+            {
+                str(item).strip()
+                for item in (
+                    payload.get("destination_modules")
+                    if isinstance(payload.get("destination_modules"), list)
+                    else []
+                )
+                if str(item).strip()
+            }
+        )[:30],
         "extraction_seams": sorted(
             {
                 str(item).strip()
@@ -33497,6 +33542,7 @@ def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
             }
         )[:20],
         "file_operations_scope": file_operations_scope[:50],
+        "test_operations_scope": test_operations_scope[:30],
     }
 
 
@@ -34145,6 +34191,25 @@ _CODE_AWARE_HEADER_PATH_HINTS: Tuple[str, ...] = (
     "toolbar",
 )
 
+_DECOMPOSITION_REQUEST_TERMS: Tuple[str, ...] = (
+    "decompose",
+    "split",
+    "extract",
+    "refactor",
+    "break up",
+    "reduce monolith",
+    "move handlers",
+    "move routes",
+    "carve out module",
+)
+
+_DECOMPOSITION_METADATA_KEYS: Tuple[str, ...] = (
+    "target_source_files",
+    "extraction_seams",
+    "moved_handlers_modules",
+    "required_test_suites",
+)
+
 
 def _request_appears_implementation_specific(request_text: str) -> bool:
     lowered = str(request_text or "").strip().lower()
@@ -34204,6 +34269,94 @@ def _request_signals_structural_backend_refactor(request_text: str) -> bool:
         "do not introduce new features",
     )
     return any(signal in text for signal in signals)
+
+
+def _metadata_signals_decomposition_campaign(metadata: Dict[str, Any]) -> bool:
+    payload = metadata if isinstance(metadata, dict) else {}
+    for key in _DECOMPOSITION_METADATA_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list) and any(str(item or "").strip() for item in value):
+            return True
+    return False
+
+
+def _collect_decomposition_planner_hints(
+    *,
+    session_metadata: Dict[str, Any],
+    analysis_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    metadata_payload = session_metadata if isinstance(session_metadata, dict) else {}
+    analysis_payload = analysis_metadata if isinstance(analysis_metadata, dict) else {}
+    merged: Dict[str, Any] = copy.deepcopy(metadata_payload)
+    for passthrough_key in ("requires_multiple_artifacts", "cross_artifact_required", "required_artifact_ids"):
+        if passthrough_key not in merged and passthrough_key in analysis_payload:
+            merged[passthrough_key] = analysis_payload.get(passthrough_key)
+    containers: List[Dict[str, Any]] = []
+    containers.extend([metadata_payload, analysis_payload])
+    for key in (
+        "decomposition_campaign",
+        "decomposition_session",
+        "planner_hints",
+        "campaign_metadata",
+        "campaign",
+    ):
+        value = metadata_payload.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    for key in ("decomposition_campaign", "planner_hints"):
+        value = analysis_payload.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    for key in _DECOMPOSITION_METADATA_KEYS:
+        values: List[str] = []
+        for container in containers:
+            raw = container.get(key)
+            if isinstance(raw, list):
+                for item in raw:
+                    token = str(item or "").strip()
+                    if token and token not in values:
+                        values.append(token)
+        if values:
+            merged[key] = values
+    return merged
+
+
+def _request_targets_oversized_monolith(request_text: str, metadata: Dict[str, Any]) -> bool:
+    text = str(request_text or "").strip().lower()
+    target_files: List[str] = []
+    payload = metadata if isinstance(metadata, dict) else {}
+    target_source_files = payload.get("target_source_files")
+    if isinstance(target_source_files, list):
+        target_files.extend([str(item or "").strip().lower() for item in target_source_files if str(item or "").strip()])
+    monolith_hints = (
+        "backend/xyn_orchestrator/xyn_api.py",
+        "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+        "xyn_orchestrator/xyn_api.py",
+    )
+    if any(hint in text for hint in monolith_hints):
+        return True
+    return any(any(hint in candidate for hint in monolith_hints) for candidate in target_files)
+
+
+def _classify_solution_change_planning_mode(
+    *,
+    request_text: str,
+    session_metadata: Dict[str, Any],
+) -> Tuple[str, List[str]]:
+    lowered = str(request_text or "").strip().lower()
+    metadata = session_metadata if isinstance(session_metadata, dict) else {}
+    reasons: List[str] = []
+    if _request_signals_structural_backend_refactor(request_text):
+        reasons.append("structural_refactor_terms")
+    if any(term in lowered for term in _DECOMPOSITION_REQUEST_TERMS):
+        reasons.append("decomposition_terms")
+    if _metadata_signals_decomposition_campaign(metadata):
+        reasons.append("decomposition_metadata")
+    if _request_targets_oversized_monolith(request_text, metadata):
+        reasons.append("oversized_monolith_target")
+    if reasons:
+        return "decompose_existing_system", reasons
+    return "modify_existing_system", ["default_modify_path"]
 
 
 def _derive_plan_prohibitions(request_text: str) -> Dict[str, Any]:
@@ -35314,19 +35467,38 @@ def _generate_solution_change_plan(
         payload: Dict[str, Any],
         selected_members_for_plan: List[ApplicationArtifactMembership],
     ) -> Dict[str, Any]:
-        finalized = _maybe_apply_code_aware_solution_planning(
-            plan=payload,
-            session=session,
-            selected_members=selected_members_for_plan,
-            force_code_aware_planning=force_code_aware_planning,
+        planner_metadata_hints = _collect_decomposition_planner_hints(
+            session_metadata=session.metadata_json if isinstance(session.metadata_json, dict) else {},
+            analysis_metadata=session.analysis_json if isinstance(session.analysis_json, dict) else {},
         )
+        planning_mode_classification, classification_reasons = _classify_solution_change_planning_mode(
+            request_text=original_request,
+            session_metadata=planner_metadata_hints,
+        )
+        if planning_mode_classification == "decompose_existing_system":
+            finalized = copy.deepcopy(payload if isinstance(payload, dict) else {})
+            finalized["planning_mode"] = "decompose_existing_system"
+            finalized["planner_mode"] = "decompose_existing_system"
+            finalized["planning_mode_source"] = "decomposition_classifier"
+            finalized["planning_mode_reasons"] = classification_reasons
+        else:
+            finalized = _maybe_apply_code_aware_solution_planning(
+                plan=payload,
+                session=session,
+                selected_members=selected_members_for_plan,
+                force_code_aware_planning=force_code_aware_planning,
+            )
+            if str(finalized.get("planning_mode") or "").strip() in {"deterministic", "code_aware"}:
+                finalized["planner_mode"] = "modify_existing_system"
+                finalized["planning_mode_source"] = "modify_existing_system"
+                finalized["planning_mode_reasons"] = classification_reasons
         engine_enriched = build_solution_change_execution_plan(
             request_text=original_request,
             base_plan=finalized,
             artifacts=_planner_artifact_inputs(),
             selected_artifact_ids=[str(member.artifact_id) for member in selected_members_for_plan],
             analysis=session.analysis_json if isinstance(session.analysis_json, dict) else {},
-            planner_hints=session.metadata_json if isinstance(session.metadata_json, dict) else {},
+            planner_hints=planner_metadata_hints,
             line_count_lookup=lambda path: _line_count_lookup(
                 path,
                 candidate_members=selected_members_for_plan if selected_members_for_plan else memberships,

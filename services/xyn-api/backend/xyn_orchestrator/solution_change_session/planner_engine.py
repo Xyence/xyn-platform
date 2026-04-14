@@ -43,6 +43,9 @@ _DECOMPOSITION_PLACEHOLDER_PATTERNS = (
     "update as needed",
     "confirm behavior",
     "adjust tests",
+    "review module",
+    "apply changes",
+    "validate functionality",
 )
 
 
@@ -420,12 +423,58 @@ def _is_generic_placeholder_step(step: str) -> bool:
     return any(token in lowered for token in _DECOMPOSITION_PLACEHOLDER_PATTERNS)
 
 
+def _is_decomposition_meaningful_line(line: str) -> bool:
+    lowered = str(line or "").strip().lower()
+    if not lowered or _is_generic_placeholder_step(lowered):
+        return False
+    has_file_or_module_ref = any(token in lowered for token in ("/", ".py", "module", "handler", "route", "helper", "import", "shim"))
+    has_extraction_verb = any(
+        token in lowered
+        for token in ("extract", "move", "rewrite", "delegate", "preserve", "split", "carve")
+    )
+    return bool(has_file_or_module_ref and has_extraction_verb)
+
+
+def decomposition_implementation_steps_meaningful(implementation_steps: Sequence[str]) -> bool:
+    rows = [str(item or "").strip() for item in implementation_steps if str(item or "").strip()]
+    if not rows:
+        return False
+    return any(_is_decomposition_meaningful_line(item) for item in rows)
+
+
+def decomposition_proposed_work_meaningful(proposed_work: Sequence[str]) -> bool:
+    rows = [str(item or "").strip() for item in proposed_work if str(item or "").strip()]
+    if not rows:
+        return False
+    return any(_is_decomposition_meaningful_line(item) for item in rows)
+
+
+def validate_decomposition_plan_quality(plan: Dict[str, Any]) -> None:
+    payload = plan if isinstance(plan, dict) else {}
+    if str(payload.get("planning_mode") or "").strip() != "decompose_existing_system":
+        return
+    implementation_steps = payload.get("implementation_steps") if isinstance(payload.get("implementation_steps"), list) else []
+    proposed_work = payload.get("proposed_work") if isinstance(payload.get("proposed_work"), list) else []
+    extraction_seams = payload.get("extraction_seams") if isinstance(payload.get("extraction_seams"), list) else []
+    proposed_moves = payload.get("proposed_moves") if isinstance(payload.get("proposed_moves"), list) else []
+    if not decomposition_implementation_steps_meaningful(implementation_steps):
+        raise ValueError("invalid_decomposition_plan: implementation_steps not decomposition-meaningful")
+    if not decomposition_proposed_work_meaningful(proposed_work):
+        raise ValueError("invalid_decomposition_plan: proposed_work not decomposition-meaningful")
+    if not [str(item).strip() for item in extraction_seams if str(item).strip()]:
+        raise ValueError("invalid_decomposition_plan: empty extraction_seams")
+    if not [item for item in proposed_moves if isinstance(item, dict)]:
+        raise ValueError("invalid_decomposition_plan: empty proposed_moves")
+
+
 def _validate_execution_packaging(
     *,
     planning_mode: str,
     implementation_steps: Sequence[str],
     file_operations: Sequence[Dict[str, Any]],
     test_operations: Sequence[Dict[str, Any]],
+    extraction_seams: Sequence[str],
+    proposed_moves: Sequence[Dict[str, Any]],
 ) -> None:
     if str(planning_mode or "").strip() != "decompose_existing_system":
         return
@@ -452,28 +501,73 @@ def _build_execution_package(
     route_update_implications: Sequence[str],
     affected_routes: Sequence[str],
     implementation_steps: Sequence[str],
+    extraction_seams: Sequence[str],
+    proposed_moves: Sequence[Dict[str, Any]],
 ) -> Dict[str, Any]:
     ordered_work_items: List[Dict[str, Any]] = []
+    import_rewrite_operations: List[Dict[str, Any]] = []
+    route_operations: List[Dict[str, Any]] = []
     for idx, operation in enumerate(file_operations, start=1):
         row = dict(operation) if isinstance(operation, dict) else {}
         if not row:
             continue
         row["order"] = idx
         ordered_work_items.append(row)
+        op_name = str(row.get("operation") or "").strip().lower()
+        if op_name in {"rewrite_imports", "import_rewrite"}:
+            import_rewrite_operations.append(row)
+        if op_name in {"route_update", "route_delegation", "route_registration"}:
+            route_operations.append(row)
     route_registration_updates = _dedupe(
         [
             *[str(item).strip() for item in route_update_implications if str(item).strip()],
             *[f"Preserve existing route contract: {route}" for route in affected_routes if str(route).strip()],
         ]
     )
+    for route in [str(item).strip() for item in affected_routes if str(item).strip()]:
+        route_operations.append(
+            {
+                "operation": "preserve_route_binding",
+                "route": route,
+                "requirement": "preserve route binding while handlers move",
+            }
+        )
+    for move in [item for item in proposed_moves if isinstance(item, dict)]:
+        seam = str(move.get("seam") or "").strip()
+        source = str(move.get("from") or "").strip()
+        destination = str(move.get("to_module") or "").strip()
+        if seam and source and destination:
+            route_operations.append(
+                {
+                    "operation": "preserve_route_binding",
+                    "seam": seam,
+                    "source": source,
+                    "destination": destination,
+                    "requirement": "maintain existing route behavior through delegation wrappers",
+                }
+            )
+    file_ops_structured = [dict(item) for item in file_operations if isinstance(item, dict)]
+    test_ops_structured = [dict(item) for item in test_operations if isinstance(item, dict)]
     return {
         "planning_mode": str(planning_mode or ""),
         "source_files": _dedupe([str(item).strip() for item in source_files if str(item).strip()]),
-        "ordered_work_items": ordered_work_items,
-        "targeted_tests": [dict(item) for item in test_operations if isinstance(item, dict)],
-        "validation_order": _dedupe([str(item).strip() for item in validation_sequence if str(item).strip()]),
-        "compatibility_constraints": _dedupe([str(item).strip() for item in compatibility_constraints if str(item).strip()]),
+        "extraction_seams": _dedupe([str(item).strip() for item in extraction_seams if str(item).strip()]),
+        "proposed_moves": [dict(item) for item in proposed_moves if isinstance(item, dict)],
+        "file_operations": file_ops_structured,
+        "test_operations": test_ops_structured,
+        "route_operations": route_operations,
+        "import_rewrite_operations": import_rewrite_operations,
+        "validation_sequence": _dedupe([str(item).strip() for item in validation_sequence if str(item).strip()]),
+        "preview_requirements": [
+            "Run decomposition validation sequence in order before stage_apply.",
+            "Verify route continuity and smoke checks in preview before commit/promotion.",
+        ],
         "rollback_instructions": _dedupe([str(item).strip() for item in rollback_notes if str(item).strip()]),
+        "compatibility_constraints": _dedupe([str(item).strip() for item in compatibility_constraints if str(item).strip()]),
+        # Backward-compatible aliases consumed by earlier handlers.
+        "ordered_work_items": ordered_work_items,
+        "targeted_tests": test_ops_structured,
+        "validation_order": _dedupe([str(item).strip() for item in validation_sequence if str(item).strip()]),
         "route_registration_updates": route_registration_updates,
         "implementation_checklist": _dedupe([str(item).strip() for item in implementation_steps if str(item).strip()]),
     }
@@ -557,6 +651,164 @@ def _build_create_app_steps() -> List[str]:
     ]
 
 
+def _synthesize_decomposition_plan(
+    *,
+    candidate_files: Sequence[str],
+    hints: Dict[str, List[str]],
+    analysis: Dict[str, Any],
+) -> Dict[str, Any]:
+    hinted_sources = [str(item).strip() for item in (hints.get("target_source_files") or []) if str(item).strip()]
+    source_files = _dedupe([*hinted_sources, *[str(item).strip() for item in candidate_files if str(item).strip()]])
+    if not source_files:
+        source_files = [str(candidate_files[0] if candidate_files else "services/xyn-api/backend/xyn_orchestrator/xyn_api.py").strip()]
+    extraction_seams = _dedupe([str(item).strip() for item in (hints.get("extraction_seams") or []) if str(item).strip()])
+    detected_seams = [str(item).strip() for item in (analysis.get("detected_extraction_seams") or []) if str(item).strip()]
+    if detected_seams:
+        extraction_seams = _dedupe([*extraction_seams, *detected_seams])
+    if not extraction_seams:
+        extraction_seams = [
+            "solution_change_session_workflow",
+            "runtime_run_handlers",
+            "release_target_handlers",
+        ]
+    destination_modules = _dedupe([str(item).strip() for item in (hints.get("moved_handlers_modules") or []) if str(item).strip()])
+    existing_destination_modules = [
+        str(item).strip()
+        for item in (analysis.get("candidate_destination_modules") or [])
+        if str(item).strip()
+    ]
+    destination_modules = _dedupe([*destination_modules, *existing_destination_modules])
+    if not destination_modules:
+        destination_modules = [
+            "backend/xyn_orchestrator/api/solutions.py",
+            "backend/xyn_orchestrator/api/runtime.py",
+            "backend/xyn_orchestrator/planning/plan_service.py",
+            "backend/xyn_orchestrator/solution_change_session/stage_apply_workflow.py",
+        ]
+    required_tests = _dedupe([str(item).strip() for item in (hints.get("required_test_suites") or []) if str(item).strip()])
+    analysis_tests = [str(item).strip() for item in (analysis.get("affected_tests") or []) if str(item).strip()]
+    required_tests = _dedupe([*required_tests, *analysis_tests])
+    if not required_tests:
+        required_tests = [
+            "xyn_orchestrator.tests.test_goal_planning",
+            "xyn_orchestrator.tests.test_bearer_workflow_auth",
+        ]
+    affected_routes = [str(item).strip() for item in (analysis.get("affected_routes") or []) if str(item).strip()]
+    import_rewrite_surface = [str(item).strip() for item in (analysis.get("import_rewrite_surface") or []) if str(item).strip()]
+    proposed_moves = []
+    sequence: List[str] = []
+    concrete_steps: List[str] = [
+        f"Freeze `{source_files[0]}` as orchestration entrypoint and map current handler clusters.",
+    ]
+    for index, seam in enumerate(extraction_seams):
+        destination = destination_modules[index] if index < len(destination_modules) else destination_modules[-1]
+        import_rewrite_target = import_rewrite_surface[index] if index < len(import_rewrite_surface) else source_files[0]
+        proposed_moves.append(
+            {
+                "seam": seam,
+                "from": source_files[0],
+                "to_module": destination,
+                "import_rewrite_target": import_rewrite_target,
+            }
+        )
+        sequence.extend(
+            [
+                f"extract_{seam}",
+                f"rewrite_imports_for_{seam}",
+                f"route_delegation_for_{seam}",
+            ]
+        )
+        concrete_steps.append(
+            f"Extract `{seam}` handlers from `{source_files[0]}` into `{destination}` and keep delegation wrappers in place."
+        )
+        concrete_steps.append(
+            f"Rewrite imports in `{import_rewrite_target}` to consume `{destination}` without changing request/response contracts."
+        )
+    if affected_routes:
+        concrete_steps.append(f"Update route delegation for: {', '.join(affected_routes[:6])}.")
+    concrete_steps.append("Run targeted regression and planner/session workflow tests before stage_apply.")
+    steps = _dedupe([*concrete_steps, *_build_decomposition_steps(source_files)])
+
+    risk_annotations: List[str] = [
+        "Import-cycle risk while extracting shared helpers.",
+        "Compatibility wrapper drift if call sites are partially moved.",
+    ]
+    if not detected_seams and not hints.get("extraction_seams"):
+        risk_annotations.append(
+            "Decomposition evidence is limited; seam boundaries are heuristic and should be confirmed before stage_apply."
+        )
+
+    return {
+        "implementation_steps": steps,
+        "file_operations": [
+            {
+                "operation": "extract_module",
+                "source": move.get("from"),
+                "destination": move.get("to_module"),
+                "seam": move.get("seam"),
+                "notes": "move cohesive workflow logic into existing module home when available",
+            }
+            for move in proposed_moves
+        ] + [
+            {
+                "operation": "rewrite_imports",
+                "source": str(move.get("import_rewrite_target") or source_files[0]),
+                "destination": str(move.get("to_module") or ""),
+                "seam": str(move.get("seam") or ""),
+            }
+            for move in proposed_moves
+        ] + [
+            {
+                "operation": "delegate_wrapper",
+                "source": str(source_files[0] if source_files else ""),
+                "notes": "preserve compatibility entrypoint",
+            }
+        ],
+        "test_operations": [
+            *[
+                {"operation": "run", "target": suite, "scope": "decomposition-regression"}
+                for suite in required_tests
+            ],
+        ],
+        "compatibility_constraints": [
+            "Maintain identical request/response behavior.",
+            "Do not introduce new features during decomposition pass.",
+        ],
+        "risk_annotations": risk_annotations,
+        "rollback_notes": [
+            "Rollback by restoring wrapper-only commit and reverting extracted module import wiring.",
+        ],
+        "source_files": source_files,
+        "destination_modules": destination_modules,
+        "extraction_seams": extraction_seams,
+        "proposed_moves": proposed_moves,
+        "compatibility_shims": [
+            {
+                "source_module": _normalized_module_name(source_files[0]),
+                "shim_type": "delegation_wrapper",
+                "reason": "preserve import and route compatibility during incremental extraction",
+            }
+        ],
+        "affected_routes": affected_routes,
+        "route_update_implications": [
+            f"Route `{route}` delegates to extracted seam modules."
+            for route in affected_routes[:6]
+        ] or [
+            "Update xyn_api routing handlers to delegate into extracted modules.",
+            "Preserve endpoint paths and response envelopes while extraction is in progress.",
+        ],
+        "ordered_migration_steps": _dedupe(
+            [
+                "identify_domain_clusters",
+                *sequence,
+                "run_required_test_suites",
+                "verify_preview_and_commit_readiness",
+            ]
+        ),
+        "affected_tests": required_tests,
+    }
+
+
 class _BasePlanner:
     mode = "modify_existing_system"
 
@@ -586,149 +838,11 @@ class PythonMonolithDecompositionPlanner(_BasePlanner):
     ) -> Dict[str, Any]:
         hints = planner_hints if isinstance(planner_hints, dict) else {}
         analysis = codebase_analysis if isinstance(codebase_analysis, dict) else {}
-        hinted_sources = [str(item).strip() for item in (hints.get("target_source_files") or []) if str(item).strip()]
-        source_files = _dedupe([*hinted_sources, *[str(item).strip() for item in candidate_files if str(item).strip()]])
-        if not source_files:
-            source_files = [str(candidate_files[0] if candidate_files else "services/xyn-api/backend/xyn_orchestrator/xyn_api.py").strip()]
-        extraction_seams = _dedupe([str(item).strip() for item in (hints.get("extraction_seams") or []) if str(item).strip()])
-        detected_seams = [str(item).strip() for item in (analysis.get("detected_extraction_seams") or []) if str(item).strip()]
-        if detected_seams:
-            extraction_seams = _dedupe([*extraction_seams, *detected_seams])
-        if not extraction_seams:
-            extraction_seams = [
-                "solution_change_session_workflow",
-                "runtime_run_handlers",
-                "release_target_handlers",
-            ]
-        destination_modules = _dedupe([str(item).strip() for item in (hints.get("moved_handlers_modules") or []) if str(item).strip()])
-        existing_destination_modules = [
-            str(item).strip()
-            for item in (analysis.get("candidate_destination_modules") or [])
-            if str(item).strip()
-        ]
-        destination_modules = _dedupe([*destination_modules, *existing_destination_modules])
-        if not destination_modules:
-            destination_modules = [
-                "backend/xyn_orchestrator/api/solutions.py",
-                "backend/xyn_orchestrator/api/runtime.py",
-                "backend/xyn_orchestrator/planning/plan_service.py",
-                "backend/xyn_orchestrator/solution_change_session/stage_apply_workflow.py",
-            ]
-        required_tests = _dedupe([str(item).strip() for item in (hints.get("required_test_suites") or []) if str(item).strip()])
-        analysis_tests = [str(item).strip() for item in (analysis.get("affected_tests") or []) if str(item).strip()]
-        required_tests = _dedupe([*required_tests, *analysis_tests])
-        if not required_tests:
-            required_tests = [
-                "xyn_orchestrator.tests.test_goal_planning",
-                "xyn_orchestrator.tests.test_bearer_workflow_auth",
-            ]
-        affected_routes = [str(item).strip() for item in (analysis.get("affected_routes") or []) if str(item).strip()]
-        import_rewrite_surface = [str(item).strip() for item in (analysis.get("import_rewrite_surface") or []) if str(item).strip()]
-        proposed_moves = []
-        sequence: List[str] = []
-        concrete_steps: List[str] = [
-            f"Freeze `{source_files[0]}` as orchestration entrypoint and map current handler clusters.",
-        ]
-        for index, seam in enumerate(extraction_seams):
-            destination = destination_modules[index] if index < len(destination_modules) else destination_modules[-1]
-            import_rewrite_target = import_rewrite_surface[index] if index < len(import_rewrite_surface) else source_files[0]
-            proposed_moves.append(
-                {
-                    "seam": seam,
-                    "from": source_files[0],
-                    "to_module": destination,
-                    "import_rewrite_target": import_rewrite_target,
-                }
-            )
-            sequence.extend(
-                [
-                    f"extract_{seam}",
-                    f"rewrite_imports_for_{seam}",
-                    f"route_delegation_for_{seam}",
-                ]
-            )
-            concrete_steps.append(
-                f"Extract `{seam}` handlers from `{source_files[0]}` into `{destination}` and keep delegation wrappers in place."
-            )
-            concrete_steps.append(
-                f"Rewrite imports in `{import_rewrite_target}` to consume `{destination}` without changing request/response contracts."
-            )
-        if affected_routes:
-            concrete_steps.append(f"Update route delegation for: {', '.join(affected_routes[:6])}.")
-        concrete_steps.append("Run targeted regression and planner/session workflow tests before stage_apply.")
-        steps = _dedupe([*concrete_steps, *_build_decomposition_steps(source_files)])
-        return {
-            "implementation_steps": steps,
-            "file_operations": [
-                {
-                    "operation": "extract_module",
-                    "source": move.get("from"),
-                    "destination": move.get("to_module"),
-                    "seam": move.get("seam"),
-                    "notes": "move cohesive workflow logic into existing module home when available",
-                }
-                for move in proposed_moves
-            ] + [
-                {
-                    "operation": "rewrite_imports",
-                    "source": str(move.get("import_rewrite_target") or source_files[0]),
-                    "destination": str(move.get("to_module") or ""),
-                    "seam": str(move.get("seam") or ""),
-                }
-                for move in proposed_moves
-            ] + [
-                {
-                    "operation": "delegate_wrapper",
-                    "source": str(source_files[0] if source_files else ""),
-                    "notes": "preserve compatibility entrypoint",
-                }
-            ],
-            "test_operations": [
-                *[
-                    {"operation": "run", "target": suite, "scope": "decomposition-regression"}
-                    for suite in required_tests
-                ],
-            ],
-            "compatibility_constraints": [
-                "Maintain identical request/response behavior.",
-                "Do not introduce new features during decomposition pass.",
-            ],
-            "risk_annotations": [
-                "Import-cycle risk while extracting shared helpers.",
-                "Compatibility wrapper drift if call sites are partially moved.",
-            ],
-            "rollback_notes": [
-                "Rollback by restoring wrapper-only commit and reverting extracted module import wiring.",
-            ],
-            "source_files": source_files,
-            "destination_modules": destination_modules,
-            "extraction_seams": extraction_seams,
-            "proposed_moves": proposed_moves,
-            "compatibility_shims": [
-                {
-                    "source_module": _normalized_module_name(source_files[0]),
-                    "shim_type": "delegation_wrapper",
-                    "reason": "preserve import and route compatibility during incremental extraction",
-                }
-            ],
-            "affected_routes": affected_routes,
-            "route_update_implications": [
-                f"Route `{route}` delegates to extracted seam modules."
-                for route in affected_routes[:6]
-            ] or [
-                "Update xyn_api routing handlers to delegate into extracted modules.",
-                "Preserve endpoint paths and response envelopes while extraction is in progress.",
-            ],
-            "ordered_migration_steps": _dedupe(
-                [
-                    "identify_domain_clusters",
-                    *sequence,
-                    "run_required_test_suites",
-                    "verify_preview_and_commit_readiness",
-                ]
-            ),
-            "affected_tests": required_tests,
-        }
+        return _synthesize_decomposition_plan(
+            candidate_files=candidate_files,
+            hints=hints,
+            analysis=analysis,
+        )
 
 
 class PythonFeatureModificationPlanner(_BasePlanner):
@@ -1151,12 +1265,16 @@ def build_solution_change_execution_plan(
         else []
     )
     affected_routes = synthesized.get("affected_routes") if isinstance(synthesized.get("affected_routes"), list) else []
+    extraction_seams = synthesized.get("extraction_seams") if isinstance(synthesized.get("extraction_seams"), list) else []
+    proposed_moves = synthesized.get("proposed_moves") if isinstance(synthesized.get("proposed_moves"), list) else []
 
     _validate_execution_packaging(
         planning_mode=classification.planning_mode,
         implementation_steps=implementation_steps,
         file_operations=file_operations if isinstance(file_operations, list) else [],
         test_operations=test_operations if isinstance(test_operations, list) else [],
+        extraction_seams=extraction_seams if isinstance(extraction_seams, list) else [],
+        proposed_moves=proposed_moves if isinstance(proposed_moves, list) else [],
     )
 
     execution_package = _build_execution_package(
@@ -1170,6 +1288,18 @@ def build_solution_change_execution_plan(
         route_update_implications=route_update_implications if isinstance(route_update_implications, list) else [],
         affected_routes=affected_routes if isinstance(affected_routes, list) else [],
         implementation_steps=implementation_steps,
+        extraction_seams=extraction_seams if isinstance(extraction_seams, list) else [],
+        proposed_moves=proposed_moves if isinstance(proposed_moves, list) else [],
+    )
+
+    validate_decomposition_plan_quality(
+        {
+            "planning_mode": classification.planning_mode,
+            "implementation_steps": implementation_steps,
+            "proposed_work": proposed_work,
+            "extraction_seams": extraction_seams,
+            "proposed_moves": proposed_moves,
+        }
     )
 
     affected_tests = [
@@ -1190,8 +1320,8 @@ def build_solution_change_execution_plan(
         "cross_artifact": classification.planning_mode == "cross_artifact_change",
         "source_files": synthesized.get("source_files") if isinstance(synthesized.get("source_files"), list) else [],
         "destination_modules": synthesized.get("destination_modules") if isinstance(synthesized.get("destination_modules"), list) else [],
-        "extraction_seams": synthesized.get("extraction_seams") if isinstance(synthesized.get("extraction_seams"), list) else [],
-        "proposed_moves": synthesized.get("proposed_moves") if isinstance(synthesized.get("proposed_moves"), list) else [],
+        "extraction_seams": extraction_seams if isinstance(extraction_seams, list) else [],
+        "proposed_moves": proposed_moves if isinstance(proposed_moves, list) else [],
         "compatibility_shims": synthesized.get("compatibility_shims") if isinstance(synthesized.get("compatibility_shims"), list) else [],
         "affected_routes": synthesized.get("affected_routes") if isinstance(synthesized.get("affected_routes"), list) else [],
         "affected_tests": _dedupe([str(item).strip() for item in affected_tests if str(item).strip()]),
