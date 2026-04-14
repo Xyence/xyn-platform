@@ -33447,6 +33447,7 @@ def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
     payload = plan if isinstance(plan, dict) else {}
     file_operations_scope: List[Dict[str, str]] = []
     test_operations_scope: List[Dict[str, str]] = []
+    proposed_moves_scope: List[Dict[str, str]] = []
     file_operations = payload.get("file_operations") if isinstance(payload.get("file_operations"), list) else []
     for row in file_operations:
         if not isinstance(row, dict):
@@ -33495,6 +33496,33 @@ def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
             str(item.get("scope") or ""),
         ),
     )
+    proposed_moves = payload.get("proposed_moves") if isinstance(payload.get("proposed_moves"), list) else []
+    for row in proposed_moves:
+        if not isinstance(row, dict):
+            continue
+        seam = str(row.get("seam") or "").strip()
+        source = str(row.get("from") or row.get("source") or "").strip()
+        destination = str(row.get("to_module") or row.get("destination") or "").strip()
+        import_rewrite_target = str(row.get("import_rewrite_target") or "").strip()
+        if not seam and not source and not destination and not import_rewrite_target:
+            continue
+        proposed_moves_scope.append(
+            {
+                "seam": seam,
+                "source": source,
+                "destination": destination,
+                "import_rewrite_target": import_rewrite_target,
+            }
+        )
+    proposed_moves_scope = sorted(
+        proposed_moves_scope,
+        key=lambda item: (
+            str(item.get("seam") or ""),
+            str(item.get("source") or ""),
+            str(item.get("destination") or ""),
+            str(item.get("import_rewrite_target") or ""),
+        ),
+    )
     return {
         "planning_mode": str(payload.get("planning_mode") or ""),
         "plan_kind": str(payload.get("plan_kind") or ""),
@@ -33541,6 +33569,7 @@ def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
                 if str(item).strip()
             }
         )[:20],
+        "proposed_moves_scope": proposed_moves_scope[:50],
         "file_operations_scope": file_operations_scope[:50],
         "test_operations_scope": test_operations_scope[:30],
     }
