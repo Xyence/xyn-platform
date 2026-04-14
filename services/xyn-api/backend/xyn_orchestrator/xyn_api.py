@@ -35702,6 +35702,7 @@ def _process_solution_change_session_reply(
     response_kind: str = "response",
     source_turn_id: str = "",
     include_iteration_linkage: bool = False,
+    prompt_response_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     interpretation = _interpret_solution_refinement(
         session=session,
@@ -35716,6 +35717,8 @@ def _process_solution_change_session_reply(
         "interpretation": interpretation,
         "use_planner_interpretation": force_planner_fallback,
     }
+    if isinstance(prompt_response_metadata, dict) and prompt_response_metadata:
+        payload["metadata"] = prompt_response_metadata
     if include_iteration_linkage:
         payload["iteration_linkage"] = _solution_session_iteration_linkage(session)
     _append_solution_planning_turn(
@@ -39897,6 +39900,7 @@ def application_solution_change_session_control_action(
     operation = str(payload.get("operation") or "").strip().lower()
     supported_operations = [
         "inspect",
+        "respond_to_planner_prompt",
         "stage_apply",
         "prepare_preview",
         "inspect_preview",
@@ -39933,6 +39937,65 @@ def application_solution_change_session_control_action(
             application=application,
             operation_status="ready" if preview_status == "ready" else "blocked",
             operation_payload={"preview_status": preview_status or "not_prepared"},
+            http_status=200,
+        )
+    if operation == "respond_to_planner_prompt":
+        if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        planning_state = _solution_planning_state(session)
+        pending_prompt_turn = None
+        if isinstance(planning_state.get("pending_question"), dict):
+            pending_prompt_turn = planning_state.get("pending_question")
+        elif isinstance(planning_state.get("pending_option_set"), dict):
+            pending_prompt_turn = planning_state.get("pending_option_set")
+        if not isinstance(pending_prompt_turn, dict):
+            control_status = _solution_change_session_control_status(session=session, application=application)
+            return _solution_change_session_control_envelope(
+                operation="respond_to_planner_prompt",
+                session=session,
+                application=application,
+                operation_status="blocked",
+                operation_payload={
+                    "error": "no planner prompt is pending",
+                    "blocked_reason": "planning_prompt_not_pending",
+                    "next_allowed_actions": list(control_status.get("next_allowed_actions") or []),
+                },
+                http_status=409,
+            )
+        reply_text = str(
+            payload.get("response")
+            or payload.get("prompt_response")
+            or payload.get("reply_text")
+            or payload.get("text")
+            or ""
+        ).strip()
+        if not reply_text:
+            return JsonResponse({"error": "response is required"}, status=400)
+        prompt_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        source_turn_id = str(payload.get("source_turn_id") or pending_prompt_turn.get("id") or "").strip()
+        force_planner_fallback = bool(payload.get("use_planner_interpretation"))
+        response_payload = _process_solution_change_session_reply(
+            session=session,
+            application=application,
+            identity=identity,
+            reply_text=reply_text,
+            force_planner_fallback=force_planner_fallback,
+            response_kind="planner_prompt_response",
+            source_turn_id=source_turn_id,
+            prompt_response_metadata=prompt_metadata,
+        )
+        post_state = _solution_planning_state(session)
+        response_payload["planner_prompt_response"] = {
+            "source_turn_id": source_turn_id,
+            "pending_prompt_remaining": bool(post_state.get("pending_question") or post_state.get("pending_option_set")),
+            "metadata": prompt_metadata,
+        }
+        return _solution_change_session_control_envelope(
+            operation="respond_to_planner_prompt",
+            session=session,
+            application=application,
+            operation_status="succeeded",
+            operation_payload=response_payload if isinstance(response_payload, dict) else {"raw": response_payload},
             http_status=200,
         )
     operation_map = {

@@ -6640,6 +6640,188 @@ class GoalPlanningTests(TestCase):
         operation_result = payload.get("operation_result") if isinstance(payload.get("operation_result"), dict) else {}
         self.assertEqual(str(operation_result.get("blocked_reason") or ""), "solution_not_installed_in_root")
 
+    def test_solution_change_session_control_action_respond_to_planner_prompt_succeeds(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-api",
+            slug=f"xyn-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Planner prompt response",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Planner flow validation",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Respond to planner prompt",
+            request_text="Refine planner scope",
+            created_by=self.identity,
+            status="planned",
+        )
+        xyn_api._append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="question",
+            payload={"question": "Please clarify scope"},
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control/actions",
+            method="post",
+            data=json.dumps(
+                {
+                    "operation": "respond_to_planner_prompt",
+                    "response": "Keep this backend-only and preserve behavior.",
+                    "metadata": {"source": "mcp-test"},
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._interpret_solution_refinement",
+            return_value={"result_type": "interpreted", "planner_message": ""},
+        ):
+            response = application_solution_change_session_control_action(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(str(payload.get("operation") or ""), "respond_to_planner_prompt")
+        self.assertEqual(str(payload.get("status") or ""), "succeeded")
+        result = payload.get("operation_result") if isinstance(payload.get("operation_result"), dict) else {}
+        planner_response = result.get("planner_prompt_response") if isinstance(result.get("planner_prompt_response"), dict) else {}
+        self.assertEqual(str((planner_response.get("metadata") or {}).get("source") or ""), "mcp-test")
+        self.assertFalse(bool(planner_response.get("pending_prompt_remaining")))
+
+    def test_solution_change_session_control_action_respond_to_planner_prompt_advances_blocked_reason(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-api",
+            slug=f"xyn-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Planner prompt progression",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Planner flow validation",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Planner prompt progression",
+            request_text="Need prompt resolution",
+            created_by=self.identity,
+            status="planned",
+        )
+        xyn_api._append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="question",
+            payload={"question": "Please clarify scope"},
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control/actions",
+            method="post",
+            data=json.dumps(
+                {
+                    "operation": "respond_to_planner_prompt",
+                    "prompt_response": "Preserve behavior and do not add features.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._interpret_solution_refinement",
+            return_value={"result_type": "interpreted", "planner_message": ""},
+        ):
+            response = application_solution_change_session_control_action(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        self.assertNotEqual(str(control.get("blocked_reason") or ""), "planning_prompt_pending")
+        self.assertNotIn("respond_to_planner_prompt", list(control.get("next_allowed_actions") or []))
+
+    def test_solution_change_session_control_action_respond_to_planner_prompt_returns_409_when_not_pending(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-api",
+            slug=f"xyn-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Planner prompt missing",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Planner flow validation",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="No pending prompt",
+            request_text="Already planned",
+            created_by=self.identity,
+            status="planned",
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control/actions",
+            method="post",
+            data=json.dumps(
+                {
+                    "operation": "respond_to_planner_prompt",
+                    "response": "Any reply",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_session_control_action(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertEqual(str(payload.get("operation") or ""), "respond_to_planner_prompt")
+        self.assertEqual(str(payload.get("status") or ""), "blocked")
+        operation_result = payload.get("operation_result") if isinstance(payload.get("operation_result"), dict) else {}
+        self.assertEqual(str(operation_result.get("blocked_reason") or ""), "planning_prompt_not_pending")
+
     def test_solution_change_session_control_inspect_reports_stage_preview_progress(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
