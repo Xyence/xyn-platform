@@ -267,6 +267,10 @@ from .execution_briefs import (
     valid_execution_brief_review_transition,
 )
 from .solution_change_session import stage_apply_workflow as _solution_stage_apply_workflow
+from .solution_change_session.planner_engine import (
+    PlannerArtifactInput,
+    build_solution_change_execution_plan,
+)
 from .execution_queue import (
     evaluate_dev_task_queue_state,
     find_dispatchable_queue_entry,
@@ -33386,10 +33390,18 @@ def _record_solution_draft_plan(
             "open_questions": list(plan.get("open_questions") or []),
             "validation_plan": list(plan.get("validation_plan") or []),
             "planning_mode": str(plan.get("planning_mode") or "deterministic"),
+            "planner_mode": str(plan.get("planner_mode") or ""),
+            "plan_kind": str(plan.get("plan_kind") or ""),
+            "confidence": float(plan.get("confidence") or 0.0),
             "code_context_summary": str(plan.get("code_context_summary") or ""),
             "candidate_files": list(plan.get("candidate_files") or []),
             "candidate_components": list(plan.get("candidate_components") or []),
             "proposed_work": list(plan.get("proposed_work") or []),
+            "file_operations": list(plan.get("file_operations") or []),
+            "test_operations": list(plan.get("test_operations") or []),
+            "validation_sequence": list(plan.get("validation_sequence") or []),
+            "preview_requirements": list(plan.get("preview_requirements") or []),
+            "risk_annotations": list(plan.get("risk_annotations") or []),
         },
     )
     return plan
@@ -35008,6 +35020,112 @@ def _generate_solution_change_plan(
             }
         )
 
+    def _planner_artifact_inputs() -> List[PlannerArtifactInput]:
+        rows: List[PlannerArtifactInput] = []
+        for membership in memberships:
+            artifact = membership.artifact
+            owner_paths = (
+                artifact.owner_path_prefixes_json
+                if isinstance(getattr(artifact, "owner_path_prefixes_json", None), list)
+                else []
+            )
+            rows.append(
+                PlannerArtifactInput(
+                    artifact_id=str(artifact.id),
+                    slug=str(artifact.slug or ""),
+                    title=str(artifact.title or ""),
+                    role=str(membership.role or ""),
+                    artifact_type=str(artifact.type.slug if artifact.type_id else ""),
+                    responsibility_summary=str(membership.responsibility_summary or ""),
+                    owner_paths=[str(item).strip() for item in owner_paths if str(item).strip()],
+                    edit_mode=str(getattr(artifact, "edit_mode", "") or ""),
+                )
+            )
+        return rows
+
+    def _line_count_lookup(path: str, *, candidate_members: List[ApplicationArtifactMembership]) -> Optional[int]:
+        requested = str(path or "").strip().replace("\\", "/")
+        if not requested:
+            return None
+        for member in candidate_members:
+            ownership = resolve_artifact_ownership(member.artifact)
+            repo_slug = str(ownership.get("repo_slug") or "").strip()
+            allowed_paths = [str(item).strip() for item in (ownership.get("allowed_paths") or []) if str(item).strip()]
+            repo_root = _resolve_local_repo_root(repo_slug)
+            if repo_root is None:
+                continue
+            if allowed_paths and not any(
+                _path_hint_matches_owner_scope(requested, str(prefix or "").strip().lower()) for prefix in allowed_paths
+            ):
+                continue
+            file_path = (repo_root / requested).resolve()
+            try:
+                file_path.relative_to(repo_root.resolve())
+            except Exception:
+                continue
+            if not file_path.exists() or not file_path.is_file():
+                continue
+            try:
+                with file_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                    return sum(1 for _ in handle)
+            except OSError:
+                continue
+        return None
+
+    def _merge_execution_plan_fields(*, current_plan: Dict[str, Any], engine_plan: Dict[str, Any]) -> Dict[str, Any]:
+        merged = copy.deepcopy(current_plan if isinstance(current_plan, dict) else {})
+        list_fields = (
+            "proposed_work",
+            "candidate_files",
+            "implementation_steps",
+            "file_operations",
+            "test_operations",
+            "validation_sequence",
+            "preview_requirements",
+            "risk_annotations",
+            "rollback_notes",
+            "affected_tests",
+            "compatibility_constraints",
+            "planning_checkpoints",
+        )
+        scalar_fields = ("planning_mode", "plan_kind", "confidence", "assumptions", "scaffold_plan")
+        always_fields = ("planner_state", "artifact_relevance")
+        for field in scalar_fields:
+            current_value = merged.get(field)
+            incoming_value = engine_plan.get(field)
+            if incoming_value in (None, "", [], {}):
+                continue
+            if field == "planning_mode":
+                existing_mode = str(current_value or "").strip()
+                incoming_mode = str(incoming_value or "").strip()
+                # Preserve legacy deterministic/code_aware contract for existing callers;
+                # expose explicit planner-mode taxonomy in a dedicated field.
+                if existing_mode in {"deterministic", "code_aware"}:
+                    merged["planner_mode"] = incoming_mode
+                else:
+                    merged[field] = incoming_mode
+            elif field in {"plan_kind", "confidence"}:
+                merged[field] = incoming_value
+            elif not current_value:
+                merged[field] = incoming_value
+        for field in list_fields:
+            current_value = merged.get(field) if isinstance(merged.get(field), list) else []
+            incoming_value = engine_plan.get(field) if isinstance(engine_plan.get(field), list) else []
+            if current_value:
+                continue
+            if incoming_value:
+                merged[field] = incoming_value
+        for field in always_fields:
+            incoming_value = engine_plan.get(field)
+            if incoming_value in (None, "", [], {}):
+                continue
+            merged[field] = incoming_value
+        if not (merged.get("selected_artifact_ids") if isinstance(merged.get("selected_artifact_ids"), list) else []):
+            candidate_selected = engine_plan.get("selected_artifact_ids")
+            if isinstance(candidate_selected, list):
+                merged["selected_artifact_ids"] = [str(item).strip() for item in candidate_selected if str(item).strip()]
+        return merged
+
     def _finalize_plan_payload(
         payload: Dict[str, Any],
         selected_members_for_plan: List[ApplicationArtifactMembership],
@@ -35018,8 +35136,20 @@ def _generate_solution_change_plan(
             selected_members=selected_members_for_plan,
             force_code_aware_planning=force_code_aware_planning,
         )
+        engine_enriched = build_solution_change_execution_plan(
+            request_text=original_request,
+            base_plan=finalized,
+            artifacts=_planner_artifact_inputs(),
+            selected_artifact_ids=[str(member.artifact_id) for member in selected_members_for_plan],
+            analysis=session.analysis_json if isinstance(session.analysis_json, dict) else {},
+            line_count_lookup=lambda path: _line_count_lookup(
+                path,
+                candidate_members=selected_members_for_plan if selected_members_for_plan else memberships,
+            ),
+        )
+        merged = _merge_execution_plan_fields(current_plan=finalized, engine_plan=engine_enriched)
         rewritten = _apply_refinement_rewrite_to_plan_payload(
-            plan=finalized,
+            plan=merged,
             directives=plan_rewrite_directives,
             request_text=original_request,
         )
