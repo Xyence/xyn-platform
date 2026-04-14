@@ -5,6 +5,7 @@ from django.test import SimpleTestCase
 from xyn_orchestrator.solution_change_session.planner_engine import (
     PlannerArtifactInput,
     build_solution_change_execution_plan,
+    validate_decomposition_plan_quality,
 )
 
 
@@ -266,6 +267,34 @@ class SolutionPlannerEngineTests(SimpleTestCase):
         self.assertTrue(codebase_signals.get("coupling_hotspots"))
         self.assertTrue(codebase_signals.get("large_function_signals"))
 
+    def test_decomposition_plan_for_xyn_api_emits_concrete_extraction_work(self):
+        request_text = (
+            "Decompose backend/xyn_orchestrator/xyn_api.py into modules; extract handlers and preserve behavior."
+        )
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=["api-1"],
+            planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
+        )
+        self.assertEqual(plan.get("planning_mode"), "decompose_existing_system")
+        self.assertEqual(plan.get("plan_kind"), "decomposition")
+        self.assertTrue(plan.get("source_files"))
+        self.assertTrue(plan.get("destination_modules"))
+        self.assertTrue(plan.get("extraction_seams"))
+        self.assertTrue(plan.get("proposed_moves"))
+        self.assertTrue(plan.get("candidate_files"))
+        self.assertTrue(plan.get("implementation_steps"))
+        destinations = plan.get("destination_modules") or []
+        self.assertIn("backend/xyn_orchestrator/api/solutions.py", destinations)
+        self.assertIn("backend/xyn_orchestrator/api/runtime.py", destinations)
+        self.assertTrue(any("planning" in str(item).lower() for item in destinations))
+        self.assertTrue(any("stage_apply" in str(item).lower() for item in destinations))
+        rendered = " ".join([*(str(item) for item in (plan.get("implementation_steps") or [])), *(str(item) for item in (plan.get("proposed_work") or []))]).lower()
+        for token in ("width", "min-width", "max-width", "header", "navigation", "styling", "layout"):
+            self.assertNotIn(token, rendered)
+
     def test_decomposition_execution_package_is_stage_apply_ready(self):
         request_text = "Decompose backend/xyn_orchestrator/xyn_api.py and preserve route behavior."
         plan = build_solution_change_execution_plan(
@@ -278,9 +307,12 @@ class SolutionPlannerEngineTests(SimpleTestCase):
         package = plan.get("execution_package") or {}
         self.assertTrue(package)
         self.assertEqual(package.get("planning_mode"), "decompose_existing_system")
-        self.assertTrue(package.get("ordered_work_items"))
-        self.assertTrue(package.get("targeted_tests"))
-        self.assertTrue(package.get("validation_order"))
+        self.assertTrue(package.get("file_operations"))
+        self.assertTrue(package.get("test_operations"))
+        self.assertTrue(package.get("import_rewrite_operations"))
+        self.assertTrue(package.get("route_operations"))
+        self.assertTrue(package.get("validation_sequence"))
+        self.assertTrue(package.get("preview_requirements"))
         self.assertTrue(package.get("compatibility_constraints"))
         self.assertTrue(package.get("rollback_instructions"))
 
@@ -292,6 +324,72 @@ class SolutionPlannerEngineTests(SimpleTestCase):
                 "implementation_steps": ["Inspect file", "Update as needed", "Confirm behavior", "Adjust tests"],
                 "file_operations": [],
                 "test_operations": [],
+            },
+        ):
+            with self.assertRaises(ValueError):
+                build_solution_change_execution_plan(
+                    request_text=request_text,
+                    base_plan={},
+                    artifacts=self._artifacts(),
+                    selected_artifact_ids=["api-1"],
+                    planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
+                )
+
+    def test_placeholder_only_decomposition_quality_is_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_decomposition_plan_quality(
+                {
+                    "planning_mode": "decompose_existing_system",
+                    "implementation_steps": ["Inspect file", "Apply changes", "Validate functionality"],
+                    "proposed_work": ["Review module", "Update as needed"],
+                    "extraction_seams": ["solution_change_session_workflow"],
+                    "proposed_moves": [{"seam": "solution_change_session_workflow"}],
+                }
+            )
+
+    def test_file_specific_decomposition_quality_passes(self):
+        validate_decomposition_plan_quality(
+            {
+                "planning_mode": "decompose_existing_system",
+                "implementation_steps": [
+                    "Extract solution_change_session handlers from backend/xyn_orchestrator/xyn_api.py into backend/xyn_orchestrator/api/solutions.py.",
+                    "Rewrite imports in backend/xyn_orchestrator/xyn_api.py to delegate route handlers.",
+                ],
+                "proposed_work": [
+                    "Move runtime_run handlers to backend/xyn_orchestrator/api/runtime.py and preserve route delegation.",
+                ],
+                "extraction_seams": ["solution_change_session_workflow", "runtime_run_handlers"],
+                "proposed_moves": [
+                    {"seam": "solution_change_session_workflow", "from": "backend/xyn_orchestrator/xyn_api.py", "to_module": "backend/xyn_orchestrator/api/solutions.py"},
+                ],
+            }
+        )
+
+    def test_code_aware_ui_plan_still_passes_quality_gate(self):
+        validate_decomposition_plan_quality(
+            {
+                "planning_mode": "code_aware",
+                "implementation_steps": ["Inspect apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx and adjust dropdown width."],
+                "proposed_work": ["Apply scoped UI styling fix for header dropdown."],
+            }
+        )
+
+    def test_decomposition_plan_without_seams_or_moves_is_rejected_by_packaging_guard(self):
+        request_text = "Decompose backend/xyn_orchestrator/xyn_api.py"
+        with patch(
+            "xyn_orchestrator.solution_change_session.planner_engine.PythonMonolithDecompositionPlanner.synthesize",
+            return_value={
+                "implementation_steps": ["Extract handlers into modules with wrappers."],
+                "file_operations": [
+                    {
+                        "operation": "extract_module",
+                        "source": "backend/xyn_orchestrator/xyn_api.py",
+                        "destination": "backend/xyn_orchestrator/api/solutions.py",
+                    }
+                ],
+                "test_operations": [{"operation": "run", "target": "xyn_orchestrator.tests.test_goal_planning"}],
+                "extraction_seams": [],
+                "proposed_moves": [],
             },
         ):
             with self.assertRaises(ValueError):
@@ -319,10 +417,27 @@ class SolutionPlannerEngineTests(SimpleTestCase):
             planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
         )
         package = plan.get("execution_package") or {}
-        route_updates = package.get("route_registration_updates") or []
+        route_updates = package.get("route_operations") or []
         rendered = "\n".join(str(item) for item in route_updates)
         self.assertIn("/xyn/api/applications", rendered)
-        self.assertIn("Preserve existing route contract", rendered)
+        self.assertIn("preserve_route_binding", rendered)
+
+    def test_decomposition_packaging_contains_stage_apply_usable_file_and_test_ops(self):
+        request_text = "Decompose backend/xyn_orchestrator/xyn_api.py and preserve route behavior."
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=["api-1"],
+            planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
+        )
+        package = plan.get("execution_package") or {}
+        file_ops = package.get("file_operations") or []
+        test_ops = package.get("test_operations") or []
+        self.assertTrue(any(str((row or {}).get("operation") or "") == "extract_module" for row in file_ops))
+        self.assertTrue(any(str((row or {}).get("operation") or "") == "rewrite_imports" for row in file_ops))
+        self.assertTrue(any(str((row or {}).get("operation") or "") == "delegate_wrapper" for row in file_ops))
+        self.assertTrue(all(str((row or {}).get("target") or "").strip() for row in test_ops if isinstance(row, dict)))
 
     def test_decomposition_mode_narrows_to_dominant_artifact(self):
         request_text = (
