@@ -48,6 +48,26 @@ _DECOMPOSITION_PLACEHOLDER_PATTERNS = (
     "validate functionality",
 )
 
+_XYN_API_PREFERRED_DESTINATION_MODULES: List[str] = [
+    "backend/xyn_orchestrator/api/solutions.py",
+    "backend/xyn_orchestrator/api/runtime.py",
+    "backend/xyn_orchestrator/solution_change_session/stage_apply_workflow.py",
+    "backend/xyn_orchestrator/solution_change_session/stage_apply_dispatch.py",
+    "backend/xyn_orchestrator/solution_change_session/stage_apply_scoping.py",
+    "backend/xyn_orchestrator/solution_change_session/stage_apply_git.py",
+]
+
+
+def _targets_xyn_api_monolith(paths: Sequence[str]) -> bool:
+    for path in [str(item).strip().lower() for item in paths if str(item).strip()]:
+        if "backend/xyn_orchestrator/xyn_api.py" in path:
+            return True
+        if "services/xyn-api/backend/xyn_orchestrator/xyn_api.py" in path:
+            return True
+        if "xyn_orchestrator/xyn_api.py" in path:
+            return True
+    return False
+
 
 def _tokenize(text: str) -> List[str]:
     return [token for token in re.findall(r"[a-z0-9_]+", str(text or "").lower()) if token]
@@ -478,6 +498,10 @@ def _validate_execution_packaging(
 ) -> None:
     if str(planning_mode or "").strip() != "decompose_existing_system":
         return
+    if not [str(item).strip() for item in extraction_seams if str(item).strip()]:
+        raise ValueError("invalid_decomposition_plan: empty extraction_seams")
+    if not [item for item in proposed_moves if isinstance(item, dict)]:
+        raise ValueError("invalid_decomposition_plan: empty proposed_moves")
     if not list(file_operations):
         raise ValueError("invalid_decomposition_plan: empty file_operations")
     if not list(test_operations):
@@ -581,10 +605,20 @@ def _normalized_module_name(path: str) -> str:
 
 def _extract_planner_hints(base_plan: Dict[str, Any], planner_hints: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
     merged = planner_hints if isinstance(planner_hints, dict) else {}
+    base = base_plan if isinstance(base_plan, dict) else {}
+    containers: List[Dict[str, Any]] = []
+    for payload in (merged, base):
+        if isinstance(payload, dict):
+            containers.append(payload)
+            for key in ("decomposition_campaign", "decomposition_session", "planner_hints", "campaign_metadata", "campaign"):
+                nested = payload.get(key)
+                if isinstance(nested, dict):
+                    containers.append(nested)
 
     def _collect(key: str) -> List[str]:
         out: List[str] = []
-        for source in (merged.get(key), base_plan.get(key)):
+        for container in containers:
+            source = container.get(key)
             if isinstance(source, list):
                 for item in source:
                     token = str(item or "").strip()
@@ -679,12 +713,9 @@ def _synthesize_decomposition_plan(
     ]
     destination_modules = _dedupe([*destination_modules, *existing_destination_modules])
     if not destination_modules:
-        destination_modules = [
-            "backend/xyn_orchestrator/api/solutions.py",
-            "backend/xyn_orchestrator/api/runtime.py",
-            "backend/xyn_orchestrator/planning/plan_service.py",
-            "backend/xyn_orchestrator/solution_change_session/stage_apply_workflow.py",
-        ]
+        destination_modules = [*list(_XYN_API_PREFERRED_DESTINATION_MODULES), "backend/xyn_orchestrator/planning/plan_service.py"]
+    if _targets_xyn_api_monolith(source_files):
+        destination_modules = _dedupe([*destination_modules, *list(_XYN_API_PREFERRED_DESTINATION_MODULES)])
     required_tests = _dedupe([str(item).strip() for item in (hints.get("required_test_suites") or []) if str(item).strip()])
     analysis_tests = [str(item).strip() for item in (analysis.get("affected_tests") or []) if str(item).strip()]
     required_tests = _dedupe([*required_tests, *analysis_tests])
@@ -1107,12 +1138,9 @@ def _build_codebase_analysis(
 
     if mode == "decompose_existing_system":
         if not destination_modules:
-            destination_modules = [
-                "backend/xyn_orchestrator/api/solutions.py",
-                "backend/xyn_orchestrator/api/runtime.py",
-                "backend/xyn_orchestrator/planning/plan_service.py",
-                "backend/xyn_orchestrator/solution_change_session/stage_apply_workflow.py",
-            ]
+            destination_modules = [*list(_XYN_API_PREFERRED_DESTINATION_MODULES), "backend/xyn_orchestrator/planning/plan_service.py"]
+        if _targets_xyn_api_monolith(candidate_files):
+            destination_modules = _dedupe([*destination_modules, *list(_XYN_API_PREFERRED_DESTINATION_MODULES)])
         if not existing_module_layout:
             existing_module_layout = [
                 "backend/xyn_orchestrator/api/solutions.py",
@@ -1175,15 +1203,16 @@ def build_solution_change_execution_plan(
     line_count_lookup: Optional[Callable[[str], Optional[int]]] = None,
 ) -> Dict[str, Any]:
     base = dict(base_plan or {})
+    hints = _extract_planner_hints(base, planner_hints)
     multi_artifact_required = _requires_multiple_artifacts(
         analysis=analysis,
-        planner_hints=planner_hints,
+        planner_hints={**(planner_hints if isinstance(planner_hints, dict) else {}), **hints},
         selected_artifact_ids=selected_artifact_ids,
     )
     classification = _classify_request(
         request_text,
         artifact_count=len(list(artifacts)),
-        planner_hints=planner_hints,
+        planner_hints=hints,
         multi_artifact_required=multi_artifact_required,
     )
     ranked = _score_artifacts(
@@ -1210,7 +1239,6 @@ def build_solution_change_execution_plan(
     selected_ids: List[str] = [str(item).strip() for item in (selection.get("selected_artifact_ids") or []) if str(item).strip()]
 
     planner = _planner_for_mode(classification.planning_mode)
-    hints = _extract_planner_hints(base, planner_hints)
     if hints.get("target_source_files"):
         candidate_files = _dedupe([*hints.get("target_source_files", []), *candidate_files])
     codebase_analysis = _build_codebase_analysis(
@@ -1346,8 +1374,11 @@ def build_solution_change_execution_plan(
         "implementation_steps": implementation_steps,
         "file_operations": file_operations if isinstance(file_operations, list) else [],
         "test_operations": test_operations if isinstance(test_operations, list) else [],
+        "route_operations": execution_package.get("route_operations") if isinstance(execution_package.get("route_operations"), list) else [],
+        "import_rewrite_operations": execution_package.get("import_rewrite_operations") if isinstance(execution_package.get("import_rewrite_operations"), list) else [],
         "validation_sequence": validation_sequence,
         "preview_requirements": preview_requirements,
+        "rollback_instructions": execution_package.get("rollback_instructions") if isinstance(execution_package.get("rollback_instructions"), list) else [],
         "risk_annotations": synthesized.get("risk_annotations") if isinstance(synthesized.get("risk_annotations"), list) else [],
         "rollback_notes": rollback_notes if isinstance(rollback_notes, list) else [],
         "affected_tests": _dedupe([str(item).strip() for item in affected_tests if str(item).strip()]),

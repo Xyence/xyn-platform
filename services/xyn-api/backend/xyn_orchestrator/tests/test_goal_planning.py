@@ -2293,6 +2293,116 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(str(payload.get("checkpoint_state") or ""), "reopened")
         self.assertEqual(str(payload.get("reopen_reason") or ""), "material_scope_changed")
 
+    def test_solution_change_session_checkpoint_reopens_when_proposed_moves_or_file_operations_change(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn API",
+            slug=f"xyn-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["services/xyn-api/backend/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform backend",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Decompose xyn_api.py",
+        )
+        ApplicationArtifactMembership.objects.create(workspace=self.workspace, application=application, artifact=api_artifact, role="primary_api")
+        base_plan = {
+            "planning_mode": "decompose_existing_system",
+            "plan_kind": "decomposition",
+            "selected_artifact_ids": [str(api_artifact.id)],
+            "candidate_files": ["services/xyn-api/backend/xyn_orchestrator/xyn_api.py"],
+            "source_files": ["services/xyn-api/backend/xyn_orchestrator/xyn_api.py"],
+            "destination_modules": ["backend/xyn_orchestrator/api/solutions.py", "backend/xyn_orchestrator/api/runtime.py"],
+            "extraction_seams": ["solution_change_session_workflow", "runtime_run_handlers"],
+            "proposed_moves": [
+                {
+                    "seam": "solution_change_session_workflow",
+                    "from": "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                    "to_module": "backend/xyn_orchestrator/api/solutions.py",
+                    "import_rewrite_target": "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                }
+            ],
+            "file_operations": [
+                {
+                    "operation": "extract_module",
+                    "source": "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                    "destination": "backend/xyn_orchestrator/api/solutions.py",
+                }
+            ],
+            "test_operations": [{"operation": "run", "target": "xyn_orchestrator.tests.test_goal_planning"}],
+            "implementation_steps": ["Extract handlers into modules and keep wrappers."],
+        }
+        changed_plan = {
+            **base_plan,
+            "proposed_moves": [
+                {
+                    "seam": "runtime_run_handlers",
+                    "from": "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                    "to_module": "backend/xyn_orchestrator/solution_change_session/stage_apply_dispatch.py",
+                    "import_rewrite_target": "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                }
+            ],
+            "file_operations": [
+                {
+                    "operation": "extract_module",
+                    "source": "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                    "destination": "backend/xyn_orchestrator/solution_change_session/stage_apply_dispatch.py",
+                }
+            ],
+        }
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Decompose API",
+            request_text="Decompose services/xyn-api/backend/xyn_orchestrator/xyn_api.py into modules.",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(api_artifact.id)],
+            plan_json=base_plan,
+        )
+        checkpoint = xyn_api._ensure_solution_stage_checkpoint(session=session)
+        checkpoint.status = "approved"
+        checkpoint.decided_by = self.identity
+        checkpoint.decided_at = timezone.now()
+        checkpoint.payload_json = {
+            **(checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {}),
+            "scope_hash": xyn_api._solution_plan_scope_hash(base_plan),
+            "approved_scope_hash": xyn_api._solution_plan_scope_hash(base_plan),
+            "scope_signature": xyn_api._solution_plan_scope_signature(base_plan),
+            "approved_scope_signature": xyn_api._solution_plan_scope_signature(base_plan),
+            "checkpoint_state": "approved",
+            "plan_revision": 1,
+            "reopen_reason": "",
+        }
+        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "payload_json", "updated_at"])
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._record_solution_draft_plan",
+            return_value=changed_plan,
+        ):
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(plan_response.status_code, 200)
+        checkpoint.refresh_from_db()
+        self.assertEqual(checkpoint.status, "pending")
+        payload = checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {}
+        self.assertEqual(str(payload.get("checkpoint_state") or ""), "reopened")
+        self.assertEqual(str(payload.get("reopen_reason") or ""), "material_scope_changed")
+
     def test_solution_change_session_decomposition_refinement_without_scope_widening_stays_approved(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         api_artifact = Artifact.objects.create(
