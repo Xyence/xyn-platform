@@ -33216,7 +33216,14 @@ def _ensure_solution_stage_checkpoint(
         defaults={
             "label": "Approve planning scope before stage apply",
             "status": "pending",
-            "payload_json": {"description": "Confirm the selected artifacts and draft plan before staging."},
+            "payload_json": {
+                "description": "Confirm the selected artifacts and draft plan before staging.",
+                "checkpoint_state": "pending",
+                "plan_revision": 0,
+                "scope_hash": "",
+                "scope_signature": {},
+                "reopen_reason": "",
+            },
         },
     )
     return checkpoint
@@ -33416,16 +33423,51 @@ def _record_solution_draft_plan(
 
 def _reset_solution_stage_checkpoint(*, session: SolutionChangeSession) -> SolutionPlanningCheckpoint:
     checkpoint = _ensure_solution_stage_checkpoint(session=session)
+    payload = checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {}
+    payload = {
+        **payload,
+        "checkpoint_state": "pending",
+        "reopen_reason": "",
+    }
     if str(checkpoint.status or "") != "pending":
         checkpoint.status = "pending"
         checkpoint.decided_by = None
         checkpoint.decided_at = None
-        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+        checkpoint.payload_json = payload
+        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "payload_json", "updated_at"])
+    else:
+        checkpoint.payload_json = payload
+        checkpoint.save(update_fields=["payload_json", "updated_at"])
     return checkpoint
 
 
 def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
     payload = plan if isinstance(plan, dict) else {}
+    file_operations_scope: List[Dict[str, str]] = []
+    file_operations = payload.get("file_operations") if isinstance(payload.get("file_operations"), list) else []
+    for row in file_operations:
+        if not isinstance(row, dict):
+            continue
+        operation = str(row.get("operation") or "").strip().lower()
+        source = str(row.get("source") or row.get("path") or row.get("target") or "").strip()
+        destination = str(row.get("destination") or row.get("to_module") or "").strip()
+        if not operation and not source and not destination:
+            continue
+        file_operations_scope.append(
+            {
+                "operation": operation,
+                "source": source,
+                "destination": destination,
+            }
+        )
+    file_operations_scope = sorted(
+        file_operations_scope,
+        key=lambda item: (
+            str(item.get("operation") or ""),
+            str(item.get("source") or ""),
+            str(item.get("destination") or ""),
+        ),
+    )
     return {
         "planning_mode": str(payload.get("planning_mode") or ""),
         "plan_kind": str(payload.get("plan_kind") or ""),
@@ -33454,11 +33496,18 @@ def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
                 if str(item).strip()
             }
         )[:20],
+        "file_operations_scope": file_operations_scope[:50],
     }
 
 
+def _solution_plan_scope_hash(plan: Dict[str, Any]) -> str:
+    signature = _solution_plan_scope_signature(plan)
+    encoded = json.dumps(signature, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _solution_plan_scope_changed(*, previous_plan: Dict[str, Any], next_plan: Dict[str, Any]) -> bool:
-    return _solution_plan_scope_signature(previous_plan) != _solution_plan_scope_signature(next_plan)
+    return _solution_plan_scope_hash(previous_plan) != _solution_plan_scope_hash(next_plan)
 
 
 def _refresh_solution_stage_checkpoint_for_plan_update(
@@ -33469,12 +33518,50 @@ def _refresh_solution_stage_checkpoint_for_plan_update(
 ) -> Tuple[SolutionPlanningCheckpoint, bool, str]:
     checkpoint = _ensure_solution_stage_checkpoint(session=session)
     status = str(checkpoint.status or "").strip()
+    payload = checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {}
+    plan_revision = int(payload.get("plan_revision") or 0)
+    next_scope_signature = _solution_plan_scope_signature(next_plan)
+    next_scope_hash = _solution_plan_scope_hash(next_plan)
+    previous_scope_hash = str(payload.get("scope_hash") or "").strip()
+
     if status != "approved":
         refreshed = _reset_solution_stage_checkpoint(session=session)
-        return refreshed, True, "checkpoint_not_approved"
-    if _solution_plan_scope_changed(previous_plan=previous_plan, next_plan=next_plan):
+        refreshed_payload = refreshed.payload_json if isinstance(refreshed.payload_json, dict) else {}
+        refreshed.payload_json = {
+            **refreshed_payload,
+            "checkpoint_state": "pending",
+            "plan_revision": max(plan_revision, 0),
+            "scope_hash": next_scope_hash,
+            "scope_signature": next_scope_signature,
+            "reopen_reason": "checkpoint_not_approved",
+        }
+        refreshed.save(update_fields=["payload_json", "updated_at"])
+        return refreshed, False, "checkpoint_not_approved"
+    material_scope_changed = _solution_plan_scope_changed(previous_plan=previous_plan, next_plan=next_plan)
+    if previous_scope_hash and previous_scope_hash != next_scope_hash:
+        material_scope_changed = True
+    if material_scope_changed:
         refreshed = _reset_solution_stage_checkpoint(session=session)
-        return refreshed, True, "scope_changed"
+        refreshed_payload = refreshed.payload_json if isinstance(refreshed.payload_json, dict) else {}
+        refreshed.payload_json = {
+            **refreshed_payload,
+            "checkpoint_state": "reopened",
+            "plan_revision": max(plan_revision, 0) + 1,
+            "scope_hash": next_scope_hash,
+            "scope_signature": next_scope_signature,
+            "reopen_reason": "material_scope_changed",
+            "reopen_at": timezone.now().isoformat(),
+        }
+        refreshed.save(update_fields=["payload_json", "updated_at"])
+        return refreshed, True, "material_scope_changed"
+    checkpoint.payload_json = {
+        **payload,
+        "checkpoint_state": "approved",
+        "scope_hash": next_scope_hash,
+        "scope_signature": next_scope_signature,
+        "reopen_reason": "",
+    }
+    checkpoint.save(update_fields=["payload_json", "updated_at"])
     return checkpoint, False, "scope_unchanged"
 
 
@@ -33502,9 +33589,9 @@ def _advance_solution_planning_after_user_response(
         previous_plan=previous_plan,
         next_plan=next_plan,
     )
-    if reopened and reopen_reason == "scope_changed":
+    if reopened and reopen_reason == "material_scope_changed":
         metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
-        metadata["checkpoint_reopen_reason"] = "scope_changed"
+        metadata["checkpoint_reopen_reason"] = "material_scope_changed"
         metadata["checkpoint_reopen_at"] = timezone.now().isoformat()
         session.metadata_json = metadata
         session.save(update_fields=["metadata_json", "updated_at"])
@@ -35166,8 +35253,11 @@ def _generate_solution_change_plan(
             "compatibility_shims",
             "route_update_implications",
             "ordered_migration_steps",
+            "affected_routes",
+            "ordered_extraction_sequence",
         )
         scalar_fields = ("planning_mode", "plan_kind", "confidence", "assumptions", "scaffold_plan")
+        object_fields = ("execution_package",)
         always_fields = ("planner_state", "artifact_relevance")
         for field in scalar_fields:
             current_value = merged.get(field)
@@ -35199,6 +35289,14 @@ def _generate_solution_change_plan(
         for field in always_fields:
             incoming_value = engine_plan.get(field)
             if incoming_value in (None, "", [], {}):
+                continue
+            merged[field] = incoming_value
+        for field in object_fields:
+            incoming_value = engine_plan.get(field)
+            if not isinstance(incoming_value, dict) or not incoming_value:
+                continue
+            current_value = merged.get(field)
+            if isinstance(current_value, dict) and current_value:
                 continue
             merged[field] = incoming_value
         candidate_selected = engine_plan.get("selected_artifact_ids")
@@ -40447,12 +40545,25 @@ def application_solution_change_session_checkpoint_decision(
     decision = str(payload.get("decision") or "").strip().lower()
     if decision not in {"approved", "rejected"}:
         return JsonResponse({"error": "decision must be approved or rejected"}, status=400)
+    existing_payload = checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {}
+    scope_signature = _solution_plan_scope_signature(session.plan_json if isinstance(session.plan_json, dict) else {})
+    scope_hash = _solution_plan_scope_hash(session.plan_json if isinstance(session.plan_json, dict) else {})
+    plan_revision = int(existing_payload.get("plan_revision") or 0)
+    if decision == "approved":
+        plan_revision = max(plan_revision, 0) + 1
     checkpoint.status = decision
     checkpoint.decided_by = identity
     checkpoint.decided_at = timezone.now()
     checkpoint.payload_json = {
-        **(checkpoint.payload_json if isinstance(checkpoint.payload_json, dict) else {}),
+        **existing_payload,
         "decision_notes": str(payload.get("notes") or "").strip(),
+        "checkpoint_state": "approved" if decision == "approved" else "rejected",
+        "scope_hash": scope_hash if decision == "approved" else str(existing_payload.get("scope_hash") or ""),
+        "scope_signature": scope_signature if decision == "approved" else (existing_payload.get("scope_signature") if isinstance(existing_payload.get("scope_signature"), dict) else {}),
+        "approved_scope_hash": scope_hash if decision == "approved" else str(existing_payload.get("approved_scope_hash") or ""),
+        "approved_scope_signature": scope_signature if decision == "approved" else (existing_payload.get("approved_scope_signature") if isinstance(existing_payload.get("approved_scope_signature"), dict) else {}),
+        "plan_revision": plan_revision,
+        "reopen_reason": "",
     }
     checkpoint.save(update_fields=["status", "decided_by", "decided_at", "payload_json", "updated_at"])
     _append_solution_planning_turn(
@@ -40619,9 +40730,9 @@ def application_solution_change_session_plan(
         previous_plan=previous_plan,
         next_plan=next_plan,
     )
-    if reopened and reopen_reason == "scope_changed":
+    if reopened and reopen_reason == "material_scope_changed":
         metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
-        metadata["checkpoint_reopen_reason"] = "scope_changed"
+        metadata["checkpoint_reopen_reason"] = "material_scope_changed"
         metadata["checkpoint_reopen_at"] = timezone.now().isoformat()
         session.metadata_json = metadata
         session.save(update_fields=["metadata_json", "updated_at"])
