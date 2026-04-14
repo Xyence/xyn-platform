@@ -83,8 +83,13 @@ def _classify_request(text: str, *, artifact_count: int) -> PlannerClassificatio
             "strict refactor",
             "structural refactor",
             "decompose",
+            "decomposition",
+            "split",
+            "break up monolith",
             "extract into modules",
             "extract into smaller modules",
+            "move handlers into modules",
+            "separate domains",
             "delegation wrappers",
             "preserve behavior",
             "no feature additions",
@@ -131,7 +136,7 @@ def _classify_request(text: str, *, artifact_count: int) -> PlannerClassificatio
         confidence = 0.9
     elif structural_refactor:
         planning_mode = "decompose_existing_system"
-        plan_kind = "structural_refactor"
+        plan_kind = "decomposition"
         confidence = 0.88
     elif ui_change and api_change:
         planning_mode = "cross_artifact_change"
@@ -327,6 +332,33 @@ def _build_decomposition_steps(candidate_files: Sequence[str]) -> List[str]:
     return steps
 
 
+def _normalized_module_name(path: str) -> str:
+    token = str(path or "").strip().replace("\\", "/")
+    token = token.rsplit(".", 1)[0]
+    return token.replace("/", ".").strip(".")
+
+
+def _extract_planner_hints(base_plan: Dict[str, Any], planner_hints: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
+    merged = planner_hints if isinstance(planner_hints, dict) else {}
+
+    def _collect(key: str) -> List[str]:
+        out: List[str] = []
+        for source in (merged.get(key), base_plan.get(key)):
+            if isinstance(source, list):
+                for item in source:
+                    token = str(item or "").strip()
+                    if token and token not in out:
+                        out.append(token)
+        return out
+
+    return {
+        "target_source_files": _collect("target_source_files"),
+        "extraction_seams": _collect("extraction_seams"),
+        "moved_handlers_modules": _collect("moved_handlers_modules"),
+        "required_test_suites": _collect("required_test_suites"),
+    }
+
+
 def _build_modify_steps(candidate_files: Sequence[str], *, full_stack: bool) -> List[str]:
     primary = str(candidate_files[0] if candidate_files else "target module").strip()
     if full_stack:
@@ -354,24 +386,84 @@ def _build_create_app_steps() -> List[str]:
 class _BasePlanner:
     mode = "modify_existing_system"
 
-    def synthesize(self, *, candidate_files: Sequence[str], classification: PlannerClassification, request_text: str) -> Dict[str, Any]:
+    def synthesize(
+        self,
+        *,
+        candidate_files: Sequence[str],
+        classification: PlannerClassification,
+        request_text: str,
+        planner_hints: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[str, Any]:
         raise NotImplementedError
 
 
 class PythonMonolithDecompositionPlanner(_BasePlanner):
     mode = "decompose_existing_system"
 
-    def synthesize(self, *, candidate_files: Sequence[str], classification: PlannerClassification, request_text: str) -> Dict[str, Any]:
-        steps = _build_decomposition_steps(candidate_files)
+    def synthesize(
+        self,
+        *,
+        candidate_files: Sequence[str],
+        classification: PlannerClassification,
+        request_text: str,
+        planner_hints: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[str, Any]:
+        hints = planner_hints if isinstance(planner_hints, dict) else {}
+        hinted_sources = [str(item).strip() for item in (hints.get("target_source_files") or []) if str(item).strip()]
+        source_files = _dedupe([*hinted_sources, *[str(item).strip() for item in candidate_files if str(item).strip()]])
+        if not source_files:
+            source_files = [str(candidate_files[0] if candidate_files else "services/xyn-api/backend/xyn_orchestrator/xyn_api.py").strip()]
+        extraction_seams = _dedupe([str(item).strip() for item in (hints.get("extraction_seams") or []) if str(item).strip()])
+        if not extraction_seams:
+            extraction_seams = [
+                "solution_change_session_workflow",
+                "runtime_run_handlers",
+                "release_target_handlers",
+            ]
+        destination_modules = _dedupe([str(item).strip() for item in (hints.get("moved_handlers_modules") or []) if str(item).strip()])
+        if not destination_modules:
+            destination_modules = [
+                "xyn_orchestrator.solution_change_session.workflow_handlers",
+                "xyn_orchestrator.runtime_runs.handlers",
+                "xyn_orchestrator.release_targets.handlers",
+            ]
+        required_tests = _dedupe([str(item).strip() for item in (hints.get("required_test_suites") or []) if str(item).strip()])
+        if not required_tests:
+            required_tests = [
+                "xyn_orchestrator.tests.test_goal_planning",
+                "xyn_orchestrator.tests.test_bearer_workflow_auth",
+            ]
+        proposed_moves = []
+        for index, seam in enumerate(extraction_seams):
+            destination = destination_modules[index] if index < len(destination_modules) else destination_modules[-1]
+            proposed_moves.append(
+                {
+                    "seam": seam,
+                    "from": source_files[0],
+                    "to_module": destination,
+                }
+            )
+        steps = _build_decomposition_steps(source_files)
         return {
             "implementation_steps": steps,
             "file_operations": [
-                {"operation": "extract_module", "source": str(candidate_files[0] if candidate_files else ""), "destination": "<new_module_path>", "notes": "move cohesive workflow logic"},
-                {"operation": "delegate_wrapper", "source": str(candidate_files[0] if candidate_files else ""), "notes": "preserve compatibility entrypoint"},
+                {
+                    "operation": "extract_module",
+                    "source": str(source_files[0] if source_files else ""),
+                    "destination": str(destination_modules[0] if destination_modules else "<new_module_path>"),
+                    "notes": "move cohesive workflow logic",
+                },
+                {
+                    "operation": "delegate_wrapper",
+                    "source": str(source_files[0] if source_files else ""),
+                    "notes": "preserve compatibility entrypoint",
+                },
             ],
             "test_operations": [
-                {"operation": "run", "target": "workflow regression tests", "scope": "solution-change-session"},
-                {"operation": "run", "target": "integration smoke", "scope": "request/response compatibility"},
+                *[
+                    {"operation": "run", "target": suite, "scope": "decomposition-regression"}
+                    for suite in required_tests
+                ],
             ],
             "compatibility_constraints": [
                 "Maintain identical request/response behavior.",
@@ -384,13 +476,45 @@ class PythonMonolithDecompositionPlanner(_BasePlanner):
             "rollback_notes": [
                 "Rollback by restoring wrapper-only commit and reverting extracted module import wiring.",
             ],
+            "source_files": source_files,
+            "destination_modules": destination_modules,
+            "extraction_seams": extraction_seams,
+            "proposed_moves": proposed_moves,
+            "compatibility_shims": [
+                {
+                    "source_module": _normalized_module_name(source_files[0]),
+                    "shim_type": "delegation_wrapper",
+                    "reason": "preserve import and route compatibility during incremental extraction",
+                }
+            ],
+            "route_update_implications": [
+                "Update xyn_api routing handlers to delegate into extracted modules.",
+                "Preserve endpoint paths and response envelopes while extraction is in progress.",
+            ],
+            "ordered_migration_steps": [
+                "identify_domain_clusters",
+                "extract_runtime_run_handlers",
+                "extract_solution_change_session_handlers",
+                "update_imports_and_router_bindings",
+                "add_compatibility_exports",
+                "run_required_test_suites",
+                "verify_preview_and_commit_readiness",
+            ],
+            "affected_tests": required_tests,
         }
 
 
 class PythonFeatureModificationPlanner(_BasePlanner):
     mode = "modify_existing_system"
 
-    def synthesize(self, *, candidate_files: Sequence[str], classification: PlannerClassification, request_text: str) -> Dict[str, Any]:
+    def synthesize(
+        self,
+        *,
+        candidate_files: Sequence[str],
+        classification: PlannerClassification,
+        request_text: str,
+        planner_hints: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[str, Any]:
         full_stack = "ui_change" in classification.intents and "api_change" in classification.intents
         steps = _build_modify_steps(candidate_files, full_stack=full_stack)
         return {
@@ -417,7 +541,14 @@ class PythonFeatureModificationPlanner(_BasePlanner):
 class PythonAppCreationPlanner(_BasePlanner):
     mode = "create_new_application"
 
-    def synthesize(self, *, candidate_files: Sequence[str], classification: PlannerClassification, request_text: str) -> Dict[str, Any]:
+    def synthesize(
+        self,
+        *,
+        candidate_files: Sequence[str],
+        classification: PlannerClassification,
+        request_text: str,
+        planner_hints: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[str, Any]:
         steps = _build_create_app_steps()
         return {
             "implementation_steps": steps,
@@ -450,7 +581,14 @@ class PythonAppCreationPlanner(_BasePlanner):
 class FullStackCoordinationPlanner(_BasePlanner):
     mode = "cross_artifact_change"
 
-    def synthesize(self, *, candidate_files: Sequence[str], classification: PlannerClassification, request_text: str) -> Dict[str, Any]:
+    def synthesize(
+        self,
+        *,
+        candidate_files: Sequence[str],
+        classification: PlannerClassification,
+        request_text: str,
+        planner_hints: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[str, Any]:
         steps = _build_modify_steps(candidate_files, full_stack=True)
         return {
             "implementation_steps": steps,
@@ -491,6 +629,7 @@ def build_solution_change_execution_plan(
     artifacts: Sequence[PlannerArtifactInput],
     selected_artifact_ids: Sequence[str],
     analysis: Optional[Dict[str, Any]] = None,
+    planner_hints: Optional[Dict[str, Any]] = None,
     line_count_lookup: Optional[Callable[[str], Optional[int]]] = None,
 ) -> Dict[str, Any]:
     base = dict(base_plan or {})
@@ -515,12 +654,23 @@ def build_solution_change_execution_plan(
         selected_ids = [str(item.get("artifact_id") or "").strip() for item in ranked[:2] if int(item.get("score") or 0) > 0]
         if classification.planning_mode in {"decompose_existing_system", "modify_existing_system"} and selected_ids:
             selected_ids = selected_ids[:1]
+    if classification.planning_mode == "decompose_existing_system" and ranked:
+        top = ranked[0]
+        second = ranked[1] if len(ranked) > 1 else {}
+        top_score = int(top.get("score") or 0)
+        second_score = int(second.get("score") or -999)
+        if top_score >= second_score + 5:
+            selected_ids = [str(top.get("artifact_id") or "").strip()]
 
     planner = _planner_for_mode(classification.planning_mode)
+    hints = _extract_planner_hints(base, planner_hints)
+    if hints.get("target_source_files"):
+        candidate_files = _dedupe([*hints.get("target_source_files", []), *candidate_files])
     synthesized = planner.synthesize(
         candidate_files=candidate_files,
         classification=classification,
         request_text=request_text,
+        planner_hints=hints,
     )
 
     implementation_steps = _dedupe([str(item or "").strip() for item in (synthesized.get("implementation_steps") or []) if str(item or "").strip()])
@@ -552,6 +702,11 @@ def build_solution_change_execution_plan(
         for item in (synthesized.get("test_operations") if isinstance(synthesized.get("test_operations"), list) else [])
         if isinstance(item, dict) and str(item.get("target") or "").strip()
     ]
+    if isinstance(synthesized.get("affected_tests"), list):
+        for value in synthesized.get("affected_tests") or []:
+            token = str(value or "").strip()
+            if token:
+                affected_tests.append(token)
 
     architecture = {
         "backend_artifacts": [item.get("artifact_id") for item in ranked if any(token in str(item.get("role") or "") for token in ("api", "worker", "runtime"))],
@@ -584,6 +739,13 @@ def build_solution_change_execution_plan(
         "rollback_notes": synthesized.get("rollback_notes") if isinstance(synthesized.get("rollback_notes"), list) else [],
         "affected_tests": _dedupe([str(item).strip() for item in affected_tests if str(item).strip()]),
         "compatibility_constraints": synthesized.get("compatibility_constraints") if isinstance(synthesized.get("compatibility_constraints"), list) else [],
+        "source_files": synthesized.get("source_files") if isinstance(synthesized.get("source_files"), list) else [],
+        "destination_modules": synthesized.get("destination_modules") if isinstance(synthesized.get("destination_modules"), list) else [],
+        "extraction_seams": synthesized.get("extraction_seams") if isinstance(synthesized.get("extraction_seams"), list) else [],
+        "proposed_moves": synthesized.get("proposed_moves") if isinstance(synthesized.get("proposed_moves"), list) else [],
+        "compatibility_shims": synthesized.get("compatibility_shims") if isinstance(synthesized.get("compatibility_shims"), list) else [],
+        "route_update_implications": synthesized.get("route_update_implications") if isinstance(synthesized.get("route_update_implications"), list) else [],
+        "ordered_migration_steps": synthesized.get("ordered_migration_steps") if isinstance(synthesized.get("ordered_migration_steps"), list) else [],
         "planning_checkpoints": [
             {"checkpoint_key": "scope_confirmed", "label": "Scope confirmed", "required_before": "architecture_confirmed"},
             {"checkpoint_key": "architecture_confirmed", "label": "Architecture confirmed", "required_before": "execution_plan_confirmed"},

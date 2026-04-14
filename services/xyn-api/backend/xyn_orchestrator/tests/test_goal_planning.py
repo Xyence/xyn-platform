@@ -10,6 +10,7 @@ from unittest import mock
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.test import RequestFactory, TestCase
+from django.utils import timezone
 
 from xyn_orchestrator.goal_progress import compute_goal_execution_metrics, compute_goal_health_indicators, compute_goal_progress
 from xyn_orchestrator.development_intelligence import compute_goal_development_insights, compute_goal_diagnostic
@@ -1928,6 +1929,72 @@ class GoalPlanningTests(TestCase):
         analysis = ((payload.get("session") or {}).get("analysis") or {})
         self.assertTrue(str(analysis.get("analyzed_at") or "").strip())
         self.assertIn("ui", [str(item) for item in (analysis.get("suggested_workstreams") or [])])
+
+    def test_solution_change_session_plan_does_not_reopen_approved_checkpoint_when_scope_unchanged(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Xyn API",
+            slug=f"xyn-api-{uuid.uuid4().hex[:6]}",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["services/xyn-api/backend/"],
+            edit_mode="repo_backed",
+        )
+        application = Application.objects.create(
+            workspace=self.workspace,
+            name="Xyn",
+            summary="Platform backend",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="Decompose xyn_api.py",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Decompose API",
+            request_text="Decompose services/xyn-api/backend/xyn_orchestrator/xyn_api.py into modules.",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(api_artifact.id)],
+            plan_json={
+                "planning_mode": "decompose_existing_system",
+                "plan_kind": "decomposition",
+                "selected_artifact_ids": [str(api_artifact.id)],
+                "candidate_files": ["services/xyn-api/backend/xyn_orchestrator/xyn_api.py"],
+                "extraction_seams": ["solution_change_session_handlers"],
+                "implementation_steps": ["Extract handlers into modules."],
+            },
+        )
+        checkpoint = xyn_api._ensure_solution_stage_checkpoint(session=session)
+        checkpoint.status = "approved"
+        checkpoint.decided_by = self.identity
+        checkpoint.decided_at = timezone.now()
+        checkpoint.save(update_fields=["status", "decided_by", "decided_at", "updated_at"])
+
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._record_solution_draft_plan",
+            return_value=session.plan_json,
+        ):
+            plan_response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(plan_response.status_code, 200)
+        checkpoint.refresh_from_db()
+        self.assertEqual(checkpoint.status, "approved")
 
     def test_solution_change_session_create_without_memberships_asks_plain_language_clarification_when_ambiguous(self):
         application = Application.objects.create(

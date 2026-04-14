@@ -33402,6 +33402,13 @@ def _record_solution_draft_plan(
             "validation_sequence": list(plan.get("validation_sequence") or []),
             "preview_requirements": list(plan.get("preview_requirements") or []),
             "risk_annotations": list(plan.get("risk_annotations") or []),
+            "source_files": list(plan.get("source_files") or []),
+            "destination_modules": list(plan.get("destination_modules") or []),
+            "extraction_seams": list(plan.get("extraction_seams") or []),
+            "proposed_moves": list(plan.get("proposed_moves") or []),
+            "compatibility_shims": list(plan.get("compatibility_shims") or []),
+            "route_update_implications": list(plan.get("route_update_implications") or []),
+            "ordered_migration_steps": list(plan.get("ordered_migration_steps") or []),
         },
     )
     return plan
@@ -33417,6 +33424,60 @@ def _reset_solution_stage_checkpoint(*, session: SolutionChangeSession) -> Solut
     return checkpoint
 
 
+def _solution_plan_scope_signature(plan: Dict[str, Any]) -> Dict[str, Any]:
+    payload = plan if isinstance(plan, dict) else {}
+    return {
+        "planning_mode": str(payload.get("planning_mode") or ""),
+        "plan_kind": str(payload.get("plan_kind") or ""),
+        "selected_artifact_ids": sorted(
+            {
+                str(item).strip()
+                for item in (
+                    payload.get("selected_artifact_ids")
+                    if isinstance(payload.get("selected_artifact_ids"), list)
+                    else []
+                )
+                if str(item).strip()
+            }
+        ),
+        "candidate_files": sorted(
+            {
+                str(item).strip()
+                for item in (payload.get("candidate_files") if isinstance(payload.get("candidate_files"), list) else [])
+                if str(item).strip()
+            }
+        )[:20],
+        "extraction_seams": sorted(
+            {
+                str(item).strip()
+                for item in (payload.get("extraction_seams") if isinstance(payload.get("extraction_seams"), list) else [])
+                if str(item).strip()
+            }
+        )[:20],
+    }
+
+
+def _solution_plan_scope_changed(*, previous_plan: Dict[str, Any], next_plan: Dict[str, Any]) -> bool:
+    return _solution_plan_scope_signature(previous_plan) != _solution_plan_scope_signature(next_plan)
+
+
+def _refresh_solution_stage_checkpoint_for_plan_update(
+    *,
+    session: SolutionChangeSession,
+    previous_plan: Dict[str, Any],
+    next_plan: Dict[str, Any],
+) -> Tuple[SolutionPlanningCheckpoint, bool, str]:
+    checkpoint = _ensure_solution_stage_checkpoint(session=session)
+    status = str(checkpoint.status or "").strip()
+    if status != "approved":
+        refreshed = _reset_solution_stage_checkpoint(session=session)
+        return refreshed, True, "checkpoint_not_approved"
+    if _solution_plan_scope_changed(previous_plan=previous_plan, next_plan=next_plan):
+        refreshed = _reset_solution_stage_checkpoint(session=session)
+        return refreshed, True, "scope_changed"
+    return checkpoint, False, "scope_unchanged"
+
+
 def _advance_solution_planning_after_user_response(
     *,
     session: SolutionChangeSession,
@@ -33426,7 +33487,8 @@ def _advance_solution_planning_after_user_response(
     if planning_state.get("pending_question") or planning_state.get("pending_option_set"):
         return
     has_existing_plan = isinstance(session.plan_json, dict) and bool(session.plan_json)
-    _record_solution_draft_plan(
+    previous_plan = session.plan_json if isinstance(session.plan_json, dict) else {}
+    next_plan = _record_solution_draft_plan(
         session=session,
         memberships=memberships,
         summary=(
@@ -33435,11 +33497,21 @@ def _advance_solution_planning_after_user_response(
             else "Revised draft plan using your latest planning response."
         ),
     )
-    checkpoint = _reset_solution_stage_checkpoint(session=session)
+    checkpoint, reopened, reopen_reason = _refresh_solution_stage_checkpoint_for_plan_update(
+        session=session,
+        previous_plan=previous_plan,
+        next_plan=next_plan,
+    )
+    if reopened and reopen_reason == "scope_changed":
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        metadata["checkpoint_reopen_reason"] = "scope_changed"
+        metadata["checkpoint_reopen_at"] = timezone.now().isoformat()
+        session.metadata_json = metadata
+        session.save(update_fields=["metadata_json", "updated_at"])
     _maybe_emit_solution_checkpoint_turn(
         session=session,
         checkpoint=checkpoint,
-        force_emit=has_existing_plan,
+        force_emit=has_existing_plan or reopened,
     )
 
 
@@ -35087,6 +35159,13 @@ def _generate_solution_change_plan(
             "affected_tests",
             "compatibility_constraints",
             "planning_checkpoints",
+            "source_files",
+            "destination_modules",
+            "extraction_seams",
+            "proposed_moves",
+            "compatibility_shims",
+            "route_update_implications",
+            "ordered_migration_steps",
         )
         scalar_fields = ("planning_mode", "plan_kind", "confidence", "assumptions", "scaffold_plan")
         always_fields = ("planner_state", "artifact_relevance")
@@ -35100,7 +35179,9 @@ def _generate_solution_change_plan(
                 incoming_mode = str(incoming_value or "").strip()
                 # Preserve legacy deterministic/code_aware contract for existing callers;
                 # expose explicit planner-mode taxonomy in a dedicated field.
-                if existing_mode in {"deterministic", "code_aware"}:
+                if incoming_mode == "decompose_existing_system":
+                    merged[field] = incoming_mode
+                elif existing_mode in {"deterministic", "code_aware"}:
                     merged["planner_mode"] = incoming_mode
                 else:
                     merged[field] = incoming_mode
@@ -35120,10 +35201,15 @@ def _generate_solution_change_plan(
             if incoming_value in (None, "", [], {}):
                 continue
             merged[field] = incoming_value
-        if not (merged.get("selected_artifact_ids") if isinstance(merged.get("selected_artifact_ids"), list) else []):
-            candidate_selected = engine_plan.get("selected_artifact_ids")
-            if isinstance(candidate_selected, list):
-                merged["selected_artifact_ids"] = [str(item).strip() for item in candidate_selected if str(item).strip()]
+        candidate_selected = engine_plan.get("selected_artifact_ids")
+        if isinstance(candidate_selected, list):
+            normalized_selected = [str(item).strip() for item in candidate_selected if str(item).strip()]
+            existing_selected = merged.get("selected_artifact_ids") if isinstance(merged.get("selected_artifact_ids"), list) else []
+            incoming_mode = str(engine_plan.get("planning_mode") or "").strip()
+            if incoming_mode == "decompose_existing_system" and normalized_selected:
+                merged["selected_artifact_ids"] = normalized_selected
+            elif not existing_selected and normalized_selected:
+                merged["selected_artifact_ids"] = normalized_selected
         return merged
 
     def _finalize_plan_payload(
@@ -35142,6 +35228,7 @@ def _generate_solution_change_plan(
             artifacts=_planner_artifact_inputs(),
             selected_artifact_ids=[str(member.artifact_id) for member in selected_members_for_plan],
             analysis=session.analysis_json if isinstance(session.analysis_json, dict) else {},
+            planner_hints=session.metadata_json if isinstance(session.metadata_json, dict) else {},
             line_count_lookup=lambda path: _line_count_lookup(
                 path,
                 candidate_members=selected_members_for_plan if selected_members_for_plan else memberships,
@@ -40520,14 +40607,25 @@ def application_solution_change_session_plan(
             planning_state = _solution_planning_state(session)
     if planning_state.get("pending_option_set"):
         return JsonResponse({"error": "planner option selection is pending; select an option before generating a draft plan"}, status=409)
-    _record_solution_draft_plan(
+    previous_plan = session.plan_json if isinstance(session.plan_json, dict) else {}
+    next_plan = _record_solution_draft_plan(
         session=session,
         memberships=memberships,
         summary="Generated structured cross-artifact draft plan.",
         force_code_aware_planning=force_code_aware_planning,
     )
-    checkpoint = _reset_solution_stage_checkpoint(session=session)
-    _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+    checkpoint, reopened, reopen_reason = _refresh_solution_stage_checkpoint_for_plan_update(
+        session=session,
+        previous_plan=previous_plan,
+        next_plan=next_plan,
+    )
+    if reopened and reopen_reason == "scope_changed":
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        metadata["checkpoint_reopen_reason"] = "scope_changed"
+        metadata["checkpoint_reopen_at"] = timezone.now().isoformat()
+        session.metadata_json = metadata
+        session.save(update_fields=["metadata_json", "updated_at"])
+    _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint, force_emit=reopened)
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {

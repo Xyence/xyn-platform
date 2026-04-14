@@ -157,3 +157,44 @@ class SolutionPlannerEngineTests(SimpleTestCase):
         self.assertTrue(plan.get("file_operations"))
         self.assertTrue(plan.get("test_operations"))
         self.assertTrue(plan.get("validation_sequence"))
+
+    def test_decomposition_plan_uses_metadata_hints_and_returns_extraction_fields(self):
+        request_text = "Decompose xyn_api.py by extracting handlers into modules with compatibility wrappers."
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=[],
+            planner_hints={
+                "target_source_files": ["services/xyn-api/backend/xyn_orchestrator/xyn_api.py"],
+                "extraction_seams": ["runtime_run_handlers", "solution_change_session_handlers"],
+                "moved_handlers_modules": [
+                    "xyn_orchestrator.runtime_runs.handlers",
+                    "xyn_orchestrator.solution_change_session.workflow_handlers",
+                ],
+                "required_test_suites": ["xyn_orchestrator.tests.test_goal_planning"],
+            },
+        )
+        self.assertEqual(plan.get("planning_mode"), "decompose_existing_system")
+        self.assertEqual(plan.get("plan_kind"), "decomposition")
+        self.assertTrue(plan.get("source_files"))
+        self.assertTrue(plan.get("destination_modules"))
+        self.assertTrue(plan.get("extraction_seams"))
+        self.assertTrue(plan.get("proposed_moves"))
+        self.assertTrue(plan.get("compatibility_shims"))
+        self.assertTrue(plan.get("ordered_migration_steps"))
+        self.assertIn("xyn_orchestrator.tests.test_goal_planning", plan.get("affected_tests") or [])
+
+    def test_decomposition_mode_narrows_to_dominant_artifact(self):
+        request_text = (
+            "STRICT REFACTOR: split services/xyn-api/backend/xyn_orchestrator/xyn_api.py "
+            "into modules and keep UI unchanged."
+        )
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=["api-1", "ui-1"],
+        )
+        selected = plan.get("selected_artifact_ids") or []
+        self.assertEqual(selected, ["api-1"])
