@@ -36560,10 +36560,21 @@ def _serialize_solution_change_session(
     requires_commit_provenance = _solution_change_session_requires_commit_provenance(session)
     promote_eligibility = _solution_change_session_promote_eligibility(session=session, application=session.application)
     evidence_ref = _latest_solution_change_session_promotion_evidence_ref(session)
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    scope = metadata.get("scope") if isinstance(metadata.get("scope"), dict) else {}
+    scope_type = str(scope.get("scope_type") or "application").strip().lower() or "application"
     return {
         "id": str(session.id),
         "workspace_id": str(session.workspace_id),
         "application_id": str(session.application_id),
+        "scope_type": scope_type,
+        "scope": {
+            "scope_type": scope_type,
+            "application_id": str(session.application_id),
+            "artifact_id": str(scope.get("artifact_id") or ""),
+            "artifact_slug": str(scope.get("artifact_slug") or ""),
+            "workspace_id": str(session.workspace_id),
+        },
         "title": session.title,
         "request_text": session.request_text or "",
         "status": session.status,
@@ -36577,7 +36588,7 @@ def _serialize_solution_change_session(
         "staged_changes": session.staged_changes_json if isinstance(session.staged_changes_json, dict) else {},
         "preview": session.preview_json if isinstance(session.preview_json, dict) else {},
         "validation": session.validation_json if isinstance(session.validation_json, dict) else {},
-        "metadata": session.metadata_json if isinstance(session.metadata_json, dict) else {},
+        "metadata": metadata,
         "repo_commit_count": int(commit_count),
         "requires_commit_provenance": bool(requires_commit_provenance),
         "promote_eligibility": promote_eligibility,
@@ -40645,6 +40656,434 @@ def application_artifact_membership_detail(
 
 @csrf_exempt
 @login_required
+def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
+    def _scope_error(
+        *,
+        status: int,
+        error: str,
+        blocked_reason: str,
+        error_classification: str,
+        workspace_id: str = "",
+        application_id: str = "",
+        artifact_id: str = "",
+        artifact_slug: str = "",
+        next_allowed_actions: Optional[List[str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> JsonResponse:
+        payload: Dict[str, Any] = {
+            "error": error,
+            "blocked_reason": blocked_reason,
+            "error_classification": error_classification,
+            "scope_type": "artifact" if (artifact_id or artifact_slug) else "application",
+            "scope": {
+                "scope_type": "artifact" if (artifact_id or artifact_slug) else "application",
+                "workspace_id": str(workspace_id or ""),
+                "application_id": str(application_id or ""),
+                "artifact_id": str(artifact_id or ""),
+                "artifact_slug": str(artifact_slug or ""),
+            },
+            "workspace_id": str(workspace_id or ""),
+            "application_id": str(application_id or ""),
+            "artifact_id": str(artifact_id or ""),
+            "artifact_slug": str(artifact_slug or ""),
+            "next_allowed_actions": list(next_allowed_actions or []),
+        }
+        if isinstance(extra, dict):
+            payload.update(extra)
+        return JsonResponse(payload, status=status)
+
+    def _infer_artifact_candidates_from_target_paths(target_source_files: List[str]) -> List[str]:
+        candidates: set[str] = set()
+        for raw_path in target_source_files:
+            path = str(raw_path or "").strip().lower().replace("\\", "/")
+            if not path:
+                continue
+            if (
+                path.startswith("backend/")
+                or "/backend/" in path
+                or "xyn_orchestrator/" in path
+                or path.endswith(".py")
+            ):
+                candidates.add("xyn-api")
+            if (
+                path.startswith("ui/")
+                or "/frontend/" in path
+                or path.startswith("src/")
+                or path.endswith(".tsx")
+                or path.endswith(".ts")
+            ):
+                candidates.add("xyn-ui")
+        return sorted(candidates)
+
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    if request.method != "POST":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    payload = _parse_json(request)
+    application_id = str(payload.get("application_id") or "").strip()
+    artifact_id = str(payload.get("artifact_id") or "").strip()
+    artifact_slug = str(payload.get("artifact_slug") or "").strip()
+    workspace_id = str(payload.get("workspace_id") or "").strip()
+    decomposition_campaign = payload.get("decomposition_campaign") if isinstance(payload.get("decomposition_campaign"), dict) else {}
+    target_source_files = payload.get("target_source_files")
+    if not isinstance(target_source_files, list):
+        target_source_files = decomposition_campaign.get("target_source_files")
+    normalized_target_paths = [
+        str(item or "").strip()
+        for item in (target_source_files if isinstance(target_source_files, list) else [])
+        if str(item or "").strip()
+    ]
+
+    if application_id and (artifact_id or artifact_slug):
+        application = Application.objects.select_related("workspace").filter(id=application_id).first()
+        if application is None:
+            return _scope_error(
+                status=404,
+                error="application not found",
+                blocked_reason="application_not_found",
+                error_classification="application_not_found",
+                application_id=application_id,
+                artifact_id=artifact_id,
+                artifact_slug=artifact_slug,
+                next_allowed_actions=["list_applications", "list_artifacts"],
+            )
+        if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
+            return JsonResponse({"error": "forbidden"}, status=403)
+        app_artifact_qs = Artifact.objects.filter(workspace_id=application.workspace_id)
+        requested_artifact = app_artifact_qs.filter(id=artifact_id).first() if artifact_id else None
+        if requested_artifact is None and artifact_slug:
+            requested_artifact = app_artifact_qs.filter(slug=artifact_slug).first()
+        if requested_artifact is None:
+            return _scope_error(
+                status=404,
+                error="artifact not found",
+                blocked_reason="artifact_not_found",
+                error_classification="artifact_not_found",
+                workspace_id=str(application.workspace_id),
+                application_id=application_id,
+                artifact_id=artifact_id,
+                artifact_slug=artifact_slug,
+                next_allowed_actions=["list_artifacts", "get_application"],
+            )
+        membership_exists = ApplicationArtifactMembership.objects.filter(
+            application_id=application.id,
+            artifact_id=requested_artifact.id,
+        ).exists()
+        if not membership_exists:
+            return _scope_error(
+                status=409,
+                error="application/artifact scope mismatch",
+                blocked_reason="contract_mismatch",
+                error_classification="contract_mismatch",
+                workspace_id=str(application.workspace_id),
+                application_id=application_id,
+                artifact_id=str(requested_artifact.id),
+                artifact_slug=str(_artifact_slug(requested_artifact) or ""),
+                next_allowed_actions=["get_application", "list_application_artifact_memberships", "list_artifacts"],
+                extra={"detail": "artifact is not bound to the supplied application"},
+            )
+
+    if application_id:
+        return application_solution_change_sessions_collection(request, application_id=application_id)
+
+    if not workspace_id:
+        return JsonResponse(
+            {
+                "error": "workspace_id is required when application_id is omitted",
+                "blocked_reason": "scope_resolution_failed",
+                "error_classification": "scope_resolution_failed",
+                "next_allowed_actions": ["list_workspaces", "list_artifacts"],
+            },
+            status=400,
+        )
+    workspace = _resolve_workspace_for_identity(identity, workspace_id)
+    if workspace is None:
+        return JsonResponse(
+            {
+                "error": "workspace not accessible",
+                "blocked_reason": "workspace_forbidden",
+                "error_classification": "auth_expired",
+                "workspace_id": workspace_id,
+            },
+            status=403,
+        )
+    artifact_qs = Artifact.objects.filter(workspace=workspace).select_related("type")
+    artifact = artifact_qs.filter(id=artifact_id).first() if artifact_id else None
+    if artifact is not None and artifact_slug and str(_artifact_slug(artifact) or "") != artifact_slug:
+        return _scope_error(
+            status=409,
+            error="artifact_id and artifact_slug refer to different artifacts",
+            blocked_reason="contract_mismatch",
+            error_classification="contract_mismatch",
+            workspace_id=str(workspace.id),
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            next_allowed_actions=["list_artifacts"],
+        )
+    if artifact is None and artifact_slug:
+        artifact = artifact_qs.filter(slug=artifact_slug).first()
+
+    if artifact is None and not artifact_id and not artifact_slug:
+        inferred_slugs = _infer_artifact_candidates_from_target_paths(normalized_target_paths)
+        available_by_slug = {
+            str(_artifact_slug(item) or ""): item
+            for item in artifact_qs
+            if str(_artifact_slug(item) or "")
+        }
+        inferred_matches = [slug for slug in inferred_slugs if slug in available_by_slug]
+        if len(inferred_matches) == 1:
+            artifact_slug = inferred_matches[0]
+            artifact = available_by_slug[artifact_slug]
+        elif len(inferred_matches) > 1:
+            return _scope_error(
+                status=409,
+                error="artifact scope could not be inferred uniquely from target_source_files",
+                blocked_reason="scope_resolution_failed",
+                error_classification="scope_resolution_failed",
+                workspace_id=str(workspace.id),
+                next_allowed_actions=["list_artifacts", "create_decomposition_campaign_with_artifact_slug"],
+                extra={
+                    "candidate_artifact_slugs": inferred_matches,
+                    "target_source_files": normalized_target_paths,
+                },
+            )
+        else:
+            return _scope_error(
+                status=400,
+                error="artifact_id or artifact_slug is required when application_id is omitted",
+                blocked_reason="scope_resolution_failed",
+                error_classification="scope_resolution_failed",
+                workspace_id=str(workspace.id),
+                next_allowed_actions=["list_artifacts", "create_decomposition_campaign_with_artifact_slug"],
+                extra={"target_source_files": normalized_target_paths},
+            )
+
+    if artifact is None and (artifact_id or artifact_slug):
+        artifact = artifact_qs.filter(id=artifact_id).first() if artifact_id else None
+        if artifact is None and artifact_slug:
+            artifact = artifact_qs.filter(slug=artifact_slug).first()
+    if artifact is None:
+        return _scope_error(
+            status=404,
+            error="artifact not found",
+            blocked_reason="artifact_not_found",
+            error_classification="artifact_not_found",
+            workspace_id=str(workspace.id),
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            next_allowed_actions=["list_artifacts"],
+        )
+
+    fingerprint = f"artifact-scope::{artifact.id}"
+    defaults = {
+        "name": str(_artifact_slug(artifact) or artifact.title or f"Artifact {artifact.id}"),
+        "summary": f"Artifact-scoped decomposition container for {str(_artifact_slug(artifact) or artifact.id)}",
+        "source_factory_key": "artifact_scoped_decomposition",
+        "requested_by": identity,
+        "status": "active",
+        "request_objective": f"Artifact-scoped change session for {str(_artifact_slug(artifact) or artifact.id)}",
+        "metadata_json": {
+            "scope": {
+                "scope_type": "artifact",
+                "workspace_id": str(workspace.id),
+                "artifact_id": str(artifact.id),
+                "artifact_slug": str(_artifact_slug(artifact) or ""),
+            },
+            "autogenerated_application": True,
+        },
+        "plan_fingerprint": fingerprint,
+    }
+    with transaction.atomic():
+        application, _created = Application.objects.get_or_create(
+            workspace=workspace,
+            plan_fingerprint=fingerprint,
+            defaults=defaults,
+        )
+        role = "primary_api" if "api" in str(_artifact_slug(artifact) or "").lower() else (
+            "primary_ui" if "ui" in str(_artifact_slug(artifact) or "").lower() else "supporting"
+        )
+        ApplicationArtifactMembership.objects.get_or_create(
+            application=application,
+            artifact=artifact,
+            defaults={
+                "workspace": workspace,
+                "role": role,
+                "responsibility_summary": "Autogenerated primary target for artifact-scoped decomposition",
+                "metadata_json": {"autogenerated": True, "scope_type": "artifact"},
+                "sort_order": 0,
+            },
+        )
+
+    post_result = application_solution_change_sessions_collection(request, application_id=str(application.id))
+    if post_result.status_code >= 400:
+        failure_payload: Dict[str, Any] = {}
+        try:
+            failure_payload = json.loads(post_result.content or b"{}")
+        except Exception:
+            failure_payload = {}
+        scope_block = {
+            "scope_type": "artifact",
+            "workspace_id": str(workspace.id),
+            "application_id": str(application.id),
+            "artifact_id": str(artifact.id),
+            "artifact_slug": str(_artifact_slug(artifact) or ""),
+        }
+        if isinstance(failure_payload, dict):
+            failure_payload["scope_type"] = "artifact"
+            failure_payload["scope"] = scope_block
+            failure_payload["workspace_id"] = str(workspace.id)
+            failure_payload["application_id"] = str(application.id)
+            failure_payload["artifact_id"] = str(artifact.id)
+            failure_payload["artifact_slug"] = str(_artifact_slug(artifact) or "")
+            if not isinstance(failure_payload.get("next_allowed_actions"), list):
+                failure_payload["next_allowed_actions"] = ["get_application_change_session_plan", "inspect_change_session_control"]
+            return JsonResponse(failure_payload, status=post_result.status_code)
+        return post_result
+    body = json.loads(post_result.content or b"{}")
+    if isinstance(body, dict) and isinstance(body.get("session"), dict):
+        session_body = dict(body.get("session") or {})
+        scope_block = {
+            "scope_type": "artifact",
+            "workspace_id": str(workspace.id),
+            "application_id": str(application.id),
+            "artifact_id": str(artifact.id),
+            "artifact_slug": str(_artifact_slug(artifact) or ""),
+        }
+        session_body["scope_type"] = "artifact"
+        session_body["scope"] = scope_block
+        body["session"] = session_body
+        body["scope_type"] = "artifact"
+        body["scope"] = scope_block
+        body["application_id"] = str(application.id)
+        body["artifact_id"] = str(artifact.id)
+        body["artifact_slug"] = str(_artifact_slug(artifact) or "")
+    return JsonResponse(body, status=post_result.status_code)
+
+
+@csrf_exempt
+@login_required
+def solution_change_session_detail(request: HttpRequest, session_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    session = SolutionChangeSession.objects.filter(id=session_id).first()
+    if session is None:
+        return JsonResponse(
+            {
+                "error": "change session not found",
+                "blocked_reason": "scope_resolution_failed",
+                "error_classification": "scope_resolution_failed",
+                "session_id": str(session_id or ""),
+            },
+            status=404,
+        )
+    return application_solution_change_session_detail(
+        request,
+        application_id=str(session.application_id),
+        session_id=str(session.id),
+    )
+
+
+@csrf_exempt
+@login_required
+def solution_change_session_control(request: HttpRequest, session_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    session = SolutionChangeSession.objects.filter(id=session_id).first()
+    if session is None:
+        return JsonResponse(
+            {
+                "error": "change session not found",
+                "blocked_reason": "scope_resolution_failed",
+                "error_classification": "scope_resolution_failed",
+                "session_id": str(session_id or ""),
+            },
+            status=404,
+        )
+    return application_solution_change_session_control(
+        request,
+        application_id=str(session.application_id),
+        session_id=str(session.id),
+    )
+
+
+@csrf_exempt
+@login_required
+def solution_change_session_plan(request: HttpRequest, session_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    session = SolutionChangeSession.objects.filter(id=session_id).first()
+    if session is None:
+        return JsonResponse(
+            {
+                "error": "change session not found",
+                "blocked_reason": "scope_resolution_failed",
+                "error_classification": "scope_resolution_failed",
+                "session_id": str(session_id or ""),
+            },
+            status=404,
+        )
+    return application_solution_change_session_plan(
+        request,
+        application_id=str(session.application_id),
+        session_id=str(session.id),
+    )
+
+
+@csrf_exempt
+@login_required
+def solution_change_session_control_action(request: HttpRequest, session_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    session = SolutionChangeSession.objects.filter(id=session_id).first()
+    if session is None:
+        return JsonResponse(
+            {
+                "error": "change session not found",
+                "blocked_reason": "scope_resolution_failed",
+                "error_classification": "scope_resolution_failed",
+                "session_id": str(session_id or ""),
+            },
+            status=404,
+        )
+    return application_solution_change_session_control_action(
+        request,
+        application_id=str(session.application_id),
+        session_id=str(session.id),
+    )
+
+
+@csrf_exempt
+@login_required
+def solution_change_session_checkpoint_decision(request: HttpRequest, session_id: str, checkpoint_id: str) -> JsonResponse:
+    identity = _require_authenticated(request)
+    if not identity:
+        return JsonResponse({"error": "not authenticated"}, status=401)
+    session = SolutionChangeSession.objects.filter(id=session_id).first()
+    if session is None:
+        return JsonResponse(
+            {
+                "error": "change session not found",
+                "blocked_reason": "scope_resolution_failed",
+                "error_classification": "scope_resolution_failed",
+                "session_id": str(session_id or ""),
+            },
+            status=404,
+        )
+    return application_solution_change_session_checkpoint_decision(
+        request,
+        application_id=str(session.application_id),
+        session_id=str(session.id),
+        checkpoint_id=str(checkpoint_id),
+    )
+
+
+@csrf_exempt
+@login_required
 def application_solution_change_sessions_collection(
     request: HttpRequest, application_id: str
 ) -> JsonResponse:
@@ -40970,8 +41409,16 @@ def application_solution_change_session_control_action(
             )
         pending_kind = str(pending_prompt_turn.get("kind") or "").strip().lower()
         pending_payload = pending_prompt_turn.get("payload") if isinstance(pending_prompt_turn.get("payload"), dict) else {}
+        response_payload = payload.get("response")
+        response_object = response_payload if isinstance(response_payload, dict) else {}
         reply_text = str(
-            payload.get("response")
+            (
+                response_payload
+                if not isinstance(response_payload, dict)
+                else response_object.get("text")
+                or response_object.get("reply_text")
+                or response_object.get("prompt_response")
+            )
             or payload.get("prompt_response")
             or payload.get("reply_text")
             or payload.get("text")
@@ -40997,11 +41444,23 @@ def application_solution_change_session_control_action(
                     http_status=400,
                 )
         prompt_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-        source_turn_id = str(payload.get("source_turn_id") or pending_prompt_turn.get("id") or "").strip()
+        source_turn_id = str(
+            payload.get("source_turn_id")
+            or payload.get("prompt_id")
+            or response_object.get("prompt_id")
+            or pending_prompt_turn.get("id")
+            or ""
+        ).strip()
         if pending_kind == "option_set":
-            selected_option_id = str(payload.get("selected_option_id") or "").strip()
+            selected_option_id = str(
+                payload.get("selected_option_id")
+                or response_object.get("selected_option_id")
+                or ""
+            ).strip()
             if not selected_option_id:
                 selected_option_ids = payload.get("selected_option_ids")
+                if not isinstance(selected_option_ids, list):
+                    selected_option_ids = response_object.get("selected_option_ids")
                 if isinstance(selected_option_ids, list):
                     normalized_ids = [str(item or "").strip() for item in selected_option_ids if str(item or "").strip()]
                     if len(normalized_ids) > 1:
@@ -41023,7 +41482,7 @@ def application_solution_change_session_control_action(
                     if normalized_ids:
                         selected_option_id = normalized_ids[0]
             if not selected_option_id:
-                selected_option_id = str(payload.get("option_id") or "").strip()
+                selected_option_id = str(payload.get("option_id") or response_object.get("option_id") or "").strip()
             option_rows = pending_payload.get("options") if isinstance(pending_payload.get("options"), list) else []
             selected_option = None
             for option in option_rows:

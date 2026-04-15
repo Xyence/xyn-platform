@@ -28,6 +28,12 @@ from xyn_orchestrator.xyn_api import (
     application_solution_change_session_commits,
     application_solution_change_session_promotion_evidence,
     application_solution_change_session_finalize,
+    solution_change_sessions_collection,
+    solution_change_session_detail,
+    solution_change_session_control,
+    solution_change_session_plan,
+    solution_change_session_control_action,
+    solution_change_session_checkpoint_decision,
     solution_bundle_install,
 )
 
@@ -61,5 +67,11 @@ __all__ = [
     "application_solution_change_session_commits",
     "application_solution_change_session_promotion_evidence",
     "application_solution_change_session_finalize",
+    "solution_change_sessions_collection",
+    "solution_change_session_detail",
+    "solution_change_session_control",
+    "solution_change_session_control_action",
+    "solution_change_session_checkpoint_decision",
+    "solution_change_session_plan",
     "solution_bundle_install",
 ]
