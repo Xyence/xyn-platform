@@ -1526,6 +1526,91 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(options)
         self.assertEqual(str((options[0] or {}).get("id") or ""), str(xyn_ui_artifact.id))
         self.assertIn("initial artifact", str(option_payload.get("prompt") or "").lower())
+        self.assertEqual(str(option_payload.get("expected_response_kind") or ""), "option_selection")
+        self.assertEqual(bool(option_payload.get("allows_multiple")), False)
+        canonical_ids = option_payload.get("canonical_option_identifiers") if isinstance(option_payload.get("canonical_option_identifiers"), list) else []
+        self.assertIn(str(xyn_ui_artifact.id), canonical_ids)
+        response_schema = option_payload.get("response_schema") if isinstance(option_payload.get("response_schema"), dict) else {}
+        self.assertEqual(str(response_schema.get("type") or ""), "object")
+        self.assertIn("selected_option_id", list(response_schema.get("canonical_required") or []))
+
+    def test_solution_change_session_decomposition_campaign_auto_locks_xyn_api_without_option_prompt(self):
+        application, workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Decompose xyn_api",
+                    "request_text": "Please execute this decomposition campaign.",
+                    "metadata": {
+                        "decomposition_campaign": {
+                            "target_source_files": ["backend/xyn_orchestrator/xyn_api.py"],
+                            "extraction_seams": ["solution_change_session_workflow", "runtime_run_handlers"],
+                            "moved_handlers_modules": [
+                                "backend/xyn_orchestrator/solution_change_session/stage_apply_workflow.py",
+                                "backend/xyn_orchestrator/solution_change_session/stage_apply_dispatch.py",
+                            ],
+                            "required_test_suites": ["xyn_orchestrator.tests.test_goal_planning"],
+                        }
+                    },
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        session_payload = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+        planning = session_payload.get("planning") if isinstance(session_payload.get("planning"), dict) else {}
+        self.assertFalse(bool(planning.get("pending_option_set")))
+        latest_draft = planning.get("latest_draft_plan") if isinstance(planning.get("latest_draft_plan"), dict) else {}
+        latest_draft_payload = latest_draft.get("payload") if isinstance(latest_draft.get("payload"), dict) else {}
+        self.assertEqual(str(latest_draft_payload.get("planning_mode") or ""), "decompose_existing_system")
+        selected_ids = [str(item) for item in (session_payload.get("selected_artifact_ids") or [])]
+        self.assertEqual(selected_ids, [str(xyn_api_artifact.id)])
+        self.assertNotIn(str(workbench_artifact.id), selected_ids)
+        self.assertTrue(bool(planning.get("decomposition_scope_locked")))
+        self.assertEqual([str(item) for item in (planning.get("locked_artifact_ids") or [])], [str(xyn_api_artifact.id)])
+        self.assertEqual(str(planning.get("scope_lock_reason") or ""), "decomposition_single_artifact_resolved")
+        self.assertEqual(str(planning.get("scope_source") or ""), "campaign_metadata")
+        turns = planning.get("turns") if isinstance(planning.get("turns"), list) else []
+        option_turns = [turn for turn in turns if isinstance(turn, dict) and str(turn.get("kind") or "") == "option_set"]
+        self.assertEqual(option_turns, [])
+
+    def test_solution_change_session_decomposition_campaign_ambiguous_targets_still_prompt_option_set(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Ambiguous decomposition",
+                    "request_text": "Please run decomposition across these target files.",
+                    "metadata": {
+                        "decomposition_campaign": {
+                            "target_source_files": [
+                                "backend/xyn_orchestrator/xyn_api.py",
+                                "apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx",
+                            ],
+                            "extraction_seams": ["solution_change_session_workflow"],
+                        }
+                    },
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        planning = ((payload.get("session") or {}).get("planning") or {})
+        option_turn = planning.get("pending_option_set") if isinstance(planning.get("pending_option_set"), dict) else {}
+        option_payload = option_turn.get("payload") if isinstance(option_turn.get("payload"), dict) else {}
+        options = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+        option_ids = {str((item or {}).get("id") or "") for item in options if isinstance(item, dict)}
+        self.assertTrue(options)
+        self.assertIn(str(xyn_api_artifact.id), option_ids)
+        self.assertIn(str(xyn_ui_artifact.id), option_ids)
 
     def test_solution_change_session_select_option_reorders_selected_artifacts_without_dropping_others(self):
         application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
@@ -1564,6 +1649,68 @@ class GoalPlanningTests(TestCase):
             [str(item) for item in (session.selected_artifact_ids_json or [])],
             [str(xyn_ui_artifact.id), str(xyn_api_artifact.id)],
         )
+
+    def test_solution_change_session_scope_widen_requires_recorded_reason(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Locked decomposition",
+            request_text="Decompose backend/xyn_orchestrator/xyn_api.py",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(xyn_api_artifact.id)],
+            metadata_json={
+                "scope_lock": {
+                    "decomposition_scope_locked": True,
+                    "locked_artifact_ids": [str(xyn_api_artifact.id)],
+                    "scope_lock_reason": "decomposition_single_artifact_resolved",
+                    "scope_source": "campaign_metadata",
+                    "widen_events": [],
+                }
+            },
+        )
+
+        blocked_patch = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}",
+            method="patch",
+            data=json.dumps({"selected_artifact_ids": [str(xyn_api_artifact.id), str(xyn_ui_artifact.id)]}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            blocked_response = application_solution_change_session_detail(blocked_patch, str(application.id), str(session.id))
+        self.assertEqual(blocked_response.status_code, 409)
+        blocked_payload = json.loads(blocked_response.content)
+        self.assertEqual(str(blocked_payload.get("blocked_reason") or ""), "scope_lock_widen_reason_required")
+
+        allowed_patch = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}",
+            method="patch",
+            data=json.dumps(
+                {
+                    "selected_artifact_ids": [str(xyn_api_artifact.id), str(xyn_ui_artifact.id)],
+                    "scope_widen_reason": "explicitly expanding to include coordinated UI work",
+                    "scope_source": "manual_override",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            allowed_response = application_solution_change_session_detail(allowed_patch, str(application.id), str(session.id))
+        self.assertEqual(allowed_response.status_code, 200)
+        allowed_payload = json.loads(allowed_response.content)
+        self.assertEqual(
+            [str(item) for item in (allowed_payload.get("selected_artifact_ids") or [])],
+            [str(xyn_api_artifact.id), str(xyn_ui_artifact.id)],
+        )
+        planning = allowed_payload.get("planning") if isinstance(allowed_payload.get("planning"), dict) else {}
+        self.assertEqual(
+            [str(item) for item in (planning.get("locked_artifact_ids") or [])],
+            [str(xyn_api_artifact.id), str(xyn_ui_artifact.id)],
+        )
+        self.assertEqual(str(planning.get("scope_source") or ""), "manual_override")
+        session.refresh_from_db()
+        scope_lock = (session.metadata_json or {}).get("scope_lock") if isinstance(session.metadata_json, dict) else {}
+        widen_events = scope_lock.get("widen_events") if isinstance(scope_lock.get("widen_events"), list) else []
+        self.assertTrue(widen_events)
+        self.assertIn("explicitly expanding", str((widen_events[-1] or {}).get("reason") or ""))
 
     def test_solution_change_session_plan_auto_selects_default_pending_option(self):
         application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
@@ -7696,6 +7843,92 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(str(payload.get("status") or ""), "blocked")
         operation_result = payload.get("operation_result") if isinstance(payload.get("operation_result"), dict) else {}
         self.assertEqual(str(operation_result.get("blocked_reason") or ""), "planning_prompt_not_pending")
+
+    def test_solution_change_session_control_action_respond_to_planner_prompt_option_set_accepts_canonical_selected_option_id(self):
+        application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Planner option prompt",
+            request_text="Resize the requested change input field so it uses the full panel width.",
+            created_by=self.identity,
+            status="analysis_complete",
+            selected_artifact_ids_json=[],
+        )
+        option_turn = xyn_api._append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="option_set",
+            payload={
+                "prompt": "Select initial artifact",
+                "options": [
+                    {"id": str(xyn_ui_artifact.id), "label": "xyn-ui", "role": "primary_ui"},
+                ],
+            },
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control/actions",
+            method="post",
+            data=json.dumps(
+                {
+                    "operation": "respond_to_planner_prompt",
+                    "source_turn_id": str(option_turn.id),
+                    "selected_option_id": str(xyn_ui_artifact.id),
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_session_control_action(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(str(payload.get("status") or ""), "succeeded")
+        operation_result = payload.get("operation_result") if isinstance(payload.get("operation_result"), dict) else {}
+        prompt_response = operation_result.get("planner_prompt_response") if isinstance(operation_result.get("planner_prompt_response"), dict) else {}
+        self.assertEqual(str(prompt_response.get("response_kind") or ""), "option_selection")
+        self.assertEqual(str(prompt_response.get("selected_option_id") or ""), str(xyn_ui_artifact.id))
+        session.refresh_from_db()
+        self.assertEqual([str(item) for item in (session.selected_artifact_ids_json or [])], [str(xyn_ui_artifact.id)])
+
+    def test_solution_change_session_control_action_respond_to_planner_prompt_option_set_validation_errors_are_actionable(self):
+        application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Planner option prompt",
+            request_text="Resize the requested change input field so it uses the full panel width.",
+            created_by=self.identity,
+            status="analysis_complete",
+            selected_artifact_ids_json=[],
+        )
+        xyn_api._append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="option_set",
+            payload={
+                "prompt": "Select initial artifact",
+                "options": [
+                    {"id": str(xyn_ui_artifact.id), "label": "xyn-ui", "role": "primary_ui"},
+                ],
+            },
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control/actions",
+            method="post",
+            data=json.dumps(
+                {
+                    "operation": "respond_to_planner_prompt",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_session_control_action(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 400)
+        payload = json.loads(response.content)
+        operation_result = payload.get("operation_result") if isinstance(payload.get("operation_result"), dict) else {}
+        self.assertEqual(str(operation_result.get("error") or ""), "option-set response is invalid")
+        field_errors = operation_result.get("field_errors") if isinstance(operation_result.get("field_errors"), dict) else {}
+        self.assertIn("selected_option_id", field_errors)
+        self.assertIn("selected_option_id", list(operation_result.get("required_fields") or []))
 
     def test_solution_change_session_control_inspect_reports_stage_preview_progress(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
