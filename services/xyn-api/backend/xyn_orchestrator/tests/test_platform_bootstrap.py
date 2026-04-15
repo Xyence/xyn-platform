@@ -2,6 +2,7 @@ import json
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from django.test import TestCase
 
 from xyn_orchestrator import xyn_api
@@ -267,3 +268,153 @@ class PlatformBootstrapTests(TestCase):
         self.assertIsNotNone(xyn_solution)
         self.assertEqual(ApplicationArtifactMembership.objects.filter(application=xyn_solution).count(), 3)
         self.assertFalse(Workspace.objects.filter(slug="development").exists())
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_default_workspace_artifact_bindings_are_idempotent(self):
+        workspace = Workspace.objects.create(slug="idempotent-bindings", name="Idempotent Bindings")
+
+        xyn_api._ensure_default_workspace_artifact_bindings(workspace)
+        first_binding_count = WorkspaceArtifactBinding.objects.filter(workspace=workspace).count()
+        first_artifact_count = Artifact.objects.count()
+
+        xyn_api._ensure_default_workspace_artifact_bindings(workspace)
+        second_binding_count = WorkspaceArtifactBinding.objects.filter(workspace=workspace).count()
+        second_artifact_count = Artifact.objects.count()
+
+        self.assertEqual(first_binding_count, second_binding_count)
+        self.assertEqual(first_artifact_count, second_artifact_count)
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_ensure_runtime_artifact_reuses_existing_canonical_source_ref(self):
+        host_workspace = Workspace.objects.create(slug="platform-builder", name="Platform Builder")
+        caller_workspace = Workspace.objects.create(slug="customer-ws", name="Customer")
+        module_type, _ = ArtifactType.objects.get_or_create(
+            slug="module",
+            defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
+        )
+
+        canonical_git = xyn_api.build_runtime_artifact_git_provenance(
+            slug="xyn-ui",
+            manifest_ref="registry/modules/xyn-ui.artifact.manifest.json",
+        )
+        source_ref_type, source_ref_id = xyn_api.runtime_git_source_ref(canonical_git)
+        canonical = Artifact.objects.create(
+            workspace=host_workspace,
+            type=module_type,
+            title="xyn-ui",
+            slug="xyn-ui",
+            status="published",
+            visibility="team",
+            source_ref_type=source_ref_type,
+            source_ref_id=source_ref_id,
+        )
+
+        ensured = xyn_api._ensure_runtime_artifact(
+            workspace=caller_workspace,
+            slug="xyn-ui",
+            title="xyn-ui",
+            manifest_ref="registry/modules/xyn-ui.artifact.manifest.json",
+            summary="Deployable Xyn UI runtime artifact.",
+        )
+
+        self.assertEqual(str(ensured.id), str(canonical.id))
+        self.assertEqual(
+            Artifact.objects.filter(source_ref_type=source_ref_type, source_ref_id=source_ref_id).count(),
+            1,
+        )
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_ensure_runtime_artifact_retries_canonical_fetch_after_integrity_error(self):
+        workspace = Workspace.objects.create(slug="retry-ws", name="Retry WS")
+        other_workspace = Workspace.objects.create(slug="retry-other", name="Retry Other")
+        module_type, _ = ArtifactType.objects.get_or_create(
+            slug="module",
+            defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
+        )
+        stale = Artifact.objects.create(
+            workspace=workspace,
+            type=module_type,
+            title="xyn-api",
+            slug="xyn-api",
+            status="published",
+            visibility="team",
+            source_ref_type="",
+            source_ref_id="",
+        )
+
+        canonical_git = xyn_api.build_runtime_artifact_git_provenance(
+            slug="xyn-api",
+            manifest_ref="registry/modules/xyn-api.artifact.manifest.json",
+        )
+        source_ref_type, source_ref_id = xyn_api.runtime_git_source_ref(canonical_git)
+        canonical = Artifact.objects.create(
+            workspace=other_workspace,
+            type=module_type,
+            title="xyn-api",
+            slug="xyn-api",
+            status="published",
+            visibility="team",
+            source_ref_type=source_ref_type,
+            source_ref_id=source_ref_id,
+        )
+
+        original_save = Artifact.save
+        raised = {"done": False}
+
+        def _racey_save(instance, *args, **kwargs):
+            update_fields = kwargs.get("update_fields") or []
+            if (
+                instance.id == stale.id
+                and "source_ref_id" in update_fields
+                and not raised["done"]
+            ):
+                raised["done"] = True
+                raise IntegrityError("duplicate key value violates unique constraint \"uniq_artifact_source_ref\"")
+            return original_save(instance, *args, **kwargs)
+
+        with mock.patch.object(Artifact, "save", autospec=True, side_effect=_racey_save):
+            ensured = xyn_api._ensure_runtime_artifact(
+                workspace=workspace,
+                slug="xyn-api",
+                title="xyn-api",
+                manifest_ref="registry/modules/xyn-api.artifact.manifest.json",
+                summary="Deployable Xyn API runtime artifact.",
+            )
+
+        self.assertEqual(str(ensured.id), str(canonical.id))
+        self.assertTrue(raised["done"])
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_unique_source_ref_constraint_remains_enforced(self):
+        workspace = Workspace.objects.create(slug="unique-ws", name="Unique WS")
+        module_type, _ = ArtifactType.objects.get_or_create(
+            slug="module",
+            defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
+        )
+        canonical_git = xyn_api.build_runtime_artifact_git_provenance(
+            slug="core.workbench",
+            manifest_ref="registry/modules/core.workbench.artifact.manifest.json",
+        )
+        source_ref_type, source_ref_id = xyn_api.runtime_git_source_ref(canonical_git)
+
+        Artifact.objects.create(
+            workspace=workspace,
+            type=module_type,
+            title="core.workbench",
+            slug="core.workbench",
+            status="published",
+            visibility="team",
+            source_ref_type=source_ref_type,
+            source_ref_id=source_ref_id,
+        )
+        with self.assertRaises(IntegrityError):
+            Artifact.objects.create(
+                workspace=workspace,
+                type=module_type,
+                title="duplicate",
+                slug="duplicate-workbench",
+                status="published",
+                visibility="team",
+                source_ref_type=source_ref_type,
+                source_ref_id=source_ref_id,
+            )

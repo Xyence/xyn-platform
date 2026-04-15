@@ -23218,80 +23218,128 @@ def _ensure_runtime_artifact(
         slug="module",
         defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
     )
-    artifact = Artifact.objects.filter(workspace=workspace, slug=slug).order_by("-updated_at", "-created_at").first()
     ownership = _runtime_artifact_ownership_for_slug(slug)
     canonical_git = build_runtime_artifact_git_provenance(slug=slug, manifest_ref=manifest_ref)
     source_ref_type, source_ref_id = runtime_git_source_ref(canonical_git)
     merged_provenance = merge_runtime_provenance({"source_system": "seed-kernel", "source_id": slug}, canonical_git)
-    if artifact is None:
-        artifact = Artifact.objects.create(
-            workspace=workspace,
-            type=module_type,
-            title=title,
-            slug=slug,
-            status="published",
-            visibility="team",
-            summary=summary,
-            scope_json={"slug": slug, "manifest_ref": manifest_ref, "summary": summary},
-            provenance_json=merged_provenance,
-            source_ref_type=source_ref_type,
-            source_ref_id=source_ref_id,
-            owner_repo_slug=str(ownership.get("repo_slug") or "").strip(),
-            owner_path_prefixes_json=list(ownership.get("allowed_paths") or []),
-            edit_mode=str(ownership.get("edit_mode") or "generated").strip().lower() or "generated",
-        )
-        return artifact
-    scope = dict(artifact.scope_json or {})
-    scope_changed = False
-    if str(scope.get("slug") or "").strip() != slug:
-        scope["slug"] = slug
-        scope_changed = True
-    if str(scope.get("manifest_ref") or "").strip() != manifest_ref:
-        scope["manifest_ref"] = manifest_ref
-        scope_changed = True
-    update_fields: List[str] = []
-    if str(artifact.title or "").strip() != title:
-        artifact.title = title
-        update_fields.append("title")
-    if str(artifact.summary or "").strip() != summary:
-        artifact.summary = summary
-        update_fields.append("summary")
     owner_repo_slug = str(ownership.get("repo_slug") or "").strip()
-    if str(artifact.owner_repo_slug or "").strip() != owner_repo_slug:
-        artifact.owner_repo_slug = owner_repo_slug
-        update_fields.append("owner_repo_slug")
     owner_path_prefixes = list(ownership.get("allowed_paths") or [])
-    if list(artifact.owner_path_prefixes_json or []) != owner_path_prefixes:
-        artifact.owner_path_prefixes_json = owner_path_prefixes
-        update_fields.append("owner_path_prefixes_json")
     edit_mode = str(ownership.get("edit_mode") or "generated").strip().lower() or "generated"
-    if str(artifact.edit_mode or "").strip().lower() != edit_mode:
-        artifact.edit_mode = edit_mode
-        update_fields.append("edit_mode")
-    if scope_changed:
-        artifact.scope_json = scope
-        update_fields.append("scope_json")
-    existing_provenance = artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {}
-    canonical_git = build_runtime_artifact_git_provenance(
-        slug=slug,
-        manifest_ref=manifest_ref,
-        existing_provenance=existing_provenance,
-    )
-    merged_provenance = merge_runtime_provenance(existing_provenance, canonical_git)
-    if merged_provenance != existing_provenance:
-        artifact.provenance_json = merged_provenance
-        update_fields.append("provenance_json")
-    source_ref_type, source_ref_id = runtime_git_source_ref(canonical_git)
-    if str(artifact.source_ref_type or "") != source_ref_type:
-        artifact.source_ref_type = source_ref_type
-        update_fields.append("source_ref_type")
-    if str(artifact.source_ref_id or "") != source_ref_id:
-        artifact.source_ref_id = source_ref_id
-        update_fields.append("source_ref_id")
-    if update_fields:
-        update_fields.append("updated_at")
-        artifact.save(update_fields=update_fields)
-    return artifact
+
+    def _apply_updates(target: Artifact) -> Artifact:
+        scope = dict(target.scope_json or {})
+        scope_changed = False
+        if str(scope.get("slug") or "").strip() != slug:
+            scope["slug"] = slug
+            scope_changed = True
+        if str(scope.get("manifest_ref") or "").strip() != manifest_ref:
+            scope["manifest_ref"] = manifest_ref
+            scope_changed = True
+        if str(scope.get("summary") or "").strip() != summary:
+            scope["summary"] = summary
+            scope_changed = True
+
+        update_fields: List[str] = []
+        if str(target.title or "").strip() != title:
+            target.title = title
+            update_fields.append("title")
+        if str(target.slug or "").strip() != slug:
+            target.slug = slug
+            update_fields.append("slug")
+        if str(target.summary or "").strip() != summary:
+            target.summary = summary
+            update_fields.append("summary")
+        if str(target.owner_repo_slug or "").strip() != owner_repo_slug:
+            target.owner_repo_slug = owner_repo_slug
+            update_fields.append("owner_repo_slug")
+        if list(target.owner_path_prefixes_json or []) != owner_path_prefixes:
+            target.owner_path_prefixes_json = owner_path_prefixes
+            update_fields.append("owner_path_prefixes_json")
+        if str(target.edit_mode or "").strip().lower() != edit_mode:
+            target.edit_mode = edit_mode
+            update_fields.append("edit_mode")
+        if scope_changed:
+            target.scope_json = scope
+            update_fields.append("scope_json")
+
+        existing_provenance = target.provenance_json if isinstance(target.provenance_json, dict) else {}
+        canonical_git_for_target = build_runtime_artifact_git_provenance(
+            slug=slug,
+            manifest_ref=manifest_ref,
+            existing_provenance=existing_provenance,
+        )
+        merged_provenance_for_target = merge_runtime_provenance(existing_provenance, canonical_git_for_target)
+        if merged_provenance_for_target != existing_provenance:
+            target.provenance_json = merged_provenance_for_target
+            update_fields.append("provenance_json")
+        if str(target.source_ref_type or "") != source_ref_type:
+            target.source_ref_type = source_ref_type
+            update_fields.append("source_ref_type")
+        if str(target.source_ref_id or "") != source_ref_id:
+            target.source_ref_id = source_ref_id
+            update_fields.append("source_ref_id")
+        if update_fields:
+            update_fields.append("updated_at")
+            target.save(update_fields=update_fields)
+        return target
+
+    with transaction.atomic():
+        canonical = (
+            Artifact.objects.select_for_update()
+            .filter(source_ref_type=source_ref_type, source_ref_id=source_ref_id)
+            .order_by("-updated_at", "-created_at")
+            .first()
+        )
+        if canonical is not None:
+            return _apply_updates(canonical)
+
+        workspace_match = (
+            Artifact.objects.select_for_update()
+            .filter(workspace=workspace, slug=slug)
+            .order_by("-updated_at", "-created_at")
+            .first()
+        )
+        if workspace_match is not None:
+            try:
+                return _apply_updates(workspace_match)
+            except IntegrityError:
+                canonical = (
+                    Artifact.objects.select_for_update()
+                    .filter(source_ref_type=source_ref_type, source_ref_id=source_ref_id)
+                    .order_by("-updated_at", "-created_at")
+                    .first()
+                )
+                if canonical is not None:
+                    return _apply_updates(canonical)
+                raise
+
+        try:
+            return Artifact.objects.create(
+                workspace=workspace,
+                type=module_type,
+                title=title,
+                slug=slug,
+                status="published",
+                visibility="team",
+                summary=summary,
+                scope_json={"slug": slug, "manifest_ref": manifest_ref, "summary": summary},
+                provenance_json=merged_provenance,
+                source_ref_type=source_ref_type,
+                source_ref_id=source_ref_id,
+                owner_repo_slug=owner_repo_slug,
+                owner_path_prefixes_json=owner_path_prefixes,
+                edit_mode=edit_mode,
+            )
+        except IntegrityError:
+            canonical = (
+                Artifact.objects.select_for_update()
+                .filter(source_ref_type=source_ref_type, source_ref_id=source_ref_id)
+                .order_by("-updated_at", "-created_at")
+                .first()
+            )
+            if canonical is not None:
+                return _apply_updates(canonical)
+            raise
 
 
 def _intent_apply_provision_xyn_remote(
