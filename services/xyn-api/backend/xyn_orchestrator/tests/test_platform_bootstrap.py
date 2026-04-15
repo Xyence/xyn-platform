@@ -385,6 +385,85 @@ class PlatformBootstrapTests(TestCase):
         self.assertTrue(raised["done"])
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_ensure_runtime_artifact_reuses_workspace_slug_owner_when_source_ref_missing(self):
+        workspace = Workspace.objects.create(slug="slug-owner-ws", name="Slug Owner WS")
+        module_type, _ = ArtifactType.objects.get_or_create(
+            slug="module",
+            defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
+        )
+        existing = Artifact.objects.create(
+            workspace=workspace,
+            type=module_type,
+            title="xyn-ui old",
+            slug="xyn-ui",
+            status="published",
+            visibility="team",
+            source_ref_type="",
+            source_ref_id="",
+        )
+        ensured = xyn_api._ensure_runtime_artifact(
+            workspace=workspace,
+            slug="xyn-ui",
+            title="xyn-ui",
+            manifest_ref="registry/modules/xyn-ui.artifact.manifest.json",
+            summary="Deployable Xyn UI runtime artifact.",
+        )
+        self.assertEqual(str(ensured.id), str(existing.id))
+        self.assertEqual(str(ensured.slug), "xyn-ui")
+        self.assertEqual(str(ensured.source_ref_type), "GitSource")
+        self.assertTrue(str(ensured.source_ref_id))
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_ensure_runtime_artifact_reconciles_split_unique_keys_with_source_ref_precedence(self):
+        workspace = Workspace.objects.create(slug="split-keys-ws", name="Split Keys WS")
+        module_type, _ = ArtifactType.objects.get_or_create(
+            slug="module",
+            defaults={"name": "Module", "description": "Kernel-loadable module artifact."},
+        )
+        slug_owner = Artifact.objects.create(
+            workspace=workspace,
+            type=module_type,
+            title="xyn-ui slug owner",
+            slug="xyn-ui",
+            status="published",
+            visibility="team",
+            source_ref_type="",
+            source_ref_id="",
+        )
+        canonical_git = xyn_api.build_runtime_artifact_git_provenance(
+            slug="xyn-ui",
+            manifest_ref="registry/modules/xyn-ui.artifact.manifest.json",
+        )
+        source_ref_type, source_ref_id = xyn_api.runtime_git_source_ref(canonical_git)
+        source_owner = Artifact.objects.create(
+            workspace=workspace,
+            type=module_type,
+            title="xyn-ui canonical owner",
+            slug="xyn-ui-canonical",
+            status="published",
+            visibility="team",
+            source_ref_type=source_ref_type,
+            source_ref_id=source_ref_id,
+        )
+
+        ensured = xyn_api._ensure_runtime_artifact(
+            workspace=workspace,
+            slug="xyn-ui",
+            title="xyn-ui",
+            manifest_ref="registry/modules/xyn-ui.artifact.manifest.json",
+            summary="Deployable Xyn UI runtime artifact.",
+        )
+        self.assertEqual(str(ensured.id), str(source_owner.id))
+        slug_owner.refresh_from_db()
+        source_owner.refresh_from_db()
+        self.assertEqual(slug_owner.slug, "xyn-ui")
+        self.assertEqual(source_owner.slug, "xyn-ui-canonical")
+        self.assertEqual(
+            Artifact.objects.filter(source_ref_type=source_ref_type, source_ref_id=source_ref_id).count(),
+            1,
+        )
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
     def test_unique_source_ref_constraint_remains_enforced(self):
         workspace = Workspace.objects.create(slug="unique-ws", name="Unique WS")
         module_type, _ = ArtifactType.objects.get_or_create(

@@ -23226,7 +23226,11 @@ def _ensure_runtime_artifact(
     owner_path_prefixes = list(ownership.get("allowed_paths") or [])
     edit_mode = str(ownership.get("edit_mode") or "generated").strip().lower() or "generated"
 
-    def _apply_updates(target: Artifact) -> Artifact:
+    def _apply_updates(
+        target: Artifact,
+        *,
+        skip_slug_update: bool = False,
+    ) -> Artifact:
         scope = dict(target.scope_json or {})
         scope_changed = False
         if str(scope.get("slug") or "").strip() != slug:
@@ -23243,7 +23247,7 @@ def _ensure_runtime_artifact(
         if str(target.title or "").strip() != title:
             target.title = title
             update_fields.append("title")
-        if str(target.slug or "").strip() != slug:
+        if not skip_slug_update and str(target.slug or "").strip() != slug:
             target.slug = slug
             update_fields.append("slug")
         if str(target.summary or "").strip() != summary:
@@ -23283,63 +23287,57 @@ def _ensure_runtime_artifact(
             target.save(update_fields=update_fields)
         return target
 
-    with transaction.atomic():
-        canonical = (
+    def _resolve_locked_candidates() -> tuple[Optional[Artifact], Optional[Artifact]]:
+        source_match = (
             Artifact.objects.select_for_update()
             .filter(source_ref_type=source_ref_type, source_ref_id=source_ref_id)
             .order_by("-updated_at", "-created_at")
             .first()
         )
-        if canonical is not None:
-            return _apply_updates(canonical)
-
-        workspace_match = (
+        workspace_slug_match = (
             Artifact.objects.select_for_update()
             .filter(workspace=workspace, slug=slug)
             .order_by("-updated_at", "-created_at")
             .first()
         )
-        if workspace_match is not None:
-            try:
-                return _apply_updates(workspace_match)
-            except IntegrityError:
-                canonical = (
-                    Artifact.objects.select_for_update()
-                    .filter(source_ref_type=source_ref_type, source_ref_id=source_ref_id)
-                    .order_by("-updated_at", "-created_at")
-                    .first()
-                )
-                if canonical is not None:
-                    return _apply_updates(canonical)
-                raise
+        return source_match, workspace_slug_match
 
+    def _upsert_once() -> Artifact:
+        source_match, workspace_slug_match = _resolve_locked_candidates()
+        if source_match is not None and workspace_slug_match is not None and source_match.id != workspace_slug_match.id:
+            # Deterministic precedence: canonical source-ref identity wins.
+            # Keep workspace+slug owner unchanged to avoid violating uniq_artifact_workspace_slug.
+            return _apply_updates(source_match, skip_slug_update=True)
+        if source_match is not None:
+            return _apply_updates(source_match)
+        if workspace_slug_match is not None:
+            return _apply_updates(workspace_slug_match)
+        return Artifact.objects.create(
+            workspace=workspace,
+            type=module_type,
+            title=title,
+            slug=slug,
+            status="published",
+            visibility="team",
+            summary=summary,
+            scope_json={"slug": slug, "manifest_ref": manifest_ref, "summary": summary},
+            provenance_json=merged_provenance,
+            source_ref_type=source_ref_type,
+            source_ref_id=source_ref_id,
+            owner_repo_slug=owner_repo_slug,
+            owner_path_prefixes_json=owner_path_prefixes,
+            edit_mode=edit_mode,
+        )
+
+    for attempt in range(2):
         try:
-            return Artifact.objects.create(
-                workspace=workspace,
-                type=module_type,
-                title=title,
-                slug=slug,
-                status="published",
-                visibility="team",
-                summary=summary,
-                scope_json={"slug": slug, "manifest_ref": manifest_ref, "summary": summary},
-                provenance_json=merged_provenance,
-                source_ref_type=source_ref_type,
-                source_ref_id=source_ref_id,
-                owner_repo_slug=owner_repo_slug,
-                owner_path_prefixes_json=owner_path_prefixes,
-                edit_mode=edit_mode,
-            )
+            with transaction.atomic():
+                return _upsert_once()
         except IntegrityError:
-            canonical = (
-                Artifact.objects.select_for_update()
-                .filter(source_ref_type=source_ref_type, source_ref_id=source_ref_id)
-                .order_by("-updated_at", "-created_at")
-                .first()
-            )
-            if canonical is not None:
-                return _apply_updates(canonical)
+            if attempt == 0:
+                continue
             raise
+    raise RuntimeError("runtime artifact upsert unexpectedly failed without result")
 
 
 def _intent_apply_provision_xyn_remote(
