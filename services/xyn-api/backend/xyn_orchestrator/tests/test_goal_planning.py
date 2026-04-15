@@ -7610,6 +7610,71 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(str(control.get("blocked_reason") or ""), "solution_not_installed_in_root")
         self.assertIn("install_in_root", list(control.get("next_allowed_actions") or []))
 
+    def test_solution_change_session_control_inspect_degrades_when_control_subcomponent_fails(self):
+        application, _workbench_artifact, _xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Inspect control degraded",
+            request_text="Inspect status",
+            created_by=self.identity,
+            status="planned",
+            execution_status="staged",
+            selected_artifact_ids_json=[],
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control",
+            method="get",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._solution_change_session_control_status",
+            side_effect=RuntimeError("planner prompt reconstruction failed"),
+        ):
+            response = application_solution_change_session_control(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(str(payload.get("status") or ""), "degraded")
+        self.assertEqual(str(payload.get("error_classification") or ""), "control_component_failure")
+        self.assertIn("planner prompt reconstruction failed", str(payload.get("error_summary") or ""))
+        self.assertEqual(str(payload.get("change_session_id") or ""), str(session.id))
+        self.assertEqual(str(payload.get("application_id") or ""), str(application.id))
+        self.assertIn("inspect", list(payload.get("safe_next_actions") or []))
+
+    def test_solution_change_session_control_degraded_retains_last_known_session_state(self):
+        application, _workbench_artifact, _xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Inspect control degraded last-known",
+            request_text="Inspect status",
+            created_by=self.identity,
+            status="planned",
+            execution_status="ready_for_promotion",
+            selected_artifact_ids_json=["art-1", "art-2"],
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control",
+            method="get",
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._solution_change_session_control_status",
+            side_effect=ValueError("prompt schema resolution failed"),
+        ):
+            response = application_solution_change_session_control(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        control = payload.get("control") if isinstance(payload.get("control"), dict) else {}
+        last_known = (
+            control.get("last_known_session_state")
+            if isinstance(control.get("last_known_session_state"), dict)
+            else {}
+        )
+        self.assertEqual(str(last_known.get("session_status") or ""), "planned")
+        self.assertEqual(str(last_known.get("execution_status") or ""), "ready_for_promotion")
+        self.assertEqual(list(last_known.get("selected_artifact_ids") or []), ["art-1", "art-2"])
+        self.assertTrue(bool(control.get("session_resolved")))
+        self.assertFalse(bool(control.get("recreation_required")))
+
     def test_solution_change_session_control_action_promote_blocked_returns_envelope(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
