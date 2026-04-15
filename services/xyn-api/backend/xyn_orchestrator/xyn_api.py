@@ -7239,16 +7239,26 @@ def _assign_bootstrap_platform_admin_if_eligible(identity: UserIdentity, email: 
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pg_advisory_xact_lock(%s)", [93821477])
 
-        has_platform_admin = RoleBinding.objects.filter(scope_kind="platform", role="platform_admin").exists()
-        if has_platform_admin:
-            return {"assigned": False, "reason": "platform_admin_exists"}
-
         if allowlist_configured:
             if not normalized_email or normalized_email not in allowlist:
                 return {"assigned": False, "reason": "not_in_allowlist"}
-        else:
-            if not _bootstrap_first_user_fallback_enabled():
-                return {"assigned": False, "reason": "fallback_disabled"}
+            _, created = RoleBinding.objects.get_or_create(
+                user_identity=identity,
+                scope_kind="platform",
+                scope_id=None,
+                role="platform_admin",
+            )
+            return {
+                "assigned": bool(created),
+                "reason": "allowlist",
+            }
+
+        if not _bootstrap_first_user_fallback_enabled():
+            return {"assigned": False, "reason": "fallback_disabled"}
+
+        has_platform_admin = RoleBinding.objects.filter(scope_kind="platform", role="platform_admin").exists()
+        if has_platform_admin:
+            return {"assigned": False, "reason": "platform_admin_exists"}
 
         _, created = RoleBinding.objects.get_or_create(
             user_identity=identity,
