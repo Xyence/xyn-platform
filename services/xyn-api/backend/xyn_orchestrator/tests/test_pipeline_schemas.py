@@ -237,6 +237,42 @@ class OIDCAuthTests(TestCase):
         identity = UserIdentity.objects.get(subject="sub-abc")
         self.assertTrue(RoleBinding.objects.filter(user_identity=identity, role="platform_admin").exists())
 
+    def test_allowlisted_login_assigns_admin_even_when_platform_admin_already_exists(self):
+        env = self._make_env()
+        local_identity = UserIdentity.objects.create(
+            provider="local",
+            issuer="local",
+            subject="admin@local",
+            email="admin@local",
+            display_name="Local Admin",
+        )
+        RoleBinding.objects.create(user_identity=local_identity, scope_kind="platform", role="platform_admin")
+
+        session = self.client.session
+        session["oidc_state"] = "state-allowlisted"
+        session["oidc_nonce"] = "nonce-allowlisted"
+        session["environment_id"] = str(env.id)
+        session.save()
+        with (
+            mock.patch.dict(os.environ, {"XYN_BOOTSTRAP_ADMIN_EMAILS": "admin@xyence.io"}, clear=False),
+            mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
+            mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
+            mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
+            mock.patch.object(xyn_api_module.requests, "post") as post_request,
+        ):
+            get_config.return_value = {"token_endpoint": "https://issuer.example.com/token"}
+            resolve_secret.return_value = "secret"
+            decode_token.return_value = {
+                "sub": "sub-allowlisted",
+                "email": "admin@xyence.io",
+                "name": "Allowlisted Admin",
+            }
+            post_request.side_effect = self._mock_token_post
+            response = self.client.get("/auth/callback?code=abc&state=state-allowlisted")
+        self.assertEqual(response.status_code, 302)
+        identity = UserIdentity.objects.get(subject="sub-allowlisted")
+        self.assertTrue(RoleBinding.objects.filter(user_identity=identity, role="platform_admin").exists())
+
     def test_non_allowlisted_login_is_denied_with_no_roles(self):
         env = self._make_env()
         session = self.client.session
@@ -302,6 +338,50 @@ class OIDCAuthTests(TestCase):
             self.assertEqual(second_response.status_code, 403)
             second_identity = UserIdentity.objects.get(subject="sub-second")
             self.assertFalse(RoleBinding.objects.filter(user_identity=second_identity, role="platform_admin").exists())
+
+    def test_allowlisted_login_is_idempotent_across_repeated_callbacks(self):
+        env = self._make_env()
+        with (
+            mock.patch.dict(os.environ, {"XYN_BOOTSTRAP_ADMIN_EMAILS": "admin@xyence.io"}, clear=False),
+            mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
+            mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
+            mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
+            mock.patch.object(xyn_api_module.requests, "post") as post_request,
+        ):
+            get_config.return_value = {"token_endpoint": "https://issuer.example.com/token"}
+            resolve_secret.return_value = "secret"
+            decode_token.return_value = {
+                "sub": "sub-repeat",
+                "email": "admin@xyence.io",
+                "name": "Repeat Admin",
+            }
+            post_request.side_effect = self._mock_token_post
+
+            session = self.client.session
+            session["oidc_state"] = "state-repeat-1"
+            session["oidc_nonce"] = "nonce-repeat-1"
+            session["environment_id"] = str(env.id)
+            session.save()
+            first = self.client.get("/auth/callback?code=abc&state=state-repeat-1")
+            self.assertEqual(first.status_code, 302)
+
+            session = self.client.session
+            session["oidc_state"] = "state-repeat-2"
+            session["oidc_nonce"] = "nonce-repeat-2"
+            session["environment_id"] = str(env.id)
+            session.save()
+            second = self.client.get("/auth/callback?code=abc&state=state-repeat-2")
+            self.assertEqual(second.status_code, 302)
+
+        identity = UserIdentity.objects.get(subject="sub-repeat")
+        self.assertEqual(
+            RoleBinding.objects.filter(
+                user_identity=identity,
+                scope_kind="platform",
+                role="platform_admin",
+            ).count(),
+            1,
+        )
 
     def test_environment_resolution_prefers_host_mapping(self):
         env = self._make_env()
