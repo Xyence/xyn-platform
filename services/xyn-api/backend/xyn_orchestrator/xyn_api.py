@@ -28,7 +28,7 @@ from django.core.validators import validate_email
 from django.core.paginator import Paginator
 from django.db import IntegrityError, connection, models, transaction
 from django.db.models import Count, Q
-from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse
+from django.http import HttpRequest, JsonResponse, HttpResponse, StreamingHttpResponse, Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -21436,18 +21436,75 @@ def _solution_change_session_control_envelope(
     operation_payload: Optional[Dict[str, Any]] = None,
     http_status: int = 200,
 ) -> JsonResponse:
-    control = _solution_change_session_control_status(session=session, application=application)
-    return JsonResponse(
-        {
-            "operation": str(operation or "").strip() or "inspect",
-            "status": str(operation_status or "").strip() or "ready",
-            "change_session_id": str(session.id),
-            "application_id": str(application.id),
-            "control": control,
-            "operation_result": operation_payload or {},
-        },
-        status=http_status,
-    )
+    safe_operation = str(operation or "").strip() or "inspect"
+    safe_status = str(operation_status or "").strip() or "ready"
+    try:
+        control = _solution_change_session_control_status(session=session, application=application)
+        return JsonResponse(
+            {
+                "operation": safe_operation,
+                "status": safe_status,
+                "change_session_id": str(session.id),
+                "application_id": str(application.id),
+                "control": control,
+                "operation_result": operation_payload or {},
+            },
+            status=http_status,
+        )
+    except Exception as exc:
+        logger.exception(
+            "solution_change_session_control_degraded operation=%s session_id=%s application_id=%s",
+            safe_operation,
+            str(getattr(session, "id", "") or ""),
+            str(getattr(application, "id", "") or ""),
+        )
+        degraded_state = {
+            "session_status": str(getattr(session, "status", "") or ""),
+            "execution_status": str(getattr(session, "execution_status", "") or ""),
+            "updated_at": (
+                getattr(session, "updated_at", None).isoformat()
+                if getattr(session, "updated_at", None) is not None
+                else ""
+            ),
+            "selected_artifact_ids": list(
+                getattr(session, "selected_artifact_ids_json", [])
+                if isinstance(getattr(session, "selected_artifact_ids_json", []), list)
+                else []
+            ),
+        }
+        planning = getattr(session, "plan_json", None)
+        if isinstance(planning, dict):
+            degraded_state["plan_revision"] = int(planning.get("plan_revision") or 0)
+        safe_next_actions = [
+            "inspect",
+            "respond_to_planner_prompt",
+            "get_application_change_session",
+            "get_application_change_session_plan",
+        ]
+        return JsonResponse(
+            {
+                "operation": safe_operation,
+                "status": "degraded",
+                "change_session_id": str(getattr(session, "id", "") or ""),
+                "application_id": str(getattr(application, "id", "") or ""),
+                "error_classification": "control_component_failure",
+                "error_summary": f"{exc.__class__.__name__}: {str(exc)[:300]}",
+                "safe_next_actions": safe_next_actions,
+                "control": {
+                    "degraded": True,
+                    "error_classification": "control_component_failure",
+                    "error_summary": f"{exc.__class__.__name__}: {str(exc)[:300]}",
+                    "safe_next_actions": safe_next_actions,
+                    "last_known_session_state": degraded_state,
+                    "session_resolved": True,
+                    "recreation_required": False,
+                    "blocked_reason": "control_degraded",
+                    "next_allowed_actions": safe_next_actions,
+                },
+                "operation_result": operation_payload or {},
+            },
+            status=200,
+        )
 
 
 def _docker_container_published_port(container_name: str, container_port: str = "8080/tcp") -> str:
@@ -40744,7 +40801,27 @@ def application_solution_change_session_control(
         return JsonResponse({"error": "forbidden"}, status=403)
     if request.method != "GET":
         return JsonResponse({"error": "method not allowed"}, status=405)
-    session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    try:
+        session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+    except Http404:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "solution_change_session_control_resolution_failed application_id=%s session_id=%s",
+            str(application_id or ""),
+            str(session_id or ""),
+        )
+        return JsonResponse(
+            {
+                "error": "session_control_unavailable",
+                "error_classification": "session_resolution_failed",
+                "error_summary": f"{exc.__class__.__name__}: {str(exc)[:300]}",
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+                "safe_next_actions": ["get_application_change_session", "list_application_change_sessions"],
+            },
+            status=500,
+        )
     return _solution_change_session_control_envelope(
         operation="inspect",
         session=session,
