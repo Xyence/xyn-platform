@@ -32298,6 +32298,88 @@ def _solution_change_session_selected_artifact_ids(session: SolutionChangeSessio
     return normalized
 
 
+def _solution_scope_lock_state(session: SolutionChangeSession) -> Dict[str, Any]:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    scope_lock = metadata.get("scope_lock") if isinstance(metadata.get("scope_lock"), dict) else {}
+    locked = bool(scope_lock.get("decomposition_scope_locked"))
+    locked_artifact_ids = [
+        str(item or "").strip()
+        for item in (scope_lock.get("locked_artifact_ids") if isinstance(scope_lock.get("locked_artifact_ids"), list) else [])
+        if str(item or "").strip()
+    ]
+    if locked and not locked_artifact_ids:
+        locked_artifact_ids = _solution_change_session_selected_artifact_ids(session)
+    return {
+        "decomposition_scope_locked": locked,
+        "locked_artifact_ids": _dedupe(locked_artifact_ids),
+        "scope_lock_reason": str(scope_lock.get("scope_lock_reason") or "").strip(),
+        "scope_source": str(scope_lock.get("scope_source") or "").strip(),
+        "widen_events": scope_lock.get("widen_events") if isinstance(scope_lock.get("widen_events"), list) else [],
+    }
+
+
+def _persist_solution_scope_lock(
+    *,
+    session: SolutionChangeSession,
+    locked_artifact_ids: List[str],
+    scope_lock_reason: str,
+    scope_source: str,
+    widen_event: Optional[Dict[str, Any]] = None,
+) -> None:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    current = _solution_scope_lock_state(session)
+    widen_events = list(current.get("widen_events") or [])
+    if isinstance(widen_event, dict) and widen_event:
+        widen_events.append(widen_event)
+    metadata["scope_lock"] = {
+        "decomposition_scope_locked": True,
+        "locked_artifact_ids": _dedupe([str(item or "").strip() for item in (locked_artifact_ids or []) if str(item or "").strip()]),
+        "scope_lock_reason": str(scope_lock_reason or "").strip(),
+        "scope_source": str(scope_source or "").strip(),
+        "widen_events": widen_events,
+    }
+    session.metadata_json = metadata
+
+
+def _apply_scope_lock_to_selection(
+    *,
+    session: SolutionChangeSession,
+    selected_artifact_ids: List[str],
+    scope_source: str,
+    widen_reason: str = "",
+    permit_planner_discovery: bool = False,
+) -> Tuple[List[str], bool, str]:
+    scope_lock = _solution_scope_lock_state(session)
+    normalized_selected = _dedupe([str(item or "").strip() for item in selected_artifact_ids if str(item or "").strip()])
+    if not bool(scope_lock.get("decomposition_scope_locked")):
+        return normalized_selected, False, ""
+    locked_ids = [str(item or "").strip() for item in (scope_lock.get("locked_artifact_ids") or []) if str(item or "").strip()]
+    if not locked_ids:
+        return normalized_selected, False, ""
+    widened_ids = [item for item in normalized_selected if item not in set(locked_ids)]
+    if not widened_ids:
+        return normalized_selected, False, ""
+    reason = str(widen_reason or "").strip()
+    if permit_planner_discovery and not reason:
+        reason = "planner_discovered_cross_artifact_dependency"
+    if not reason:
+        return locked_ids, False, "scope_widen_reason_required"
+    widened = _dedupe([*locked_ids, *widened_ids])
+    _persist_solution_scope_lock(
+        session=session,
+        locked_artifact_ids=widened,
+        scope_lock_reason=str(scope_lock.get("scope_lock_reason") or "decomposition_single_artifact_resolved"),
+        scope_source=str(scope_source or "manual_override"),
+        widen_event={
+            "source": str(scope_source or "manual_override"),
+            "reason": reason,
+            "added_artifact_ids": widened_ids,
+            "updated_at": timezone.now().isoformat(),
+        },
+    )
+    return widened, True, ""
+
+
 _SOLUTION_WORKSTREAM_KEYS: set[str] = {
     "ui",
     "api",
@@ -32389,13 +32471,67 @@ def _append_solution_planning_turn(
     payload: Optional[Dict[str, Any]] = None,
     created_by: Optional[UserIdentity] = None,
 ) -> SolutionPlanningTurn:
+    normalized_payload = dict(payload) if isinstance(payload, dict) else {}
+    if str(actor or "") == "planner":
+        if str(kind or "") == "option_set":
+            options = normalized_payload.get("options") if isinstance(normalized_payload.get("options"), list) else []
+            canonical_option_ids = [
+                str((item or {}).get("id") or "").strip()
+                for item in options
+                if isinstance(item, dict) and str((item or {}).get("id") or "").strip()
+            ]
+            normalized_payload = {
+                **normalized_payload,
+                "expected_response_kind": "option_selection",
+                "allows_multiple": False,
+                "canonical_option_identifiers": canonical_option_ids,
+                "response_schema": {
+                    "type": "object",
+                    "required_any_of": ["selected_option_id", "selected_option_ids", "option_id", "response", "prompt_response"],
+                    "canonical_required": ["selected_option_id"],
+                    "properties": {
+                        "selected_option_id": {"type": "string", "enum": canonical_option_ids},
+                        "selected_option_ids": {"type": "array", "items": {"type": "string", "enum": canonical_option_ids}, "minItems": 1, "maxItems": 1},
+                        "option_id": {"type": "string", "deprecated": True, "enum": canonical_option_ids},
+                        "response": {"type": "string"},
+                        "prompt_response": {"type": "string", "deprecated": True},
+                        "source_turn_id": {"type": "string"},
+                        "metadata": {"type": "object"},
+                    },
+                },
+                "response_examples": (
+                    ([{"selected_option_id": canonical_option_ids[0]}, {"selected_option_ids": [canonical_option_ids[0]]}]
+                     if canonical_option_ids
+                     else [{"selected_option_id": "<option_id>"}])
+                ),
+            }
+        elif str(kind or "") == "question":
+            normalized_payload = {
+                **normalized_payload,
+                "expected_response_kind": "text_response",
+                "allows_multiple": False,
+                "response_schema": {
+                    "type": "object",
+                    "required_any_of": ["response", "prompt_response", "reply_text", "text"],
+                    "canonical_required": ["response"],
+                    "properties": {
+                        "response": {"type": "string"},
+                        "prompt_response": {"type": "string", "deprecated": True},
+                        "reply_text": {"type": "string", "deprecated": True},
+                        "text": {"type": "string", "deprecated": True},
+                        "source_turn_id": {"type": "string"},
+                        "metadata": {"type": "object"},
+                    },
+                },
+                "response_examples": [{"response": "Keep this backend-only and preserve behavior."}],
+            }
     turn = SolutionPlanningTurn.objects.create(
         workspace_id=session.workspace_id,
         session=session,
         actor=actor,
         kind=kind,
         sequence=_next_solution_planning_turn_sequence(session),
-        payload_json=payload if isinstance(payload, dict) else {},
+        payload_json=normalized_payload,
         created_by=created_by,
     )
     return turn
@@ -33367,6 +33503,41 @@ def _record_solution_draft_plan(
         memberships=memberships,
         force_code_aware_planning=force_code_aware_planning,
     )
+    if isinstance(plan, dict):
+        scope_lock = _solution_scope_lock_state(session)
+        if bool(scope_lock.get("decomposition_scope_locked")):
+            plan_selected = plan.get("selected_artifact_ids") if isinstance(plan.get("selected_artifact_ids"), list) else []
+            current_selected = _solution_change_session_selected_artifact_ids(session)
+            if not plan_selected and current_selected:
+                plan["selected_artifact_ids"] = list(current_selected)
+            elif plan_selected:
+                planner_discovery_reason = ""
+                if bool(plan.get("cross_artifact_required")):
+                    planner_discovery_reason = "planner_reported_cross_artifact_required"
+                elif str(plan.get("planning_mode") or "").strip() == "cross_artifact_change":
+                    planner_discovery_reason = "planner_mode_cross_artifact_change"
+                constrained, widened, error_code = _apply_scope_lock_to_selection(
+                    session=session,
+                    selected_artifact_ids=[str(item).strip() for item in plan_selected if str(item).strip()],
+                    scope_source="planner_discovery",
+                    widen_reason=planner_discovery_reason,
+                    permit_planner_discovery=bool(planner_discovery_reason),
+                )
+                if error_code == "scope_widen_reason_required":
+                    plan["selected_artifact_ids"] = list(scope_lock.get("locked_artifact_ids") or current_selected)
+                    risk_annotations = [
+                        str(item).strip()
+                        for item in (plan.get("risk_annotations") if isinstance(plan.get("risk_annotations"), list) else [])
+                        if str(item).strip()
+                    ]
+                    annotation = (
+                        "Decomposition scope lock retained: additional artifacts were not auto-selected because no widening reason was recorded."
+                    )
+                    if annotation not in risk_annotations:
+                        risk_annotations.append(annotation)
+                    plan["risk_annotations"] = risk_annotations
+                elif widened:
+                    plan["selected_artifact_ids"] = constrained
     validate_decomposition_plan_quality(plan if isinstance(plan, dict) else {})
     objective_summary = str(
         plan.get("planner_objective_text")
@@ -33381,7 +33552,7 @@ def _record_solution_draft_plan(
     )
     session.plan_json = plan
     session.status = "planned"
-    session.save(update_fields=["plan_json", "status", "updated_at"])
+    session.save(update_fields=["plan_json", "status", "metadata_json", "updated_at"])
     _append_solution_planning_turn(
         session=session,
         actor="planner",
@@ -33719,6 +33890,7 @@ def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
         if latest_draft_plan and not pending_prompt_turn
         else []
     )
+    scope_lock = _solution_scope_lock_state(session)
     return {
         "turns": serialized_turns,
         "checkpoints": serialized_checkpoints,
@@ -33726,6 +33898,10 @@ def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
         "pending_option_set": pending_option_set,
         "pending_checkpoints": pending_checkpoints,
         "latest_draft_plan": latest_draft_plan,
+        "decomposition_scope_locked": bool(scope_lock.get("decomposition_scope_locked")),
+        "locked_artifact_ids": list(scope_lock.get("locked_artifact_ids") or []),
+        "scope_lock_reason": str(scope_lock.get("scope_lock_reason") or ""),
+        "scope_source": str(scope_lock.get("scope_source") or ""),
     }
 
 
@@ -33746,6 +33922,45 @@ def _seed_solution_planning_state_on_create(
 
     token_count = len([token for token in re.findall(r"[a-z0-9_]+", request_text.lower()) if len(token) >= 2])
     has_meaningful_memberships = _has_meaningful_solution_memberships(memberships)
+    auto_locked_artifact_id = _resolve_initial_decomposition_autolock_artifact(
+        session=session,
+        memberships=memberships,
+    )
+    if auto_locked_artifact_id:
+        session.selected_artifact_ids_json = [auto_locked_artifact_id]
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        planner_hints = _collect_decomposition_planner_hints(
+            session_metadata=session.metadata_json if isinstance(session.metadata_json, dict) else {},
+            analysis_metadata=session.analysis_json if isinstance(session.analysis_json, dict) else {},
+        )
+        metadata["initial_scope"] = {
+            "auto_locked": True,
+            "artifact_id": auto_locked_artifact_id,
+            "reason": "decomposition_single_artifact_resolved",
+            "target_source_files": list(
+                planner_hints.get("target_source_files")
+                if isinstance(planner_hints.get("target_source_files"), list)
+                else []
+            ),
+        }
+        metadata["scope_lock"] = {
+            "decomposition_scope_locked": True,
+            "locked_artifact_ids": [auto_locked_artifact_id],
+            "scope_lock_reason": "decomposition_single_artifact_resolved",
+            "scope_source": "campaign_metadata",
+            "widen_events": [],
+        }
+        session.metadata_json = metadata
+        session.save(update_fields=["selected_artifact_ids_json", "metadata_json", "updated_at"])
+        _record_solution_draft_plan(
+            session=session,
+            memberships=memberships,
+            summary="Auto-scoped decomposition plan from campaign metadata.",
+        )
+        checkpoint = _reset_solution_stage_checkpoint(session=session)
+        _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+        return
+
     if request_text and not has_meaningful_memberships:
         if _request_requires_initial_clarification(request_text):
             _append_solution_planning_turn(
@@ -34064,12 +34279,39 @@ def _build_solution_impacted_analysis(
     application: Application,
     request_text: str,
     memberships: List[ApplicationArtifactMembership],
+    session_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    metadata_payload = session_metadata if isinstance(session_metadata, dict) else {}
+    metadata_hints = _collect_decomposition_planner_hints(
+        session_metadata=metadata_payload,
+        analysis_metadata={},
+    )
+    normalized_target_paths = _dedupe(
+        [
+            str(item).strip().replace("\\", "/")
+            for item in (
+                metadata_hints.get("target_source_files")
+                if isinstance(metadata_hints.get("target_source_files"), list)
+                else []
+            )
+            if str(item).strip()
+        ]
+    )
+    if normalized_target_paths:
+        hinted_suffixes = [str(Path(path).name).strip() for path in normalized_target_paths if str(Path(path).name).strip()]
+        if hinted_suffixes:
+            request_text = f"{request_text} {' '.join(hinted_suffixes)}".strip()
     analysis = _analyze_solution_impacted_artifacts(
         application=application,
         request_text=request_text,
         memberships=memberships,
     )
+    if metadata_hints:
+        analysis = {
+            **analysis,
+            "decomposition_campaign": metadata_hints,
+            "planner_hints": metadata_hints,
+        }
     impacted_rows = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
     suggested_workstreams = analysis.get("suggested_workstreams") if isinstance(analysis.get("suggested_workstreams"), list) else []
     if impacted_rows:
@@ -34091,6 +34333,96 @@ def _build_solution_impacted_analysis(
     )
     analysis["analyzed_at"] = timezone.now().isoformat()
     return analysis
+
+
+def _resolve_initial_decomposition_autolock_artifact(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> Optional[str]:
+    metadata_payload = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    analysis_payload = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+    planner_hints = _collect_decomposition_planner_hints(
+        session_metadata=metadata_payload,
+        analysis_metadata=analysis_payload,
+    )
+    target_source_files = (
+        planner_hints.get("target_source_files")
+        if isinstance(planner_hints.get("target_source_files"), list)
+        else []
+    )
+    normalized_targets = _dedupe(
+        [str(item).strip().replace("\\", "/") for item in target_source_files if str(item).strip()]
+    )
+    if not normalized_targets:
+        return None
+
+    planning_mode, _reasons = _classify_solution_change_planning_mode(
+        request_text=str(session.request_text or ""),
+        session_metadata=planner_hints,
+    )
+    if planning_mode != "decompose_existing_system":
+        return None
+
+    lowered_request = str(session.request_text or "").strip().lower()
+    if any(
+        token in lowered_request
+        for token in ("cross artifact", "cross-artifact", "across artifacts", "both ui and api", "frontend and backend")
+    ):
+        return None
+    if bool(planner_hints.get("requires_multiple_artifacts")) or bool(planner_hints.get("cross_artifact_required")):
+        return None
+
+    membership_ids = {str(member.artifact_id): member for member in memberships}
+    matched_artifact_ids: Set[str] = set()
+    for target in normalized_targets:
+        lowered_target = target.lower()
+        target_matches: List[str] = []
+        for member in memberships:
+            artifact = member.artifact
+            owner_prefixes = (
+                artifact.owner_path_prefixes_json
+                if isinstance(getattr(artifact, "owner_path_prefixes_json", None), list)
+                else []
+            )
+            if not owner_prefixes:
+                continue
+            if any(
+                _path_hint_matches_owner_scope(lowered_target, str(prefix or "").strip().lower())
+                for prefix in owner_prefixes
+                if str(prefix or "").strip()
+            ):
+                artifact_id = str(member.artifact_id)
+                if artifact_id not in target_matches:
+                    target_matches.append(artifact_id)
+        if len(target_matches) != 1:
+            return None
+        matched_artifact_ids.add(target_matches[0])
+    if len(matched_artifact_ids) != 1:
+        return None
+    resolved_artifact_id = str(next(iter(matched_artifact_ids)))
+    if resolved_artifact_id not in membership_ids:
+        return None
+
+    impacted_rows = (
+        analysis_payload.get("impacted_artifacts")
+        if isinstance(analysis_payload.get("impacted_artifacts"), list)
+        else []
+    )
+    scored = [row for row in impacted_rows if isinstance(row, dict) and str(row.get("artifact_id") or "").strip()]
+    if scored:
+        scored = sorted(scored, key=lambda row: -int(row.get("score") or 0))
+        top_row = scored[0]
+        top_artifact_id = str(top_row.get("artifact_id") or "").strip()
+        top_score = int(top_row.get("score") or 0)
+        if top_artifact_id and top_artifact_id != resolved_artifact_id:
+            return None
+        if len(scored) > 1:
+            second_score = int(scored[1].get("score") or 0)
+            if top_score - second_score < 3:
+                return None
+
+    return resolved_artifact_id
 
 
 _CODE_AWARE_IMPLEMENTATION_TOKENS: Set[str] = {
@@ -40240,10 +40572,17 @@ def application_solution_change_sessions_collection(
     if not request_text:
         return JsonResponse({"error": "request_text is required"}, status=400)
     title = str(payload.get("title") or "").strip() or f"Change Session {timezone.now().strftime('%Y-%m-%d %H:%M')}"
+    metadata_payload = payload.get("metadata")
+    if metadata_payload is None:
+        metadata_payload = payload.get("metadata_json")
+    if metadata_payload is not None and not isinstance(metadata_payload, dict):
+        return JsonResponse({"error": "metadata must be an object"}, status=400)
+    session_metadata = metadata_payload if isinstance(metadata_payload, dict) else {}
     analysis = _build_solution_impacted_analysis(
         application=application,
         request_text=request_text,
         memberships=memberships,
+        session_metadata=session_metadata,
     )
     session = SolutionChangeSession.objects.create(
         workspace_id=application.workspace_id,
@@ -40251,6 +40590,7 @@ def application_solution_change_sessions_collection(
         title=title,
         request_text=request_text,
         created_by=identity,
+        metadata_json=session_metadata,
         analysis_json=analysis,
         selected_artifact_ids_json=analysis.get("suggested_artifact_ids") if isinstance(analysis.get("suggested_artifact_ids"), list) else [],
     )
@@ -40333,7 +40673,24 @@ def application_solution_change_session_detail(
             token = str(item or "").strip()
             if token and token in allowed_ids and token not in selected_ids:
                 selected_ids.append(token)
-        session.selected_artifact_ids_json = selected_ids
+        constrained_ids, _widened, error_code = _apply_scope_lock_to_selection(
+            session=session,
+            selected_artifact_ids=selected_ids,
+            scope_source=str(payload.get("scope_source") or "manual_override").strip() or "manual_override",
+            widen_reason=str(payload.get("scope_widen_reason") or "").strip(),
+            permit_planner_discovery=False,
+        )
+        if error_code == "scope_widen_reason_required":
+            return JsonResponse(
+                {
+                    "error": "scope_widen_reason is required to expand decomposition scope",
+                    "blocked_reason": "scope_lock_widen_reason_required",
+                    "required_fields": ["scope_widen_reason"],
+                    "allowed_actions": ["set_selected_artifact_ids_with_scope_widen_reason", "regenerate_options", "plan"],
+                },
+                status=409,
+            )
+        session.selected_artifact_ids_json = constrained_ids
     if "confirmed_workstreams" in payload:
         raw = payload.get("confirmed_workstreams")
         if not isinstance(raw, list):
@@ -40478,6 +40835,8 @@ def application_solution_change_session_control_action(
                 },
                 http_status=409,
             )
+        pending_kind = str(pending_prompt_turn.get("kind") or "").strip().lower()
+        pending_payload = pending_prompt_turn.get("payload") if isinstance(pending_prompt_turn.get("payload"), dict) else {}
         reply_text = str(
             payload.get("response")
             or payload.get("prompt_response")
@@ -40486,9 +40845,156 @@ def application_solution_change_session_control_action(
             or ""
         ).strip()
         if not reply_text:
-            return JsonResponse({"error": "response is required"}, status=400)
+            if pending_kind != "option_set":
+                expected_schema = pending_payload.get("response_schema") if isinstance(pending_payload.get("response_schema"), dict) else {}
+                return _solution_change_session_control_envelope(
+                    operation="respond_to_planner_prompt",
+                    session=session,
+                    application=application,
+                    operation_status="blocked",
+                    operation_payload={
+                        "error": "response is required",
+                        "field_errors": {
+                            "response": "required for question prompts",
+                        },
+                        "required_fields": ["response"],
+                        "accepted_fields": ["response", "prompt_response", "reply_text", "text"],
+                        "response_schema": expected_schema,
+                    },
+                    http_status=400,
+                )
         prompt_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         source_turn_id = str(payload.get("source_turn_id") or pending_prompt_turn.get("id") or "").strip()
+        if pending_kind == "option_set":
+            selected_option_id = str(payload.get("selected_option_id") or "").strip()
+            if not selected_option_id:
+                selected_option_ids = payload.get("selected_option_ids")
+                if isinstance(selected_option_ids, list):
+                    normalized_ids = [str(item or "").strip() for item in selected_option_ids if str(item or "").strip()]
+                    if len(normalized_ids) > 1:
+                        expected_schema = pending_payload.get("response_schema") if isinstance(pending_payload.get("response_schema"), dict) else {}
+                        return _solution_change_session_control_envelope(
+                            operation="respond_to_planner_prompt",
+                            session=session,
+                            application=application,
+                            operation_status="blocked",
+                            operation_payload={
+                                "error": "selected_option_ids must contain exactly one id",
+                                "field_errors": {"selected_option_ids": "multiple selections are not supported for this prompt"},
+                                "required_fields": ["selected_option_id"],
+                                "accepted_fields": ["selected_option_id", "selected_option_ids", "option_id"],
+                                "response_schema": expected_schema,
+                            },
+                            http_status=400,
+                        )
+                    if normalized_ids:
+                        selected_option_id = normalized_ids[0]
+            if not selected_option_id:
+                selected_option_id = str(payload.get("option_id") or "").strip()
+            option_rows = pending_payload.get("options") if isinstance(pending_payload.get("options"), list) else []
+            selected_option = None
+            for option in option_rows:
+                if not isinstance(option, dict):
+                    continue
+                if str(option.get("id") or "").strip() == selected_option_id:
+                    selected_option = option
+                    break
+            if not selected_option:
+                expected_schema = pending_payload.get("response_schema") if isinstance(pending_payload.get("response_schema"), dict) else {}
+                canonical_option_ids = [
+                    str((item or {}).get("id") or "").strip()
+                    for item in option_rows
+                    if isinstance(item, dict) and str((item or {}).get("id") or "").strip()
+                ]
+                return _solution_change_session_control_envelope(
+                    operation="respond_to_planner_prompt",
+                    session=session,
+                    application=application,
+                    operation_status="blocked",
+                    operation_payload={
+                        "error": "option-set response is invalid",
+                        "field_errors": {
+                            "selected_option_id": (
+                                "required and must match one of the pending option identifiers"
+                                if not selected_option_id
+                                else "selected_option_id is not part of the pending option set"
+                            )
+                        },
+                        "required_fields": ["selected_option_id"],
+                        "accepted_fields": ["selected_option_id", "selected_option_ids", "option_id"],
+                        "canonical_option_identifiers": canonical_option_ids,
+                        "response_schema": expected_schema,
+                    },
+                    http_status=400,
+                )
+            current_selected_ids = _solution_change_session_selected_artifact_ids(session)
+            selected_artifact_id = str(selected_option.get("id") or selected_option_id).strip() or selected_option_id
+            reordered_selected_ids = [selected_artifact_id] + [
+                artifact_id for artifact_id in current_selected_ids if artifact_id != selected_artifact_id
+            ]
+            constrained_ids, _widened, error_code = _apply_scope_lock_to_selection(
+                session=session,
+                selected_artifact_ids=reordered_selected_ids,
+                scope_source=str(payload.get("scope_source") or "prompt_response").strip() or "prompt_response",
+                widen_reason=str(payload.get("scope_widen_reason") or "").strip(),
+                permit_planner_discovery=False,
+            )
+            if error_code == "scope_widen_reason_required":
+                return _solution_change_session_control_envelope(
+                    operation="respond_to_planner_prompt",
+                    session=session,
+                    application=application,
+                    operation_status="blocked",
+                    operation_payload={
+                        "error": "scope_widen_reason is required to expand decomposition scope",
+                        "blocked_reason": "scope_lock_widen_reason_required",
+                        "required_fields": ["scope_widen_reason"],
+                        "accepted_fields": ["scope_widen_reason", "scope_source"],
+                    },
+                    http_status=409,
+                )
+            session.selected_artifact_ids_json = constrained_ids
+            session.save(update_fields=["selected_artifact_ids_json", "metadata_json", "updated_at"])
+            _append_solution_planning_turn(
+                session=session,
+                actor="user",
+                kind="response",
+                payload={
+                    "response_kind": "option_selection",
+                    "source_turn_id": source_turn_id,
+                    "selected_option_id": selected_option_id,
+                    "option_id": selected_option_id,
+                    "option_label": str(selected_option.get("label") or selected_option_id),
+                    "option_payload": selected_option,
+                    "metadata": prompt_metadata,
+                },
+                created_by=identity,
+            )
+            memberships = list(
+                ApplicationArtifactMembership.objects.filter(application=application)
+                .select_related("artifact", "artifact__type")
+                .order_by("sort_order", "created_at")
+            )
+            _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+            post_state = _solution_planning_state(session)
+            response_payload: Dict[str, Any] = {
+                "recorded": True,
+                "planner_prompt_response": {
+                    "source_turn_id": source_turn_id,
+                    "response_kind": "option_selection",
+                    "selected_option_id": selected_option_id,
+                    "pending_prompt_remaining": bool(post_state.get("pending_question") or post_state.get("pending_option_set")),
+                    "metadata": prompt_metadata,
+                },
+            }
+            return _solution_change_session_control_envelope(
+                operation="respond_to_planner_prompt",
+                session=session,
+                application=application,
+                operation_status="succeeded",
+                operation_payload=response_payload,
+                http_status=200,
+            )
         force_planner_fallback = bool(payload.get("use_planner_interpretation"))
         response_payload = _process_solution_change_session_reply(
             session=session,
@@ -40690,8 +41196,24 @@ def application_solution_change_session_select_option(
     reordered_selected_ids = [selected_artifact_id] + [
         artifact_id for artifact_id in current_selected_ids if artifact_id != selected_artifact_id
     ]
-    session.selected_artifact_ids_json = reordered_selected_ids
-    session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+    constrained_ids, _widened, error_code = _apply_scope_lock_to_selection(
+        session=session,
+        selected_artifact_ids=reordered_selected_ids,
+        scope_source=str(payload.get("scope_source") or "manual_override").strip() or "manual_override",
+        widen_reason=str(payload.get("scope_widen_reason") or "").strip(),
+        permit_planner_discovery=False,
+    )
+    if error_code == "scope_widen_reason_required":
+        return JsonResponse(
+            {
+                "error": "scope_widen_reason is required to expand decomposition scope",
+                "blocked_reason": "scope_lock_widen_reason_required",
+                "required_fields": ["scope_widen_reason"],
+            },
+            status=409,
+        )
+    session.selected_artifact_ids_json = constrained_ids
+    session.save(update_fields=["selected_artifact_ids_json", "metadata_json", "updated_at"])
 
     _append_solution_planning_turn(
         session=session,
@@ -40877,6 +41399,7 @@ def application_solution_change_session_plan(
         application=application,
         request_text=str(session.request_text or ""),
         memberships=memberships,
+        session_metadata=session.metadata_json if isinstance(session.metadata_json, dict) else {},
     )
     session.save(update_fields=["analysis_json", "updated_at"])
     planning_state = _solution_planning_state(session)
@@ -40900,7 +41423,16 @@ def application_solution_change_session_plan(
             reordered_selected_ids = [selected_artifact_id] + [
                 artifact_id for artifact_id in current_selected_ids if artifact_id != selected_artifact_id
             ]
-            session.selected_artifact_ids_json = reordered_selected_ids
+            constrained_ids, _widened, error_code = _apply_scope_lock_to_selection(
+                session=session,
+                selected_artifact_ids=reordered_selected_ids,
+                scope_source="planner_discovery",
+                widen_reason="",
+                permit_planner_discovery=False,
+            )
+            if error_code == "scope_widen_reason_required":
+                constrained_ids = _solution_scope_lock_state(session).get("locked_artifact_ids") or current_selected_ids
+            session.selected_artifact_ids_json = list(constrained_ids)
             session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
             _append_solution_planning_turn(
                 session=session,
