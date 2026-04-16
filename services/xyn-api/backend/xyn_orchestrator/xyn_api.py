@@ -41246,6 +41246,51 @@ def solution_change_session_checkpoint_decision(request: HttpRequest, session_id
     )
 
 
+def _normalized_campaign_text_list(raw_value: Any) -> List[str]:
+    if not isinstance(raw_value, list):
+        return []
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for item in raw_value:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
+
+
+def _build_change_request_text_from_decomposition_campaign(decomposition_campaign: Dict[str, Any]) -> str:
+    target_source_files = _normalized_campaign_text_list(decomposition_campaign.get("target_source_files"))
+    extraction_seams = _normalized_campaign_text_list(decomposition_campaign.get("extraction_seams"))
+    moved_handlers_modules = _normalized_campaign_text_list(decomposition_campaign.get("moved_handlers_modules"))
+    required_test_suites = _normalized_campaign_text_list(decomposition_campaign.get("required_test_suites"))
+    if not target_source_files:
+        return ""
+
+    target_phrase = ", ".join(target_source_files)
+    request_lines = [
+        f"Decompose {target_phrase} by extracting the specified seams into smaller backend modules.",
+    ]
+    if extraction_seams:
+        request_lines.append(f"Prioritize seams: {', '.join(extraction_seams)}.")
+    if moved_handlers_modules:
+        request_lines.append(f"Move logic into: {', '.join(moved_handlers_modules)}.")
+    request_lines.append("Preserve route behavior, response contracts, and compatibility wrappers in xyn_api.py.")
+    if required_test_suites:
+        request_lines.append(f"Validate with test suites: {', '.join(required_test_suites)}.")
+    return " ".join(request_lines)
+
+
+def _normalize_change_session_request_payload(payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    request_text = str(payload.get("request_text") or "").strip()
+    decomposition_campaign = payload.get("decomposition_campaign") if isinstance(payload.get("decomposition_campaign"), dict) else {}
+    if request_text or not decomposition_campaign:
+        return request_text, decomposition_campaign
+    derived_request_text = _build_change_request_text_from_decomposition_campaign(decomposition_campaign)
+    return str(derived_request_text or "").strip(), decomposition_campaign
+
+
 @csrf_exempt
 @login_required
 def application_solution_change_sessions_collection(
@@ -41284,9 +41329,14 @@ def application_solution_change_sessions_collection(
     if not _require_workspace_capabilities(identity, str(application.workspace_id), [CAP_ARTIFACTS_WRITE]):
         return JsonResponse({"error": "forbidden"}, status=403)
     payload = _parse_json(request)
-    request_text = str(payload.get("request_text") or "").strip()
+    request_text, decomposition_campaign = _normalize_change_session_request_payload(payload)
     if not request_text:
-        return JsonResponse({"error": "request_text is required"}, status=400)
+        failure_payload: Dict[str, Any] = {"error": "request_text is required"}
+        if decomposition_campaign:
+            failure_payload["decomposition_campaign"] = decomposition_campaign
+            failure_payload["blocked_reason"] = "backend_validation_error"
+            failure_payload["error_classification"] = "backend_validation_error"
+        return JsonResponse(failure_payload, status=400)
     title = str(payload.get("title") or "").strip() or f"Change Session {timezone.now().strftime('%Y-%m-%d %H:%M')}"
     metadata_payload = payload.get("metadata")
     if metadata_payload is None:

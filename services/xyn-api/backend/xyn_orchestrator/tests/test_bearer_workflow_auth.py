@@ -1,5 +1,6 @@
 import json
 import uuid
+from typing import Any, Dict
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -18,6 +19,7 @@ from xyn_orchestrator.models import (
     Workspace,
     WorkspaceMembership,
 )
+from xyn_orchestrator.xyn_api import _build_change_request_text_from_decomposition_campaign
 
 
 class BearerWorkflowAuthTests(TestCase):
@@ -480,6 +482,23 @@ class ArtifactScopedChangeSessionTests(TestCase):
             "aud": "xyn-ui",
         }
 
+    def test_decomposition_request_text_derivation_is_deterministic(self):
+        decomposition_campaign = {
+            "target_source_files": ["backend/xyn_orchestrator/xyn_api.py"],
+            "extraction_seams": ["solution_change_session_workflow", "stage_apply_dispatch"],
+            "moved_handlers_modules": [
+                "backend/xyn_orchestrator/api/solutions.py",
+                "backend/xyn_orchestrator/solution_change_session/stage_apply_dispatch.py",
+            ],
+            "required_test_suites": ["test_solution_planner_engine", "test_goal_planning"],
+        }
+        first = _build_change_request_text_from_decomposition_campaign(decomposition_campaign)
+        second = _build_change_request_text_from_decomposition_campaign(dict(decomposition_campaign))
+        self.assertEqual(first, second)
+        self.assertIn("backend/xyn_orchestrator/xyn_api.py", first)
+        self.assertIn("Preserve route behavior, response contracts, and compatibility wrappers in xyn_api.py.", first)
+        self.assertIn("solution_change_session_workflow", first)
+
     def _create_artifact_scoped_session_records(self) -> SolutionChangeSession:
         application = Application.objects.create(
             workspace=self.workspace,
@@ -590,6 +609,89 @@ class ArtifactScopedChangeSessionTests(TestCase):
             HTTP_AUTHORIZATION="Bearer token-artifact-scope",
         )
         self.assertEqual(plan_response.status_code, 200, plan_response.content.decode())
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
+    @mock.patch("xyence.middleware._verify_oidc_token")
+    @mock.patch("xyn_orchestrator.xyn_api._maybe_emit_solution_checkpoint_turn")
+    @mock.patch("xyn_orchestrator.xyn_api._reset_solution_stage_checkpoint")
+    @mock.patch("xyn_orchestrator.xyn_api._record_solution_draft_plan")
+    @mock.patch("xyn_orchestrator.xyn_api._solution_planning_state")
+    @mock.patch("xyn_orchestrator.xyn_api._build_solution_impacted_analysis")
+    def test_artifact_scoped_decomposition_session_derives_request_text_when_omitted(
+        self,
+        mock_analysis: mock.Mock,
+        mock_planning_state: mock.Mock,
+        _mock_record_plan: mock.Mock,
+        _mock_reset_checkpoint: mock.Mock,
+        _mock_emit_checkpoint: mock.Mock,
+        mock_verify: mock.Mock,
+    ):
+        mock_verify.return_value = self._bearer_claims()
+
+        captured: Dict[str, Any] = {}
+
+        def _analysis_side_effect(*, request_text: str, **kwargs):
+            captured["request_text"] = request_text
+            return {"suggested_artifact_ids": [str(self.xyn_api_artifact.id)]}
+
+        mock_analysis.side_effect = _analysis_side_effect
+        mock_planning_state.return_value = {"pending_question": None, "pending_option_set": None, "latest_draft_plan": {"ok": True}}
+
+        response = self.client.post(
+            "/xyn/api/change-sessions",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "artifact_slug": "xyn-api",
+                    "decomposition_campaign": {
+                        "kind": "xyn_api_decomposition",
+                        "target_source_files": ["backend/xyn_orchestrator/xyn_api.py"],
+                        "extraction_seams": ["solution_change_plan_generation"],
+                        "moved_handlers_modules": ["backend/xyn_orchestrator/api/solutions.py"],
+                        "required_test_suites": ["test_solution_planner_engine"],
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer token-derived-request-text",
+        )
+        self.assertEqual(response.status_code, 201, response.content.decode())
+        payload = response.json()
+        session = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+        derived_request_text = str(session.get("request_text") or "")
+        self.assertTrue(derived_request_text)
+        self.assertIn("backend/xyn_orchestrator/xyn_api.py", derived_request_text)
+        self.assertIn("Preserve route behavior, response contracts, and compatibility wrappers in xyn_api.py.", derived_request_text)
+        self.assertEqual(captured.get("request_text"), derived_request_text)
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
+    @mock.patch("xyence.middleware._verify_oidc_token")
+    def test_artifact_scoped_decomposition_without_target_files_still_returns_structured_validation_error(
+        self,
+        mock_verify: mock.Mock,
+    ):
+        mock_verify.return_value = self._bearer_claims()
+        response = self.client.post(
+            "/xyn/api/change-sessions",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "artifact_slug": "xyn-api",
+                    "decomposition_campaign": {
+                        "kind": "xyn_api_decomposition",
+                        "extraction_seams": ["solution_change_plan_generation"],
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer token-validation-structured",
+        )
+        self.assertEqual(response.status_code, 400, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("error"), "request_text is required")
+        self.assertEqual(payload.get("blocked_reason"), "backend_validation_error")
+        self.assertEqual(payload.get("error_classification"), "backend_validation_error")
+        self.assertIsInstance(payload.get("decomposition_campaign"), dict)
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
     @mock.patch("xyence.middleware._verify_oidc_token")
