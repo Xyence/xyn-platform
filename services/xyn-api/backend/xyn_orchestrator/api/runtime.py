@@ -1,3 +1,5 @@
+from typing import Any, Callable, Dict
+
 from xyn_orchestrator.xyn_api import (
     blueprints_collection,
     blueprint_detail,
@@ -58,6 +60,20 @@ from xyn_orchestrator.xyn_api import (
     internal_workspace_artifacts_collection,
 )
 
+
+def intent_resolution(
+    *,
+    request: Any,
+    resolve_fn: Callable[..., Dict[str, Any]],
+) -> Dict[str, Any]:
+    payload = resolve_fn(request=request)
+    resolved = payload if isinstance(payload, dict) else {}
+    if not isinstance(resolved.get("intent"), dict):
+        resolved.setdefault("intent", {})
+    resolved.setdefault("status", "ok")
+    return resolved
+
+
 __all__ = [
     "blueprints_collection",
     "blueprint_detail",
@@ -116,4 +132,5 @@ __all__ = [
     "ai_invoke",
     "ai_activity",
     "internal_workspace_artifacts_collection",
+    "intent_resolution",
 ]

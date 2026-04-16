@@ -262,7 +262,7 @@ class SolutionChangeSessionRepoCommitTests(TestCase):
         commits = list(SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=self.session).order_by("-created_at"))
         self.assertEqual(len(commits), 1)
         self.assertEqual(commits[0].repository_slug, "xyn-platform")
-        self.assertEqual(commits[0].branch, "main")
+        self.assertTrue(str(commits[0].branch or "").startswith("xyn/session/xyn-platform-"))
         self.assertIn("apps/xyn-ui/src/feature.tsx", commits[0].changed_files_json)
 
         status_proc = subprocess.run(

@@ -16,7 +16,7 @@ import fnmatch
 from functools import wraps
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit, quote, unquote
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, List, Sequence, Set, Tuple, TypedDict
+from typing import Any, Callable, Dict, Iterable, Optional, List, Sequence, Set, Tuple, TypedDict
 
 import requests
 import boto3
@@ -24417,7 +24417,11 @@ def xyn_intent_resolve(request: HttpRequest) -> JsonResponse:
             ),
         ),
     )
-    epic_d_payload = epic_d_intent.model_dump(mode="json")
+    intent_resolution_payload = _intent_resolution(
+        request=request,
+        resolve_fn=lambda request: {"intent": epic_d_intent.model_dump(mode="json"), "status": "resolved"},
+    )
+    epic_d_payload = intent_resolution_payload.get("intent") if isinstance(intent_resolution_payload.get("intent"), dict) else {}
     generated_app_evolution = _match_generated_app_evolution_command(message, generated_workspace) if generated_workspace else None
     prompt_interpretation = _prompt_interpretation_from_intent(
         message=message,
@@ -33633,7 +33637,7 @@ def _record_solution_draft_plan(
     summary: str,
     force_code_aware_planning: bool = False,
 ) -> Dict[str, Any]:
-    plan = _generate_solution_change_plan(
+    plan = _solution_change_plan_generation(
         session=session,
         memberships=memberships,
         force_code_aware_planning=force_code_aware_planning,
@@ -36868,34 +36872,25 @@ def _solution_change_stage_artifact_plan_steps(
     plan: Dict[str, Any],
     planned_work_by_artifact: Dict[str, List[str]],
 ) -> List[str]:
-    planned = [str(item).strip() for item in (planned_work_by_artifact.get(artifact_id) or []) if str(item).strip()]
-    if planned:
-        return planned
-    proposed_work = [str(item).strip() for item in (plan.get("proposed_work") if isinstance(plan.get("proposed_work"), list) else []) if str(item).strip()]
-    if proposed_work:
-        return proposed_work
-    implementation_steps = [
-        str(item).strip()
-        for item in (plan.get("implementation_steps") if isinstance(plan.get("implementation_steps"), list) else [])
-        if str(item).strip()
-    ]
-    if implementation_steps:
-        return implementation_steps[:4]
-    objective = str(session.request_text or "").strip()
-    if objective:
-        return [f"Implement requested change: {objective}"]
-    return ["Implement the approved solution change for this artifact."]
+    return _solution_stage_apply_workflow.solution_change_stage_artifact_plan_steps(
+        artifact_id=artifact_id,
+        session=session,
+        plan=plan,
+        planned_work_by_artifact=planned_work_by_artifact,
+    )
 
 
 def _resolve_stage_apply_target_branch(
     *,
     repo_slug: str,
     fallback_branch: str,
+    session: Optional[SolutionChangeSession] = None,
 ) -> Tuple[str, str, str]:
     return _solution_stage_apply_workflow.resolve_stage_apply_target_branch(
         repo_slug=repo_slug,
         fallback_branch=fallback_branch,
         resolve_local_repo_root=_resolve_local_repo_root,
+        session=session,
     )
 
 
@@ -36988,6 +36983,65 @@ def _stage_solution_change_session(
         artifact_role_matches_workstreams=_artifact_role_matches_workstreams,
         stage_solution_change_dispatch_dev_tasks=_stage_solution_change_dispatch_dev_tasks,
     )
+
+
+def _solution_change_plan_generation(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+    force_code_aware_planning: bool = False,
+) -> Dict[str, Any]:
+    from .api import solutions as _solutions_api
+
+    return _solutions_api.solution_change_plan_generation(
+        session=session,
+        memberships=memberships,
+        force_code_aware_planning=force_code_aware_planning,
+        generate_fn=_generate_solution_change_plan,
+    )
+
+
+def _solution_change_preview_validation(
+    *,
+    session: SolutionChangeSession,
+    mode: str,
+) -> Dict[str, Any]:
+    from .api import solutions as _solutions_api
+
+    return _solutions_api.solution_change_preview_validation(
+        session=session,
+        mode=mode,
+        prepare_fn=_prepare_solution_change_preview,
+        validate_fn=_validate_solution_change_session,
+    )
+
+
+def _solution_change_session_workflow(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+    dispatch_runtime: bool = False,
+    dispatch_user=None,
+) -> Dict[str, Any]:
+    from .api import solutions as _solutions_api
+
+    return _solutions_api.solution_change_session_workflow(
+        session=session,
+        memberships=memberships,
+        dispatch_runtime=dispatch_runtime,
+        dispatch_user=dispatch_user,
+        stage_apply_fn=_stage_solution_change_session,
+    )
+
+
+def _intent_resolution(
+    *,
+    request: HttpRequest,
+    resolve_fn: Callable[..., Dict[str, Any]],
+) -> Dict[str, Any]:
+    from .api import runtime as _runtime_api
+
+    return _runtime_api.intent_resolution(request=request, resolve_fn=resolve_fn)
 
 
 def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[str, Any]:
@@ -42420,7 +42474,7 @@ def application_solution_change_session_stage_apply(
         return JsonResponse({"error": "planning approval checkpoint must be approved before staging"}, status=409)
     if not isinstance(session.plan_json, dict) or not session.plan_json:
         return JsonResponse({"error": "solution change session must have a generated plan before staging"}, status=409)
-    _stage_solution_change_session(
+    _solution_change_session_workflow(
         session=session,
         memberships=memberships,
         dispatch_runtime=True,
@@ -42457,7 +42511,7 @@ def application_solution_change_session_prepare_preview(
     artifact_states = staged.get("artifact_states") if isinstance(staged.get("artifact_states"), list) else []
     if not artifact_states:
         return JsonResponse({"error": "stage apply must run before preview preparation"}, status=409)
-    preview_payload = _prepare_solution_change_preview(session=session)
+    preview_payload = _solution_change_preview_validation(session=session, mode="prepare_preview")
     memberships_by_artifact_id = {
         str(member.artifact_id): member
         for member in ApplicationArtifactMembership.objects.filter(application=application)
@@ -42497,7 +42551,7 @@ def application_solution_change_session_validate(
     preview = session.preview_json if isinstance(session.preview_json, dict) else {}
     if str(preview.get("status") or "").strip().lower() != "ready":
         return JsonResponse({"error": "preview must be prepared before validation"}, status=409)
-    _validate_solution_change_session(session=session)
+    _solution_change_preview_validation(session=session, mode="validate")
     memberships_by_artifact_id = {
         str(member.artifact_id): member
         for member in ApplicationArtifactMembership.objects.filter(application=application)
@@ -42964,6 +43018,7 @@ def application_solution_change_session_commit(
         branch, _branch_source, branch_error = _resolve_stage_apply_target_branch(
             repo_slug=repo_slug,
             fallback_branch=fallback_branch,
+            session=session,
         )
         if not branch:
             return JsonResponse(
@@ -42974,6 +43029,20 @@ def application_solution_change_session_commit(
         if repo_root is None:
             return JsonResponse(
                 {"error": "unable to resolve local repository root for commit", "repository_slug": repo_slug},
+                status=409,
+            )
+        checkout_code, _checkout_out, checkout_err = _git_repo_command(
+            repo_root=repo_root,
+            args=["checkout", branch],
+        )
+        if checkout_code != 0:
+            return JsonResponse(
+                {
+                    "error": "failed to switch repository to session branch for commit",
+                    "repository_slug": repo_slug,
+                    "branch": branch,
+                    "details": checkout_err or "git checkout failed",
+                },
                 status=409,
             )
         changed_files = _git_changed_files_for_paths(repo_root=repo_root, pathspecs=allowed_paths)

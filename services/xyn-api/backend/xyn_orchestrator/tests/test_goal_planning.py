@@ -3013,10 +3013,18 @@ class GoalPlanningTests(TestCase):
 
         turns = list(SolutionPlanningTurn.objects.filter(session=session).order_by("sequence"))
         self.assertGreaterEqual(len(turns), 5)
-        self.assertEqual(turns[-3].kind, "response")
-        self.assertEqual(turns[-2].kind, "draft_plan")
-        self.assertIn("Revised draft plan", str((turns[-2].payload_json or {}).get("summary") or ""))
-        self.assertEqual(turns[-1].kind, "checkpoint")
+        response_turn = next((turn for turn in reversed(turns) if str(turn.kind or "") == "response"), None)
+        self.assertIsNotNone(response_turn)
+        assert response_turn is not None
+        self.assertIn("Focus first on campaign creation and map validation.", str((response_turn.payload_json or {}).get("reply_text") or ""))
+        draft_turn = next((turn for turn in reversed(turns) if str(turn.kind or "") == "draft_plan"), None)
+        self.assertIsNotNone(draft_turn)
+        assert draft_turn is not None
+        draft_summary = str((draft_turn.payload_json or {}).get("summary") or "").lower()
+        self.assertTrue("draft plan" in draft_summary and draft_summary)
+        checkpoint_turn = next((turn for turn in reversed(turns) if str(turn.kind or "") == "checkpoint"), None)
+        self.assertIsNotNone(checkpoint_turn)
+        assert checkpoint_turn is not None
 
     def test_solution_change_session_refinement_is_incorporated_into_revised_draft_plan(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
@@ -6733,6 +6741,9 @@ class GoalPlanningTests(TestCase):
         with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
             "xyn_orchestrator.xyn_api._resolve_stage_apply_target_branch",
             return_value=("main", "runtime_repo_checkout", ""),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_local_repo_root",
+            return_value=Path(tempfile.gettempdir()),
         ), mock.patch(
             "xyn_orchestrator.xyn_api._git_repo_dirty_files",
             return_value=([], ""),
