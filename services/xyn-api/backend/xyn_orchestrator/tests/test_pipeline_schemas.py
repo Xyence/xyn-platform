@@ -339,6 +339,43 @@ class OIDCAuthTests(TestCase):
             second_identity = UserIdentity.objects.get(subject="sub-second")
             self.assertFalse(RoleBinding.objects.filter(user_identity=second_identity, role="platform_admin").exists())
 
+    def test_first_user_fallback_ignores_seeded_local_platform_admin(self):
+        env = self._make_env()
+        local_identity = UserIdentity.objects.create(
+            provider="local",
+            issuer="local",
+            subject="admin@local",
+            email="admin@local",
+        )
+        RoleBinding.objects.create(user_identity=local_identity, scope_kind="platform", role="platform_admin")
+
+        with (
+            mock.patch.dict(os.environ, {"XYN_BOOTSTRAP_FIRST_OIDC_ADMIN_FALLBACK": "true"}, clear=False),
+            mock.patch.object(xyn_api_module, "_get_oidc_config") as get_config,
+            mock.patch.object(xyn_api_module, "_resolve_secret_ref") as resolve_secret,
+            mock.patch.object(xyn_api_module, "_decode_id_token") as decode_token,
+            mock.patch.object(xyn_api_module.requests, "post") as post_request,
+        ):
+            get_config.return_value = {"token_endpoint": "https://issuer.example.com/token"}
+            resolve_secret.return_value = "secret"
+            post_request.side_effect = self._mock_token_post
+
+            session = self.client.session
+            session["oidc_state"] = "state-first-real-oidc"
+            session["oidc_nonce"] = "nonce-first-real-oidc"
+            session["environment_id"] = str(env.id)
+            session.save()
+
+            decode_token.return_value = {
+                "sub": "sub-first-real-oidc",
+                "email": "first-oidc@xyence.io",
+                "name": "First OIDC User",
+            }
+            response = self.client.get("/auth/callback?code=abc&state=state-first-real-oidc")
+            self.assertEqual(response.status_code, 302)
+            first_identity = UserIdentity.objects.get(subject="sub-first-real-oidc")
+            self.assertTrue(RoleBinding.objects.filter(user_identity=first_identity, role="platform_admin").exists())
+
     def test_allowlisted_login_is_idempotent_across_repeated_callbacks(self):
         env = self._make_env()
         with (

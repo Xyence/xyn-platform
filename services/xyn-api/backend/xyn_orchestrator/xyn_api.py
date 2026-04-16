@@ -7256,7 +7256,13 @@ def _assign_bootstrap_platform_admin_if_eligible(identity: UserIdentity, email: 
         if not _bootstrap_first_user_fallback_enabled():
             return {"assigned": False, "reason": "fallback_disabled"}
 
-        has_platform_admin = RoleBinding.objects.filter(scope_kind="platform", role="platform_admin").exists()
+        # Only treat existing OIDC admins as terminal for first-OIDC fallback.
+        # Seeded local/service identities must not block first real OIDC bootstrap.
+        has_platform_admin = (
+            RoleBinding.objects.filter(scope_kind="platform", role="platform_admin")
+            .filter(user_identity__provider="oidc")
+            .exists()
+        )
         if has_platform_admin:
             return {"assigned": False, "reason": "platform_admin_exists"}
 
