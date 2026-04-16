@@ -2887,14 +2887,33 @@ def _can_manage_docs(identity: UserIdentity) -> bool:
 
 
 def _docs_workspace() -> Workspace:
-    workspace = Workspace.objects.filter(slug="platform-builder").first()
+    workspace = _workspace_role_qs(WORKSPACE_ROLE_SYSTEM_PLATFORM).order_by("name", "created_at").first()
     if workspace:
         return workspace
+    workspace = Workspace.objects.filter(slug="platform-builder").first()
+    if workspace:
+        return _ensure_workspace_role_metadata(
+            workspace,
+            role=WORKSPACE_ROLE_SYSTEM_PLATFORM,
+            hidden_from_ui=True,
+            bootstrap_source="system_platform",
+        )
     workspace, _ = Workspace.objects.get_or_create(
         slug="platform-builder",
-        defaults={"name": "Platform Builder", "description": "Platform governance and operator documentation"},
+        defaults={
+            "name": "Platform Builder",
+            "description": "Platform governance and operator documentation",
+            "kind": "internal",
+            "lifecycle_stage": "internal",
+            "metadata_json": {},
+        },
     )
-    return workspace
+    return _ensure_workspace_role_metadata(
+        workspace,
+        role=WORKSPACE_ROLE_SYSTEM_PLATFORM,
+        hidden_from_ui=True,
+        bootstrap_source="system_platform",
+    )
 
 
 def _ensure_doc_artifact_type() -> ArtifactType:
@@ -4798,6 +4817,7 @@ def _serialize_workspace_summary(
         "parent_workspace_id": str(workspace.parent_workspace_id) if workspace.parent_workspace_id else None,
         "org_name": str(workspace.org_name or workspace.name or "").strip(),
         "metadata": workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {},
+        "workspace_role": _workspace_role(workspace),
         "role": role or "admin",
         "termination_authority": bool(termination_authority) if termination_authority is not None else True,
     }
@@ -8550,8 +8570,8 @@ def auth_mode(request: HttpRequest) -> JsonResponse:
 
 def _platform_initialization_state(identity: UserIdentity) -> Dict[str, Any]:
     workspace_count = _user_visible_workspace_qs().count()
-    initialized = workspace_count > 0
-    requires_setup = bool(_auth_mode() != "dev" and _is_platform_admin(identity) and not initialized)
+    initialized = _default_user_workspace().exists()
+    requires_setup = bool(_is_platform_admin(identity) and not initialized)
     return {
         "initialized": bool(initialized),
         "requires_setup": bool(requires_setup),
@@ -8560,23 +8580,88 @@ def _platform_initialization_state(identity: UserIdentity) -> Dict[str, Any]:
     }
 
 
-def _is_system_workspace(workspace: Workspace) -> bool:
-    slug = str(getattr(workspace, "slug", "") or "").strip().lower()
-    if slug in {"platform-builder", "civic-lab"}:
-        return True
+WORKSPACE_ROLE_METADATA_KEY = "xyn_workspace_role"
+WORKSPACE_ROLE_SYSTEM_PLATFORM = "system_platform"
+WORKSPACE_ROLE_DEFAULT_USER = "default_user"
+WORKSPACE_ROLE_USER_VISIBLE = "user_visible"
+WORKSPACE_UI_HIDDEN_KEY = "xyn_hidden_from_ui"
+
+
+def _workspace_metadata(workspace: Workspace) -> Dict[str, Any]:
     metadata = getattr(workspace, "metadata_json", None)
-    if isinstance(metadata, dict) and metadata.get("xyn_system_workspace") is True:
-        return True
-    return False
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _workspace_role(workspace: Workspace) -> str:
+    slug = str(getattr(workspace, "slug", "") or "").strip().lower()
+    metadata = _workspace_metadata(workspace)
+    role = str(metadata.get(WORKSPACE_ROLE_METADATA_KEY) or "").strip().lower()
+    if role in {WORKSPACE_ROLE_SYSTEM_PLATFORM, WORKSPACE_ROLE_DEFAULT_USER, WORKSPACE_ROLE_USER_VISIBLE}:
+        return role
+    if metadata.get("xyn_system_workspace") is True:
+        return WORKSPACE_ROLE_SYSTEM_PLATFORM
+    if slug in {"platform-builder", "civic-lab"}:
+        return WORKSPACE_ROLE_SYSTEM_PLATFORM
+    return WORKSPACE_ROLE_USER_VISIBLE
+
+
+def _workspace_has_role(workspace: Workspace, role: str) -> bool:
+    return _workspace_role(workspace) == str(role or "").strip().lower()
+
+
+def _workspace_role_qs(role: str):
+    return Workspace.objects.filter(**{f"metadata_json__{WORKSPACE_ROLE_METADATA_KEY}": str(role or "").strip().lower()})
+
+
+def _ensure_workspace_role_metadata(
+    workspace: Workspace,
+    *,
+    role: str,
+    hidden_from_ui: Optional[bool] = None,
+    bootstrap_source: str = "",
+) -> Workspace:
+    metadata = _workspace_metadata(workspace)
+    changed = False
+    normalized_role = str(role or WORKSPACE_ROLE_USER_VISIBLE).strip().lower() or WORKSPACE_ROLE_USER_VISIBLE
+    if metadata.get(WORKSPACE_ROLE_METADATA_KEY) != normalized_role:
+        metadata[WORKSPACE_ROLE_METADATA_KEY] = normalized_role
+        changed = True
+    if normalized_role == WORKSPACE_ROLE_SYSTEM_PLATFORM:
+        if metadata.get("xyn_system_workspace") is not True:
+            metadata["xyn_system_workspace"] = True
+            changed = True
+    elif metadata.get("xyn_system_workspace") is True:
+        metadata.pop("xyn_system_workspace", None)
+        changed = True
+    if hidden_from_ui is not None and metadata.get(WORKSPACE_UI_HIDDEN_KEY) is not bool(hidden_from_ui):
+        metadata[WORKSPACE_UI_HIDDEN_KEY] = bool(hidden_from_ui)
+        changed = True
+    if bootstrap_source:
+        if metadata.get("bootstrap") != str(bootstrap_source):
+            metadata["bootstrap"] = str(bootstrap_source)
+            changed = True
+    if changed:
+        workspace.metadata_json = metadata
+        workspace.save(update_fields=["metadata_json", "updated_at"])
+    return workspace
+
+
+def _is_system_workspace(workspace: Workspace) -> bool:
+    return _workspace_has_role(workspace, WORKSPACE_ROLE_SYSTEM_PLATFORM)
 
 
 def _user_visible_workspace_qs():
-    return Workspace.objects.exclude(slug__in=["platform-builder", "civic-lab"])
+    return Workspace.objects.exclude(**{f"metadata_json__{WORKSPACE_ROLE_METADATA_KEY}": WORKSPACE_ROLE_SYSTEM_PLATFORM}).exclude(
+        slug__in=["platform-builder", "civic-lab"]
+    )
 
 
 def _workspace_is_visible(workspace: Workspace, *, include_system: bool = False) -> bool:
     if include_system:
         return True
+    metadata = _workspace_metadata(workspace)
+    if metadata.get(WORKSPACE_UI_HIDDEN_KEY) is True:
+        return False
     return not _is_system_workspace(workspace)
 
 
@@ -8697,9 +8782,120 @@ def _default_dev_workspace_slug() -> str:
     return slug or "development"
 
 
+def _default_user_workspace_name() -> str:
+    if _auth_mode() == "dev":
+        return _workspace_title_from_slug(_default_dev_workspace_slug())
+    configured = str(os.getenv("XYN_ORG_NAME", "") or "").strip()
+    return configured or "Xyn"
+
+
+def _default_user_workspace_slug() -> str:
+    if _auth_mode() == "dev":
+        return _default_dev_workspace_slug()
+    base_name = _default_user_workspace_name()
+    candidate = slugify(base_name)
+    return candidate or "xyn"
+
+
+def _default_user_workspace():
+    return _workspace_role_qs(WORKSPACE_ROLE_DEFAULT_USER)
+
+
 def _workspace_title_from_slug(slug: str) -> str:
     value = str(slug or "").strip().replace("-", " ")
     return value.title() if value else "Development"
+
+
+def _ensure_system_platform_workspace() -> Workspace:
+    workspace, _ = Workspace.objects.get_or_create(
+        slug="platform-builder",
+        defaults={
+            "name": "Platform Builder",
+            "org_name": "Platform Builder",
+            "description": "Platform builder workspace",
+            "status": "active",
+            "kind": "internal",
+            "lifecycle_stage": "internal",
+            "auth_mode": "local",
+            "metadata_json": {},
+        },
+    )
+    workspace = Workspace.objects.get(id=workspace.id)
+    return _ensure_workspace_role_metadata(
+        workspace,
+        role=WORKSPACE_ROLE_SYSTEM_PLATFORM,
+        hidden_from_ui=True,
+        bootstrap_source="system_platform",
+    )
+
+
+def _ensure_default_user_workspace(
+    *,
+    identity: Optional[UserIdentity],
+    requested_name: str = "",
+    requested_slug: str = "",
+) -> Workspace:
+    normalized_requested_name = str(requested_name or "").strip()
+    target_name = normalized_requested_name or _default_user_workspace_name()
+    target_slug_seed = str(requested_slug or "").strip().lower() or _default_user_workspace_slug()
+    target_slug = slugify(target_slug_seed) or _default_user_workspace_slug()
+
+    workspace = _default_user_workspace().order_by("name", "created_at").first()
+    if workspace is None:
+        workspace = Workspace.objects.filter(slug=target_slug).order_by("created_at").first()
+    if workspace is None:
+        visible_rows = list(_user_visible_workspace_qs().order_by("name", "created_at")[:2])
+        if len(visible_rows) == 1:
+            workspace = visible_rows[0]
+    if workspace is None:
+        slug_value = target_slug
+        suffix = 2
+        while Workspace.objects.filter(slug=slug_value).exists():
+            slug_value = f"{target_slug}-{suffix}"
+            suffix += 1
+        workspace = Workspace.objects.create(
+            slug=slug_value,
+            name=target_name,
+            org_name=target_name,
+            description=f"Default workspace for {target_name}.",
+            status="active",
+            kind="internal" if _auth_mode() == "dev" else "customer",
+            lifecycle_stage="internal" if _auth_mode() == "dev" else "customer",
+            auth_mode="local" if _auth_mode() == "dev" else ("oidc" if _auth_mode() == "oidc" else "local"),
+            metadata_json={},
+        )
+
+    workspace = Workspace.objects.select_for_update().get(id=workspace.id)
+    update_fields: List[str] = []
+    if normalized_requested_name and workspace.name != target_name:
+        workspace.name = target_name
+        update_fields.append("name")
+    if workspace.org_name != target_name:
+        workspace.org_name = target_name
+        update_fields.append("org_name")
+    if _auth_mode() != "dev" and workspace.kind != "customer":
+        workspace.kind = "customer"
+        update_fields.append("kind")
+    if _auth_mode() != "dev" and workspace.lifecycle_stage != "customer":
+        workspace.lifecycle_stage = "customer"
+        update_fields.append("lifecycle_stage")
+    if update_fields:
+        workspace.save(update_fields=[*update_fields, "updated_at"])
+    workspace = _ensure_workspace_role_metadata(
+        workspace,
+        role=WORKSPACE_ROLE_DEFAULT_USER,
+        hidden_from_ui=False,
+        bootstrap_source="default_user_workspace",
+    )
+    if identity is not None:
+        WorkspaceMembership.objects.update_or_create(
+            workspace=workspace,
+            user_identity=identity,
+            defaults={"role": "admin", "termination_authority": True},
+        )
+    _ensure_default_workspace_artifact_bindings(workspace)
+    _ensure_default_xyn_solution_for_workspace(workspace=workspace)
+    return workspace
 
 
 def _default_xyn_solution_workspace_slug() -> str:
@@ -8792,12 +8988,40 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
         runtime_entry = runtime_artifacts_by_slug.get(token)
         if runtime_entry is not None:
             title, manifest_ref, summary = runtime_entry
-            return _ensure_runtime_artifact(
+            source = (
+                Artifact.objects.filter(slug=token)
+                .exclude(workspace=workspace)
+                .select_related("type")
+                .order_by("-updated_at", "-created_at")
+                .first()
+            )
+            if source is None:
+                return _ensure_runtime_artifact(
+                    workspace=workspace,
+                    slug=token,
+                    title=title,
+                    manifest_ref=manifest_ref,
+                    summary=summary,
+                )
+            return Artifact.objects.create(
                 workspace=workspace,
-                slug=token,
-                title=title,
-                manifest_ref=manifest_ref,
-                summary=summary,
+                type=source.type,
+                title=source.title,
+                slug=source.slug,
+                status=source.status,
+                visibility=source.visibility,
+                summary=source.summary,
+                scope_json=dict(source.scope_json or {}),
+                owner_repo_slug=str(source.owner_repo_slug or "").strip(),
+                owner_path_prefixes_json=list(source.owner_path_prefixes_json or []),
+                edit_mode=str(source.edit_mode or "generated").strip().lower() or "generated",
+                provenance_json={
+                    **(source.provenance_json if isinstance(source.provenance_json, dict) else {}),
+                    "materialized_for_workspace": str(workspace.id),
+                    "materialized_from_artifact_id": str(source.id),
+                    "materialized_from_workspace_id": str(source.workspace_id),
+                    "materialized_by": "default_xyn_solution_bootstrap",
+                },
             )
         source = (
             Artifact.objects.filter(slug=token)
@@ -8879,7 +9103,9 @@ def _ensure_default_xyn_solution() -> Optional[Application]:
 
 
 def _runtime_artifact_host_workspace(fallback_workspace: Workspace) -> Workspace:
-    host_workspace = Workspace.objects.filter(slug="platform-builder").first()
+    host_workspace = _workspace_role_qs(WORKSPACE_ROLE_SYSTEM_PLATFORM).order_by("name", "created_at").first()
+    if host_workspace is None:
+        host_workspace = Workspace.objects.filter(slug="platform-builder").first()
     if host_workspace is not None:
         return host_workspace
     return fallback_workspace
@@ -8913,40 +9139,35 @@ def _ensure_default_workspace_artifact_bindings(workspace: Workspace) -> None:
     _ensure_default_xyn_solution_for_workspace(workspace=workspace)
 
 
+def _ensure_bootstrap_workspaces(
+    *,
+    identity: Optional[UserIdentity],
+    requested_default_workspace_name: str = "",
+    requested_default_workspace_slug: str = "",
+) -> Dict[str, Workspace]:
+    result: Dict[str, Workspace] = {}
+    with transaction.atomic():
+        result["system_workspace"] = _ensure_system_platform_workspace()
+        if identity is None or not _is_platform_admin(identity):
+            return result
+        result["default_user_workspace"] = _ensure_default_user_workspace(
+            identity=identity,
+            requested_name=requested_default_workspace_name,
+            requested_slug=requested_default_workspace_slug,
+        )
+    return result
+
+
 def _ensure_dev_bootstrap_workspace(identity: UserIdentity) -> Optional[Workspace]:
     if _auth_mode() != "dev":
         return None
     if not _is_platform_admin(identity):
         return None
+    bootstrapped = _ensure_bootstrap_workspaces(identity=identity)
+    workspace = bootstrapped.get("default_user_workspace")
+    if workspace is None:
+        return None
     workspace_slug = _default_dev_workspace_slug()
-    with transaction.atomic():
-        workspace, _ = Workspace.objects.get_or_create(
-            slug=workspace_slug,
-            defaults={
-                "name": _workspace_title_from_slug(workspace_slug),
-                "org_name": _workspace_title_from_slug(workspace_slug),
-                "description": f"Default {workspace_slug} workspace for local bootstrap.",
-                "status": "active",
-                "kind": "internal",
-                "lifecycle_stage": "internal",
-                "auth_mode": "local",
-                "metadata_json": {"bootstrap": "dev_default"},
-            },
-        )
-        workspace = Workspace.objects.select_for_update().get(id=workspace.id)
-        metadata = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
-        if metadata.get("xyn_system_workspace") is True:
-            metadata = dict(metadata)
-            metadata.pop("xyn_system_workspace", None)
-            workspace.metadata_json = metadata
-            workspace.save(update_fields=["metadata_json", "updated_at"])
-        WorkspaceMembership.objects.update_or_create(
-            workspace=workspace,
-            user_identity=identity,
-            defaults={"role": "admin", "termination_authority": True},
-        )
-        _ensure_default_workspace_artifact_bindings(workspace)
-        _ensure_default_xyn_solution_for_workspace(workspace=workspace)
     workspace_rows = Workspace.objects.filter(slug=workspace_slug).count()
     if workspace_rows != 1:
         logger.warning("Dev bootstrap expected exactly one workspace for slug=%s but found=%s", workspace_slug, workspace_rows)
@@ -8970,42 +9191,18 @@ def platform_initialization_complete(request: HttpRequest) -> JsonResponse:
         return JsonResponse({"error": "method not allowed"}, status=405)
     if not _is_platform_admin(identity):
         return JsonResponse({"error": "forbidden"}, status=403)
-    if _auth_mode() == "dev":
-        return JsonResponse({"error": "platform initialization wizard is not used in dev mode"}, status=409)
-    if _user_visible_workspace_qs().exists():
-        return JsonResponse(
-            {"error": "platform already initialized", "platform_initialization": _platform_initialization_state(identity)},
-            status=409,
-        )
-
     payload = _parse_json(request)
     requested_name = str(payload.get("workspace_name") or payload.get("company_name") or "").strip()
-    workspace_name = requested_name or "Company"
     requested_slug = str(payload.get("workspace_slug") or "").strip().lower()
-    slug_base = requested_slug or slugify(workspace_name) or "company"
-    slug_value = slug_base
-    suffix = 2
-    while Workspace.objects.filter(slug=slug_value).exists():
-        slug_value = f"{slug_base}-{suffix}"
-        suffix += 1
-
+    bootstrapped = _ensure_bootstrap_workspaces(
+        identity=identity,
+        requested_default_workspace_name=requested_name,
+        requested_default_workspace_slug=requested_slug,
+    )
+    workspace = bootstrapped.get("default_user_workspace")
+    if workspace is None:
+        return JsonResponse({"error": "failed to resolve default workspace"}, status=500)
     with transaction.atomic():
-        workspace = Workspace.objects.create(
-            slug=slug_value,
-            name=workspace_name,
-            org_name=str(payload.get("org_name") or workspace_name).strip() or workspace_name,
-            description=str(payload.get("description") or "").strip(),
-            status="active",
-            kind="customer",
-            lifecycle_stage="customer",
-            auth_mode="oidc" if _auth_mode() == "oidc" else "local",
-            metadata_json={"bootstrap": "initial_setup"},
-        )
-        WorkspaceMembership.objects.update_or_create(
-            workspace=workspace,
-            user_identity=identity,
-            defaults={"role": "admin", "termination_authority": True},
-        )
         latest_doc = PlatformConfigDocument.objects.order_by("-version").first()
         next_version = int(getattr(latest_doc, "version", 0) or 0) + 1
         PlatformConfigDocument.objects.create(
@@ -9034,7 +9231,8 @@ def api_me(request: HttpRequest) -> JsonResponse:
     include_system = str(request.GET.get("include_system") or "").strip().lower() in {"1", "true", "yes"}
     _run_runtime_bootstrap(reason="api_me")
     roles = _get_roles(identity)
-    bootstrap_workspace = _ensure_dev_bootstrap_workspace(identity)
+    bootstrapped = _ensure_bootstrap_workspaces(identity=identity if _is_platform_admin(identity) else None)
+    bootstrap_workspace = bootstrapped.get("default_user_workspace")
     _ensure_default_xyn_solution()
     if _is_platform_admin(identity):
         rows = Workspace.objects.all().order_by("name")
@@ -9064,9 +9262,9 @@ def api_me(request: HttpRequest) -> JsonResponse:
     if bootstrap_workspace is not None:
         preferred_workspace_id = str(bootstrap_workspace.id)
     elif workspace_payload:
-        default_slug = _default_dev_workspace_slug()
-        dev_entry = next((entry for entry in workspace_payload if str(entry.get("slug") or "").strip().lower() == default_slug), None)
-        preferred_workspace_id = str((dev_entry or workspace_payload[0]).get("id") or "")
+        default_slug = _default_user_workspace_slug()
+        default_entry = next((entry for entry in workspace_payload if str(entry.get("slug") or "").strip().lower() == default_slug), None)
+        preferred_workspace_id = str((default_entry or workspace_payload[0]).get("id") or "")
 
     return JsonResponse(
         {
@@ -14651,7 +14849,9 @@ def _resolve_article_workspace(identity: UserIdentity, requested_workspace_id: s
         if membership or _can_manage_articles(identity):
             return workspace
         return None
-    default_workspace = Workspace.objects.filter(slug="platform-builder").first() or Workspace.objects.first()
+    default_workspace = _workspace_role_qs(WORKSPACE_ROLE_SYSTEM_PLATFORM).order_by("name", "created_at").first()
+    if default_workspace is None:
+        default_workspace = Workspace.objects.filter(slug="platform-builder").first() or Workspace.objects.first()
     if default_workspace:
         return default_workspace
     return None

@@ -66,6 +66,14 @@ class PlatformBootstrapTests(TestCase):
         ).first()
         self.assertIsNotNone(xyn_solution)
         self.assertEqual(xyn_solution.source_factory_key, "xyn_platform_default")
+        system_workspace = Workspace.objects.get(slug="platform-builder")
+        system_meta = system_workspace.metadata_json if isinstance(system_workspace.metadata_json, dict) else {}
+        self.assertEqual(system_meta.get("xyn_workspace_role"), "system_platform")
+        self.assertTrue(system_meta.get("xyn_system_workspace"))
+        self.assertTrue(system_meta.get("xyn_hidden_from_ui"))
+        dev_meta = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
+        self.assertEqual(dev_meta.get("xyn_workspace_role"), "default_user")
+        self.assertNotIn("xyn_system_workspace", dev_meta)
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
     def test_dev_me_prefers_development_when_system_workspaces_exist(self):
@@ -229,6 +237,40 @@ class PlatformBootstrapTests(TestCase):
         self.assertEqual(membership.role, "admin")
         self.assertTrue(membership.termination_authority)
         self.assertFalse(Workspace.objects.filter(slug="development").exists())
+        system_workspace = Workspace.objects.get(slug="platform-builder")
+        system_meta = system_workspace.metadata_json if isinstance(system_workspace.metadata_json, dict) else {}
+        self.assertEqual(system_meta.get("xyn_workspace_role"), "system_platform")
+        company_meta = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
+        self.assertEqual(company_meta.get("xyn_workspace_role"), "default_user")
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc", "XYN_ORG_NAME": "Xyence"}, clear=False)
+    def test_non_dev_me_auto_bootstraps_org_default_workspace(self):
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        workspaces = payload.get("workspaces") or []
+        self.assertEqual(len(workspaces), 1)
+        self.assertEqual(workspaces[0]["slug"], "xyence")
+        self.assertEqual(workspaces[0]["workspace_role"], "default_user")
+        workspace = Workspace.objects.get(slug="xyence")
+        meta = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
+        self.assertEqual(meta.get("xyn_workspace_role"), "default_user")
+        self.assertEqual(payload.get("preferred_workspace_id"), str(workspace.id))
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
+    def test_system_workspace_hidden_by_default_and_visible_with_include_system(self):
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        workspaces = payload.get("workspaces") or []
+        self.assertEqual([row.get("slug") for row in workspaces], ["development"])
+
+        all_rows = self.client.get("/xyn/api/workspaces?include_system=true")
+        self.assertEqual(all_rows.status_code, 200)
+        full_payload = all_rows.json()
+        listed = sorted([str(row.get("slug") or "") for row in (full_payload.get("workspaces") or [])])
+        self.assertIn("development", listed)
+        self.assertIn("platform-builder", listed)
 
     @mock.patch.dict(
         "os.environ",

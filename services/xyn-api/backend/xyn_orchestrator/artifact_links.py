@@ -13,13 +13,38 @@ CONTEXT_PACK_ARTIFACT_TYPE_SLUG = "context_pack"
 
 
 def _default_workspace() -> Workspace:
+    workspace = Workspace.objects.filter(metadata_json__xyn_workspace_role="system_platform").first()
+    if workspace:
+        return workspace
     workspace = Workspace.objects.filter(slug="platform-builder").first()
     if workspace:
         return workspace
     workspace, _ = Workspace.objects.get_or_create(
         slug="platform-builder",
-        defaults={"name": "Platform Builder", "description": "Platform builder workspace"},
+        defaults={
+            "name": "Platform Builder",
+            "description": "Platform builder workspace",
+            "metadata_json": {
+                "xyn_workspace_role": "system_platform",
+                "xyn_system_workspace": True,
+                "xyn_hidden_from_ui": True,
+            },
+        },
     )
+    metadata = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
+    changed = False
+    if metadata.get("xyn_workspace_role") != "system_platform":
+        metadata["xyn_workspace_role"] = "system_platform"
+        changed = True
+    if metadata.get("xyn_system_workspace") is not True:
+        metadata["xyn_system_workspace"] = True
+        changed = True
+    if metadata.get("xyn_hidden_from_ui") is not True:
+        metadata["xyn_hidden_from_ui"] = True
+        changed = True
+    if changed:
+        workspace.metadata_json = metadata
+        workspace.save(update_fields=["metadata_json", "updated_at"])
     return workspace
 
 
