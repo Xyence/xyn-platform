@@ -8900,18 +8900,16 @@ def _ensure_default_user_workspace(
 
 def _default_xyn_solution_workspace_slug() -> str:
     configured = slugify(str(os.getenv("XYN_DEFAULT_XYN_SOLUTION_WORKSPACE_SLUG", "") or "").strip().lower())
-    if configured:
-        return configured
-    if _auth_mode() == "dev":
-        return _default_dev_workspace_slug()
-    return ""
+    return configured
 
 
 def _workspace_matches_default_xyn_solution_target(workspace: Workspace) -> bool:
-    target_slug = _default_xyn_solution_workspace_slug()
-    if not target_slug:
+    if workspace is None:
         return False
-    return str(getattr(workspace, "slug", "") or "").strip().lower() == target_slug
+    target_slug = _default_xyn_solution_workspace_slug()
+    if target_slug:
+        return str(getattr(workspace, "slug", "") or "").strip().lower() == target_slug
+    return _workspace_has_role(workspace, WORKSPACE_ROLE_DEFAULT_USER)
 
 
 def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optional[Application]:
@@ -9094,11 +9092,16 @@ def _ensure_default_xyn_solution_for_workspace(*, workspace: Workspace) -> Optio
 
 def _ensure_default_xyn_solution() -> Optional[Application]:
     target_slug = _default_xyn_solution_workspace_slug()
-    if not target_slug:
-        return None
-    workspace = Workspace.objects.filter(slug=target_slug).first()
-    if workspace is None:
-        return None
+    if target_slug:
+        workspace = Workspace.objects.filter(slug=target_slug).first()
+        if workspace is None:
+            return None
+    else:
+        workspace = _default_user_workspace().order_by("name", "created_at").first()
+        if workspace is None:
+            workspace = _user_visible_workspace_qs().order_by("name", "created_at").first()
+        if workspace is None:
+            return None
     return _ensure_default_xyn_solution_for_workspace(workspace=workspace)
 
 

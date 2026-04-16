@@ -256,6 +256,61 @@ class PlatformBootstrapTests(TestCase):
         meta = workspace.metadata_json if isinstance(workspace.metadata_json, dict) else {}
         self.assertEqual(meta.get("xyn_workspace_role"), "default_user")
         self.assertEqual(payload.get("preferred_workspace_id"), str(workspace.id))
+        xyn_solution = Application.objects.filter(
+            workspace=workspace,
+            metadata_json__system_solution_key="xyn-platform-default",
+        ).first()
+        self.assertIsNotNone(xyn_solution)
+        self.assertEqual(xyn_solution.source_factory_key, "xyn_platform_default")
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=xyn_solution)
+            .select_related("artifact")
+            .order_by("sort_order", "created_at")
+        )
+        self.assertEqual([row.artifact.slug for row in memberships], ["core.workbench", "xyn-ui", "xyn-api"])
+        applications_response = self.client.get(f"/xyn/api/applications?workspace_id={workspace.id}")
+        self.assertEqual(applications_response.status_code, 200)
+        applications_payload = applications_response.json()
+        applications = applications_payload.get("applications") or []
+        self.assertEqual(len(applications), 1)
+        self.assertEqual(applications[0]["id"], str(xyn_solution.id))
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc", "XYN_ORG_NAME": ""}, clear=False)
+    def test_non_dev_me_auto_bootstraps_default_xyn_workspace_and_solution_without_org_name(self):
+        response = self.client.get("/xyn/api/me")
+        self.assertEqual(response.status_code, 200)
+        workspace = Workspace.objects.get(slug="xyn")
+        self.assertEqual(payload := response.json().get("preferred_workspace_id"), str(workspace.id))
+        xyn_solution = Application.objects.filter(
+            workspace=workspace,
+            metadata_json__system_solution_key="xyn-platform-default",
+        ).first()
+        self.assertIsNotNone(xyn_solution)
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc", "XYN_ORG_NAME": "Xyence"}, clear=False)
+    def test_non_dev_default_xyn_application_bootstrap_is_idempotent(self):
+        first = self.client.get("/xyn/api/me")
+        self.assertEqual(first.status_code, 200)
+        workspace = Workspace.objects.get(slug="xyence")
+        first_solution = Application.objects.get(
+            workspace=workspace,
+            metadata_json__system_solution_key="xyn-platform-default",
+        )
+        first_memberships = ApplicationArtifactMembership.objects.filter(application=first_solution).count()
+
+        second = self.client.get("/xyn/api/me")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(
+            Application.objects.filter(
+                workspace=workspace,
+                metadata_json__system_solution_key="xyn-platform-default",
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            ApplicationArtifactMembership.objects.filter(application=first_solution).count(),
+            first_memberships,
+        )
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "dev"}, clear=False)
     def test_system_workspace_hidden_by_default_and_visible_with_include_system(self):
