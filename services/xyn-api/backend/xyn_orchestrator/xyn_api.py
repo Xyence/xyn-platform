@@ -32411,6 +32411,18 @@ def _solution_change_session_selected_artifact_ids(session: SolutionChangeSessio
     return normalized
 
 
+def _dedupe(values: List[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in values or []:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        normalized.append(token)
+    return normalized
+
+
 def _solution_scope_lock_state(session: SolutionChangeSession) -> Dict[str, Any]:
     metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
     scope_lock = metadata.get("scope_lock") if isinstance(metadata.get("scope_lock"), dict) else {}
@@ -40787,17 +40799,47 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
     if application_id:
         return application_solution_change_sessions_collection(request, application_id=application_id)
 
+    candidate_memberships = list(
+        WorkspaceMembership.objects.select_related("workspace")
+        .filter(user_identity=identity)
+        .order_by("workspace__name")
+    )
+    candidate_workspaces = [
+        {
+            "id": str(member.workspace_id),
+            "slug": str(member.workspace.slug or ""),
+            "title": str(member.workspace.name or ""),
+        }
+        for member in candidate_memberships
+    ]
+
     if not workspace_id:
-        return JsonResponse(
-            {
-                "error": "workspace_id is required when application_id is omitted",
-                "blocked_reason": "scope_resolution_failed",
-                "error_classification": "scope_resolution_failed",
-                "next_allowed_actions": ["list_workspaces", "list_artifacts"],
-            },
-            status=400,
-        )
-    workspace = _resolve_workspace_for_identity(identity, workspace_id)
+        if len(candidate_memberships) == 1:
+            workspace = candidate_memberships[0].workspace
+        elif len(candidate_memberships) > 1:
+            return JsonResponse(
+                {
+                    "error": "workspace_id is required when multiple workspaces are accessible",
+                    "blocked_reason": "scope_resolution_failed",
+                    "error_classification": "scope_resolution_failed",
+                    "candidate_workspaces": candidate_workspaces,
+                    "next_allowed_actions": ["list_workspaces", "list_artifacts"],
+                },
+                status=400,
+            )
+        else:
+            return JsonResponse(
+                {
+                    "error": "workspace_id is required when application_id is omitted",
+                    "blocked_reason": "scope_resolution_failed",
+                    "error_classification": "scope_resolution_failed",
+                    "candidate_workspaces": candidate_workspaces,
+                    "next_allowed_actions": ["list_workspaces", "list_artifacts"],
+                },
+                status=400,
+            )
+    else:
+        workspace = _resolve_workspace_for_identity(identity, workspace_id)
     if workspace is None:
         return JsonResponse(
             {
@@ -40805,6 +40847,7 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
                 "blocked_reason": "workspace_forbidden",
                 "error_classification": "auth_expired",
                 "workspace_id": workspace_id,
+                "candidate_workspaces": candidate_workspaces,
             },
             status=403,
         )
