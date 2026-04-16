@@ -40666,6 +40666,104 @@ def application_artifact_membership_detail(
     return JsonResponse(_serialize_application_artifact_membership(membership))
 
 
+def _resolve_artifact_for_change_scope(
+    *,
+    identity: UserIdentity,
+    workspace: Optional[Workspace],
+    candidate_memberships: List[WorkspaceMembership],
+    artifact_id: str = "",
+    artifact_slug: str = "",
+    allow_workspace_reassignment: bool = True,
+) -> Dict[str, Any]:
+    normalized_artifact_id = str(artifact_id or "").strip()
+    normalized_artifact_slug = str(artifact_slug or "").strip()
+    if not normalized_artifact_id and not normalized_artifact_slug:
+        return {"ok": False, "error": "artifact reference required", "status": 400}
+
+    membership_workspace_ids = {
+        str(member.workspace_id)
+        for member in candidate_memberships
+        if str(member.workspace_id or "").strip()
+    }
+    is_platform_admin = _is_platform_admin(identity)
+
+    def _accessible_qs(*, scope_workspace: Optional[Workspace]) -> models.QuerySet[Artifact]:
+        qs: models.QuerySet[Artifact] = Artifact.objects.select_related("workspace", "type").all()
+        if scope_workspace is not None:
+            return qs.filter(workspace_id=scope_workspace.id)
+        if is_platform_admin:
+            return qs
+        if membership_workspace_ids:
+            return qs.filter(workspace_id__in=list(membership_workspace_ids))
+        return qs.none()
+
+    scoped_qs = _accessible_qs(scope_workspace=workspace)
+
+    if normalized_artifact_id:
+        artifact = scoped_qs.filter(id=normalized_artifact_id).first()
+        if artifact is None and allow_workspace_reassignment:
+            artifact = _accessible_qs(scope_workspace=None).filter(id=normalized_artifact_id).first()
+        if artifact is None:
+            return {
+                "ok": False,
+                "status": 404,
+                "error": "artifact not found",
+                "blocked_reason": "artifact_not_found",
+                "error_classification": "artifact_not_found",
+            }
+        if normalized_artifact_slug and str(_artifact_slug(artifact) or "") != normalized_artifact_slug:
+            return {
+                "ok": False,
+                "status": 409,
+                "error": "artifact_id and artifact_slug refer to different artifacts",
+                "blocked_reason": "contract_mismatch",
+                "error_classification": "contract_mismatch",
+            }
+        return {
+            "ok": True,
+            "artifact": artifact,
+            "workspace": artifact.workspace,
+            "workspace_reassigned": bool(workspace is not None and str(artifact.workspace_id) != str(workspace.id)),
+        }
+
+    slug_matches = list(scoped_qs.filter(slug=normalized_artifact_slug).order_by("-updated_at", "-created_at")[:25])
+    if not slug_matches and allow_workspace_reassignment:
+        slug_matches = list(_accessible_qs(scope_workspace=None).filter(slug=normalized_artifact_slug).order_by("-updated_at", "-created_at")[:25])
+    if not slug_matches:
+        return {
+            "ok": False,
+            "status": 404,
+            "error": "artifact not found",
+            "blocked_reason": "artifact_not_found",
+            "error_classification": "artifact_not_found",
+        }
+    if len(slug_matches) > 1:
+        candidate_workspaces = [
+            {
+                "workspace_id": str(row.workspace_id),
+                "artifact_id": str(row.id),
+                "artifact_slug": str(_artifact_slug(row) or ""),
+                "artifact_title": str(row.title or ""),
+            }
+            for row in slug_matches
+        ]
+        return {
+            "ok": False,
+            "status": 409,
+            "error": "artifact_slug matched multiple accessible artifacts; provide artifact_id or workspace_id",
+            "blocked_reason": "scope_resolution_failed",
+            "error_classification": "scope_resolution_failed",
+            "candidate_artifacts": candidate_workspaces,
+        }
+    artifact = slug_matches[0]
+    return {
+        "ok": True,
+        "artifact": artifact,
+        "workspace": artifact.workspace,
+        "workspace_reassigned": bool(workspace is not None and str(artifact.workspace_id) != str(workspace.id)),
+    }
+
+
 @csrf_exempt
 @login_required
 def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
@@ -40762,11 +40860,35 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
             )
         if not _workspace_accessible_for_identity(identity, str(application.workspace_id)):
             return JsonResponse({"error": "forbidden"}, status=403)
-        app_artifact_qs = Artifact.objects.filter(workspace_id=application.workspace_id)
-        requested_artifact = app_artifact_qs.filter(id=artifact_id).first() if artifact_id else None
-        if requested_artifact is None and artifact_slug:
-            requested_artifact = app_artifact_qs.filter(slug=artifact_slug).first()
-        if requested_artifact is None:
+        strict_resolution = _resolve_artifact_for_change_scope(
+            identity=identity,
+            workspace=application.workspace,
+            candidate_memberships=list(
+                WorkspaceMembership.objects.select_related("workspace").filter(user_identity=identity)
+            ),
+            artifact_id=artifact_id,
+            artifact_slug=artifact_slug,
+            allow_workspace_reassignment=False,
+        )
+        if not strict_resolution.get("ok"):
+            return _scope_error(
+                status=int(strict_resolution.get("status") or 404),
+                error=str(strict_resolution.get("error") or "artifact not found"),
+                blocked_reason=str(strict_resolution.get("blocked_reason") or "artifact_not_found"),
+                error_classification=str(strict_resolution.get("error_classification") or "artifact_not_found"),
+                workspace_id=str(application.workspace_id),
+                application_id=application_id,
+                artifact_id=artifact_id,
+                artifact_slug=artifact_slug,
+                next_allowed_actions=["list_artifacts", "get_application"],
+                extra={
+                    "candidate_artifacts": strict_resolution.get("candidate_artifacts")
+                    if isinstance(strict_resolution.get("candidate_artifacts"), list)
+                    else []
+                },
+            )
+        requested_artifact = strict_resolution.get("artifact")
+        if not isinstance(requested_artifact, Artifact):
             return _scope_error(
                 status=404,
                 error="artifact not found",
@@ -40813,21 +40935,22 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
         for member in candidate_memberships
     ]
 
-    if not workspace_id:
-        if len(candidate_memberships) == 1:
-            workspace = candidate_memberships[0].workspace
-        elif len(candidate_memberships) > 1:
+    workspace = _resolve_workspace_for_identity(identity, workspace_id) if workspace_id else None
+    if workspace is None:
+        if workspace_id:
             return JsonResponse(
                 {
-                    "error": "workspace_id is required when multiple workspaces are accessible",
-                    "blocked_reason": "scope_resolution_failed",
-                    "error_classification": "scope_resolution_failed",
+                    "error": "workspace not accessible",
+                    "blocked_reason": "workspace_forbidden",
+                    "error_classification": "auth_expired",
+                    "workspace_id": workspace_id,
                     "candidate_workspaces": candidate_workspaces,
-                    "next_allowed_actions": ["list_workspaces", "list_artifacts"],
                 },
-                status=400,
+                status=403,
             )
-        else:
+        if len(candidate_memberships) == 1:
+            workspace = candidate_memberships[0].workspace
+        elif not (artifact_id or artifact_slug):
             return JsonResponse(
                 {
                     "error": "workspace_id is required when application_id is omitted",
@@ -40838,35 +40961,37 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
                 },
                 status=400,
             )
-    else:
-        workspace = _resolve_workspace_for_identity(identity, workspace_id)
-    if workspace is None:
-        return JsonResponse(
-            {
-                "error": "workspace not accessible",
-                "blocked_reason": "workspace_forbidden",
-                "error_classification": "auth_expired",
-                "workspace_id": workspace_id,
-                "candidate_workspaces": candidate_workspaces,
-            },
-            status=403,
-        )
-    artifact_qs = Artifact.objects.filter(workspace=workspace).select_related("type")
-    artifact = artifact_qs.filter(id=artifact_id).first() if artifact_id else None
-    if artifact is not None and artifact_slug and str(_artifact_slug(artifact) or "") != artifact_slug:
-        return _scope_error(
-            status=409,
-            error="artifact_id and artifact_slug refer to different artifacts",
-            blocked_reason="contract_mismatch",
-            error_classification="contract_mismatch",
-            workspace_id=str(workspace.id),
+
+    artifact: Optional[Artifact] = None
+    if artifact_id or artifact_slug:
+        resolution = _resolve_artifact_for_change_scope(
+            identity=identity,
+            workspace=workspace,
+            candidate_memberships=candidate_memberships,
             artifact_id=artifact_id,
             artifact_slug=artifact_slug,
-            next_allowed_actions=["list_artifacts"],
+            allow_workspace_reassignment=True,
         )
-    if artifact is None and artifact_slug:
-        artifact = artifact_qs.filter(slug=artifact_slug).first()
+        if not resolution.get("ok"):
+            return _scope_error(
+                status=int(resolution.get("status") or 404),
+                error=str(resolution.get("error") or "artifact not found"),
+                blocked_reason=str(resolution.get("blocked_reason") or "artifact_not_found"),
+                error_classification=str(resolution.get("error_classification") or "artifact_not_found"),
+                workspace_id=str(workspace.id) if workspace else "",
+                artifact_id=artifact_id,
+                artifact_slug=artifact_slug,
+                next_allowed_actions=["list_artifacts", "list_workspaces"],
+                extra={
+                    "candidate_artifacts": resolution.get("candidate_artifacts")
+                    if isinstance(resolution.get("candidate_artifacts"), list)
+                    else []
+                },
+            )
+        artifact = resolution.get("artifact") if isinstance(resolution.get("artifact"), Artifact) else None
+        workspace = resolution.get("workspace") if isinstance(resolution.get("workspace"), Workspace) else workspace
 
+    artifact_qs = Artifact.objects.filter(workspace=workspace).select_related("type") if workspace else Artifact.objects.none()
     if artifact is None and not artifact_id and not artifact_slug:
         inferred_slugs = _infer_artifact_candidates_from_target_paths(normalized_target_paths)
         available_by_slug = {
@@ -40902,10 +41027,6 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
                 extra={"target_source_files": normalized_target_paths},
             )
 
-    if artifact is None and (artifact_id or artifact_slug):
-        artifact = artifact_qs.filter(id=artifact_id).first() if artifact_id else None
-        if artifact is None and artifact_slug:
-            artifact = artifact_qs.filter(slug=artifact_slug).first()
     if artifact is None:
         return _scope_error(
             status=404,

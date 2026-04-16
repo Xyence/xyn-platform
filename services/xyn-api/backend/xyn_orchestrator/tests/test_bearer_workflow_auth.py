@@ -801,13 +801,68 @@ class ArtifactScopedChangeSessionTests(TestCase):
             content_type="application/json",
             HTTP_AUTHORIZATION="Bearer token-workspace-ambiguous",
         )
-        self.assertEqual(response.status_code, 400, response.content.decode())
+        self.assertEqual(response.status_code, 409, response.content.decode())
         payload = response.json()
         self.assertEqual(payload.get("blocked_reason"), "scope_resolution_failed")
         self.assertEqual(payload.get("error_classification"), "scope_resolution_failed")
-        candidates = payload.get("candidate_workspaces")
+        candidates = payload.get("candidate_artifacts")
         self.assertIsInstance(candidates, list)
         self.assertGreaterEqual(len(candidates), 2)
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
+    @mock.patch("xyence.middleware._verify_oidc_token")
+    @mock.patch("xyn_orchestrator.xyn_api._maybe_emit_solution_checkpoint_turn")
+    @mock.patch("xyn_orchestrator.xyn_api._reset_solution_stage_checkpoint")
+    @mock.patch("xyn_orchestrator.xyn_api._record_solution_draft_plan")
+    @mock.patch("xyn_orchestrator.xyn_api._solution_planning_state")
+    @mock.patch("xyn_orchestrator.xyn_api._build_solution_impacted_analysis")
+    def test_artifact_id_resolution_realigns_workspace_for_change_session_create(
+        self,
+        mock_analysis: mock.Mock,
+        mock_planning_state: mock.Mock,
+        _mock_record_plan: mock.Mock,
+        _mock_reset_checkpoint: mock.Mock,
+        _mock_emit_checkpoint: mock.Mock,
+        mock_verify: mock.Mock,
+    ):
+        mock_verify.return_value = self._bearer_claims()
+        mock_analysis.return_value = {"suggested_artifact_ids": [str(self.xyn_api_artifact.id)]}
+        mock_planning_state.return_value = {"pending_question": None, "pending_option_set": None, "latest_draft_plan": {"ok": True}}
+
+        second_workspace = Workspace.objects.create(
+            slug=f"artifact-scope-extra2-{uuid.uuid4().hex[:8]}",
+            name="Artifact Scope Extra 2",
+        )
+        WorkspaceMembership.objects.create(
+            workspace=second_workspace,
+            user_identity=self.identity,
+            role="admin",
+            termination_authority=True,
+        )
+
+        response = self.client.post(
+            "/xyn/api/change-sessions",
+            data=json.dumps(
+                {
+                    "workspace_id": str(second_workspace.id),
+                    "artifact_id": str(self.xyn_api_artifact.id),
+                    "request_text": "Decompose xyn_api.py with artifact-id and mismatched workspace",
+                    "decomposition_campaign": {
+                        "kind": "xyn_api_decomposition",
+                        "target_source_files": ["backend/xyn_orchestrator/xyn_api.py"],
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer token-realign",
+        )
+        self.assertEqual(response.status_code, 201, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("scope_type"), "artifact")
+        self.assertEqual(payload.get("artifact_id"), str(self.xyn_api_artifact.id))
+        scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+        self.assertEqual(scope.get("workspace_id"), str(self.workspace.id))
+        self.assertEqual(scope.get("artifact_slug"), "xyn-api")
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
     @mock.patch("xyence.middleware._verify_oidc_token")
