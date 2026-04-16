@@ -34188,8 +34188,35 @@ def _maybe_auto_lock_single_artifact_option(
         return False
 
     metadata_payload = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    metadata_scope_backfilled = False
     scope_payload = metadata_payload.get("scope") if isinstance(metadata_payload.get("scope"), dict) else {}
     scope_type = str(scope_payload.get("scope_type") or "").strip().lower()
+    if scope_type != "artifact":
+        application_metadata = (
+            session.application.metadata_json
+            if isinstance(getattr(session.application, "metadata_json", None), dict)
+            else {}
+        )
+        application_scope = (
+            application_metadata.get("scope")
+            if isinstance(application_metadata.get("scope"), dict)
+            else {}
+        )
+        application_scope_type = str(application_scope.get("scope_type") or "").strip().lower()
+        if application_scope_type == "artifact":
+            scope_payload = application_scope
+            scope_type = application_scope_type
+            if not isinstance(metadata_payload.get("scope"), dict):
+                metadata_payload = dict(metadata_payload)
+                metadata_payload["scope"] = {
+                    "scope_type": "artifact",
+                    "workspace_id": str(session.workspace_id),
+                    "application_id": str(session.application_id),
+                    "artifact_id": str(application_scope.get("artifact_id") or "").strip(),
+                    "artifact_slug": str(application_scope.get("artifact_slug") or "").strip(),
+                }
+                session.metadata_json = metadata_payload
+                metadata_scope_backfilled = True
     if scope_type != "artifact":
         return False
     scoped_artifact_id = str(scope_payload.get("artifact_id") or "").strip()
@@ -34212,7 +34239,10 @@ def _maybe_auto_lock_single_artifact_option(
         return False
 
     session.selected_artifact_ids_json = [option_artifact_id]
-    session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+    update_fields = ["selected_artifact_ids_json", "updated_at"]
+    if metadata_scope_backfilled:
+        update_fields.insert(1, "metadata_json")
+    session.save(update_fields=update_fields)
     _persist_solution_scope_lock(
         session=session,
         locked_artifact_ids=[option_artifact_id],

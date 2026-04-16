@@ -695,6 +695,77 @@ class ArtifactScopedChangeSessionTests(TestCase):
 
     @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
     @mock.patch("xyence.middleware._verify_oidc_token")
+    def test_artifact_scoped_decomposition_single_option_auto_locks_without_prompt(
+        self,
+        mock_verify: mock.Mock,
+    ):
+        mock_verify.return_value = self._bearer_claims()
+        response = self.client.post(
+            "/xyn/api/change-sessions",
+            data=json.dumps(
+                {
+                    "workspace_id": str(self.workspace.id),
+                    "artifact_slug": "xyn-api",
+                    "decomposition_campaign": {
+                        "kind": "xyn_api_decomposition",
+                        "target_source_files": ["backend/xyn_orchestrator/xyn_api.py"],
+                        "extraction_seams": [
+                            "solution_change_plan_generation",
+                            "solution_change_preview_validation",
+                            "solution_change_session_workflow",
+                            "stage_apply_dispatch",
+                            "stage_apply_scoping",
+                            "stage_apply_git",
+                            "intent_resolution",
+                        ],
+                        "moved_handlers_modules": [
+                            "backend/xyn_orchestrator/api/solutions.py",
+                            "backend/xyn_orchestrator/api/runtime.py",
+                            "backend/xyn_orchestrator/solution_change_session/stage_apply_workflow.py",
+                            "backend/xyn_orchestrator/solution_change_session/stage_apply_dispatch.py",
+                            "backend/xyn_orchestrator/solution_change_session/stage_apply_scoping.py",
+                            "backend/xyn_orchestrator/solution_change_session/stage_apply_git.py",
+                        ],
+                        "required_test_suites": [
+                            "test_solution_planner_engine",
+                            "test_goal_planning",
+                            "test_solution_change_session_repo_commits",
+                            "test_api_route_domain_split",
+                        ],
+                    },
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION="Bearer token-single-option-autolock",
+        )
+        self.assertEqual(response.status_code, 201, response.content.decode())
+        payload = response.json()
+        self.assertEqual(payload.get("scope_type"), "artifact")
+        self.assertEqual(payload.get("artifact_slug"), "xyn-api")
+        session = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+        planning = session.get("planning") if isinstance(session.get("planning"), dict) else {}
+        self.assertFalse(bool(planning.get("pending_option_set")))
+        self.assertTrue(bool(planning.get("decomposition_scope_locked")))
+        expected_artifact_id = str(payload.get("artifact_id") or "")
+        self.assertTrue(expected_artifact_id)
+        self.assertEqual(
+            [str(item) for item in (planning.get("locked_artifact_ids") or [])],
+            [expected_artifact_id],
+        )
+        self.assertEqual(
+            [str(item) for item in (session.get("selected_artifact_ids") or [])],
+            [expected_artifact_id],
+        )
+        plan = session.get("plan") if isinstance(session.get("plan"), dict) else {}
+        self.assertEqual(str(plan.get("planning_mode") or ""), "decompose_existing_system")
+        self.assertTrue(bool(plan.get("proposed_moves")))
+        self.assertTrue(bool(plan.get("file_operations")))
+        self.assertTrue(bool(plan.get("test_operations")))
+        self.assertTrue(bool(plan.get("destination_modules")))
+        self.assertTrue(bool(plan.get("ordered_extraction_sequence")))
+
+    @mock.patch.dict("os.environ", {"XYN_AUTH_MODE": "oidc"}, clear=False)
+    @mock.patch("xyence.middleware._verify_oidc_token")
     @mock.patch("xyn_orchestrator.xyn_api._maybe_emit_solution_checkpoint_turn")
     @mock.patch("xyn_orchestrator.xyn_api._reset_solution_stage_checkpoint")
     @mock.patch("xyn_orchestrator.xyn_api._record_solution_draft_plan")
