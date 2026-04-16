@@ -232,12 +232,38 @@ def resolve_development_target(
         application = application or _goal_application(goal)
 
     artifacts = _artifacts_from_context(application=application, task=task, work_item=work_item)
-    return _ownership_resolution_for_artifacts(
+    resolution = _ownership_resolution_for_artifacts(
         artifacts=artifacts,
         application=application,
         application_plan=application_plan,
         goal=goal,
         task=task,
+    )
+    if resolution.source_kind != "unresolved":
+        return resolution
+
+    fallback_repository = None
+    fallback_source_kind = ""
+    if application is not None and getattr(application, "target_repository", None) is not None:
+        fallback_repository = application.target_repository
+        fallback_source_kind = "application_target_repository"
+    elif application_plan is not None and getattr(application_plan, "target_repository", None) is not None:
+        fallback_repository = application_plan.target_repository
+        fallback_source_kind = "application_plan_target_repository"
+    if fallback_repository is None:
+        return resolution
+
+    branch = str(getattr(task, "target_branch", "") or "").strip() or str(fallback_repository.default_branch or "").strip() or "develop"
+    return DevelopmentTargetResolution(
+        repository=fallback_repository,
+        repository_slug=str(fallback_repository.slug or "").strip() or None,
+        branch=branch,
+        allowed_paths=(),
+        source_kind=fallback_source_kind,
+        application_id=str(application.id) if application is not None else None,
+        application_plan_id=str(application_plan.id) if application_plan is not None else None,
+        goal_id=str(goal.id) if goal is not None else None,
+        unresolved_reason=None,
     )
 
 

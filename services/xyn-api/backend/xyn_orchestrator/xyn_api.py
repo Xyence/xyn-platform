@@ -32557,6 +32557,10 @@ def _next_solution_planning_turn_sequence(session: SolutionChangeSession) -> int
 
 
 def _serialize_solution_planning_turn(turn: SolutionPlanningTurn) -> Dict[str, Any]:
+    payload = turn.payload_json if isinstance(turn.payload_json, dict) else {}
+    normalized_payload = dict(payload)
+    if str(turn.actor or "") == "planner" and str(turn.kind or "") in {"question", "option_set"}:
+        normalized_payload.setdefault("prompt_id", str(turn.id))
     return {
         "id": str(turn.id),
         "workspace_id": str(turn.workspace_id),
@@ -32564,7 +32568,7 @@ def _serialize_solution_planning_turn(turn: SolutionPlanningTurn) -> Dict[str, A
         "actor": turn.actor,
         "kind": turn.kind,
         "sequence": int(turn.sequence or 0),
-        "payload": turn.payload_json if isinstance(turn.payload_json, dict) else {},
+        "payload": normalized_payload,
         "created_by": str(turn.created_by_id) if turn.created_by_id else None,
         "created_at": turn.created_at,
         "updated_at": turn.updated_at,
@@ -34132,6 +34136,19 @@ def _seed_solution_planning_state_on_create(
             ordered_artifact_ids=ordered_artifact_ids,
             request_text=request_text,
         )
+        if _maybe_auto_lock_single_artifact_option(
+            session=session,
+            options=options,
+            memberships=memberships,
+        ):
+            _record_solution_draft_plan(
+                session=session,
+                memberships=memberships,
+                summary="Auto-accepted single artifact selection for decomposition campaign.",
+            )
+            checkpoint = _reset_solution_stage_checkpoint(session=session)
+            _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+            return
         if options:
             _append_solution_planning_turn(
                 session=session,
@@ -34155,6 +34172,54 @@ def _seed_solution_planning_state_on_create(
                     "reason": "missing_artifact_options",
                 },
             )
+
+
+def _maybe_auto_lock_single_artifact_option(
+    *,
+    session: SolutionChangeSession,
+    options: List[Dict[str, Any]],
+    memberships: List[ApplicationArtifactMembership],
+) -> bool:
+    if len(options) != 1:
+        return False
+    option_row = options[0] if isinstance(options[0], dict) else {}
+    option_artifact_id = str(option_row.get("id") or "").strip()
+    if not option_artifact_id:
+        return False
+
+    metadata_payload = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    scope_payload = metadata_payload.get("scope") if isinstance(metadata_payload.get("scope"), dict) else {}
+    scope_type = str(scope_payload.get("scope_type") or "").strip().lower()
+    if scope_type != "artifact":
+        return False
+    scoped_artifact_id = str(scope_payload.get("artifact_id") or "").strip()
+    if not scoped_artifact_id or scoped_artifact_id != option_artifact_id:
+        return False
+
+    planner_hints = _collect_decomposition_planner_hints(
+        session_metadata=metadata_payload,
+        analysis_metadata=session.analysis_json if isinstance(session.analysis_json, dict) else {},
+    )
+    planning_mode, _reasons = _classify_solution_change_planning_mode(
+        request_text=str(session.request_text or ""),
+        session_metadata=planner_hints,
+    )
+    if planning_mode != "decompose_existing_system":
+        return False
+
+    membership_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+    if option_artifact_id not in membership_by_artifact_id:
+        return False
+
+    session.selected_artifact_ids_json = [option_artifact_id]
+    session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+    _persist_solution_scope_lock(
+        session=session,
+        locked_artifact_ids=[option_artifact_id],
+        scope_lock_reason="decomposition_single_artifact_resolved",
+        scope_source="single_option_autolock",
+    )
+    return True
 
 
 def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
