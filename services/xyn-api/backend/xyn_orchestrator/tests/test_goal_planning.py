@@ -9530,6 +9530,590 @@ class GoalPlanningTests(TestCase):
         self.assertNotEqual(str(provision_calls[0].get("name") or ""), str(provision_calls[1].get("name") or ""))
         self.assertNotEqual(str(preview_one.get("primary_url") or ""), str(preview_two.get("primary_url") or ""))
 
+    def test_solution_change_session_prepare_preview_reuses_runtime_when_platform_freshness_matches(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-ui",
+            slug="xyn-ui",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        app = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="UI refresh",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="refresh UI",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=app,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        marker = {
+            "version": "v1",
+            "repo_slug": "xyn-platform",
+            "components": ["xyn-ui"],
+            "component_digests": {"xyn-ui": "sha256:match"},
+            "digest": "sha256:match-all",
+        }
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug="xyn-ui",
+            fqdn=f"xyn-ui-{uuid.uuid4().hex[:8]}.localhost",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://api.preview.localhost",
+                    "public_app_url": "http://preview.localhost",
+                    "compose_project": "xyn-preview-shared",
+                    "platform_preview_freshness": marker,
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=app,
+            title="UI refresh",
+            request_text="Refresh Deal Finder UI",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            staged_changes_json={
+                "artifact_states": [{"artifact_id": str(ui_artifact.id), "artifact_title": "xyn-ui", "apply_state": "queued"}],
+                "selected_artifact_ids": [str(ui_artifact.id)],
+                "execution_runs": [{"artifact_id": str(ui_artifact.id), "status": "queued", "dev_task_id": str(uuid.uuid4())}],
+                "dev_task_ids": [str(uuid.uuid4())],
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{app.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        provision_response = mock.Mock()
+        provision_response.status_code = 200
+        provision_response.headers = {"content-type": "application/json"}
+        provision_response.content = b'{"status":"reused"}'
+        provision_response.json.return_value = {
+            "status": "reused",
+            "compose_project": "xyn-preview-shared",
+            "ui_url": "http://preview.localhost",
+            "api_url": "http://api.preview.localhost",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_local_repo_root",
+            return_value=Path(tempfile.gettempdir()),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._compute_platform_preview_freshness",
+            return_value=marker,
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=provision_response,
+        ) as provision_request, mock.patch(
+            "xyn_orchestrator.xyn_api._runtime_target_request",
+            return_value=mock.Mock(status_code=200),
+        ):
+            response = application_solution_change_session_prepare_preview(preview_request, str(app.id), str(session.id))
+        payload = json.loads(response.content)
+        preview = ((payload.get("session") or {}).get("preview") or {})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload.get("prepared"))
+        self.assertTrue(bool(preview.get("reused_existing_runtime")))
+        request_payload = provision_request.call_args.kwargs.get("payload") if provision_request.call_args else {}
+        self.assertFalse(bool((request_payload or {}).get("force")))
+
+    def test_solution_change_session_prepare_preview_forces_reprovision_for_xyn_api_freshness_mismatch(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-api",
+            slug="xyn-api",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["services/xyn-api/"],
+            edit_mode="repo_backed",
+        )
+        app = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="API refresh",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="refresh API",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=app,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=api_artifact,
+            app_slug="xyn-api",
+            fqdn=f"xyn-api-{uuid.uuid4().hex[:8]}.localhost",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://api.preview.localhost",
+                    "public_app_url": "http://preview.localhost",
+                    "compose_project": "xyn-preview-api",
+                    "platform_preview_freshness": {
+                        "version": "v1",
+                        "component_digests": {"xyn-api": "sha256:old"},
+                        "digest": "sha256:old-all",
+                    },
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=app,
+            title="API refresh",
+            request_text="Refresh API",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(api_artifact.id)],
+            status="planned",
+            staged_changes_json={
+                "artifact_states": [{"artifact_id": str(api_artifact.id), "artifact_title": "xyn-api", "apply_state": "queued"}],
+                "selected_artifact_ids": [str(api_artifact.id)],
+                "execution_runs": [{"artifact_id": str(api_artifact.id), "status": "queued", "dev_task_id": str(uuid.uuid4())}],
+                "dev_task_ids": [str(uuid.uuid4())],
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{app.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        provision_response = mock.Mock()
+        provision_response.status_code = 200
+        provision_response.headers = {"content-type": "application/json"}
+        provision_response.content = b'{"status":"succeeded"}'
+        provision_response.json.return_value = {
+            "status": "succeeded",
+            "compose_project": "xyn-preview-api",
+            "ui_url": "http://preview.localhost",
+            "api_url": "http://api.preview.localhost",
+        }
+        marker = {
+            "version": "v1",
+            "repo_slug": "xyn-platform",
+            "components": ["xyn-api"],
+            "component_digests": {"xyn-api": "sha256:new"},
+            "digest": "sha256:new-all",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_local_repo_root",
+            return_value=Path(tempfile.gettempdir()),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._compute_platform_preview_freshness",
+            return_value=marker,
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=provision_response,
+        ) as provision_request:
+            response = application_solution_change_session_prepare_preview(preview_request, str(app.id), str(session.id))
+        payload = json.loads(response.content)
+        preview = ((payload.get("session") or {}).get("preview") or {})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(bool(preview.get("newly_built_for_session")))
+        request_payload = provision_request.call_args.kwargs.get("payload") if provision_request.call_args else {}
+        self.assertTrue(bool((request_payload or {}).get("force")))
+
+    def test_solution_change_session_prepare_preview_forces_reprovision_for_xyn_ui_freshness_mismatch(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-ui",
+            slug="xyn-ui",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        app = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="UI refresh",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="refresh UI",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=app,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug="xyn-ui",
+            fqdn=f"xyn-ui-{uuid.uuid4().hex[:8]}.localhost",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://api.preview.localhost",
+                    "public_app_url": "http://preview.localhost",
+                    "compose_project": "xyn-preview-ui",
+                    "platform_preview_freshness": {
+                        "version": "v1",
+                        "component_digests": {"xyn-ui": "sha256:old"},
+                        "digest": "sha256:old-all",
+                    },
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=app,
+            title="UI refresh",
+            request_text="Refresh UI",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            staged_changes_json={
+                "artifact_states": [{"artifact_id": str(ui_artifact.id), "artifact_title": "xyn-ui", "apply_state": "queued"}],
+                "selected_artifact_ids": [str(ui_artifact.id)],
+                "execution_runs": [{"artifact_id": str(ui_artifact.id), "status": "queued", "dev_task_id": str(uuid.uuid4())}],
+                "dev_task_ids": [str(uuid.uuid4())],
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{app.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        provision_response = mock.Mock()
+        provision_response.status_code = 200
+        provision_response.headers = {"content-type": "application/json"}
+        provision_response.content = b'{"status":"succeeded"}'
+        provision_response.json.return_value = {
+            "status": "succeeded",
+            "compose_project": "xyn-preview-ui",
+            "ui_url": "http://preview.localhost",
+            "api_url": "http://api.preview.localhost",
+        }
+        marker = {
+            "version": "v1",
+            "repo_slug": "xyn-platform",
+            "components": ["xyn-ui"],
+            "component_digests": {"xyn-ui": "sha256:new"},
+            "digest": "sha256:new-all",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_local_repo_root",
+            return_value=Path(tempfile.gettempdir()),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._compute_platform_preview_freshness",
+            return_value=marker,
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=provision_response,
+        ) as provision_request:
+            response = application_solution_change_session_prepare_preview(preview_request, str(app.id), str(session.id))
+        payload = json.loads(response.content)
+        preview = ((payload.get("session") or {}).get("preview") or {})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(bool(preview.get("newly_built_for_session")))
+        request_payload = provision_request.call_args.kwargs.get("payload") if provision_request.call_args else {}
+        self.assertTrue(bool((request_payload or {}).get("force")))
+
+    def test_solution_change_session_prepare_preview_forces_reprovision_when_both_platform_components_change(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        api_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-api",
+            slug="xyn-api",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["services/xyn-api/"],
+            edit_mode="repo_backed",
+        )
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-ui",
+            slug="xyn-ui",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        app = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="UI/API refresh",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="refresh both",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=app,
+            artifact=api_artifact,
+            role="primary_api",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=app,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=api_artifact,
+            app_slug="xyn-api",
+            fqdn=f"xyn-api-{uuid.uuid4().hex[:8]}.localhost",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://api.preview.localhost",
+                    "public_app_url": "http://preview.localhost",
+                    "compose_project": "xyn-preview-both",
+                    "platform_preview_freshness": {
+                        "version": "v1",
+                        "component_digests": {"xyn-api": "sha256:old", "xyn-ui": "sha256:old"},
+                        "digest": "sha256:old-all",
+                    },
+                }
+            },
+        )
+        WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug="xyn-ui",
+            fqdn=f"xyn-ui-{uuid.uuid4().hex[:8]}.localhost",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://api.preview.localhost",
+                    "public_app_url": "http://preview.localhost",
+                    "compose_project": "xyn-preview-both",
+                    "platform_preview_freshness": {
+                        "version": "v1",
+                        "component_digests": {"xyn-api": "sha256:old", "xyn-ui": "sha256:old"},
+                        "digest": "sha256:old-all",
+                    },
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=app,
+            title="UI/API refresh",
+            request_text="Refresh both",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(api_artifact.id), str(ui_artifact.id)],
+            status="planned",
+            staged_changes_json={
+                "artifact_states": [
+                    {"artifact_id": str(api_artifact.id), "artifact_title": "xyn-api", "apply_state": "queued"},
+                    {"artifact_id": str(ui_artifact.id), "artifact_title": "xyn-ui", "apply_state": "queued"},
+                ],
+                "selected_artifact_ids": [str(api_artifact.id), str(ui_artifact.id)],
+                "execution_runs": [
+                    {"artifact_id": str(api_artifact.id), "status": "queued", "dev_task_id": str(uuid.uuid4())},
+                    {"artifact_id": str(ui_artifact.id), "status": "queued", "dev_task_id": str(uuid.uuid4())},
+                ],
+                "dev_task_ids": [str(uuid.uuid4())],
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{app.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        provision_response = mock.Mock()
+        provision_response.status_code = 200
+        provision_response.headers = {"content-type": "application/json"}
+        provision_response.content = b'{"status":"succeeded"}'
+        provision_response.json.return_value = {
+            "status": "succeeded",
+            "compose_project": "xyn-preview-both",
+            "ui_url": "http://preview.localhost",
+            "api_url": "http://api.preview.localhost",
+        }
+        marker = {
+            "version": "v1",
+            "repo_slug": "xyn-platform",
+            "components": ["xyn-api", "xyn-ui"],
+            "component_digests": {"xyn-api": "sha256:new-api", "xyn-ui": "sha256:new-ui"},
+            "digest": "sha256:new-all",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_local_repo_root",
+            return_value=Path(tempfile.gettempdir()),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._compute_platform_preview_freshness",
+            return_value=marker,
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=provision_response,
+        ) as provision_request:
+            response = application_solution_change_session_prepare_preview(preview_request, str(app.id), str(session.id))
+        payload = json.loads(response.content)
+        preview = ((payload.get("session") or {}).get("preview") or {})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(int(preview.get("artifact_count") or 0), 2)
+        request_payload = provision_request.call_args.kwargs.get("payload") if provision_request.call_args else {}
+        self.assertTrue(bool((request_payload or {}).get("force")))
+
+    def test_solution_change_session_prepare_preview_updates_runtime_target_freshness_metadata(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        ui_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="xyn-ui",
+            slug="xyn-ui",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="xyn-platform",
+            owner_path_prefixes_json=["apps/xyn-ui/"],
+            edit_mode="repo_backed",
+        )
+        app = Application.objects.create(
+            workspace=self.workspace,
+            name="Deal Finder",
+            summary="UI refresh",
+            source_factory_key="generic_application_mvp",
+            requested_by=self.identity,
+            status="active",
+            plan_fingerprint=f"app-{uuid.uuid4().hex}",
+            request_objective="refresh UI",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=app,
+            artifact=ui_artifact,
+            role="primary_ui",
+        )
+        runtime_instance = WorkspaceAppInstance.objects.create(
+            workspace=self.workspace,
+            artifact=ui_artifact,
+            app_slug="xyn-ui",
+            fqdn=f"xyn-ui-{uuid.uuid4().hex[:8]}.localhost",
+            deployment_target="local",
+            status="active",
+            dns_config_json={
+                "runtime_target": {
+                    "runtime_owner": "sibling",
+                    "runtime_base_url": "http://api.preview.localhost",
+                    "public_app_url": "http://preview.localhost",
+                    "compose_project": "xyn-preview-ui",
+                    "platform_preview_freshness": {
+                        "version": "v1",
+                        "component_digests": {"xyn-ui": "sha256:old"},
+                        "digest": "sha256:old-all",
+                    },
+                }
+            },
+        )
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=app,
+            title="UI refresh",
+            request_text="Refresh UI",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(ui_artifact.id)],
+            status="planned",
+            staged_changes_json={
+                "artifact_states": [{"artifact_id": str(ui_artifact.id), "artifact_title": "xyn-ui", "apply_state": "queued"}],
+                "selected_artifact_ids": [str(ui_artifact.id)],
+                "execution_runs": [{"artifact_id": str(ui_artifact.id), "status": "queued", "dev_task_id": str(uuid.uuid4())}],
+                "dev_task_ids": [str(uuid.uuid4())],
+            },
+            execution_status="staged",
+        )
+        preview_request = self._request(
+            f"/xyn/api/applications/{app.id}/change-sessions/{session.id}/prepare-preview",
+            method="post",
+            data=json.dumps({}),
+        )
+        provision_response = mock.Mock()
+        provision_response.status_code = 200
+        provision_response.headers = {"content-type": "application/json"}
+        provision_response.content = b'{"status":"succeeded"}'
+        provision_response.json.return_value = {
+            "status": "succeeded",
+            "compose_project": "xyn-preview-ui",
+            "ui_url": "http://preview.localhost",
+            "api_url": "http://api.preview.localhost",
+        }
+        marker = {
+            "version": "v1",
+            "repo_slug": "xyn-platform",
+            "components": ["xyn-ui"],
+            "component_digests": {"xyn-ui": "sha256:new"},
+            "digest": "sha256:new-all",
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._resolve_local_repo_root",
+            return_value=Path(tempfile.gettempdir()),
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._compute_platform_preview_freshness",
+            return_value=marker,
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api._seed_api_request",
+            return_value=provision_response,
+        ):
+            response = application_solution_change_session_prepare_preview(preview_request, str(app.id), str(session.id))
+        self.assertEqual(response.status_code, 200)
+        runtime_instance.refresh_from_db()
+        runtime_target = (
+            runtime_instance.dns_config_json.get("runtime_target")
+            if isinstance(runtime_instance.dns_config_json, dict)
+            else {}
+        )
+        freshness = runtime_target.get("platform_preview_freshness") if isinstance(runtime_target, dict) else {}
+        self.assertEqual(str((freshness or {}).get("digest") or ""), "sha256:new-all")
+        self.assertEqual(str(((freshness or {}).get("component_digests") or {}).get("xyn-ui") or ""), "sha256:new")
+
     def test_application_plan_detail_patch_updates_plan_status(self):
         plan = ApplicationPlan.objects.create(
             workspace=self.workspace,

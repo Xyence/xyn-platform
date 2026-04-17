@@ -21416,6 +21416,126 @@ def _artifact_runtime_app_slug(artifact: Artifact) -> str:
     return runtime_app_slug
 
 
+_PLATFORM_PREVIEW_COMPONENT_PATHS: Dict[str, str] = {
+    "xyn-api": "services/xyn-api",
+    "xyn-ui": "apps/xyn-ui",
+}
+_PLATFORM_PREVIEW_IGNORED_DIRS: Set[str] = {
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    "__pycache__",
+    ".pytest_cache",
+    ".venv",
+    "venv",
+    ".mypy_cache",
+}
+
+
+def _platform_preview_component_from_artifact(artifact: Artifact) -> str:
+    slug = str(getattr(artifact, "slug", "") or "").strip()
+    if slug in _PLATFORM_PREVIEW_COMPONENT_PATHS:
+        return slug
+    return ""
+
+
+def _compute_platform_preview_freshness(
+    *,
+    repo_root: Path,
+    components: Sequence[str],
+    generated_at: str,
+) -> Dict[str, Any]:
+    selected = [str(item or "").strip() for item in components if str(item or "").strip() in _PLATFORM_PREVIEW_COMPONENT_PATHS]
+    selected = sorted(set(selected))
+    component_digests: Dict[str, str] = {}
+    component_file_counts: Dict[str, int] = {}
+    component_missing_paths: List[str] = []
+    for component in selected:
+        rel_root = _PLATFORM_PREVIEW_COMPONENT_PATHS.get(component)
+        source_root = (repo_root / rel_root).resolve() if rel_root else None
+        if not rel_root or source_root is None or not source_root.exists():
+            component_digests[component] = "missing"
+            component_file_counts[component] = 0
+            component_missing_paths.append(rel_root or component)
+            continue
+        hasher = hashlib.sha256()
+        file_count = 0
+        for current_root, dirnames, filenames in os.walk(source_root):
+            dirnames[:] = sorted([name for name in dirnames if name not in _PLATFORM_PREVIEW_IGNORED_DIRS])
+            for filename in sorted(filenames):
+                file_path = Path(current_root) / filename
+                if not file_path.is_file():
+                    continue
+                rel_file = file_path.relative_to(repo_root).as_posix()
+                try:
+                    payload = file_path.read_bytes()
+                except OSError:
+                    continue
+                payload_digest = hashlib.sha256(payload).hexdigest()
+                hasher.update(rel_file.encode("utf-8"))
+                hasher.update(b"\0")
+                hasher.update(payload_digest.encode("ascii"))
+                hasher.update(b"\0")
+                hasher.update(str(len(payload)).encode("ascii"))
+                hasher.update(b"\n")
+                file_count += 1
+        component_digests[component] = f"sha256:{hasher.hexdigest()}"
+        component_file_counts[component] = file_count
+    aggregate_hasher = hashlib.sha256(
+        json.dumps(
+            {
+                "repo_root": str(repo_root),
+                "components": selected,
+                "component_digests": component_digests,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+    return {
+        "version": "v1",
+        "repo_slug": "xyn-platform",
+        "components": selected,
+        "component_digests": component_digests,
+        "component_file_counts": component_file_counts,
+        "missing_paths": component_missing_paths,
+        "digest": f"sha256:{aggregate_hasher.hexdigest()}",
+        "generated_at": generated_at,
+    }
+
+
+def _platform_preview_freshness_matches(
+    *,
+    existing_marker: Dict[str, Any],
+    requested_marker: Dict[str, Any],
+    required_components: Sequence[str],
+) -> bool:
+    if not isinstance(existing_marker, dict) or not isinstance(requested_marker, dict):
+        return False
+    existing_component_digests = (
+        existing_marker.get("component_digests")
+        if isinstance(existing_marker.get("component_digests"), dict)
+        else {}
+    )
+    requested_component_digests = (
+        requested_marker.get("component_digests")
+        if isinstance(requested_marker.get("component_digests"), dict)
+        else {}
+    )
+    required = [str(item or "").strip() for item in required_components if str(item or "").strip()]
+    if not required:
+        return False
+    for component in required:
+        existing_digest = str(existing_component_digests.get(component) or "").strip()
+        requested_digest = str(requested_component_digests.get(component) or "").strip()
+        if not existing_digest or existing_digest != requested_digest:
+            return False
+    return True
+
+
 def _workspace_primary_runtime_target(workspace: Workspace, app_slug: str) -> Optional[Dict[str, Any]]:
     token = str(app_slug or "").strip()
     if not token:
@@ -37906,6 +38026,10 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
     now_iso = timezone.now().isoformat()
     local_public_base_url = str(os.getenv("XYN_PUBLIC_BASE_URL", "http://localhost") or "http://localhost").strip().rstrip("/")
     local_compose_project = str(os.getenv("XYN_LOCAL_COMPOSE_PROJECT", "xyn-local") or "xyn-local").strip() or "xyn-local"
+    platform_preview_freshness: Dict[str, Any] = {}
+    platform_preview_components: List[str] = []
+    platform_preview_force_reprovision = False
+    platform_preview_force_reason = ""
 
     def _session_preview_candidate_artifact_ids() -> List[str]:
         selected_ids = [str(item).strip() for item in (staged.get("selected_artifact_ids") or []) if str(item).strip()]
@@ -37919,6 +38043,27 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             if artifact_id and artifact_id not in inferred:
                 inferred.append(artifact_id)
         return inferred
+
+    def _session_platform_preview_components(*, artifact_ids: List[str]) -> List[str]:
+        component_set: Set[str] = set()
+        artifacts = list(Artifact.objects.filter(id__in=artifact_ids))
+        for artifact in artifacts:
+            component = _platform_preview_component_from_artifact(artifact)
+            if component:
+                component_set.add(component)
+        commit_rows = list(
+            SolutionChangeSessionRepoCommit.objects.filter(solution_change_session=session, repository_slug="xyn-platform")
+            .order_by("-updated_at", "-created_at")
+        )
+        for row in commit_rows:
+            changed_files = row.changed_files_json if isinstance(row.changed_files_json, list) else []
+            for changed in changed_files:
+                token = str(changed or "").strip().replace("\\", "/")
+                if token.startswith("services/xyn-api/"):
+                    component_set.add("xyn-api")
+                if token.startswith("apps/xyn-ui/"):
+                    component_set.add("xyn-ui")
+        return sorted(component_set)
 
     def _session_preview_should_provision_isolated_runtime(*, artifact_ids: List[str]) -> bool:
         if not artifact_ids:
@@ -37937,7 +38082,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                 return True
         return False
 
-    def _provision_session_preview_environment() -> Dict[str, Any]:
+    def _provision_session_preview_environment(*, force_reprovision: bool = False) -> Dict[str, Any]:
         started_at = timezone.now().isoformat()
         session_token = str(session.id).replace("-", "")[:8]
         if not session_token:
@@ -37958,10 +38103,14 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             "ui_host": ui_host,
             "api_host": api_host,
         }
+        if force_reprovision:
+            payload["force"] = True
         env_mode = str(os.getenv("XYN_ENV", "") or "").strip().lower()
         if env_mode in {"local", "dev", ""}:
             payload["prefer_local_images"] = True
             payload["prefer_local_sources"] = True
+        if platform_preview_freshness:
+            payload["platform_preview_freshness_digest"] = str(platform_preview_freshness.get("digest") or "").strip()
         try:
             response = _seed_api_request(
                 method="POST",
@@ -38184,13 +38333,50 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         }
 
     selected_artifact_ids_for_preview = _session_preview_candidate_artifact_ids()
+    platform_preview_components = _session_platform_preview_components(artifact_ids=selected_artifact_ids_for_preview)
+    if platform_preview_components:
+        repo_root = _resolve_local_repo_root("xyn-platform")
+        if repo_root is None:
+            platform_preview_force_reprovision = True
+            platform_preview_force_reason = "platform_repo_root_unresolved"
+        else:
+            platform_preview_freshness = _compute_platform_preview_freshness(
+                repo_root=repo_root,
+                components=platform_preview_components,
+                generated_at=now_iso,
+            )
+            runtime_markers: List[Dict[str, Any]] = []
+            for component in platform_preview_components:
+                runtime_record = _workspace_runtime_target(session.workspace, component)
+                runtime_target = runtime_record.get("runtime_target") if isinstance(runtime_record, dict) else {}
+                marker = runtime_target.get("platform_preview_freshness") if isinstance(runtime_target, dict) else {}
+                if isinstance(marker, dict):
+                    runtime_markers.append(marker)
+            if not runtime_markers:
+                platform_preview_force_reprovision = True
+                platform_preview_force_reason = "platform_preview_freshness_missing"
+            else:
+                marker_matches = any(
+                    _platform_preview_freshness_matches(
+                        existing_marker=marker,
+                        requested_marker=platform_preview_freshness,
+                        required_components=platform_preview_components,
+                    )
+                    for marker in runtime_markers
+                )
+                platform_preview_force_reprovision = not marker_matches
+                if platform_preview_force_reprovision:
+                    platform_preview_force_reason = "platform_preview_freshness_mismatch"
+
     isolated_session_preview_requested = _session_preview_should_provision_isolated_runtime(
         artifact_ids=selected_artifact_ids_for_preview
     )
     session_preview_runtime: Dict[str, Any] = {}
     session_preview_fallback_reason = ""
     if isolated_session_preview_requested:
-        session_preview_runtime = _provision_session_preview_environment()
+        session_preview_runtime = _provision_session_preview_environment(
+            force_reprovision=platform_preview_force_reprovision
+        )
         provision_status = str(session_preview_runtime.get("status") or "").strip().lower()
         if provision_status != "newly_built_for_session":
             if provision_status == "failed":
@@ -38318,6 +38504,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                     or fallback_runtime.get("source_build_job_id")
                     or ""
                 ).strip(),
+                "platform_preview_freshness": platform_preview_freshness if platform_preview_freshness else {},
                 "probe": probe,
             }
         )
@@ -38369,6 +38556,9 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
         "compose_projects": sorted(compose_projects),
         "single_preview_environment": single_preview_environment,
         "session_build": session_build,
+        "platform_preview_freshness": platform_preview_freshness if platform_preview_freshness else {},
+        "platform_preview_force_reprovision": bool(platform_preview_force_reprovision),
+        "platform_preview_force_reason": platform_preview_force_reason,
         "build_deploy_evidence": {
             "runtime_owner": "sibling",
             "source_build_job_ids": sorted(
@@ -38380,6 +38570,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
             ),
             "verified_at": now_iso,
             "session_build": session_build,
+            "platform_preview_freshness": platform_preview_freshness if platform_preview_freshness else {},
         },
         "handoff": {
             "workbench_path": (
@@ -38409,6 +38600,35 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
     else:
         primary_row = next((row for row in artifact_rows if isinstance(row, dict) and str(row.get("status") or "") == "ready"), None)
         if isinstance(primary_row, dict):
+            if platform_preview_freshness:
+                for artifact_row in artifact_rows:
+                    if not isinstance(artifact_row, dict):
+                        continue
+                    artifact_slug = str(artifact_row.get("artifact_slug") or "").strip()
+                    if artifact_slug not in _PLATFORM_PREVIEW_COMPONENT_PATHS:
+                        continue
+                    runtime_target_id = str(artifact_row.get("runtime_target_id") or "").strip()
+                    if not runtime_target_id:
+                        continue
+                    try:
+                        instance = WorkspaceAppInstance.objects.filter(id=runtime_target_id, workspace=session.workspace).first()
+                    except Exception:
+                        instance = None
+                    if instance is None:
+                        continue
+                    dns_payload = dict(instance.dns_config_json) if isinstance(instance.dns_config_json, dict) else {}
+                    runtime_target_payload = (
+                        dict(dns_payload.get("runtime_target"))
+                        if isinstance(dns_payload.get("runtime_target"), dict)
+                        else {}
+                    )
+                    runtime_target_payload["platform_preview_freshness"] = dict(platform_preview_freshness)
+                    runtime_target_payload["platform_preview_freshness_digest"] = str(
+                        platform_preview_freshness.get("digest") or ""
+                    ).strip()
+                    dns_payload["runtime_target"] = runtime_target_payload
+                    instance.dns_config_json = dns_payload
+                    instance.save(update_fields=["dns_config_json", "updated_at"])
             _persist_solution_session_iteration_linkage(
                 session=session,
                 linkage_updates={
@@ -38428,6 +38648,7 @@ def _prepare_solution_change_preview(*, session: SolutionChangeSession) -> Dict[
                         "runtime_base_url": str(primary_row.get("runtime_base_url") or "").strip(),
                         "public_app_url": str(primary_row.get("public_app_url") or "").strip(),
                         "compose_project": str(primary_row.get("compose_project") or "").strip(),
+                        "platform_preview_freshness": dict(platform_preview_freshness) if platform_preview_freshness else {},
                     },
                     "activation": {
                         "job_id": "",
