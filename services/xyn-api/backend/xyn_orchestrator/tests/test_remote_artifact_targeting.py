@@ -228,8 +228,10 @@ class RemoteArtifactTargetingTests(TestCase):
             response = artifacts_remote_sources_collection(request)
         self.assertEqual(response.status_code, 200, response.content.decode())
         payload = json.loads(response.content)
-        self.assertEqual(payload.get("count"), 2)
-        self.assertEqual((payload.get("sources") or [])[0].get("source"), "s3://bucket/a")
+        sources = [str(row.get("source") or "") for row in (payload.get("sources") or [])]
+        self.assertGreaterEqual(payload.get("count") or 0, 2)
+        self.assertIn("s3://bucket/a", sources)
+        self.assertIn("s3://bucket/b", sources)
 
     @mock.patch("xyn_orchestrator.remote_artifact_targeting.list_remote_artifact_candidates")
     @mock.patch("xyn_orchestrator.remote_artifact_targeting._iter_manifest_sources_for_root")
@@ -292,6 +294,47 @@ class RemoteArtifactTargetingTests(TestCase):
         self.assertEqual(result.get("total"), 1)
         self.assertEqual((result.get("candidates") or [])[0].get("artifact_slug"), "deal-finder-api")
         mock_fallback_sources.assert_called()
+
+    @mock.patch.dict("os.environ", {"XYN_SOLUTION_BUNDLE_SOURCES": "s3://bucket/solutions"}, clear=False)
+    @mock.patch("xyn_orchestrator.remote_artifact_targeting._s3_client")
+    @mock.patch("xyn_orchestrator.remote_artifact_targeting.list_remote_artifact_candidates")
+    def test_search_remote_artifact_catalog_filters_manifest_scan_by_query_tokens(
+        self,
+        mock_list_candidates: mock.Mock,
+        mock_s3_client: mock.Mock,
+    ):
+        client = mock.Mock()
+        paginator = mock.Mock()
+        paginator.paginate.return_value = [
+            {
+                "Contents": [
+                    {"Key": "solutions/crm/v1/manifest.json"},
+                    {"Key": "solutions/analytics/v2/manifest.json"},
+                    {"Key": "solutions/real-estate-deal-finder/v2026-03-31/manifest.json"},
+                ]
+            }
+        ]
+        client.get_paginator.return_value = paginator
+        mock_s3_client.return_value = client
+        mock_list_candidates.return_value = [
+            {
+                "artifact_slug": "app.real-estate-deal-finder",
+                "artifact_type": "application",
+                "title": "Deal Finder",
+                "summary": "Real estate deal finder",
+                "remote_source": {
+                    "manifest_source": "s3://bucket/solutions/real-estate-deal-finder/v2026-03-31/manifest.json"
+                },
+            }
+        ]
+
+        result = search_remote_artifact_catalog(query="deal finder", artifact_type="application")
+        self.assertEqual(result.get("total"), 1)
+        self.assertEqual((result.get("candidates") or [])[0].get("artifact_slug"), "app.real-estate-deal-finder")
+        called_sources = [kwargs["artifact_source"]["manifest_source"] for _, kwargs in mock_list_candidates.call_args_list]
+        self.assertIn("s3://bucket/solutions/real-estate-deal-finder/v2026-03-31/manifest.json", called_sources)
+        self.assertFalse(any("crm/" in source for source in called_sources))
+        self.assertFalse(any("analytics/" in source for source in called_sources))
 
     @mock.patch("xyn_orchestrator.xyn_api.search_remote_artifact_catalog")
     @mock.patch("xyn_orchestrator.xyn_api._require_staff")

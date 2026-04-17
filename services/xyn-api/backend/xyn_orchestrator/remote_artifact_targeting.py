@@ -171,7 +171,44 @@ def configured_remote_catalog_sources() -> List[Dict[str, Any]]:
     return rows
 
 
-def _iter_manifest_sources_for_root(root: str, *, max_manifests: int = 500) -> Iterable[str]:
+def _manifest_search_tokens(*, query: str = "", artifact_slug: str = "") -> List[str]:
+    tokens: List[str] = []
+    for raw in (artifact_slug, query):
+        value = str(raw or "").strip().lower()
+        if not value:
+            continue
+        slugified = _slugify_search_token(value)
+        if slugified:
+            tokens.append(slugified)
+        compact = "".join(ch for ch in value if ch.isalnum())
+        if compact:
+            tokens.append(compact)
+    # Preserve order while de-duping.
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def _manifest_key_matches_tokens(key: str, *, tokens: List[str]) -> bool:
+    if not tokens:
+        return True
+    lowered = str(key or "").lower()
+    normalized = "".join(ch for ch in lowered if ch.isalnum())
+    return any(token in lowered or token in normalized for token in tokens)
+
+
+def _iter_manifest_sources_for_root(
+    root: str,
+    *,
+    max_manifests: int = 500,
+    query: str = "",
+    artifact_slug: str = "",
+) -> Iterable[str]:
     token = str(root or "").strip()
     if not token:
         return []
@@ -187,12 +224,15 @@ def _iter_manifest_sources_for_root(root: str, *, max_manifests: int = 500) -> I
         if prefix:
             kwargs["Prefix"] = f"{prefix}/"
         paginator = client.get_paginator("list_objects_v2")
+        tokens = _manifest_search_tokens(query=query, artifact_slug=artifact_slug)
         for page in paginator.paginate(**kwargs):
             for row in page.get("Contents", []):
                 object_key = str(row.get("Key") or "")
                 if not object_key:
                     continue
                 if not (object_key.endswith("/manifest.json") or object_key.endswith(".manifest.json")):
+                    continue
+                if not _manifest_key_matches_tokens(object_key, tokens=tokens):
                     continue
                 candidates.append(f"s3://{bucket}/{object_key}")
                 if len(candidates) >= max_manifests:
@@ -294,7 +334,13 @@ def search_remote_artifact_catalog(
     seen: set[str] = set()
     for root in selected_roots:
         try:
-            manifest_sources = list(_iter_manifest_sources_for_root(root))
+            manifest_sources = list(
+                _iter_manifest_sources_for_root(
+                    root,
+                    query=normalized_query,
+                    artifact_slug=normalized_slug,
+                )
+            )
         except Exception as exc:
             errors.append(f"{root}: {str(exc)}")
             continue
