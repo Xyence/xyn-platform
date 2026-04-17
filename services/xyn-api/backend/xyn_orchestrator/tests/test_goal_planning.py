@@ -1763,7 +1763,7 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(str(scope_lock.get("scope_source") or ""), "single_option_autolock")
 
     def test_solution_change_session_remote_explicit_artifact_scope_autolocks_even_with_multiple_memberships(self):
-        application, _workbench_artifact, _xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
         remote_artifact = Artifact.objects.create(
             workspace=self.workspace,
@@ -1837,6 +1837,315 @@ class GoalPlanningTests(TestCase):
             [str(remote_artifact.id)],
         )
         self.assertEqual(str(planning.get("scope_lock_reason") or ""), "explicit_artifact_scope_target")
+        self.assertEqual(str((session_payload.get("artifact_scope") or {}).get("primary_artifact_id") or ""), str(remote_artifact.id))
+        self.assertEqual(list((session_payload.get("artifact_scope") or {}).get("dependent_artifact_ids") or []), [])
+        self.assertEqual(str(session_payload.get("primary_artifact_id") or ""), str(remote_artifact.id))
+        self.assertEqual(list(session_payload.get("dependent_artifact_ids") or []), [])
+        suggested_ids = [
+            str(item or "").strip()
+            for item in (((session_payload.get("analysis") or {}).get("suggested_artifact_ids") or []))
+            if str(item or "").strip()
+        ]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(remote_artifact.id))
+        # Core artifacts can appear as dependent candidates, but they must not displace the explicit primary.
+        self.assertIn(str(xyn_ui_artifact.id), set(suggested_ids))
+        self.assertIn(str(xyn_api_artifact.id), set(suggested_ids))
+
+    def test_solution_change_session_explicit_remote_primary_adds_ui_as_dependent(self):
+        application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        remote_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Real Estate Deal Finder",
+            slug="app.real-estate-deal-finder",
+            status="active",
+            artifact_state="provisional",
+            author=self.identity,
+            source_ref_type="RemoteArtifactSource",
+            source_ref_id=f"bundle:test:{uuid.uuid4()}",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=remote_artifact,
+            role="supporting",
+            responsibility_summary="Remote artifact target",
+            sort_order=99,
+        )
+        application.metadata_json = {
+            "scope": {
+                "scope_type": "artifact",
+                "workspace_id": str(self.workspace.id),
+                "application_id": str(application.id),
+                "artifact_id": str(remote_artifact.id),
+                "artifact_slug": str(remote_artifact.slug),
+            },
+            "artifact_origin": "remote_catalog",
+        }
+        application.save(update_fields=["metadata_json", "updated_at"])
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Remote deal finder session",
+                    "request_text": "Start with Deal Finder, then intentionally include xyn-ui updates.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(create_response.status_code, 201, create_response.content.decode())
+        create_payload = json.loads(create_response.content)
+        session_id = str((create_payload.get("session") or {}).get("id") or "")
+        expand_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session_id}",
+            method="patch",
+            data=json.dumps(
+                {
+                    "selected_artifact_ids": [str(remote_artifact.id), str(xyn_ui_artifact.id)],
+                    "scope_widen_reason": "explicit UI dependency for Deal Finder implementation",
+                    "scope_source": "manual_override",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            expand_response = application_solution_change_session_detail(expand_request, str(application.id), str(session_id))
+        self.assertEqual(expand_response.status_code, 200, expand_response.content.decode())
+        expanded_payload = json.loads(expand_response.content)
+        self.assertEqual(
+            [str(item) for item in (expanded_payload.get("selected_artifact_ids") or [])],
+            [str(remote_artifact.id), str(xyn_ui_artifact.id)],
+        )
+        artifact_scope = expanded_payload.get("artifact_scope") if isinstance(expanded_payload.get("artifact_scope"), dict) else {}
+        self.assertEqual(str(artifact_scope.get("primary_artifact_id") or ""), str(remote_artifact.id))
+        self.assertEqual([str(item) for item in (artifact_scope.get("dependent_artifact_ids") or [])], [str(xyn_ui_artifact.id)])
+        dependent_reasons = artifact_scope.get("dependent_artifact_reasons") if isinstance(artifact_scope.get("dependent_artifact_reasons"), dict) else {}
+        self.assertIn("explicit UI dependency", str(((dependent_reasons.get(str(xyn_ui_artifact.id)) or {}).get("added_reason") or "")))
+
+    def test_solution_change_session_explicit_remote_primary_adds_api_as_dependent(self):
+        application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        remote_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Real Estate Deal Finder",
+            slug="app.real-estate-deal-finder",
+            status="active",
+            artifact_state="provisional",
+            author=self.identity,
+            source_ref_type="RemoteArtifactSource",
+            source_ref_id=f"bundle:test:{uuid.uuid4()}",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=remote_artifact,
+            role="supporting",
+            responsibility_summary="Remote artifact target",
+            sort_order=99,
+        )
+        application.metadata_json = {
+            "scope": {
+                "scope_type": "artifact",
+                "workspace_id": str(self.workspace.id),
+                "application_id": str(application.id),
+                "artifact_id": str(remote_artifact.id),
+                "artifact_slug": str(remote_artifact.slug),
+            },
+            "artifact_origin": "remote_catalog",
+        }
+        application.save(update_fields=["metadata_json", "updated_at"])
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Remote deal finder session",
+                    "request_text": "Start with Deal Finder, then intentionally include xyn-api updates.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(create_response.status_code, 201, create_response.content.decode())
+        create_payload = json.loads(create_response.content)
+        session_id = str((create_payload.get("session") or {}).get("id") or "")
+        expand_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session_id}",
+            method="patch",
+            data=json.dumps(
+                {
+                    "selected_artifact_ids": [str(remote_artifact.id), str(xyn_api_artifact.id)],
+                    "scope_widen_reason": "explicit API dependency for Deal Finder implementation",
+                    "scope_source": "manual_override",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            expand_response = application_solution_change_session_detail(expand_request, str(application.id), str(session_id))
+        self.assertEqual(expand_response.status_code, 200, expand_response.content.decode())
+        expanded_payload = json.loads(expand_response.content)
+        self.assertEqual(
+            [str(item) for item in (expanded_payload.get("selected_artifact_ids") or [])],
+            [str(remote_artifact.id), str(xyn_api_artifact.id)],
+        )
+        artifact_scope = expanded_payload.get("artifact_scope") if isinstance(expanded_payload.get("artifact_scope"), dict) else {}
+        self.assertEqual(str(artifact_scope.get("primary_artifact_id") or ""), str(remote_artifact.id))
+        self.assertEqual([str(item) for item in (artifact_scope.get("dependent_artifact_ids") or [])], [str(xyn_api_artifact.id)])
+
+    def test_solution_change_session_explicit_remote_primary_prevents_core_artifact_promotion(self):
+        application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        remote_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Real Estate Deal Finder",
+            slug="app.real-estate-deal-finder",
+            status="active",
+            artifact_state="provisional",
+            author=self.identity,
+            source_ref_type="RemoteArtifactSource",
+            source_ref_id=f"bundle:test:{uuid.uuid4()}",
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=remote_artifact,
+            role="supporting",
+            responsibility_summary="Remote artifact target",
+            sort_order=99,
+        )
+        application.metadata_json = {
+            "scope": {
+                "scope_type": "artifact",
+                "workspace_id": str(self.workspace.id),
+                "application_id": str(application.id),
+                "artifact_id": str(remote_artifact.id),
+                "artifact_slug": str(remote_artifact.slug),
+            },
+            "artifact_origin": "remote_catalog",
+        }
+        application.save(update_fields=["metadata_json", "updated_at"])
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Remote deal finder session",
+                    "request_text": "Start from Deal Finder and include UI dependency intentionally.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            create_response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(create_response.status_code, 201, create_response.content.decode())
+        create_payload = json.loads(create_response.content)
+        session_id = str((create_payload.get("session") or {}).get("id") or "")
+        # Request UI first in the payload order; explicit remote primary must remain first.
+        reorder_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session_id}",
+            method="patch",
+            data=json.dumps(
+                {
+                    "selected_artifact_ids": [str(xyn_ui_artifact.id), str(remote_artifact.id)],
+                    "scope_widen_reason": "explicit UI dependency for Deal Finder implementation",
+                    "scope_source": "manual_override",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            reorder_response = application_solution_change_session_detail(reorder_request, str(application.id), str(session_id))
+        self.assertEqual(reorder_response.status_code, 200, reorder_response.content.decode())
+        reordered_payload = json.loads(reorder_response.content)
+        self.assertEqual(
+            [str(item) for item in (reordered_payload.get("selected_artifact_ids") or [])],
+            [str(remote_artifact.id), str(xyn_ui_artifact.id)],
+        )
+        self.assertEqual(str(reordered_payload.get("primary_artifact_id") or ""), str(remote_artifact.id))
+
+    def test_solution_change_session_local_explicit_artifact_scope_autolocks_even_with_multiple_memberships(self):
+        application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        application.metadata_json = {
+            "scope": {
+                "scope_type": "artifact",
+                "workspace_id": str(self.workspace.id),
+                "application_id": str(application.id),
+                "artifact_id": str(xyn_api_artifact.id),
+                "artifact_slug": str(xyn_api_artifact.slug),
+            },
+            "autogenerated_application": True,
+        }
+        application.save(update_fields=["metadata_json", "updated_at"])
+
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Local explicit target session",
+                    "request_text": "Refine orchestrator backend behavior for the targeted artifact scope.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201, response.content.decode())
+        payload = json.loads(response.content)
+        session_payload = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+        planning = session_payload.get("planning") if isinstance(session_payload.get("planning"), dict) else {}
+        self.assertFalse(bool(planning.get("pending_option_set")))
+        self.assertTrue(bool(planning.get("decomposition_scope_locked")))
+        self.assertEqual(
+            [str(item) for item in (planning.get("locked_artifact_ids") or [])],
+            [str(xyn_api_artifact.id)],
+        )
+        self.assertEqual(
+            [str(item) for item in (session_payload.get("selected_artifact_ids") or [])],
+            [str(xyn_api_artifact.id)],
+        )
+        self.assertEqual(str(planning.get("scope_lock_reason") or ""), "explicit_artifact_scope_target")
+
+    def test_solution_change_session_cross_artifact_request_keeps_option_prompt_when_primary_scope_not_explicit(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Cross artifact planning request",
+                    "request_text": (
+                        "Please perform cross-artifact planning across artifacts before choosing a primary target, "
+                        "covering both UI and API changes."
+                    ),
+                    "metadata": {
+                        "decomposition_campaign": {
+                            "target_source_files": [
+                                "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                                "apps/xyn-ui/src/app/components/common/HeaderUtilityMenu.tsx",
+                            ],
+                            "cross_artifact_required": True,
+                            "requires_multiple_artifacts": True,
+                        }
+                    },
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201, response.content.decode())
+        payload = json.loads(response.content)
+        planning = ((payload.get("session") or {}).get("planning") or {})
+        option_turn = planning.get("pending_option_set") if isinstance(planning.get("pending_option_set"), dict) else {}
+        option_payload = option_turn.get("payload") if isinstance(option_turn.get("payload"), dict) else {}
+        options = option_payload.get("options") if isinstance(option_payload.get("options"), list) else []
+        option_ids = {str((item or {}).get("id") or "") for item in options if isinstance(item, dict)}
+        self.assertTrue(options)
+        self.assertIn(str(xyn_api_artifact.id), option_ids)
+        self.assertIn(str(xyn_ui_artifact.id), option_ids)
+        self.assertFalse(bool(planning.get("decomposition_scope_locked")))
 
     def test_build_solution_impacted_analysis_prioritizes_explicit_scoped_artifact(self):
         application, _workbench_artifact, _xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()

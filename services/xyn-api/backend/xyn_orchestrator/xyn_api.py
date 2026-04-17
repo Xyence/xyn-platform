@@ -32883,6 +32883,168 @@ def _dedupe(values: List[str]) -> List[str]:
     return normalized
 
 
+def _solution_artifact_scope_state(
+    session: SolutionChangeSession,
+    *,
+    selected_artifact_ids: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    scope = metadata.get("artifact_scope") if isinstance(metadata.get("artifact_scope"), dict) else {}
+    selected_ids = _dedupe(
+        selected_artifact_ids
+        if isinstance(selected_artifact_ids, list)
+        else _solution_change_session_selected_artifact_ids(session)
+    )
+    primary_artifact_id = str(scope.get("primary_artifact_id") or "").strip()
+    dependent_artifact_ids = _dedupe(
+        [str(item or "").strip() for item in (scope.get("dependent_artifact_ids") if isinstance(scope.get("dependent_artifact_ids"), list) else [])]
+    )
+    dependent_artifact_reasons = (
+        scope.get("dependent_artifact_reasons") if isinstance(scope.get("dependent_artifact_reasons"), dict) else {}
+    )
+    if not primary_artifact_id and selected_ids:
+        primary_artifact_id = selected_ids[0]
+    if primary_artifact_id and primary_artifact_id not in selected_ids:
+        selected_ids = [primary_artifact_id, *selected_ids]
+    if primary_artifact_id:
+        selected_ids = [primary_artifact_id] + [artifact_id for artifact_id in selected_ids if artifact_id != primary_artifact_id]
+    if not dependent_artifact_ids:
+        dependent_artifact_ids = [artifact_id for artifact_id in selected_ids if artifact_id != primary_artifact_id]
+    dependent_artifact_ids = [artifact_id for artifact_id in dependent_artifact_ids if artifact_id != primary_artifact_id]
+    normalized_dependent_reasons: Dict[str, Any] = {}
+    for artifact_id in dependent_artifact_ids:
+        reason_payload = dependent_artifact_reasons.get(artifact_id) if isinstance(dependent_artifact_reasons, dict) else None
+        normalized_dependent_reasons[artifact_id] = reason_payload if isinstance(reason_payload, dict) else {}
+    return {
+        "primary_artifact_id": primary_artifact_id,
+        "dependent_artifact_ids": dependent_artifact_ids,
+        "dependent_artifact_reasons": normalized_dependent_reasons,
+        "selected_artifact_ids": selected_ids,
+        "updated_at": str(scope.get("updated_at") or "").strip(),
+        "source": str(scope.get("source") or "").strip(),
+    }
+
+
+def _persist_solution_artifact_scope(
+    *,
+    session: SolutionChangeSession,
+    selected_artifact_ids: List[str],
+    source: str,
+    primary_artifact_id: str = "",
+    dependent_artifact_reason_updates: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> List[str]:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    current_scope = _solution_artifact_scope_state(session, selected_artifact_ids=selected_artifact_ids)
+    selected_ids = _dedupe(selected_artifact_ids)
+    resolved_primary_id = str(primary_artifact_id or current_scope.get("primary_artifact_id") or "").strip()
+    if not resolved_primary_id and selected_ids:
+        resolved_primary_id = selected_ids[0]
+    if resolved_primary_id and resolved_primary_id not in selected_ids:
+        selected_ids = [resolved_primary_id, *selected_ids]
+    if resolved_primary_id:
+        selected_ids = [resolved_primary_id] + [artifact_id for artifact_id in selected_ids if artifact_id != resolved_primary_id]
+    dependent_ids = [artifact_id for artifact_id in selected_ids if artifact_id != resolved_primary_id]
+    dependent_reasons = (
+        dict(current_scope.get("dependent_artifact_reasons") or {})
+        if isinstance(current_scope.get("dependent_artifact_reasons"), dict)
+        else {}
+    )
+    for artifact_id in list(dependent_reasons.keys()):
+        if artifact_id not in set(dependent_ids):
+            dependent_reasons.pop(artifact_id, None)
+    updates = dependent_artifact_reason_updates if isinstance(dependent_artifact_reason_updates, dict) else {}
+    for artifact_id, payload in updates.items():
+        token = str(artifact_id or "").strip()
+        if not token or token not in set(dependent_ids):
+            continue
+        normalized_payload = payload if isinstance(payload, dict) else {}
+        dependent_reasons[token] = {
+            **(dependent_reasons.get(token) if isinstance(dependent_reasons.get(token), dict) else {}),
+            **normalized_payload,
+            "updated_at": timezone.now().isoformat(),
+        }
+    metadata["artifact_scope"] = {
+        "primary_artifact_id": resolved_primary_id,
+        "dependent_artifact_ids": dependent_ids,
+        "dependent_artifact_reasons": dependent_reasons,
+        "source": str(source or "").strip(),
+        "updated_at": timezone.now().isoformat(),
+    }
+    session.metadata_json = metadata
+    return selected_ids
+
+
+def _solution_explicit_dependency_signals(
+    *,
+    session: SolutionChangeSession,
+    candidate_artifact_ids: List[str],
+) -> bool:
+    candidate_ids = {str(item or "").strip() for item in candidate_artifact_ids if str(item or "").strip()}
+    if not candidate_ids:
+        return False
+    analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+    planner_hints = analysis.get("planner_hints") if isinstance(analysis.get("planner_hints"), dict) else {}
+    if bool(planner_hints.get("cross_artifact_required")) or bool(planner_hints.get("requires_multiple_artifacts")):
+        return True
+    impacted_rows = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
+    for row in impacted_rows:
+        if not isinstance(row, dict):
+            continue
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        if artifact_id not in candidate_ids:
+            continue
+        dependency_reason = str(row.get("dependency_reason") or "").strip()
+        if dependency_reason in {
+            "owned_source_scope_path_match",
+            "role_signal_alignment",
+            "api_intent_alignment",
+            "ui_intent_alignment",
+            "request_term_overlap",
+        }:
+            return True
+        matched_signals = row.get("matched_signals") if isinstance(row.get("matched_signals"), list) else []
+        if any(str(item or "").strip() for item in matched_signals):
+            return True
+    request_lowered = str(session.request_text or "").strip().lower()
+    return any(
+        token in request_lowered
+        for token in ("cross artifact", "cross-artifact", "across artifacts", "both ui and api", "frontend and backend", "multi-artifact")
+    )
+
+
+def _solution_dependent_artifact_reason_payload(
+    *,
+    session: SolutionChangeSession,
+    dependent_artifact_ids: List[str],
+    default_reason: str,
+    source: str,
+) -> Dict[str, Dict[str, Any]]:
+    dependent_ids = [str(item or "").strip() for item in dependent_artifact_ids if str(item or "").strip()]
+    if not dependent_ids:
+        return {}
+    analysis = session.analysis_json if isinstance(session.analysis_json, dict) else {}
+    impacted_rows = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
+    impacted_by_artifact_id: Dict[str, Dict[str, Any]] = {}
+    for row in impacted_rows:
+        if not isinstance(row, dict):
+            continue
+        artifact_id = str(row.get("artifact_id") or "").strip()
+        if artifact_id:
+            impacted_by_artifact_id[artifact_id] = row
+    payload: Dict[str, Dict[str, Any]] = {}
+    for artifact_id in dependent_ids:
+        row = impacted_by_artifact_id.get(artifact_id) if isinstance(impacted_by_artifact_id.get(artifact_id), dict) else {}
+        matched_signals = row.get("matched_signals") if isinstance(row.get("matched_signals"), list) else []
+        payload[artifact_id] = {
+            "added_reason": str(default_reason or "").strip(),
+            "dependency_reason": str(row.get("dependency_reason") or "").strip(),
+            "fallback_reason": str(row.get("fallback_reason") or "").strip(),
+            "matched_signals": [str(item).strip() for item in matched_signals if str(item).strip()],
+            "source": str(source or "").strip(),
+        }
+    return payload
+
+
 def _solution_scope_lock_state(session: SolutionChangeSession) -> Dict[str, Any]:
     metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
     scope_lock = metadata.get("scope_lock") if isinstance(metadata.get("scope_lock"), dict) else {}
@@ -32937,19 +33099,47 @@ def _apply_scope_lock_to_selection(
     scope_lock = _solution_scope_lock_state(session)
     normalized_selected = _dedupe([str(item or "").strip() for item in selected_artifact_ids if str(item or "").strip()])
     if not bool(scope_lock.get("decomposition_scope_locked")):
+        normalized_selected = _persist_solution_artifact_scope(
+            session=session,
+            selected_artifact_ids=normalized_selected,
+            source=str(scope_source or "manual_override").strip() or "manual_override",
+        )
         return normalized_selected, False, ""
     locked_ids = [str(item or "").strip() for item in (scope_lock.get("locked_artifact_ids") or []) if str(item or "").strip()]
     if not locked_ids:
+        normalized_selected = _persist_solution_artifact_scope(
+            session=session,
+            selected_artifact_ids=normalized_selected,
+            source=str(scope_source or "manual_override").strip() or "manual_override",
+        )
         return normalized_selected, False, ""
     widened_ids = [item for item in normalized_selected if item not in set(locked_ids)]
     if not widened_ids:
+        normalized_selected = _persist_solution_artifact_scope(
+            session=session,
+            selected_artifact_ids=normalized_selected,
+            source=str(scope_source or "manual_override").strip() or "manual_override",
+        )
         return normalized_selected, False, ""
     reason = str(widen_reason or "").strip()
+    explicit_dependency_signals = _solution_explicit_dependency_signals(
+        session=session,
+        candidate_artifact_ids=widened_ids,
+    )
     if permit_planner_discovery and not reason:
-        reason = "planner_discovered_cross_artifact_dependency"
+        if explicit_dependency_signals:
+            reason = "planner_discovered_explicit_dependency_signal"
+    if permit_planner_discovery and not explicit_dependency_signals and str(scope_source or "").strip() == "planner_discovery":
+        return locked_ids, False, "scope_widen_reason_required"
     if not reason:
         return locked_ids, False, "scope_widen_reason_required"
     widened = _dedupe([*locked_ids, *widened_ids])
+    dependent_reasons = _solution_dependent_artifact_reason_payload(
+        session=session,
+        dependent_artifact_ids=widened_ids,
+        default_reason=reason,
+        source=str(scope_source or "manual_override").strip() or "manual_override",
+    )
     _persist_solution_scope_lock(
         session=session,
         locked_artifact_ids=widened,
@@ -32959,8 +33149,15 @@ def _apply_scope_lock_to_selection(
             "source": str(scope_source or "manual_override"),
             "reason": reason,
             "added_artifact_ids": widened_ids,
+            "dependent_artifact_reasons": dependent_reasons,
             "updated_at": timezone.now().isoformat(),
         },
+    )
+    widened = _persist_solution_artifact_scope(
+        session=session,
+        selected_artifact_ids=widened,
+        source=str(scope_source or "manual_override").strip() or "manual_override",
+        dependent_artifact_reason_updates=dependent_reasons,
     )
     return widened, True, ""
 
@@ -34127,6 +34324,19 @@ def _record_solution_draft_plan(
                     plan["risk_annotations"] = risk_annotations
                 elif widened:
                     plan["selected_artifact_ids"] = constrained
+        plan_selected_ids = (
+            [str(item).strip() for item in (plan.get("selected_artifact_ids") if isinstance(plan.get("selected_artifact_ids"), list) else []) if str(item).strip()]
+            or _solution_change_session_selected_artifact_ids(session)
+        )
+        artifact_scope = _solution_artifact_scope_state(session, selected_artifact_ids=plan_selected_ids)
+        plan["selected_artifact_ids"] = [str(item).strip() for item in (artifact_scope.get("selected_artifact_ids") or []) if str(item).strip()]
+        plan["primary_artifact_id"] = str(artifact_scope.get("primary_artifact_id") or "")
+        plan["dependent_artifact_ids"] = [str(item).strip() for item in (artifact_scope.get("dependent_artifact_ids") or []) if str(item).strip()]
+        plan["dependent_artifact_reasons"] = (
+            artifact_scope.get("dependent_artifact_reasons")
+            if isinstance(artifact_scope.get("dependent_artifact_reasons"), dict)
+            else {}
+        )
     validate_decomposition_plan_quality(plan if isinstance(plan, dict) else {})
     objective_summary = str(
         plan.get("planner_objective_text")
@@ -34152,6 +34362,9 @@ def _record_solution_draft_plan(
             "request_text": str(session.request_text or ""),
             "user_refinements": user_refinements,
             "selected_artifact_ids": list(plan.get("selected_artifact_ids") or []),
+            "primary_artifact_id": str(plan.get("primary_artifact_id") or ""),
+            "dependent_artifact_ids": list(plan.get("dependent_artifact_ids") or []),
+            "dependent_artifact_reasons": plan.get("dependent_artifact_reasons") if isinstance(plan.get("dependent_artifact_reasons"), dict) else {},
             "confirmed_workstreams": list(plan.get("confirmed_workstreams") or []),
             "suggested_workstreams": list(plan.get("suggested_workstreams") or []),
             "implementation_steps": list(plan.get("implementation_steps") or []),
@@ -34480,6 +34693,7 @@ def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
         else []
     )
     scope_lock = _solution_scope_lock_state(session)
+    artifact_scope = _solution_artifact_scope_state(session)
     return {
         "turns": serialized_turns,
         "checkpoints": serialized_checkpoints,
@@ -34491,6 +34705,9 @@ def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
         "locked_artifact_ids": list(scope_lock.get("locked_artifact_ids") or []),
         "scope_lock_reason": str(scope_lock.get("scope_lock_reason") or ""),
         "scope_source": str(scope_lock.get("scope_source") or ""),
+        "primary_artifact_id": str(artifact_scope.get("primary_artifact_id") or ""),
+        "dependent_artifact_ids": list(artifact_scope.get("dependent_artifact_ids") or []),
+        "dependent_artifact_reasons": artifact_scope.get("dependent_artifact_reasons") if isinstance(artifact_scope.get("dependent_artifact_reasons"), dict) else {},
     }
 
 
@@ -34544,6 +34761,12 @@ def _seed_solution_planning_state_on_create(
             "widen_events": [],
         }
         session.metadata_json = metadata
+        _persist_solution_artifact_scope(
+            session=session,
+            selected_artifact_ids=[auto_locked_artifact_id],
+            source="campaign_metadata",
+            primary_artifact_id=auto_locked_artifact_id,
+        )
         session.save(update_fields=["selected_artifact_ids_json", "metadata_json", "updated_at"])
         _record_solution_draft_plan(
             session=session,
@@ -34556,7 +34779,13 @@ def _seed_solution_planning_state_on_create(
 
     if explicit_scope_artifact_id:
         session.selected_artifact_ids_json = [explicit_scope_artifact_id]
-        session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+        _persist_solution_artifact_scope(
+            session=session,
+            selected_artifact_ids=[explicit_scope_artifact_id],
+            source="session_scope_metadata",
+            primary_artifact_id=explicit_scope_artifact_id,
+        )
+        session.save(update_fields=["selected_artifact_ids_json", "metadata_json", "updated_at"])
         _persist_solution_scope_lock(
             session=session,
             locked_artifact_ids=[explicit_scope_artifact_id],
@@ -34721,8 +34950,15 @@ def _maybe_auto_lock_single_artifact_option(
         return False
 
     session.selected_artifact_ids_json = [option_artifact_id]
-    update_fields = ["selected_artifact_ids_json", "updated_at"]
+    _persist_solution_artifact_scope(
+        session=session,
+        selected_artifact_ids=[option_artifact_id],
+        source="single_option_autolock",
+        primary_artifact_id=option_artifact_id,
+    )
+    update_fields = ["selected_artifact_ids_json", "metadata_json", "updated_at"]
     if metadata_scope_backfilled:
+        update_fields = [field for field in update_fields if field != "metadata_json"]
         update_fields.insert(1, "metadata_json")
     session.save(update_fields=update_fields)
     _persist_solution_scope_lock(
@@ -34758,22 +34994,29 @@ def _resolve_explicit_session_scope_artifact_id(
     scoped_artifact_id = str(scope_payload.get("artifact_id") or "").strip()
     if not scoped_artifact_id or scoped_artifact_id not in membership_ids:
         return None
-
-    session_source = metadata_payload.get("artifact_source") if isinstance(metadata_payload.get("artifact_source"), dict) else {}
-    app_source = (
-        application_metadata.get("artifact_source") if isinstance(application_metadata.get("artifact_source"), dict) else {}
+    planner_hints = _collect_decomposition_planner_hints(
+        session_metadata=metadata_payload,
+        analysis_metadata=session.analysis_json if isinstance(session.analysis_json, dict) else {},
     )
-    has_explicit_source = bool(
-        str(session_source.get("manifest_source") or "").strip()
-        or str(session_source.get("package_source") or "").strip()
-        or str(app_source.get("manifest_source") or "").strip()
-        or str(app_source.get("package_source") or "").strip()
+    request_lowered = str(session.request_text or "").strip().lower()
+    explicit_cross_artifact_request = any(
+        token in request_lowered
+        for token in (
+            "cross artifact",
+            "cross-artifact",
+            "across artifacts",
+            "both ui and api",
+            "frontend and backend",
+            "multi-artifact",
+        )
     )
-    session_origin = str(metadata_payload.get("artifact_origin") or "").strip().lower()
-    app_origin = str(application_metadata.get("artifact_origin") or "").strip().lower()
-    if has_explicit_source or session_origin == "remote_catalog" or app_origin == "remote_catalog":
-        return scoped_artifact_id
-    return None
+    if (
+        explicit_cross_artifact_request
+        or bool(planner_hints.get("requires_multiple_artifacts"))
+        or bool(planner_hints.get("cross_artifact_required"))
+    ):
+        return None
+    return scoped_artifact_id
 
 
 def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
@@ -34885,6 +35128,8 @@ def _analyze_solution_impacted_artifacts(
         if any(word in text for word in words):
             matched_roles.add(role)
     impacted_rows: List[Dict[str, Any]] = []
+    fallback_used = False
+    fallback_reason = ""
     for member in memberships:
         artifact = member.artifact
         score = 0
@@ -34981,6 +35226,17 @@ def _analyze_solution_impacted_artifacts(
             reasons.append("request indicates structural backend refactor")
         if score <= 0:
             continue
+        dependency_reason = ""
+        if matched_path_hint:
+            dependency_reason = "owned_source_scope_path_match"
+        elif member.role in matched_roles:
+            dependency_reason = "role_signal_alignment"
+        elif artifact_api_signal and is_api_change_request:
+            dependency_reason = "api_intent_alignment"
+        elif artifact_ui_signal and is_ui_code_change_request:
+            dependency_reason = "ui_intent_alignment"
+        elif token_hits:
+            dependency_reason = "request_term_overlap"
         impacted_rows.append(
             {
                 "membership_id": str(member.id),
@@ -34990,10 +35246,15 @@ def _analyze_solution_impacted_artifacts(
                 "role": member.role,
                 "score": score,
                 "reasons": reasons,
+                "matched_signals": list(reasons),
+                "dependency_reason": dependency_reason,
+                "fallback_reason": "",
             }
         )
     impacted_rows.sort(key=lambda row: (-int(row.get("score") or 0), str(row.get("artifact_title") or "")))
     if not impacted_rows:
+        fallback_used = True
+        fallback_reason = "defaulted_to_primary_solution_artifacts"
         fallback_members = [m for m in memberships if m.role in {"primary_ui", "primary_api"}] or memberships[:2]
         for member in fallback_members:
             impacted_rows.append(
@@ -35005,6 +35266,9 @@ def _analyze_solution_impacted_artifacts(
                     "role": member.role,
                     "score": 1,
                     "reasons": ["defaulted to primary solution artifacts"],
+                    "matched_signals": ["defaulted to primary solution artifacts"],
+                    "dependency_reason": "fallback_primary_solution_artifacts",
+                    "fallback_reason": "defaulted_to_primary_solution_artifacts",
                 }
             )
     suggested_artifact_ids = [str(row.get("artifact_id") or "") for row in impacted_rows if str(row.get("artifact_id") or "").strip()]
@@ -35015,6 +35279,9 @@ def _analyze_solution_impacted_artifacts(
         "impacted_artifacts": impacted_rows,
         "suggested_artifact_ids": suggested_artifact_ids,
         "suggested_workstreams": suggested_workstreams,
+        "fallback_used": bool(fallback_used),
+        "fallback_reason": str(fallback_reason or ""),
+        "explicit_target_override_reason": "",
     }
 
 
@@ -35100,6 +35367,18 @@ def _build_solution_impacted_analysis(
             )
             analysis["impacted_artifacts"] = impacted_rows
             analysis["suggested_artifact_ids"] = suggested_ids
+            analysis["explicit_target_override_reason"] = scope_reason
+            analysis["primary_artifact_id"] = scoped_artifact_id
+            analysis["dependent_candidate_artifact_ids"] = [artifact_id for artifact_id in suggested_ids if artifact_id != scoped_artifact_id]
+    if not str(analysis.get("primary_artifact_id") or "").strip():
+        suggested_ids = analysis.get("suggested_artifact_ids") if isinstance(analysis.get("suggested_artifact_ids"), list) else []
+        normalized_suggested = [str(item or "").strip() for item in suggested_ids if str(item or "").strip()]
+        if normalized_suggested:
+            analysis["primary_artifact_id"] = normalized_suggested[0]
+            analysis["dependent_candidate_artifact_ids"] = [artifact_id for artifact_id in normalized_suggested[1:]]
+        else:
+            analysis["primary_artifact_id"] = ""
+            analysis["dependent_candidate_artifact_ids"] = []
     if metadata_hints:
         analysis = {
             **analysis,
@@ -37223,6 +37502,8 @@ def _serialize_solution_change_session(
 ) -> Dict[str, Any]:
     memberships_by_artifact_id = memberships_by_artifact_id or {}
     selected_ids = _solution_change_session_selected_artifact_ids(session)
+    artifact_scope = _solution_artifact_scope_state(session, selected_artifact_ids=selected_ids)
+    selected_ids = [str(item or "").strip() for item in (artifact_scope.get("selected_artifact_ids") or []) if str(item or "").strip()]
     selected_artifacts: List[Dict[str, Any]] = []
     for artifact_id in selected_ids:
         member = memberships_by_artifact_id.get(artifact_id)
@@ -37262,6 +37543,15 @@ def _serialize_solution_change_session(
         "created_by": str(session.created_by_id) if session.created_by_id else None,
         "analysis": session.analysis_json if isinstance(session.analysis_json, dict) else {},
         "selected_artifact_ids": selected_ids,
+        "primary_artifact_id": str(artifact_scope.get("primary_artifact_id") or ""),
+        "dependent_artifact_ids": list(artifact_scope.get("dependent_artifact_ids") or []),
+        "artifact_scope": {
+            "primary_artifact_id": str(artifact_scope.get("primary_artifact_id") or ""),
+            "dependent_artifact_ids": list(artifact_scope.get("dependent_artifact_ids") or []),
+            "dependent_artifact_reasons": artifact_scope.get("dependent_artifact_reasons") if isinstance(artifact_scope.get("dependent_artifact_reasons"), dict) else {},
+            "source": str(artifact_scope.get("source") or ""),
+            "updated_at": str(artifact_scope.get("updated_at") or ""),
+        },
         "confirmed_workstreams": _solution_change_session_confirmed_workstreams(session),
         "selected_artifacts": selected_artifacts,
         "plan": session.plan_json if isinstance(session.plan_json, dict) else {},
@@ -42201,6 +42491,13 @@ def application_solution_change_sessions_collection(
         analysis_json=analysis,
         selected_artifact_ids_json=analysis.get("suggested_artifact_ids") if isinstance(analysis.get("suggested_artifact_ids"), list) else [],
     )
+    _persist_solution_artifact_scope(
+        session=session,
+        selected_artifact_ids=session.selected_artifact_ids_json if isinstance(session.selected_artifact_ids_json, list) else [],
+        source="initial_analysis",
+        primary_artifact_id=str(analysis.get("primary_artifact_id") or "").strip(),
+    )
+    session.save(update_fields=["metadata_json", "updated_at"])
     _seed_solution_planning_state_on_create(session=session, memberships=memberships)
     session.refresh_from_db()
     return JsonResponse(
@@ -43080,7 +43377,7 @@ def application_solution_change_session_plan(
             if error_code == "scope_widen_reason_required":
                 constrained_ids = _solution_scope_lock_state(session).get("locked_artifact_ids") or current_selected_ids
             session.selected_artifact_ids_json = list(constrained_ids)
-            session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+            session.save(update_fields=["selected_artifact_ids_json", "metadata_json", "updated_at"])
             _append_solution_planning_turn(
                 session=session,
                 actor="user",
