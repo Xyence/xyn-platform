@@ -267,6 +267,32 @@ class RemoteArtifactTargetingTests(TestCase):
         self.assertEqual(result.get("total"), 1)
         self.assertEqual((result.get("candidates") or [])[0].get("artifact_slug"), "deal-finder-api")
 
+    @mock.patch("xyn_orchestrator.remote_artifact_targeting.list_remote_artifact_candidates")
+    @mock.patch("xyn_orchestrator.remote_artifact_targeting._fallback_manifest_sources_for_root")
+    @mock.patch("xyn_orchestrator.remote_artifact_targeting._iter_manifest_sources_for_root")
+    @mock.patch.dict("os.environ", {"XYN_SOLUTION_BUNDLE_SOURCES": "s3://bucket/root"}, clear=False)
+    def test_search_remote_artifact_catalog_fallbacks_to_slug_json_when_no_manifest_scan_hits(
+        self,
+        mock_manifest_sources: mock.Mock,
+        mock_fallback_sources: mock.Mock,
+        mock_list_candidates: mock.Mock,
+    ):
+        mock_manifest_sources.return_value = []
+        mock_fallback_sources.return_value = ["s3://bucket/root/deal-finder.json"]
+        mock_list_candidates.return_value = [
+            {
+                "artifact_slug": "deal-finder-api",
+                "artifact_type": "application",
+                "title": "Deal Finder API",
+                "summary": "Remote bundle",
+                "remote_source": {"manifest_source": "s3://bucket/root/deal-finder.json"},
+            }
+        ]
+        result = search_remote_artifact_catalog(query="deal finder", artifact_type="application")
+        self.assertEqual(result.get("total"), 1)
+        self.assertEqual((result.get("candidates") or [])[0].get("artifact_slug"), "deal-finder-api")
+        mock_fallback_sources.assert_called()
+
     @mock.patch("xyn_orchestrator.xyn_api.search_remote_artifact_catalog")
     @mock.patch("xyn_orchestrator.xyn_api._require_staff")
     def test_remote_catalog_endpoint_returns_candidates(

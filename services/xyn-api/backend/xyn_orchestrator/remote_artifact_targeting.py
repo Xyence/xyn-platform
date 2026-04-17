@@ -117,6 +117,16 @@ def _candidate_summary_match(row: Dict[str, Any], query: str) -> bool:
     return token in text
 
 
+def _slugify_search_token(value: str) -> str:
+    token = str(value or "").strip().lower()
+    if not token:
+        return ""
+    normalized = "".join(ch if ch.isalnum() else "-" for ch in token)
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    return normalized.strip("-")
+
+
 def _configured_remote_source_roots() -> List[str]:
     roots = _env_list("XYN_SOLUTION_BUNDLE_SOURCES")
     bootstrap_source = _env_token("XYN_BOOTSTRAP_SOLUTION_SOURCE").lower() or "local"
@@ -204,6 +214,56 @@ def _iter_manifest_sources_for_root(root: str, *, max_manifests: int = 500) -> I
     return manifests
 
 
+def _fallback_manifest_sources_for_root(
+    root: str,
+    *,
+    query: str = "",
+    artifact_slug: str = "",
+    max_probes: int = 24,
+) -> List[str]:
+    token = str(root or "").strip()
+    if not token or not token.lower().startswith("s3://"):
+        return []
+    bucket, key = _parse_s3_source(token)
+    prefix = key.strip().strip("/")
+    slug_candidates: List[str] = []
+    for raw in (artifact_slug, query):
+        slug = _slugify_search_token(raw)
+        if slug:
+            slug_candidates.append(slug)
+    # Keep order while de-duping.
+    seen_slugs: set[str] = set()
+    ordered_slugs: List[str] = []
+    for slug in slug_candidates:
+        if slug in seen_slugs:
+            continue
+        seen_slugs.add(slug)
+        ordered_slugs.append(slug)
+    if not ordered_slugs:
+        return []
+
+    probe_keys: List[str] = []
+    for slug in ordered_slugs:
+        for candidate in (
+            f"{slug}.json",
+            f"{slug}.manifest.json",
+            f"{slug}/manifest.json",
+        ):
+            probe_keys.append(f"{prefix}/{candidate}" if prefix else candidate)
+    # Trim to bounded probes for safety.
+    probe_keys = probe_keys[:max_probes]
+
+    client = _s3_client()
+    resolved: List[str] = []
+    for key_candidate in probe_keys:
+        try:
+            client.head_object(Bucket=bucket, Key=key_candidate)
+        except ClientError:
+            continue
+        resolved.append(f"s3://{bucket}/{key_candidate}")
+    return resolved
+
+
 def search_remote_artifact_catalog(
     *,
     query: str = "",
@@ -234,10 +294,22 @@ def search_remote_artifact_catalog(
     seen: set[str] = set()
     for root in selected_roots:
         try:
-            manifest_sources = _iter_manifest_sources_for_root(root)
+            manifest_sources = list(_iter_manifest_sources_for_root(root))
         except Exception as exc:
             errors.append(f"{root}: {str(exc)}")
             continue
+        if not manifest_sources:
+            # Some catalogs are authored as <slug>.json instead of nested manifest.json.
+            # Probe deterministic slug-based candidates to keep discovery useful.
+            try:
+                manifest_sources = _fallback_manifest_sources_for_root(
+                    root,
+                    query=normalized_query,
+                    artifact_slug=normalized_slug,
+                )
+            except Exception as exc:
+                errors.append(f"{root}: {str(exc)}")
+                continue
         for manifest_source in manifest_sources:
             try:
                 candidates = list_remote_artifact_candidates(artifact_source={"manifest_source": manifest_source})
