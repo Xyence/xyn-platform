@@ -1762,6 +1762,136 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(str(scope_lock.get("scope_lock_reason") or ""), "decomposition_single_artifact_resolved")
         self.assertEqual(str(scope_lock.get("scope_source") or ""), "single_option_autolock")
 
+    def test_solution_change_session_remote_explicit_artifact_scope_autolocks_even_with_multiple_memberships(self):
+        application, _workbench_artifact, _xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        remote_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Real Estate Deal Finder",
+            slug="app.real-estate-deal-finder",
+            status="active",
+            artifact_state="provisional",
+            author=self.identity,
+            source_ref_type="RemoteArtifactSource",
+            source_ref_id=f"bundle:test:{uuid.uuid4()}",
+            provenance_json={
+                "artifact_origin": "remote_catalog",
+                "remote_source": {
+                    "manifest_source": "s3://xyn-xyence-artifacts/solutions/real-estate-deal-finder/v1/manifest.json"
+                },
+            },
+            scope_json={
+                "scope_type": "artifact",
+                "catalog_mode": "remote_catalog",
+                "installed": False,
+            },
+        )
+        ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=remote_artifact,
+            role="supporting",
+            responsibility_summary="Remote artifact target",
+            sort_order=99,
+        )
+        application.metadata_json = {
+            "scope": {
+                "scope_type": "artifact",
+                "workspace_id": str(self.workspace.id),
+                "application_id": str(application.id),
+                "artifact_id": str(remote_artifact.id),
+                "artifact_slug": str(remote_artifact.slug),
+            },
+            "artifact_origin": "remote_catalog",
+            "artifact_source": {
+                "manifest_source": "s3://xyn-xyence-artifacts/solutions/real-estate-deal-finder/v1/manifest.json"
+            },
+        }
+        application.save(update_fields=["metadata_json", "updated_at"])
+
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps(
+                {
+                    "title": "Remote deal finder session",
+                    "request_text": "Implement API enhancements for remote Deal Finder artifact.",
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201, response.content.decode())
+        payload = json.loads(response.content)
+        session_payload = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+        planning = session_payload.get("planning") if isinstance(session_payload.get("planning"), dict) else {}
+        self.assertFalse(bool(planning.get("pending_option_set")))
+        self.assertTrue(bool(planning.get("decomposition_scope_locked")))
+        self.assertEqual(
+            [str(item) for item in (planning.get("locked_artifact_ids") or [])],
+            [str(remote_artifact.id)],
+        )
+        self.assertEqual(
+            [str(item) for item in (session_payload.get("selected_artifact_ids") or [])],
+            [str(remote_artifact.id)],
+        )
+        self.assertEqual(str(planning.get("scope_lock_reason") or ""), "explicit_artifact_scope_target")
+
+    def test_build_solution_impacted_analysis_prioritizes_explicit_scoped_artifact(self):
+        application, _workbench_artifact, _xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        artifact_type, _ = ArtifactType.objects.get_or_create(slug="application", defaults={"name": "Application"})
+        remote_artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="Real Estate Deal Finder",
+            slug="app.real-estate-deal-finder",
+            status="active",
+            artifact_state="provisional",
+            author=self.identity,
+            source_ref_type="RemoteArtifactSource",
+            source_ref_id=f"bundle:test:{uuid.uuid4()}",
+        )
+        remote_membership = ApplicationArtifactMembership.objects.create(
+            workspace=self.workspace,
+            application=application,
+            artifact=remote_artifact,
+            role="supporting",
+            responsibility_summary="Remote artifact target",
+            sort_order=99,
+        )
+        application.metadata_json = {
+            "scope": {
+                "scope_type": "artifact",
+                "artifact_id": str(remote_artifact.id),
+                "artifact_slug": str(remote_artifact.slug),
+            },
+            "artifact_origin": "remote_catalog",
+            "artifact_source": {"manifest_source": "s3://xyn-xyence-artifacts/solutions/real-estate-deal-finder/v1/manifest.json"},
+        }
+        application.save(update_fields=["metadata_json", "updated_at"])
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=application)
+            .select_related("artifact", "artifact__type")
+            .order_by("sort_order", "created_at")
+        )
+
+        analysis = xyn_api._build_solution_impacted_analysis(
+            application=application,
+            request_text="Update selected artifact planning behavior",
+            memberships=memberships,
+            session_metadata={},
+        )
+        suggested = analysis.get("suggested_artifact_ids") if isinstance(analysis.get("suggested_artifact_ids"), list) else []
+        self.assertTrue(suggested)
+        self.assertEqual(str(suggested[0]), str(remote_artifact.id))
+        impacted = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
+        target_rows = [row for row in impacted if isinstance(row, dict) and str(row.get("artifact_id") or "") == str(remote_artifact.id)]
+        self.assertTrue(target_rows)
+        reasons = target_rows[0].get("reasons") if isinstance(target_rows[0].get("reasons"), list) else []
+        self.assertIn("explicit artifact scope target preserved for planning", reasons)
+        self.assertEqual(str(remote_membership.artifact_id), str(remote_artifact.id))
+
     def test_solution_change_session_select_option_reorders_selected_artifacts_without_dropping_others(self):
         application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         session = SolutionChangeSession.objects.create(

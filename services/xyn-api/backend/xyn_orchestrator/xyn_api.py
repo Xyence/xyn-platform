@@ -34515,6 +34515,10 @@ def _seed_solution_planning_state_on_create(
         session=session,
         memberships=memberships,
     )
+    explicit_scope_artifact_id = _resolve_explicit_session_scope_artifact_id(
+        session=session,
+        memberships=memberships,
+    )
     if auto_locked_artifact_id:
         session.selected_artifact_ids_json = [auto_locked_artifact_id]
         metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
@@ -34545,6 +34549,24 @@ def _seed_solution_planning_state_on_create(
             session=session,
             memberships=memberships,
             summary="Auto-scoped decomposition plan from campaign metadata.",
+        )
+        checkpoint = _reset_solution_stage_checkpoint(session=session)
+        _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
+        return
+
+    if explicit_scope_artifact_id:
+        session.selected_artifact_ids_json = [explicit_scope_artifact_id]
+        session.save(update_fields=["selected_artifact_ids_json", "updated_at"])
+        _persist_solution_scope_lock(
+            session=session,
+            locked_artifact_ids=[explicit_scope_artifact_id],
+            scope_lock_reason="explicit_artifact_scope_target",
+            scope_source="session_scope_metadata",
+        )
+        _record_solution_draft_plan(
+            session=session,
+            memberships=memberships,
+            summary="Auto-scoped planning to explicit artifact target.",
         )
         checkpoint = _reset_solution_stage_checkpoint(session=session)
         _maybe_emit_solution_checkpoint_turn(session=session, checkpoint=checkpoint)
@@ -34710,6 +34732,48 @@ def _maybe_auto_lock_single_artifact_option(
         scope_source="single_option_autolock",
     )
     return True
+
+
+def _resolve_explicit_session_scope_artifact_id(
+    *,
+    session: SolutionChangeSession,
+    memberships: List[ApplicationArtifactMembership],
+) -> Optional[str]:
+    membership_ids = {str(member.artifact_id) for member in memberships}
+    if not membership_ids:
+        return None
+
+    metadata_payload = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    application_metadata = (
+        session.application.metadata_json if isinstance(getattr(session.application, "metadata_json", None), dict) else {}
+    )
+    scope_payload = (
+        metadata_payload.get("scope") if isinstance(metadata_payload.get("scope"), dict) else {}
+    ) or (
+        application_metadata.get("scope") if isinstance(application_metadata.get("scope"), dict) else {}
+    )
+    scope_type = str(scope_payload.get("scope_type") or "").strip().lower()
+    if scope_type != "artifact":
+        return None
+    scoped_artifact_id = str(scope_payload.get("artifact_id") or "").strip()
+    if not scoped_artifact_id or scoped_artifact_id not in membership_ids:
+        return None
+
+    session_source = metadata_payload.get("artifact_source") if isinstance(metadata_payload.get("artifact_source"), dict) else {}
+    app_source = (
+        application_metadata.get("artifact_source") if isinstance(application_metadata.get("artifact_source"), dict) else {}
+    )
+    has_explicit_source = bool(
+        str(session_source.get("manifest_source") or "").strip()
+        or str(session_source.get("package_source") or "").strip()
+        or str(app_source.get("manifest_source") or "").strip()
+        or str(app_source.get("package_source") or "").strip()
+    )
+    session_origin = str(metadata_payload.get("artifact_origin") or "").strip().lower()
+    app_origin = str(application_metadata.get("artifact_origin") or "").strip().lower()
+    if has_explicit_source or session_origin == "remote_catalog" or app_origin == "remote_catalog":
+        return scoped_artifact_id
+    return None
 
 
 def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
@@ -34986,6 +35050,56 @@ def _build_solution_impacted_analysis(
         request_text=request_text,
         memberships=memberships,
     )
+    application_metadata = application.metadata_json if isinstance(application.metadata_json, dict) else {}
+    scope_payload = application_metadata.get("scope") if isinstance(application_metadata.get("scope"), dict) else {}
+    scoped_artifact_id = str(scope_payload.get("artifact_id") or "").strip()
+    scope_type = str(scope_payload.get("scope_type") or "").strip().lower()
+    if scope_type == "artifact" and scoped_artifact_id:
+        membership_by_artifact_id = {str(member.artifact_id): member for member in memberships}
+        scoped_member = membership_by_artifact_id.get(scoped_artifact_id)
+        if scoped_member is not None:
+            impacted_rows = (
+                analysis.get("impacted_artifacts")
+                if isinstance(analysis.get("impacted_artifacts"), list)
+                else []
+            )
+            max_score = max([int(row.get("score") or 0) for row in impacted_rows if isinstance(row, dict)] or [0])
+            existing_row: Optional[Dict[str, Any]] = None
+            for row in impacted_rows:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("artifact_id") or "").strip() == scoped_artifact_id:
+                    existing_row = row
+                    break
+            scope_reason = "explicit artifact scope target preserved for planning"
+            if existing_row is None:
+                impacted_rows.append(
+                    {
+                        "membership_id": str(scoped_member.id),
+                        "artifact_id": str(scoped_member.artifact_id),
+                        "artifact_title": scoped_member.artifact.title,
+                        "artifact_type": scoped_member.artifact.type.slug if scoped_member.artifact.type_id else "",
+                        "role": scoped_member.role,
+                        "score": max_score + 10,
+                        "reasons": [scope_reason],
+                    }
+                )
+            else:
+                existing_row["score"] = max(int(existing_row.get("score") or 0), max_score + 10)
+                reasons = existing_row.get("reasons") if isinstance(existing_row.get("reasons"), list) else []
+                if scope_reason not in reasons:
+                    reasons.append(scope_reason)
+                existing_row["reasons"] = reasons
+            impacted_rows = sorted(
+                [row for row in impacted_rows if isinstance(row, dict)],
+                key=lambda row: (-int(row.get("score") or 0), str(row.get("artifact_title") or "")),
+            )
+            suggested_ids = _dedupe(
+                [scoped_artifact_id]
+                + [str(row.get("artifact_id") or "").strip() for row in impacted_rows if str(row.get("artifact_id") or "").strip()]
+            )
+            analysis["impacted_artifacts"] = impacted_rows
+            analysis["suggested_artifact_ids"] = suggested_ids
     if metadata_hints:
         analysis = {
             **analysis,
