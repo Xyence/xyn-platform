@@ -342,6 +342,11 @@ from .runtime_artifact_provenance import (
     merge_runtime_provenance,
     runtime_git_source_ref,
 )
+from .remote_artifact_targeting import (
+    list_remote_artifact_candidates,
+    resolve_remote_artifact_candidate,
+    upsert_remote_catalog_artifact,
+)
 from .module_registry import maybe_sync_modules_from_registry
 from .deployments import (
     compute_idempotency_base,
@@ -11431,6 +11436,62 @@ def artifacts_catalog_collection(request: HttpRequest) -> JsonResponse:
             }
         )
     return JsonResponse({"artifacts": rows})
+
+
+@csrf_exempt
+@login_required
+def artifacts_remote_candidates_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if staff_error := _require_staff(request):
+        return staff_error
+    artifact_source: Dict[str, Any] = {}
+    manifest_source = str(request.GET.get("manifest_source") or "").strip()
+    package_source = str(request.GET.get("package_source") or "").strip()
+    if manifest_source:
+        artifact_source["manifest_source"] = manifest_source
+    if package_source:
+        artifact_source["package_source"] = package_source
+    artifact_slug = str(request.GET.get("artifact_slug") or "").strip()
+    artifact_type = str(request.GET.get("artifact_type") or "").strip()
+    if artifact_slug:
+        artifact_source["artifact_slug"] = artifact_slug
+    if artifact_type:
+        artifact_source["artifact_type"] = artifact_type
+    if not artifact_source:
+        env_sources = [item.strip() for item in str(os.environ.get("XYN_SOLUTION_BUNDLE_SOURCES") or "").split(",")]
+        env_sources = [item for item in env_sources if item]
+        if not env_sources:
+            return JsonResponse(
+                {
+                    "error": "manifest_source or package_source is required",
+                    "blocked_reason": "scope_resolution_failed",
+                    "error_classification": "scope_resolution_failed",
+                },
+                status=400,
+            )
+        candidates: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        for source in env_sources:
+            try:
+                source_candidates = list_remote_artifact_candidates(artifact_source={"manifest_source": source})
+            except Exception as exc:
+                errors.append(str(exc))
+                continue
+            candidates.extend(source_candidates)
+        return JsonResponse({"candidates": candidates, "count": len(candidates), "errors": errors})
+    try:
+        candidates = list_remote_artifact_candidates(artifact_source=artifact_source)
+    except Exception as exc:
+        return JsonResponse(
+            {
+                "error": str(exc) or "failed to resolve remote artifact candidates",
+                "blocked_reason": "artifact_not_found",
+                "error_classification": "artifact_not_found",
+            },
+            status=404,
+        )
+    return JsonResponse({"candidates": candidates, "count": len(candidates)})
 
 
 @csrf_exempt
@@ -41312,6 +41373,12 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
     artifact_id = str(payload.get("artifact_id") or "").strip()
     artifact_slug = str(payload.get("artifact_slug") or "").strip()
     workspace_id = str(payload.get("workspace_id") or "").strip()
+    artifact_source = payload.get("artifact_source") if isinstance(payload.get("artifact_source"), dict) else {}
+    artifact_type = str(payload.get("artifact_type") or "").strip()
+    if not artifact_slug and isinstance(artifact_source, dict):
+        artifact_slug = str(artifact_source.get("artifact_slug") or "").strip()
+    if not artifact_type and isinstance(artifact_source, dict):
+        artifact_type = str(artifact_source.get("artifact_type") or "").strip()
     decomposition_campaign = payload.get("decomposition_campaign") if isinstance(payload.get("decomposition_campaign"), dict) else {}
     target_source_files = payload.get("target_source_files")
     if not isinstance(target_source_files, list):
@@ -41440,6 +41507,41 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
             )
 
     artifact: Optional[Artifact] = None
+    artifact_origin = "installed"
+    resolved_remote_source: Dict[str, Any] = {}
+
+    def _resolve_remote_catalog_artifact(*, selected_workspace: Optional[Workspace]) -> Dict[str, Any]:
+        if not isinstance(artifact_source, dict) or not artifact_source:
+            return {"ok": False}
+        if selected_workspace is None:
+            return {
+                "ok": False,
+                "status": 400,
+                "error": "workspace resolution is required before remote artifact targeting",
+                "blocked_reason": "scope_resolution_failed",
+                "error_classification": "scope_resolution_failed",
+            }
+        try:
+            candidate = resolve_remote_artifact_candidate(
+                artifact_source=artifact_source,
+                artifact_slug=artifact_slug,
+                artifact_type=artifact_type,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": 404,
+                "error": str(exc) or "remote artifact candidate not found",
+                "blocked_reason": "artifact_not_found",
+                "error_classification": "artifact_not_found",
+            }
+        artifact_row = upsert_remote_catalog_artifact(
+            workspace=selected_workspace,
+            candidate=candidate,
+            created_by=identity,
+        )
+        return {"ok": True, "artifact": artifact_row, "candidate": candidate}
+
     if artifact_id or artifact_slug:
         resolution = _resolve_artifact_for_change_scope(
             identity=identity,
@@ -41450,25 +41552,93 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
             allow_workspace_reassignment=True,
         )
         if not resolution.get("ok"):
+            blocked_reason = str(resolution.get("blocked_reason") or "artifact_not_found")
+            if blocked_reason == "artifact_not_found" and artifact_source:
+                remote_resolution = _resolve_remote_catalog_artifact(selected_workspace=workspace)
+                if remote_resolution.get("ok"):
+                    artifact = (
+                        remote_resolution.get("artifact")
+                        if isinstance(remote_resolution.get("artifact"), Artifact)
+                        else None
+                    )
+                    candidate = (
+                        remote_resolution.get("candidate")
+                        if isinstance(remote_resolution.get("candidate"), dict)
+                        else {}
+                    )
+                    artifact_origin = str(candidate.get("artifact_origin") or "remote_catalog")
+                    resolved_remote_source = (
+                        candidate.get("remote_source") if isinstance(candidate.get("remote_source"), dict) else {}
+                    )
+                else:
+                    return _scope_error(
+                        status=int(remote_resolution.get("status") or 404),
+                        error=str(remote_resolution.get("error") or "artifact not found"),
+                        blocked_reason=str(remote_resolution.get("blocked_reason") or "artifact_not_found"),
+                        error_classification=str(
+                            remote_resolution.get("error_classification") or "artifact_not_found"
+                        ),
+                        workspace_id=str(workspace.id) if workspace else "",
+                        artifact_id=artifact_id,
+                        artifact_slug=artifact_slug,
+                        next_allowed_actions=["list_artifacts", "get_remote_artifact_candidates", "list_workspaces"],
+                    )
+            else:
+                return _scope_error(
+                    status=int(resolution.get("status") or 404),
+                    error=str(resolution.get("error") or "artifact not found"),
+                    blocked_reason=blocked_reason,
+                    error_classification=str(resolution.get("error_classification") or "artifact_not_found"),
+                    workspace_id=str(workspace.id) if workspace else "",
+                    artifact_id=artifact_id,
+                    artifact_slug=artifact_slug,
+                    next_allowed_actions=["list_artifacts", "list_workspaces"],
+                    extra={
+                        "candidate_artifacts": resolution.get("candidate_artifacts")
+                        if isinstance(resolution.get("candidate_artifacts"), list)
+                        else []
+                    },
+                )
+        if resolution.get("ok"):
+            artifact = resolution.get("artifact") if isinstance(resolution.get("artifact"), Artifact) else None
+            workspace = resolution.get("workspace") if isinstance(resolution.get("workspace"), Workspace) else workspace
+        if artifact is None and artifact_source:
+            remote_resolution = _resolve_remote_catalog_artifact(selected_workspace=workspace)
+            if not remote_resolution.get("ok"):
+                return _scope_error(
+                    status=int(remote_resolution.get("status") or 404),
+                    error=str(remote_resolution.get("error") or "artifact not found"),
+                    blocked_reason=str(remote_resolution.get("blocked_reason") or "artifact_not_found"),
+                    error_classification=str(remote_resolution.get("error_classification") or "artifact_not_found"),
+                    workspace_id=str(workspace.id) if workspace else "",
+                    artifact_id=artifact_id,
+                    artifact_slug=artifact_slug,
+                    next_allowed_actions=["list_artifacts", "list_workspaces", "get_remote_artifact_candidates"],
+                )
+            artifact = remote_resolution.get("artifact") if isinstance(remote_resolution.get("artifact"), Artifact) else None
+            candidate = remote_resolution.get("candidate") if isinstance(remote_resolution.get("candidate"), dict) else {}
+            artifact_origin = str(candidate.get("artifact_origin") or "remote_catalog")
+            resolved_remote_source = candidate.get("remote_source") if isinstance(candidate.get("remote_source"), dict) else {}
+
+    artifact_qs = Artifact.objects.filter(workspace=workspace).select_related("type") if workspace else Artifact.objects.none()
+    if artifact is None and artifact_source:
+        remote_resolution = _resolve_remote_catalog_artifact(selected_workspace=workspace)
+        if not remote_resolution.get("ok"):
             return _scope_error(
-                status=int(resolution.get("status") or 404),
-                error=str(resolution.get("error") or "artifact not found"),
-                blocked_reason=str(resolution.get("blocked_reason") or "artifact_not_found"),
-                error_classification=str(resolution.get("error_classification") or "artifact_not_found"),
+                status=int(remote_resolution.get("status") or 404),
+                error=str(remote_resolution.get("error") or "artifact not found"),
+                blocked_reason=str(remote_resolution.get("blocked_reason") or "artifact_not_found"),
+                error_classification=str(remote_resolution.get("error_classification") or "artifact_not_found"),
                 workspace_id=str(workspace.id) if workspace else "",
                 artifact_id=artifact_id,
                 artifact_slug=artifact_slug,
-                next_allowed_actions=["list_artifacts", "list_workspaces"],
-                extra={
-                    "candidate_artifacts": resolution.get("candidate_artifacts")
-                    if isinstance(resolution.get("candidate_artifacts"), list)
-                    else []
-                },
+                next_allowed_actions=["list_artifacts", "get_remote_artifact_candidates", "list_workspaces"],
             )
-        artifact = resolution.get("artifact") if isinstance(resolution.get("artifact"), Artifact) else None
-        workspace = resolution.get("workspace") if isinstance(resolution.get("workspace"), Workspace) else workspace
+        artifact = remote_resolution.get("artifact") if isinstance(remote_resolution.get("artifact"), Artifact) else None
+        candidate = remote_resolution.get("candidate") if isinstance(remote_resolution.get("candidate"), dict) else {}
+        artifact_origin = str(candidate.get("artifact_origin") or "remote_catalog")
+        resolved_remote_source = candidate.get("remote_source") if isinstance(candidate.get("remote_source"), dict) else {}
 
-    artifact_qs = Artifact.objects.filter(workspace=workspace).select_related("type") if workspace else Artifact.objects.none()
     if artifact is None and not artifact_id and not artifact_slug:
         inferred_slugs = _infer_artifact_candidates_from_target_paths(normalized_target_paths)
         available_by_slug = {
@@ -41532,6 +41702,8 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
                 "artifact_slug": str(_artifact_slug(artifact) or ""),
             },
             "autogenerated_application": True,
+            "artifact_origin": artifact_origin,
+            "artifact_source": resolved_remote_source if isinstance(resolved_remote_source, dict) else {},
         },
         "plan_fingerprint": fingerprint,
     }
@@ -41551,7 +41723,12 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
                 "workspace": workspace,
                 "role": role,
                 "responsibility_summary": "Autogenerated primary target for artifact-scoped decomposition",
-                "metadata_json": {"autogenerated": True, "scope_type": "artifact"},
+                "metadata_json": {
+                    "autogenerated": True,
+                    "scope_type": "artifact",
+                    "artifact_origin": artifact_origin,
+                    "artifact_source": resolved_remote_source if isinstance(resolved_remote_source, dict) else {},
+                },
                 "sort_order": 0,
             },
         )
@@ -41569,6 +41746,8 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
             "application_id": str(application.id),
             "artifact_id": str(artifact.id),
             "artifact_slug": str(_artifact_slug(artifact) or ""),
+            "artifact_origin": artifact_origin,
+            "artifact_source": resolved_remote_source if isinstance(resolved_remote_source, dict) else {},
         }
         if isinstance(failure_payload, dict):
             failure_payload["scope_type"] = "artifact"
@@ -41590,6 +41769,8 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
             "application_id": str(application.id),
             "artifact_id": str(artifact.id),
             "artifact_slug": str(_artifact_slug(artifact) or ""),
+            "artifact_origin": artifact_origin,
+            "artifact_source": resolved_remote_source if isinstance(resolved_remote_source, dict) else {},
         }
         session_body["scope_type"] = "artifact"
         session_body["scope"] = scope_block
@@ -41599,6 +41780,8 @@ def solution_change_sessions_collection(request: HttpRequest) -> JsonResponse:
         body["application_id"] = str(application.id)
         body["artifact_id"] = str(artifact.id)
         body["artifact_slug"] = str(_artifact_slug(artifact) or "")
+        body["artifact_origin"] = artifact_origin
+        body["artifact_source"] = resolved_remote_source if isinstance(resolved_remote_source, dict) else {}
     return JsonResponse(body, status=post_result.status_code)
 
 

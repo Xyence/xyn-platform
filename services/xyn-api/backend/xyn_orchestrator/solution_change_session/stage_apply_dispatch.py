@@ -22,7 +22,13 @@ def stage_solution_change_dispatch_dev_tasks(
     git_repo_dirty_files: Callable[..., Tuple[List[str], str]],
     solution_change_stage_repo_work_item_seed: Callable[..., str],
     submit_dev_task_runtime_run: Callable[..., Dict[str, Any]],
+    remote_catalog_materialization_by_artifact_id: Dict[str, Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
+    materialization_map = (
+        remote_catalog_materialization_by_artifact_id
+        if isinstance(remote_catalog_materialization_by_artifact_id, dict)
+        else {}
+    )
     staged_artifacts_by_id = {
         str(row.get("artifact_id") or "").strip(): row
         for row in staged_artifacts
@@ -309,6 +315,15 @@ def stage_solution_change_dispatch_dev_tasks(
                 "application_id": str(session.application_id),
                 "artifact_ids": [str(item.get("artifact_id") or "") for item in artifacts_for_repo if isinstance(item, dict)],
                 "artifact_slugs": [str(item.get("artifact_slug") or "") for item in artifacts_for_repo if isinstance(item, dict)],
+                "remote_catalog_materialization": [
+                    {
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                        "artifact_slug": str(item.get("artifact_slug") or ""),
+                        "materialization": materialization_map.get(str(item.get("artifact_id") or "")) or {},
+                    }
+                    for item in artifacts_for_repo
+                    if isinstance(item, dict) and str(item.get("artifact_id") or "") in materialization_map
+                ],
             },
             revision=1,
             revision_reason="stage_apply",
@@ -337,6 +352,15 @@ def stage_solution_change_dispatch_dev_tasks(
                 "solution_change_session_id": str(session.id),
                 "solution_change_session": {"id": str(session.id), "application_id": str(session.application_id)},
                 "coordinated_repo_apply": True,
+                "remote_catalog_materialization": [
+                    {
+                        "artifact_id": str(item.get("artifact_id") or ""),
+                        "artifact_slug": str(item.get("artifact_slug") or ""),
+                        "materialization": materialization_map.get(str(item.get("artifact_id") or "")) or {},
+                    }
+                    for item in artifacts_for_repo
+                    if isinstance(item, dict) and str(item.get("artifact_id") or "") in materialization_map
+                ],
             },
             runtime_workspace_id=session.workspace_id,
             context_purpose="coding",

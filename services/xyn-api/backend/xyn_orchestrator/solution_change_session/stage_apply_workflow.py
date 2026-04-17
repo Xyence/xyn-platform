@@ -35,6 +35,7 @@ def stage_solution_change_session(
     if not selected_members:
         selected_members = memberships
     plan = session.plan_json if isinstance(session.plan_json, dict) else {}
+    remote_catalog_materialization_by_artifact_id: Dict[str, Dict[str, Any]] = {}
     planned_work_by_artifact: Dict[str, List[str]] = {}
     for row in (plan.get("per_artifact_work") if isinstance(plan.get("per_artifact_work"), list) else []):
         if not isinstance(row, dict):
@@ -51,6 +52,25 @@ def stage_solution_change_session(
     for member in selected_members:
         artifact = member.artifact
         artifact_id = str(artifact.id)
+        scope_json = artifact.scope_json if isinstance(artifact.scope_json, dict) else {}
+        provenance_json = artifact.provenance_json if isinstance(artifact.provenance_json, dict) else {}
+        remote_source = provenance_json.get("remote_source") if isinstance(provenance_json.get("remote_source"), dict) else {}
+        is_remote_catalog = str(scope_json.get("catalog_mode") or "").strip().lower() == "remote_catalog"
+        if is_remote_catalog and isinstance(remote_source, dict):
+            remote_catalog_materialization_by_artifact_id[artifact_id] = {
+                "mode": "lazy_materialize_in_runtime_context",
+                "artifact_origin": str(provenance_json.get("artifact_origin") or "remote_catalog"),
+                "manifest_source": str(remote_source.get("manifest_source") or ""),
+                "package_source": str(remote_source.get("package_source") or ""),
+                "package_ref": str(remote_source.get("package_ref") or ""),
+                "package_id": str(remote_source.get("package_id") or ""),
+                "owner_repo_slug": str(remote_source.get("owner_repo_slug") or ""),
+                "owner_path_prefixes": [
+                    str(item).strip()
+                    for item in (remote_source.get("owner_path_prefixes") if isinstance(remote_source.get("owner_path_prefixes"), list) else [])
+                    if str(item).strip()
+                ],
+            }
         staged_artifacts.append(
             {
                 "artifact_id": artifact_id,
@@ -62,6 +82,7 @@ def stage_solution_change_session(
                 "validation_state": "pending",
                 "planned_work": planned_work_by_artifact.get(artifact_id) or [],
                 "updated_at": timezone.now().isoformat(),
+                "materialization": remote_catalog_materialization_by_artifact_id.get(artifact_id) or {},
             }
         )
     staged_payload: Dict[str, Any] = {
@@ -80,6 +101,7 @@ def stage_solution_change_session(
             "approved_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="approved").count(),
             "rejected_count": SolutionPlanningCheckpoint.objects.filter(session=session, status="rejected").count(),
         },
+        "remote_catalog_materialization": remote_catalog_materialization_by_artifact_id,
     }
     if dispatch_runtime:
         dispatch_payload = stage_solution_change_dispatch_dev_tasks(
@@ -89,6 +111,7 @@ def stage_solution_change_session(
             planned_work_by_artifact=planned_work_by_artifact,
             plan=plan,
             dispatch_user=dispatch_user,
+            remote_catalog_materialization_by_artifact_id=remote_catalog_materialization_by_artifact_id,
         )
         dispatch_results = dispatch_payload.get("execution_runs") if isinstance(dispatch_payload, dict) else []
         per_repo_results = dispatch_payload.get("per_repo_results") if isinstance(dispatch_payload, dict) else []

@@ -250,6 +250,7 @@ from xyn_orchestrator.api.solutions import (
 from xyn_orchestrator.api.artifacts import (
     artifacts_collection,
     artifacts_catalog_collection,
+    artifacts_remote_candidates_collection,
     artifact_detail,
     artifact_activate,
     artifact_activity,
@@ -613,6 +614,7 @@ urlpatterns = [
     path("xyn/api/video/adapter-configs", video_adapter_configs_collection),
     path("xyn/api/video/adapter-configs/<uuid:artifact_id>", video_adapter_config_detail),
     path("xyn/api/artifacts/catalog", artifacts_catalog_collection),
+    path("xyn/api/artifacts/remote-candidates", artifacts_remote_candidates_collection),
     path("xyn/api/artifacts", artifacts_collection),
     path("xyn/api/artifacts/<uuid:artifact_id>", artifact_detail),
     path("xyn/api/artifacts/<uuid:artifact_id>/activate", artifact_activate),

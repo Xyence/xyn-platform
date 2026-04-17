@@ -171,3 +171,61 @@ class SolutionChangeSessionStageApplyWorkflowTests(SimpleTestCase):
         self.assertEqual(error, "")
         self.assertTrue(branch.startswith("xyn/session/xyn-platform-61028b1934df"))
         self.assertEqual(run_mock.call_count, 2)
+
+    def test_stage_apply_includes_lazy_materialization_metadata_for_remote_catalog_artifacts(self):
+        artifact = SimpleNamespace(
+            id="a1",
+            title="Deal Finder API",
+            type_id="type-1",
+            type=SimpleNamespace(slug="application"),
+            scope_json={"catalog_mode": "remote_catalog"},
+            provenance_json={
+                "artifact_origin": "remote_catalog",
+                "remote_source": {
+                    "manifest_source": "s3://bucket/manifest.json",
+                    "package_source": "s3://bucket/deal-finder.tar.gz",
+                    "owner_repo_slug": "deal-finder",
+                    "owner_path_prefixes": ["services/api/"],
+                },
+            },
+        )
+        member = SimpleNamespace(artifact=artifact, artifact_id="a1", role="primary_api")
+        session = SimpleNamespace(
+            id="s1",
+            workspace_id="w1",
+            application_id="app1",
+            plan_json={},
+            staged_changes_json={},
+            preview_json={},
+            validation_json={},
+            execution_status="draft",
+            status="draft",
+            save=lambda **_kwargs: None,
+        )
+        captured: dict[str, object] = {}
+
+        def _dispatch(**kwargs):
+            captured.update(kwargs)
+            return {"execution_runs": [], "per_repo_results": []}
+
+        with mock.patch(
+            "xyn_orchestrator.solution_change_session.stage_apply_workflow.SolutionPlanningCheckpoint.objects.filter",
+            return_value=SimpleNamespace(count=lambda: 0),
+        ):
+            payload = stage_apply_workflow.stage_solution_change_session(
+                session=session,
+                memberships=[member],
+                dispatch_runtime=True,
+                dispatch_user=object(),
+                solution_change_session_selected_artifact_ids=lambda _session: ["a1"],
+                solution_change_session_confirmed_workstreams=lambda _session: [],
+                artifact_role_matches_workstreams=lambda _role, _workstreams: False,
+                stage_solution_change_dispatch_dev_tasks=_dispatch,
+            )
+        materialization = payload.get("remote_catalog_materialization")
+        self.assertIsInstance(materialization, dict)
+        self.assertEqual(materialization.get("a1", {}).get("mode"), "lazy_materialize_in_runtime_context")
+        self.assertEqual(
+            captured.get("remote_catalog_materialization_by_artifact_id", {}).get("a1", {}).get("package_source"),
+            "s3://bucket/deal-finder.tar.gz",
+        )
