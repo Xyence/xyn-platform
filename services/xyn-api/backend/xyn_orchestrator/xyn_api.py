@@ -8864,6 +8864,13 @@ def _ensure_default_user_workspace(
             auth_mode="local" if _auth_mode() == "dev" else ("oidc" if _auth_mode() == "oidc" else "local"),
             metadata_json={},
         )
+        logger.info(
+            "artifact_visibility_diag event=default_workspace_created workspace_id=%s workspace_slug=%s workspace_name=%s auth_mode=%s",
+            str(workspace.id),
+            str(workspace.slug or ""),
+            str(workspace.name or ""),
+            _auth_mode(),
+        )
 
     workspace = Workspace.objects.select_for_update().get(id=workspace.id)
     update_fields: List[str] = []
@@ -8895,6 +8902,15 @@ def _ensure_default_user_workspace(
         )
     _ensure_default_workspace_artifact_bindings(workspace)
     _ensure_default_xyn_solution_for_workspace(workspace=workspace)
+    logger.info(
+        "artifact_visibility_diag event=default_workspace_resolved workspace_id=%s workspace_slug=%s workspace_name=%s requested_slug=%s requested_name=%s has_identity=%s",
+        str(workspace.id),
+        str(workspace.slug or ""),
+        str(workspace.name or ""),
+        str(requested_slug or "").strip().lower(),
+        str(requested_name or "").strip(),
+        bool(identity is not None),
+    )
     return workspace
 
 
@@ -9116,6 +9132,16 @@ def _runtime_artifact_host_workspace(fallback_workspace: Workspace) -> Workspace
 
 def _ensure_default_workspace_artifact_bindings(workspace: Workspace) -> None:
     host_workspace = _runtime_artifact_host_workspace(workspace)
+    logger.info(
+        "artifact_visibility_diag event=workspace_binding_start workspace_id=%s workspace_slug=%s host_workspace_id=%s host_workspace_slug=%s runtime_artifacts_count=%s",
+        str(workspace.id),
+        str(workspace.slug or ""),
+        str(host_workspace.id),
+        str(host_workspace.slug or ""),
+        len(DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS),
+    )
+    binding_upserts = 0
+    binding_creates = 0
     for slug, title, manifest_ref, summary in DEFAULT_WORKSPACE_RUNTIME_ARTIFACTS:
         artifact = _ensure_runtime_artifact(
             workspace=host_workspace,
@@ -9124,11 +9150,14 @@ def _ensure_default_workspace_artifact_bindings(workspace: Workspace) -> None:
             manifest_ref=manifest_ref,
             summary=summary,
         )
-        binding, _ = WorkspaceArtifactBinding.objects.get_or_create(
+        binding, binding_created = WorkspaceArtifactBinding.objects.get_or_create(
             workspace=workspace,
             artifact=artifact,
             defaults={"enabled": True, "installed_state": "installed", "config_ref": None},
         )
+        binding_upserts += 1
+        if binding_created:
+            binding_creates += 1
         update_fields: List[str] = []
         if not binding.enabled:
             binding.enabled = True
@@ -9139,7 +9168,26 @@ def _ensure_default_workspace_artifact_bindings(workspace: Workspace) -> None:
         if update_fields:
             update_fields.append("updated_at")
             binding.save(update_fields=update_fields)
+        logger.info(
+            "artifact_visibility_diag event=workspace_binding_upsert workspace_id=%s workspace_slug=%s artifact_id=%s artifact_slug=%s host_workspace_id=%s host_workspace_slug=%s enabled=%s installed_state=%s updated_fields=%s",
+            str(workspace.id),
+            str(workspace.slug or ""),
+            str(artifact.id),
+            str(artifact.slug or ""),
+            str(host_workspace.id),
+            str(host_workspace.slug or ""),
+            bool(binding.enabled),
+            str(binding.installed_state or ""),
+            ",".join(update_fields) if update_fields else "none",
+        )
     _ensure_default_xyn_solution_for_workspace(workspace=workspace)
+    logger.info(
+        "artifact_visibility_diag event=workspace_binding_complete workspace_id=%s workspace_slug=%s binding_upserts=%s binding_creates_estimate=%s",
+        str(workspace.id),
+        str(workspace.slug or ""),
+        binding_upserts,
+        binding_creates,
+    )
 
 
 def _ensure_bootstrap_workspaces(
@@ -9149,15 +9197,36 @@ def _ensure_bootstrap_workspaces(
     requested_default_workspace_slug: str = "",
 ) -> Dict[str, Workspace]:
     result: Dict[str, Workspace] = {}
+    logger.info(
+        "artifact_visibility_diag event=bootstrap_workspace_ensure_start requested_default_workspace_name=%s requested_default_workspace_slug=%s has_identity=%s",
+        str(requested_default_workspace_name or "").strip(),
+        str(requested_default_workspace_slug or "").strip().lower(),
+        bool(identity is not None),
+    )
     with transaction.atomic():
         result["system_workspace"] = _ensure_system_platform_workspace()
         if identity is None or not _is_platform_admin(identity):
+            logger.info(
+                "artifact_visibility_diag event=bootstrap_workspace_ensure_complete system_workspace_id=%s system_workspace_slug=%s default_user_workspace_id=%s reason=%s",
+                str(result["system_workspace"].id),
+                str(result["system_workspace"].slug or ""),
+                "",
+                "identity_missing_or_not_platform_admin",
+            )
             return result
         result["default_user_workspace"] = _ensure_default_user_workspace(
             identity=identity,
             requested_name=requested_default_workspace_name,
             requested_slug=requested_default_workspace_slug,
         )
+    logger.info(
+        "artifact_visibility_diag event=bootstrap_workspace_ensure_complete system_workspace_id=%s system_workspace_slug=%s default_user_workspace_id=%s default_user_workspace_slug=%s reason=%s",
+        str(result["system_workspace"].id),
+        str(result["system_workspace"].slug or ""),
+        str(result["default_user_workspace"].id),
+        str(result["default_user_workspace"].slug or ""),
+        "ok",
+    )
     return result
 
 
@@ -20464,22 +20533,72 @@ def _resolve_workspace_for_identity(identity: UserIdentity, workspace_id: str) -
                 workspace_id=requested_uuid,
             ).first()
             if membership:
+                logger.info(
+                    "artifact_visibility_diag event=workspace_resolution_result strategy=membership_uuid requested=%s workspace_id=%s workspace_slug=%s",
+                    requested,
+                    str(membership.workspace.id),
+                    str(membership.workspace.slug or ""),
+                )
                 return membership.workspace
         membership = WorkspaceMembership.objects.select_related("workspace").filter(
             user_identity=identity,
             workspace__slug=requested,
         ).first()
         if membership:
+            logger.info(
+                "artifact_visibility_diag event=workspace_resolution_result strategy=membership_slug requested=%s workspace_id=%s workspace_slug=%s",
+                requested,
+                str(membership.workspace.id),
+                str(membership.workspace.slug or ""),
+            )
             return membership.workspace
         if _is_platform_admin(identity):
             if requested_uuid is not None:
                 workspace = Workspace.objects.filter(id=requested_uuid).first()
                 if workspace:
+                    logger.info(
+                        "artifact_visibility_diag event=workspace_resolution_result strategy=platform_admin_uuid requested=%s workspace_id=%s workspace_slug=%s",
+                        requested,
+                        str(workspace.id),
+                        str(workspace.slug or ""),
+                    )
                     return workspace
-            return Workspace.objects.filter(slug=requested).first()
+            workspace = Workspace.objects.filter(slug=requested).first()
+            if workspace is not None:
+                logger.info(
+                    "artifact_visibility_diag event=workspace_resolution_result strategy=platform_admin_slug requested=%s workspace_id=%s workspace_slug=%s",
+                    requested,
+                    str(workspace.id),
+                    str(workspace.slug or ""),
+                )
+            else:
+                logger.warning(
+                    "artifact_visibility_diag event=workspace_resolution_result strategy=platform_admin_slug requested=%s workspace_id=%s reason=not_found",
+                    requested,
+                    "",
+                )
+            return workspace
+        logger.warning(
+            "artifact_visibility_diag event=workspace_resolution_result strategy=requested_no_access requested=%s workspace_id=%s reason=not_member",
+            requested,
+            "",
+        )
         return None
     fallback = WorkspaceMembership.objects.select_related("workspace").filter(user_identity=identity).order_by("workspace__name").first()
-    return fallback.workspace if fallback else None
+    if fallback:
+        logger.info(
+            "artifact_visibility_diag event=workspace_resolution_result strategy=fallback_membership requested=%s workspace_id=%s workspace_slug=%s",
+            "",
+            str(fallback.workspace.id),
+            str(fallback.workspace.slug or ""),
+        )
+        return fallback.workspace
+    logger.warning(
+        "artifact_visibility_diag event=workspace_resolution_result strategy=fallback_membership requested=%s workspace_id=%s reason=no_memberships",
+        "",
+        "",
+    )
+    return None
 
 
 def _seed_api_base_url() -> str:

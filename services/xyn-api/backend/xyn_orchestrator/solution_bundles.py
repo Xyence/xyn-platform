@@ -163,6 +163,11 @@ def _parse_s3_source(source: str) -> Tuple[str, str]:
 
 
 def _s3_read_bytes(*, bucket: str, key: str) -> bytes:
+    logger.info(
+        "artifact_visibility_diag event=s3_object_fetch_start bucket=%s key=%s",
+        bucket,
+        key,
+    )
     try:
         client = boto3.client("s3")
         response = client.get_object(Bucket=bucket, Key=key)
@@ -174,7 +179,14 @@ def _s3_read_bytes(*, bucket: str, key: str) -> bytes:
             raise _bundle_error(f"s3 bucket not found: {bucket}") from exc
         raise _bundle_error(f"failed to fetch s3 object: s3://{bucket}/{key}") from exc
     body = response.get("Body")
-    return body.read() if body is not None else b""
+    payload = body.read() if body is not None else b""
+    logger.info(
+        "artifact_visibility_diag event=s3_object_fetch_complete bucket=%s key=%s bytes=%s",
+        bucket,
+        key,
+        len(payload),
+    )
+    return payload
 
 
 def _read_s3_json(source: str) -> Dict[str, Any]:
@@ -353,13 +365,29 @@ def load_solution_bundle_from_source(source: str) -> Dict[str, Any]:
         package = ArtifactPackage.objects.filter(id=package_id.strip()).first()
         if package is None:
             raise _bundle_error(f"artifact package not found: {package_id}")
-        return normalize_solution_bundle(_derived_bundle_from_package_manifest(package))
+        normalized = normalize_solution_bundle(_derived_bundle_from_package_manifest(package))
+        logger.info(
+            "artifact_visibility_diag event=bundle_manifest_parsed source=%s solution_slug=%s artifacts_primary=%s artifacts_supporting_count=%s",
+            token,
+            str((_as_dict(normalized.get("solution")).get("slug") or "")).strip(),
+            str((_as_dict(_as_dict(normalized.get("artifacts")).get("primary_app")).get("slug") or "")).strip(),
+            len(_as_list(_as_dict(normalized.get("artifacts")).get("supporting"))),
+        )
+        return normalized
     resolved = _resolve_bundle_source_with_candidates(token)
     if resolved.lower().startswith("s3://"):
         raw_bundle = _read_s3_json(resolved)
     else:
         raw_bundle = _read_file_json(resolved)
-    return normalize_solution_bundle(_apply_bundle_package_sources(raw_bundle, base_source=resolved))
+    normalized = normalize_solution_bundle(_apply_bundle_package_sources(raw_bundle, base_source=resolved))
+    logger.info(
+        "artifact_visibility_diag event=bundle_manifest_parsed source=%s solution_slug=%s artifacts_primary=%s artifacts_supporting_count=%s",
+        resolved,
+        str((_as_dict(normalized.get("solution")).get("slug") or "")).strip(),
+        str((_as_dict(_as_dict(normalized.get("artifacts")).get("primary_app")).get("slug") or "")).strip(),
+        len(_as_list(_as_dict(normalized.get("artifacts")).get("supporting"))),
+    )
+    return normalized
 
 
 def _load_package_from_source(source: str) -> ArtifactPackage:
@@ -494,6 +522,14 @@ def install_solution_bundle(
     installed_by: Any = None,
 ) -> Dict[str, Any]:
     normalized = normalize_solution_bundle(bundle)
+    solution_slug = str(_as_dict(normalized.get("solution")).get("slug") or "").strip().lower()
+    logger.info(
+        "artifact_visibility_diag event=artifact_registration_start workspace_id=%s workspace_slug=%s solution_slug=%s install_source=%s",
+        str(workspace.id),
+        str(workspace.slug or ""),
+        solution_slug,
+        str(install_source or "").strip(),
+    )
     with transaction.atomic():
         normalized_install_source = str(install_source or "").strip()
         application, application_created = _application_for_bundle(
@@ -520,6 +556,7 @@ def install_solution_bundle(
         bind_workspace_artifacts = bool(bootstrap.get("bind_workspace_artifacts", True))
         enable_bindings = bool(bootstrap.get("enable_bindings", True))
 
+        registration_rows: List[Dict[str, Any]] = []
         for kind, ref, sort_order in artifact_entries:
             artifact, receipt = _ensure_artifact_available(
                 workspace=workspace,
@@ -558,6 +595,15 @@ def install_solution_bundle(
                 },
             )
             membership_rows.append(membership)
+            registration_rows.append(
+                {
+                    "kind": kind,
+                    "artifact_slug": str(getattr(artifact, "slug", "") or ""),
+                    "artifact_id": str(getattr(artifact, "id", "") or ""),
+                    "membership_created": bool(_created),
+                    "role": str(ref.get("role") or "supporting"),
+                }
+            )
             if bind_workspace_artifacts:
                 binding, _binding_created = WorkspaceArtifactBinding.objects.update_or_create(
                     workspace=workspace,
@@ -568,6 +614,43 @@ def install_solution_bundle(
                     },
                 )
                 binding_rows.append(binding)
+                logger.info(
+                    "artifact_visibility_diag event=artifact_workspace_binding_upsert workspace_id=%s workspace_slug=%s artifact_id=%s artifact_slug=%s binding_created=%s enabled=%s installed_state=%s",
+                    str(workspace.id),
+                    str(workspace.slug or ""),
+                    str(getattr(artifact, "id", "") or ""),
+                    str(getattr(artifact, "slug", "") or ""),
+                    bool(_binding_created),
+                    bool(binding.enabled),
+                    str(binding.installed_state or ""),
+                )
+            else:
+                logger.info(
+                    "artifact_visibility_diag event=artifact_workspace_binding_skipped workspace_id=%s workspace_slug=%s artifact_id=%s artifact_slug=%s reason=bind_workspace_artifacts_disabled",
+                    str(workspace.id),
+                    str(workspace.slug or ""),
+                    str(getattr(artifact, "id", "") or ""),
+                    str(getattr(artifact, "slug", "") or ""),
+                )
+
+        logger.info(
+            "artifact_visibility_diag event=artifact_registration_complete workspace_id=%s workspace_slug=%s solution_slug=%s application_id=%s application_created=%s memberships=%s bindings=%s receipts=%s policy_source=%s",
+            str(workspace.id),
+            str(workspace.slug or ""),
+            solution_slug,
+            str(getattr(application, "id", "") or ""),
+            bool(application_created),
+            len(membership_rows),
+            len(binding_rows),
+            len(receipts),
+            policy_source,
+        )
+        logger.debug(
+            "artifact_visibility_diag event=artifact_registration_rows workspace_id=%s workspace_slug=%s rows=%s",
+            str(workspace.id),
+            str(workspace.slug or ""),
+            registration_rows,
+        )
 
         return {
             "bundle": normalized,
@@ -624,13 +707,26 @@ def _bootstrap_workspace() -> Workspace:
     slug = _bootstrap_workspace_slug()
     workspace = Workspace.objects.filter(slug=slug).first()
     if workspace is not None:
+        logger.info(
+            "artifact_visibility_diag event=bootstrap_workspace_resolved workspace_id=%s workspace_slug=%s created=%s",
+            str(workspace.id),
+            str(workspace.slug or ""),
+            False,
+        )
         return workspace
-    return Workspace.objects.create(
+    workspace = Workspace.objects.create(
         slug=slug,
         name=_workspace_title_from_slug(slug),
         description=f"Default {slug} workspace for bootstrap solution bundle install.",
         metadata_json={"bootstrap": "solution_bundle_install"},
     )
+    logger.info(
+        "artifact_visibility_diag event=bootstrap_workspace_resolved workspace_id=%s workspace_slug=%s created=%s",
+        str(workspace.id),
+        str(workspace.slug or ""),
+        True,
+    )
+    return workspace
 
 
 def _bundle_source_for_slug(solution_slug: str) -> str:
@@ -667,7 +763,25 @@ def _application_exists_for_solution(*, workspace: Workspace, solution_slug: str
 
 def bootstrap_install_solution_bundles_from_env(*, reason: str = "startup") -> Dict[str, Any]:
     slugs = _env_solution_slugs()
+    source_type = str(os.environ.get("XYN_BOOTSTRAP_SOLUTION_SOURCE") or "local").strip().lower() or "local"
+    configured_bucket = str(os.environ.get("XYN_BOOTSTRAP_SOLUTION_BUCKET") or "").strip()
+    configured_prefix = str(os.environ.get("XYN_BOOTSTRAP_SOLUTION_PREFIX") or "").strip()
+    configured_version = str(os.environ.get("XYN_BOOTSTRAP_SOLUTION_VERSION") or "").strip()
+    logger.info(
+        "artifact_visibility_diag event=s3_discovery_start reason=%s source_type=%s bucket=%s prefix=%s version=%s slugs=%s slugs_count=%s",
+        reason,
+        source_type,
+        configured_bucket,
+        configured_prefix,
+        configured_version,
+        ",".join(slugs),
+        len(slugs),
+    )
     if not slugs:
+        logger.info(
+            "artifact_visibility_diag event=s3_discovery_end reason=%s outcome=skipped_no_solution_slugs",
+            reason,
+        )
         return {"enabled": False, "reason": "no_solution_slugs", "results": []}
     workspace = _bootstrap_workspace()
     missing_only = _env_bool("XYN_BOOTSTRAP_IF_MISSING_ONLY", True)
@@ -734,6 +848,18 @@ def bootstrap_install_solution_bundles_from_env(*, reason: str = "startup") -> D
                 exc,
             )
         results.append(row)
+    installed_count = sum(1 for item in results if str(item.get("status") or "") in {"installed", "updated"})
+    failed_count = sum(1 for item in results if str(item.get("status") or "") == "failed")
+    skipped_count = sum(1 for item in results if str(item.get("status") or "") == "skipped")
+    logger.info(
+        "artifact_visibility_diag event=s3_discovery_end reason=%s workspace_id=%s workspace_slug=%s installed_or_updated=%s skipped=%s failed=%s",
+        reason,
+        str(workspace.id),
+        str(workspace.slug or ""),
+        installed_count,
+        skipped_count,
+        failed_count,
+    )
     return {
         "enabled": True,
         "reason": reason,
