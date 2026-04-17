@@ -1,6 +1,8 @@
 from xyn_orchestrator.xyn_api import (
     artifacts_collection,
     artifacts_catalog_collection,
+    artifacts_remote_sources_collection,
+    artifacts_remote_catalog_collection,
     artifacts_remote_candidates_collection,
     artifact_detail,
     artifact_activate,
@@ -72,6 +74,8 @@ from xyn_orchestrator.xyn_api import (
 __all__ = [
     "artifacts_collection",
     "artifacts_catalog_collection",
+    "artifacts_remote_sources_collection",
+    "artifacts_remote_catalog_collection",
     "artifacts_remote_candidates_collection",
     "artifact_detail",
     "artifact_activate",

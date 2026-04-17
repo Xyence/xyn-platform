@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from .artifact_packages import import_package_blob_idempotent
 from .models import Artifact, ArtifactPackage, ArtifactType, UserIdentity, Workspace
@@ -13,6 +16,8 @@ from .solution_bundles import SolutionBundleError, load_solution_bundle_from_sou
 
 
 REMOTE_SOURCE_REF_TYPE = "RemoteArtifactSource"
+_DEFAULT_REMOTE_CATALOG_LIMIT = 50
+_MAX_REMOTE_CATALOG_LIMIT = 200
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -30,6 +35,248 @@ def _source_key(source: str) -> str:
 
 def _source_value(source: Dict[str, Any], key: str) -> str:
     return str(source.get(key) or "").strip() if isinstance(source, dict) else ""
+
+
+def _env_token(name: str) -> str:
+    return str(os.environ.get(name) or "").strip()
+
+
+def _env_list(name: str) -> List[str]:
+    raw = str(os.environ.get(name) or "")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _resolve_s3_region() -> str:
+    # Keep resolution deterministic and resilient: prefer explicit region envs.
+    for key in (
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "XYN_RUNTIME_ARTIFACT_S3_REGION",
+        "XYN_ARTIFACT_S3_REGION",
+    ):
+        value = _env_token(key)
+        if value:
+            return value
+    # Fallback avoids malformed endpoint construction in environments that omit region.
+    return "us-east-1"
+
+
+def _resolve_s3_endpoint_url() -> str:
+    for key in (
+        "XYN_RUNTIME_ARTIFACT_S3_ENDPOINT_URL",
+        "XYN_ARTIFACT_S3_ENDPOINT_URL",
+        "AWS_ENDPOINT_URL_S3",
+    ):
+        value = _env_token(key)
+        if not value:
+            continue
+        # Guard against malformed endpoint forms like "https://s3..amazonaws.com".
+        if "s3..amazonaws.com" in value.lower():
+            continue
+        return value
+    return ""
+
+
+def _s3_client() -> Any:
+    kwargs: Dict[str, Any] = {
+        "region_name": _resolve_s3_region(),
+        "config": Config(retries={"max_attempts": 4, "mode": "standard"}),
+    }
+    endpoint_url = _resolve_s3_endpoint_url()
+    if endpoint_url:
+        kwargs["endpoint_url"] = endpoint_url
+    return boto3.client("s3", **kwargs)
+
+
+def _parse_s3_source(source: str) -> Tuple[str, str]:
+    token = str(source or "").strip()
+    if not token.lower().startswith("s3://"):
+        raise SolutionBundleError("source must start with s3://")
+    without_scheme = token[5:]
+    bucket, _, key = without_scheme.partition("/")
+    bucket = bucket.strip()
+    key = key.lstrip("/")
+    if not bucket:
+        raise SolutionBundleError("source must include s3://<bucket>/<key>")
+    return bucket, key
+
+
+def _candidate_summary_match(row: Dict[str, Any], query: str) -> bool:
+    if not query:
+        return True
+    token = query.lower()
+    text = " ".join(
+        [
+            str(row.get("artifact_slug") or ""),
+            str(row.get("title") or ""),
+            str(row.get("summary") or ""),
+            str(_as_dict(row.get("remote_source")).get("solution_slug") or ""),
+            str(_as_dict(row.get("remote_source")).get("solution_name") or ""),
+        ]
+    ).lower()
+    return token in text
+
+
+def _configured_remote_source_roots() -> List[str]:
+    roots = _env_list("XYN_SOLUTION_BUNDLE_SOURCES")
+    bootstrap_source = _env_token("XYN_BOOTSTRAP_SOLUTION_SOURCE").lower() or "local"
+    if bootstrap_source == "s3":
+        bucket = _env_token("XYN_BOOTSTRAP_SOLUTION_BUCKET")
+        prefix = _env_token("XYN_BOOTSTRAP_SOLUTION_PREFIX").strip("/")
+        if bucket:
+            roots.append(f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}")
+    # Preserve order while removing duplicates.
+    seen: set[str] = set()
+    out: List[str] = []
+    for item in roots:
+        token = str(item or "").strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def configured_remote_catalog_sources() -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for source in _configured_remote_source_roots():
+        lowered = source.lower()
+        source_type = "s3" if lowered.startswith("s3://") else ("file" if lowered.startswith("file://") else "path")
+        bucket = ""
+        prefix = ""
+        if source_type == "s3":
+            try:
+                bucket, prefix = _parse_s3_source(source)
+            except Exception:
+                pass
+        rows.append(
+            {
+                "source": source,
+                "source_type": source_type,
+                "bucket": bucket,
+                "prefix": prefix,
+                "region": _resolve_s3_region() if source_type == "s3" else "",
+            }
+        )
+    return rows
+
+
+def _iter_manifest_sources_for_root(root: str, *, max_manifests: int = 500) -> Iterable[str]:
+    token = str(root or "").strip()
+    if not token:
+        return []
+    lowered = token.lower()
+    if lowered.startswith("s3://"):
+        bucket, key = _parse_s3_source(token)
+        if key.endswith(".json"):
+            return [token]
+        client = _s3_client()
+        prefix = key.rstrip("/")
+        candidates: List[str] = []
+        kwargs: Dict[str, Any] = {"Bucket": bucket}
+        if prefix:
+            kwargs["Prefix"] = f"{prefix}/"
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(**kwargs):
+            for row in page.get("Contents", []):
+                object_key = str(row.get("Key") or "")
+                if not object_key:
+                    continue
+                if not (object_key.endswith("/manifest.json") or object_key.endswith(".manifest.json")):
+                    continue
+                candidates.append(f"s3://{bucket}/{object_key}")
+                if len(candidates) >= max_manifests:
+                    return candidates
+        return candidates
+    path_token = token[7:] if lowered.startswith("file://") else token
+    path = Path(path_token)
+    if path.is_file():
+        return [f"file://{path}"]
+    if not path.exists() or not path.is_dir():
+        return []
+    manifests: List[str] = []
+    for candidate in path.rglob("*.json"):
+        if candidate.name not in {"manifest.json"} and not candidate.name.endswith(".manifest.json"):
+            continue
+        manifests.append(f"file://{candidate}")
+        if len(manifests) >= max_manifests:
+            break
+    return manifests
+
+
+def search_remote_artifact_catalog(
+    *,
+    query: str = "",
+    artifact_slug: str = "",
+    artifact_type: str = "",
+    source_root: str = "",
+    limit: int = _DEFAULT_REMOTE_CATALOG_LIMIT,
+    cursor: str = "",
+) -> Dict[str, Any]:
+    source_rows = configured_remote_catalog_sources()
+    selected_roots = [source_root.strip()] if str(source_root or "").strip() else [row.get("source", "") for row in source_rows]
+    selected_roots = [str(item).strip() for item in selected_roots if str(item).strip()]
+    normalized_slug = str(artifact_slug or "").strip()
+    normalized_type = str(artifact_type or "").strip()
+    normalized_query = str(query or "").strip()
+    try:
+        normalized_limit = int(limit or _DEFAULT_REMOTE_CATALOG_LIMIT)
+    except (TypeError, ValueError):
+        normalized_limit = _DEFAULT_REMOTE_CATALOG_LIMIT
+    bounded_limit = max(1, min(normalized_limit, _MAX_REMOTE_CATALOG_LIMIT))
+    try:
+        offset = max(int(str(cursor or "0").strip() or 0), 0)
+    except ValueError:
+        offset = 0
+
+    discovered: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    seen: set[str] = set()
+    for root in selected_roots:
+        try:
+            manifest_sources = _iter_manifest_sources_for_root(root)
+        except Exception as exc:
+            errors.append(f"{root}: {str(exc)}")
+            continue
+        for manifest_source in manifest_sources:
+            try:
+                candidates = list_remote_artifact_candidates(artifact_source={"manifest_source": manifest_source})
+            except Exception as exc:
+                errors.append(f"{manifest_source}: {str(exc)}")
+                continue
+            for row in candidates:
+                if not isinstance(row, dict):
+                    continue
+                if normalized_slug and str(row.get("artifact_slug") or "") != normalized_slug:
+                    continue
+                if normalized_type and str(row.get("artifact_type") or "") != normalized_type:
+                    continue
+                if not _candidate_summary_match(row, normalized_query):
+                    continue
+                remote_source = _as_dict(row.get("remote_source"))
+                key = "|".join(
+                    [
+                        str(row.get("artifact_slug") or ""),
+                        str(row.get("artifact_type") or ""),
+                        str(remote_source.get("manifest_source") or manifest_source),
+                    ]
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                discovered.append(row)
+
+    total = len(discovered)
+    page = discovered[offset : offset + bounded_limit]
+    next_cursor = str(offset + bounded_limit) if (offset + bounded_limit) < total else ""
+    return {
+        "candidates": page,
+        "count": len(page),
+        "total": total,
+        "next_cursor": next_cursor,
+        "source_roots": selected_roots,
+        "errors": errors,
+    }
 
 
 def _derive_owner_path_prefixes(row: Dict[str, Any]) -> List[str]:
@@ -107,12 +354,19 @@ def _parse_package_source(source: str) -> ArtifactPackage:
             raise SolutionBundleError(f"artifact package not found: {package_id}")
         return package
     if lowered.startswith("s3://"):
-        without_scheme = token[5:]
-        bucket, _, key = without_scheme.partition("/")
-        if not bucket or not key:
+        bucket, key = _parse_s3_source(token)
+        if not key:
             raise SolutionBundleError("package_source must include s3://<bucket>/<key>")
-        client = boto3.client("s3")
-        response = client.get_object(Bucket=bucket, Key=key)
+        client = _s3_client()
+        try:
+            response = client.get_object(Bucket=bucket, Key=key)
+        except ClientError as exc:
+            code = str((exc.response or {}).get("Error", {}).get("Code") or "").strip()
+            if code in {"NoSuchKey", "404", "NotFound"}:
+                raise SolutionBundleError(f"s3 key not found: s3://{bucket}/{key}") from exc
+            if code in {"NoSuchBucket"}:
+                raise SolutionBundleError(f"s3 bucket not found: {bucket}") from exc
+            raise SolutionBundleError(f"failed to fetch s3 package object: s3://{bucket}/{key}") from exc
         blob = response["Body"].read() if response.get("Body") is not None else b""
         package, _ = import_package_blob_idempotent(blob=blob, created_by=None)
         return package

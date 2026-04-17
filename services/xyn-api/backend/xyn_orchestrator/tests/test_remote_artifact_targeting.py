@@ -18,10 +18,18 @@ from xyn_orchestrator.models import (
 )
 from xyn_orchestrator.remote_artifact_targeting import (
     REMOTE_SOURCE_REF_TYPE,
+    configured_remote_catalog_sources,
     list_remote_artifact_candidates,
+    search_remote_artifact_catalog,
     upsert_remote_catalog_artifact,
 )
-from xyn_orchestrator.xyn_api import artifacts_remote_candidates_collection, solution_change_sessions_collection
+from xyn_orchestrator.solution_bundles import _resolve_s3_region
+from xyn_orchestrator.xyn_api import (
+    artifacts_remote_candidates_collection,
+    artifacts_remote_catalog_collection,
+    artifacts_remote_sources_collection,
+    solution_change_sessions_collection,
+)
 
 
 class RemoteArtifactTargetingTests(TestCase):
@@ -211,3 +219,97 @@ class RemoteArtifactTargetingTests(TestCase):
         payload = json.loads(response.content)
         self.assertEqual(payload.get("count"), 1)
         self.assertEqual((payload.get("candidates") or [])[0].get("artifact_slug"), "deal-finder-api")
+
+    @mock.patch.dict("os.environ", {"XYN_SOLUTION_BUNDLE_SOURCES": "s3://bucket/a,s3://bucket/b"}, clear=False)
+    def test_remote_sources_collection_exposes_configured_roots(self):
+        with mock.patch("xyn_orchestrator.xyn_api._require_staff", return_value=None):
+            request = self.factory.get("/xyn/api/artifacts/remote-sources")
+            request.user = self.user
+            response = artifacts_remote_sources_collection(request)
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("count"), 2)
+        self.assertEqual((payload.get("sources") or [])[0].get("source"), "s3://bucket/a")
+
+    @mock.patch("xyn_orchestrator.remote_artifact_targeting.list_remote_artifact_candidates")
+    @mock.patch("xyn_orchestrator.remote_artifact_targeting._iter_manifest_sources_for_root")
+    @mock.patch.dict("os.environ", {"XYN_SOLUTION_BUNDLE_SOURCES": "s3://bucket/root"}, clear=False)
+    def test_search_remote_artifact_catalog_by_query(
+        self,
+        mock_manifest_sources: mock.Mock,
+        mock_list_candidates: mock.Mock,
+    ):
+        mock_manifest_sources.return_value = [
+            "s3://bucket/root/deal-finder/manifest.json",
+            "s3://bucket/root/crm/manifest.json",
+        ]
+        mock_list_candidates.side_effect = [
+            [
+                {
+                    "artifact_slug": "deal-finder-api",
+                    "artifact_type": "application",
+                    "title": "Deal Finder API",
+                    "summary": "AI real estate deal finder",
+                    "remote_source": {"manifest_source": "s3://bucket/root/deal-finder/manifest.json"},
+                }
+            ],
+            [
+                {
+                    "artifact_slug": "crm-api",
+                    "artifact_type": "application",
+                    "title": "CRM API",
+                    "summary": "Customer tracking",
+                    "remote_source": {"manifest_source": "s3://bucket/root/crm/manifest.json"},
+                }
+            ],
+        ]
+        result = search_remote_artifact_catalog(query="deal finder", artifact_type="application")
+        self.assertEqual(result.get("total"), 1)
+        self.assertEqual((result.get("candidates") or [])[0].get("artifact_slug"), "deal-finder-api")
+
+    @mock.patch("xyn_orchestrator.xyn_api.search_remote_artifact_catalog")
+    @mock.patch("xyn_orchestrator.xyn_api._require_staff")
+    def test_remote_catalog_endpoint_returns_candidates(
+        self,
+        mock_require_staff: mock.Mock,
+        mock_search: mock.Mock,
+    ):
+        mock_require_staff.return_value = None
+        mock_search.return_value = {
+            "candidates": [{"artifact_slug": "deal-finder-api", "artifact_type": "application"}],
+            "count": 1,
+            "total": 1,
+            "next_cursor": "",
+            "source_roots": ["s3://bucket/root"],
+            "errors": [],
+        }
+        request = self.factory.get("/xyn/api/artifacts/remote-catalog", {"q": "deal finder"})
+        request.user = self.user
+        response = artifacts_remote_catalog_collection(request)
+        self.assertEqual(response.status_code, 200, response.content.decode())
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("total"), 1)
+        self.assertEqual((payload.get("candidates") or [])[0].get("artifact_slug"), "deal-finder-api")
+
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_missing_region_defaults_safely_for_s3_clients(self):
+        self.assertEqual(_resolve_s3_region(), "us-east-1")
+
+    @mock.patch.dict(
+        "os.environ",
+        {
+            "AWS_REGION": "us-west-2",
+            "XYN_SOLUTION_BUNDLE_SOURCES": "s3://bucket/root",
+            "AWS_ENDPOINT_URL_S3": "https://s3..amazonaws.com",
+        },
+        clear=True,
+    )
+    def test_invalid_s3_endpoint_env_is_ignored(self):
+        with mock.patch("xyn_orchestrator.remote_artifact_targeting.boto3.client") as mock_client:
+            mock_client.return_value = mock.Mock()
+            from xyn_orchestrator.remote_artifact_targeting import _s3_client
+
+            _s3_client()
+        _, kwargs = mock_client.call_args
+        self.assertEqual(kwargs.get("region_name"), "us-west-2")
+        self.assertNotIn("endpoint_url", kwargs)

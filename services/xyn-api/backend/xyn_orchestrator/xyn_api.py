@@ -343,8 +343,10 @@ from .runtime_artifact_provenance import (
     runtime_git_source_ref,
 )
 from .remote_artifact_targeting import (
+    configured_remote_catalog_sources,
     list_remote_artifact_candidates,
     resolve_remote_artifact_candidate,
+    search_remote_artifact_catalog,
     upsert_remote_catalog_artifact,
 )
 from .module_registry import maybe_sync_modules_from_registry
@@ -11436,6 +11438,71 @@ def artifacts_catalog_collection(request: HttpRequest) -> JsonResponse:
             }
         )
     return JsonResponse({"artifacts": rows})
+
+
+@csrf_exempt
+@login_required
+def artifacts_remote_sources_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if staff_error := _require_staff(request):
+        return staff_error
+    sources = configured_remote_catalog_sources()
+    return JsonResponse(
+        {
+            "sources": sources,
+            "count": len(sources),
+            "source_mode": str(os.environ.get("XYN_BOOTSTRAP_SOLUTION_SOURCE") or "").strip().lower() or "local",
+            "configured_region": str(
+                os.environ.get("AWS_REGION")
+                or os.environ.get("AWS_DEFAULT_REGION")
+                or os.environ.get("XYN_RUNTIME_ARTIFACT_S3_REGION")
+                or os.environ.get("XYN_ARTIFACT_S3_REGION")
+                or ""
+            ).strip(),
+        }
+    )
+
+
+@csrf_exempt
+@login_required
+def artifacts_remote_catalog_collection(request: HttpRequest) -> JsonResponse:
+    if request.method != "GET":
+        return JsonResponse({"error": "method not allowed"}, status=405)
+    if staff_error := _require_staff(request):
+        return staff_error
+    try:
+        limit = int(str(request.GET.get("limit") or "50").strip() or 50)
+    except ValueError:
+        limit = 50
+    query = str(request.GET.get("q") or request.GET.get("query") or "").strip()
+    artifact_slug = str(request.GET.get("artifact_slug") or "").strip()
+    artifact_type = str(request.GET.get("artifact_type") or "").strip()
+    source_root = str(request.GET.get("source_root") or request.GET.get("source") or "").strip()
+    cursor = str(request.GET.get("cursor") or "").strip()
+    try:
+        payload = search_remote_artifact_catalog(
+            query=query,
+            artifact_slug=artifact_slug,
+            artifact_type=artifact_type,
+            source_root=source_root,
+            limit=limit,
+            cursor=cursor,
+        )
+    except Exception as exc:
+        return JsonResponse(
+            {
+                "error": str(exc) or "failed to discover remote artifacts",
+                "blocked_reason": "artifact_not_found",
+                "error_classification": "artifact_not_found",
+                "next_allowed_actions": [
+                    "get_remote_artifact_sources",
+                    "get_remote_artifact_candidates",
+                ],
+            },
+            status=404,
+        )
+    return JsonResponse(payload)
 
 
 @csrf_exempt

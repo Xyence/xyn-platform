@@ -357,6 +357,49 @@ class SolutionBundleInstallApiTests(TestCase):
             with self.assertRaisesRegex(Exception, r"malformed bundle manifest JSON"):
                 load_solution_bundle_from_source("s3://xyn-bundles/deal-finder/v1/manifest.json")
 
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_source_loader_s3_uses_safe_default_region_when_missing(self) -> None:
+        bundle = {
+            "schema_version": SOLUTION_BUNDLE_SCHEMA,
+            "solution": {"slug": "real-estate-deal-finder", "name": "Real Estate Deal Finder"},
+            "artifacts": {
+                "primary_app": {"type": "application", "slug": "app.real-estate-deal-finder", "version": "0.0.1-dev"},
+                "supporting": [],
+            },
+            "bootstrap": {},
+        }
+        s3_client = mock.Mock()
+        s3_client.get_object.return_value = {"Body": io.BytesIO(json.dumps(bundle).encode("utf-8"))}
+        with mock.patch("xyn_orchestrator.solution_bundles.boto3.client", return_value=s3_client) as mock_client:
+            loaded = load_solution_bundle_from_source("s3://xyn-bundles/deal-finder.json")
+        self.assertEqual(loaded["solution"]["slug"], "real-estate-deal-finder")
+        _, kwargs = mock_client.call_args
+        self.assertEqual(kwargs.get("region_name"), "us-east-1")
+
+    @mock.patch.dict(
+        "os.environ",
+        {"AWS_REGION": "us-west-2", "AWS_ENDPOINT_URL_S3": "https://s3..amazonaws.com"},
+        clear=True,
+    )
+    def test_source_loader_ignores_invalid_s3_endpoint_env(self) -> None:
+        bundle = {
+            "schema_version": SOLUTION_BUNDLE_SCHEMA,
+            "solution": {"slug": "real-estate-deal-finder", "name": "Real Estate Deal Finder"},
+            "artifacts": {
+                "primary_app": {"type": "application", "slug": "app.real-estate-deal-finder", "version": "0.0.1-dev"},
+                "supporting": [],
+            },
+            "bootstrap": {},
+        }
+        s3_client = mock.Mock()
+        s3_client.get_object.return_value = {"Body": io.BytesIO(json.dumps(bundle).encode("utf-8"))}
+        with mock.patch("xyn_orchestrator.solution_bundles.boto3.client", return_value=s3_client) as mock_client:
+            loaded = load_solution_bundle_from_source("s3://xyn-bundles/deal-finder.json")
+        self.assertEqual(loaded["solution"]["slug"], "real-estate-deal-finder")
+        _, kwargs = mock_client.call_args
+        self.assertEqual(kwargs.get("region_name"), "us-west-2")
+        self.assertNotIn("endpoint_url", kwargs)
+
 
 class SolutionBundleBootstrapEnvTests(TestCase):
     def setUp(self) -> None:

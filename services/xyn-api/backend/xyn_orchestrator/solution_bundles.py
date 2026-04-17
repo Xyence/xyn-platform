@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from django.db import transaction
 
@@ -169,7 +170,7 @@ def _s3_read_bytes(*, bucket: str, key: str) -> bytes:
         key,
     )
     try:
-        client = boto3.client("s3")
+        client = _s3_client()
         response = client.get_object(Bucket=bucket, Key=key)
     except ClientError as exc:
         code = str((exc.response or {}).get("Error", {}).get("Code") or "").strip()
@@ -187,6 +188,46 @@ def _s3_read_bytes(*, bucket: str, key: str) -> bytes:
         len(payload),
     )
     return payload
+
+
+def _resolve_s3_region() -> str:
+    for key in (
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "XYN_RUNTIME_ARTIFACT_S3_REGION",
+        "XYN_ARTIFACT_S3_REGION",
+    ):
+        value = str(os.environ.get(key) or "").strip()
+        if value:
+            return value
+    # Prevent malformed endpoint construction when region env is missing.
+    return "us-east-1"
+
+
+def _resolve_s3_endpoint_url() -> str:
+    for key in (
+        "XYN_RUNTIME_ARTIFACT_S3_ENDPOINT_URL",
+        "XYN_ARTIFACT_S3_ENDPOINT_URL",
+        "AWS_ENDPOINT_URL_S3",
+    ):
+        value = str(os.environ.get(key) or "").strip()
+        if not value:
+            continue
+        if "s3..amazonaws.com" in value.lower():
+            continue
+        return value
+    return ""
+
+
+def _s3_client():
+    kwargs: Dict[str, Any] = {
+        "region_name": _resolve_s3_region(),
+        "config": Config(retries={"max_attempts": 4, "mode": "standard"}),
+    }
+    endpoint_url = _resolve_s3_endpoint_url()
+    if endpoint_url:
+        kwargs["endpoint_url"] = endpoint_url
+    return boto3.client("s3", **kwargs)
 
 
 def _read_s3_json(source: str) -> Dict[str, Any]:
