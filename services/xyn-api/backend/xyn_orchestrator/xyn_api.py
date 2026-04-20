@@ -37024,6 +37024,85 @@ def _generate_solution_change_plan(
         payload: Dict[str, Any],
         selected_members_for_plan: List[ApplicationArtifactMembership],
     ) -> Dict[str, Any]:
+        def _extract_openai_raw_text_candidates(raw_payload: Dict[str, Any]) -> List[str]:
+            if not isinstance(raw_payload, dict):
+                return []
+            candidates: List[str] = []
+            output_items = raw_payload.get("output") if isinstance(raw_payload.get("output"), list) else []
+            for item in output_items:
+                if not isinstance(item, dict):
+                    continue
+                content_items = item.get("content") if isinstance(item.get("content"), list) else []
+                for content in content_items:
+                    if not isinstance(content, dict):
+                        continue
+                    text_value = content.get("text")
+                    if isinstance(text_value, str) and text_value.strip():
+                        candidates.append(text_value.strip())
+                        continue
+                    if isinstance(text_value, dict):
+                        nested = str(text_value.get("value") or "").strip()
+                        if nested:
+                            candidates.append(nested)
+                            continue
+                    alt = str(content.get("output_text") or "").strip()
+                    if alt:
+                        candidates.append(alt)
+            return [item for item in candidates if item]
+
+        def _invoke_planning_json_repair_agent(
+            *,
+            resolved_config: Dict[str, Any],
+            planning_input: Dict[str, Any],
+            raw_response_text: str,
+        ) -> Dict[str, Any]:
+            repair_prompt = (
+                "You are a JSON repair assistant for a planning agent.\n"
+                "Return ONLY one JSON object and no prose.\n"
+                "Output must include exactly these top-level keys:\n"
+                "goal, assumptions, ordered_steps, affected_files, affected_components, risks, open_questions,\n"
+                "validation_checks, execution_constraints, file_operations, test_operations, rollback_notes,\n"
+                "route_update_implications, affected_routes, source_files, destination_modules, extraction_seams,\n"
+                "proposed_moves, compatibility_shims, ordered_migration_steps, compatibility_constraints,\n"
+                "scaffold_plan, risk_annotations, affected_tests.\n"
+                "Required constraints:\n"
+                "- goal must be a non-empty string\n"
+                "- ordered_steps must contain at least one step\n"
+                "- validation_checks must be present\n"
+                "- arrays/objects may be empty when unknown\n\n"
+                f"Planning input:\n{json.dumps(planning_input, ensure_ascii=True)}\n\n"
+                f"Malformed planning response to repair:\n{str(raw_response_text or '').strip()}"
+            )
+            repair_result = invoke_model(
+                resolved_config=resolved_config,
+                messages=[{"role": "user", "content": repair_prompt}],
+            )
+            repair_text = str(repair_result.get("content") or "")
+            repair_json = _extract_json_object_text(repair_text)
+            if not repair_json:
+                raw_candidates = _extract_openai_raw_text_candidates(
+                    repair_result.get("raw") if isinstance(repair_result.get("raw"), dict) else {}
+                )
+                for candidate in raw_candidates:
+                    repair_json = _extract_json_object_text(candidate)
+                    if repair_json:
+                        break
+            if not repair_json:
+                raise SolutionPlanningAgentResponseValidationError(
+                    "Planning-agent repair response did not contain a parseable JSON object."
+                )
+            try:
+                repaired = json.loads(repair_json)
+            except json.JSONDecodeError as exc:
+                raise SolutionPlanningAgentResponseValidationError(
+                    f"Planning-agent repair JSON decode failed: {exc}"
+                ) from exc
+            if not isinstance(repaired, dict):
+                raise SolutionPlanningAgentResponseValidationError(
+                    "Planning-agent repair response must decode to a JSON object."
+                )
+            return repaired
+
         def _invoke_solution_planning_agent(planning_input: Dict[str, Any]) -> Dict[str, Any]:
             resolved = resolve_ai_config(purpose_slug="planning")
             raw_context_refs: List[Any] = []
@@ -37074,9 +37153,20 @@ def _generate_solution_change_plan(
             raw_text = str(result.get("content") or "")
             json_text = _extract_json_object_text(raw_text)
             if not json_text:
-                raise SolutionPlanningAgentResponseValidationError(
-                    "Planning-agent response did not contain a parseable JSON object."
+                raw_candidates = _extract_openai_raw_text_candidates(
+                    result.get("raw") if isinstance(result.get("raw"), dict) else {}
                 )
+                for candidate in raw_candidates:
+                    json_text = _extract_json_object_text(candidate)
+                    if json_text:
+                        break
+            if not json_text:
+                repaired = _invoke_planning_json_repair_agent(
+                    resolved_config=resolved,
+                    planning_input=planning_input,
+                    raw_response_text=raw_text,
+                )
+                return repaired
             try:
                 parsed = json.loads(json_text)
             except json.JSONDecodeError as exc:
