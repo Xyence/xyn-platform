@@ -1531,6 +1531,27 @@ class GoalPlanningTests(TestCase):
         if ui_row is not None:
             self.assertLess(int((ui_row or {}).get("score") or 0), int((api_row or {}).get("score") or 0))
 
+    def test_solution_change_session_ui_only_request_with_api_negation_prefers_xyn_ui(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        request_text = (
+            "Update Deal Finder helper text in xyn-ui command palette results only. "
+            "Explicitly avoid backend, API route, datasource, and persistence changes."
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "UI helper copy only", "request_text": request_text}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_ui_artifact.id))
+        self.assertNotEqual(suggested_ids[0], str(xyn_api_artifact.id))
+
     def test_generate_solution_change_plan_raises_when_primary_violates_forbidden_artifact_constraint(self):
         application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         session = SolutionChangeSession.objects.create(

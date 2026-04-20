@@ -35180,6 +35180,9 @@ def _analyze_solution_impacted_artifacts(
     text = str(request_text or "").strip().lower()
     path_hints = _request_path_hints(request_text)
     forbids_ui_changes = _request_forbids_ui_changes(request_text)
+    forbids_api_changes = _request_forbids_api_changes(request_text)
+    explicit_ui_artifact_mention = "xyn-ui" in text
+    explicit_api_artifact_mention = ("xyn-api" in text) or ("xyn_api.py" in text)
     negated_ui_tokens = {
         "ui",
         "frontend",
@@ -35328,6 +35331,20 @@ def _analyze_solution_impacted_artifacts(
             elif artifact_ui_signal:
                 score -= 6
                 reasons.append("exact backend xyn_api.py path hint de-prioritizes UI artifact")
+        if explicit_ui_artifact_mention and not explicit_api_artifact_mention:
+            if artifact_ui_signal:
+                score += 6
+                reasons.append("request explicitly targets xyn-ui")
+            elif artifact_api_signal:
+                score -= 4
+                reasons.append("xyn-ui explicit request de-prioritizes API/backend artifact")
+        if explicit_api_artifact_mention and not explicit_ui_artifact_mention:
+            if artifact_api_signal:
+                score += 6
+                reasons.append("request explicitly targets xyn-api/xyn_api.py")
+            elif artifact_ui_signal:
+                score -= 4
+                reasons.append("xyn-api explicit request de-prioritizes UI artifact")
         if member.role in matched_roles:
             score += 4
             reasons.append(f"request mentions {member.role.replace('_', ' ')} concerns")
@@ -35377,6 +35394,9 @@ def _analyze_solution_impacted_artifacts(
         if forbids_ui_changes and artifact_ui_signal:
             score -= 5
             reasons.append("request explicitly forbids UI/styling/layout changes")
+        if forbids_api_changes and artifact_api_signal:
+            score -= 5
+            reasons.append("request explicitly forbids backend/API/persistence changes")
         if structural_backend_refactor and artifact_api_signal:
             score += 5
             reasons.append("request indicates structural backend refactor")
@@ -35840,6 +35860,24 @@ def _request_forbids_ui_changes(request_text: str) -> bool:
         r"\bwithout\s+ui\s+changes\b",
         r"\bwithout\s+layout\s+changes\b",
         r"\bwithout\s+styling\s+changes\b",
+    )
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _request_forbids_api_changes(request_text: str) -> bool:
+    text = str(request_text or "").strip().lower()
+    if not text:
+        return False
+    patterns = (
+        r"\bno\s+api\b",
+        r"\bno\s+backend\b",
+        r"\bdo\s+not\s+modify\s+api\b",
+        r"\bdo\s+not\s+change\s+api\b",
+        r"\bdo\s+not\s+modify\s+backend\b",
+        r"\bdo\s+not\s+touch\s+api\b",
+        r"\bwithout\s+api\s+changes\b",
+        r"\bwithout\s+backend\s+changes\b",
+        r"\bavoid(?:ing)?\s+.*\b(api|backend|persistence|datasource)\b",
     )
     return any(re.search(pattern, text) for pattern in patterns)
 
