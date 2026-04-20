@@ -37156,7 +37156,29 @@ def _generate_solution_change_plan(
             payload = response.json() if response.content else {}
             choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
             message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
-            content = str(message.get("content") or "").strip() if isinstance(message, dict) else ""
+            content = ""
+            if isinstance(message, dict):
+                message_content = message.get("content")
+                if isinstance(message_content, str):
+                    content = message_content.strip()
+                elif isinstance(message_content, list):
+                    parts: List[str] = []
+                    for item in message_content:
+                        if not isinstance(item, dict):
+                            continue
+                        text_value = item.get("text")
+                        if isinstance(text_value, str) and text_value.strip():
+                            parts.append(text_value.strip())
+                            continue
+                        if isinstance(text_value, dict):
+                            nested = str(text_value.get("value") or "").strip()
+                            if nested:
+                                parts.append(nested)
+                                continue
+                        alt = str(item.get("output_text") or "").strip()
+                        if alt:
+                            parts.append(alt)
+                    content = "\n".join(part for part in parts if part).strip()
             json_text = _extract_json_object_text(content)
             if not json_text:
                 raise SolutionPlanningAgentResponseValidationError(
