@@ -37145,7 +37145,6 @@ def _generate_solution_change_plan(
                     "model": model_name,
                     "messages": messages,
                     "response_format": {"type": "json_object"},
-                    "temperature": float(resolved_config.get("temperature") or 0.0),
                     "max_completion_tokens": int(resolved_config.get("max_tokens") or 1600),
                 },
                 timeout=60,
