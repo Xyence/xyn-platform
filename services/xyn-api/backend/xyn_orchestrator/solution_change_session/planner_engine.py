@@ -150,7 +150,7 @@ def _request_forbids_ui_changes(text: str) -> bool:
     return any(re.search(pattern, lowered) for pattern in patterns)
 
 
-def _classify_request(
+def _normalize_planning_request_classification(
     text: str,
     *,
     artifact_count: int,
@@ -301,7 +301,7 @@ def _artifact_is_backend(artifact: PlannerArtifactInput) -> bool:
     return any(token in haystack for token in ("api", "backend", "service", "orchestrator", "python"))
 
 
-def _score_artifacts(
+def _assemble_artifact_relevance(
     *,
     request_text: str,
     artifacts: Sequence[PlannerArtifactInput],
@@ -402,7 +402,7 @@ def _score_artifacts(
     return ranked
 
 
-def _build_candidate_files(
+def _assemble_candidate_files_context(
     *,
     request_text: str,
     base_plan: Dict[str, Any],
@@ -756,7 +756,7 @@ def _normalize_planning_agent_response(payload: Dict[str, Any]) -> Dict[str, Any
     return normalized
 
 
-def _planning_input_payload(
+def _build_planning_agent_input(
     *,
     request_text: str,
     base_plan: Dict[str, Any],
@@ -781,7 +781,7 @@ def _planning_input_payload(
     }
 
 
-def _default_planning_agent_invoke(planning_input: Dict[str, Any]) -> Dict[str, Any]:
+def _default_planning_agent_call(planning_input: Dict[str, Any]) -> Dict[str, Any]:
     payload = planning_input if isinstance(planning_input, dict) else {}
     base_plan = payload.get("base_plan") if isinstance(payload.get("base_plan"), dict) else {}
     explicit = base_plan.get("planning_agent_response")
@@ -794,12 +794,12 @@ def _default_planning_agent_invoke(planning_input: Dict[str, Any]) -> Dict[str, 
     )
 
 
-def _invoke_planning_agent(
+def _call_planning_agent(
     *,
     planning_input: Dict[str, Any],
     planning_agent_invoke: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]],
 ) -> Dict[str, Any]:
-    invoke = planning_agent_invoke or _default_planning_agent_invoke
+    invoke = planning_agent_invoke or _default_planning_agent_call
     try:
         response = invoke(planning_input)
     except SolutionPlanningError:
@@ -915,7 +915,7 @@ def _resolve_artifact_scope(
     }
 
 
-def _build_codebase_analysis(
+def _assemble_codebase_context(
     *,
     mode: str,
     candidate_files: Sequence[str],
@@ -1033,21 +1033,21 @@ def build_solution_change_execution_plan(
         planner_hints={**(planner_hints if isinstance(planner_hints, dict) else {}), **hints},
         selected_artifact_ids=selected_artifact_ids,
     )
-    classification = _classify_request(
+    classification = _normalize_planning_request_classification(
         request_text,
         artifact_count=len(list(artifacts)),
         planner_hints=hints,
         multi_artifact_required=multi_artifact_required,
     )
-    ranked = _score_artifacts(
+    artifact_relevance = _assemble_artifact_relevance(
         request_text=request_text,
         artifacts=artifacts,
         selected_artifact_ids=selected_artifact_ids,
     )
-    candidate_files = _build_candidate_files(
+    candidate_files = _assemble_candidate_files_context(
         request_text=request_text,
         base_plan=base,
-        ranked_artifacts=ranked,
+        ranked_artifacts=artifact_relevance,
     )
     oversized = _compute_oversized_file_report(
         candidate_files=candidate_files,
@@ -1055,7 +1055,7 @@ def build_solution_change_execution_plan(
     )
 
     selection = _resolve_artifact_scope(
-        ranked=ranked,
+        ranked=artifact_relevance,
         classification=classification,
         selected_artifact_ids=selected_artifact_ids,
         multi_artifact_required=multi_artifact_required,
@@ -1064,28 +1064,28 @@ def build_solution_change_execution_plan(
 
     if hints.get("target_source_files"):
         candidate_files = _dedupe([*hints.get("target_source_files", []), *candidate_files])
-    codebase_analysis = _build_codebase_analysis(
+    codebase_context = _assemble_codebase_context(
         mode=classification.planning_mode,
         candidate_files=candidate_files,
         oversized=oversized,
         analysis=analysis,
     )
-    planning_input = _planning_input_payload(
+    planning_input = _build_planning_agent_input(
         request_text=request_text,
         base_plan=base,
         classification=classification,
         hints=hints,
-        codebase_analysis=codebase_analysis,
-        ranked=ranked,
+        codebase_analysis=codebase_context,
+        ranked=artifact_relevance,
         selected_ids=selected_ids,
         candidate_files=candidate_files,
     )
-    synthesized = _invoke_planning_agent(
+    agent_response = _call_planning_agent(
         planning_input=planning_input,
         planning_agent_invoke=planning_agent_invoke,
     )
 
-    implementation_steps = _dedupe([str(item or "").strip() for item in (synthesized.get("ordered_steps") or []) if str(item or "").strip()])
+    implementation_steps = _dedupe([str(item or "").strip() for item in (agent_response.get("ordered_steps") or []) if str(item or "").strip()])
     implementation_steps = [step for step in implementation_steps if not _prohibited_ui_step(step, request_text=request_text)]
     if not implementation_steps:
         raise SolutionPlanningAgentResponseValidationError("Planning-agent response returned no usable ordered_steps.")
@@ -1095,8 +1095,8 @@ def build_solution_change_execution_plan(
         )
 
     proposed_work = _dedupe([*implementation_steps])
-    file_operations = synthesized.get("file_operations") if isinstance(synthesized.get("file_operations"), list) else []
-    test_operations = synthesized.get("test_operations") if isinstance(synthesized.get("test_operations"), list) else []
+    file_operations = agent_response.get("file_operations") if isinstance(agent_response.get("file_operations"), list) else []
+    test_operations = agent_response.get("test_operations") if isinstance(agent_response.get("test_operations"), list) else []
     validation_sequence = _dedupe(
         [
             "scope_confirmed",
@@ -1111,17 +1111,17 @@ def build_solution_change_execution_plan(
         "Preview should include selected artifacts in a single deploy set when multiple artifacts are involved.",
         "Run validation sequence before commit/promotion.",
     ]
-    compatibility_constraints = synthesized.get("compatibility_constraints") if isinstance(synthesized.get("compatibility_constraints"), list) else []
-    compatibility_constraints = _dedupe([*compatibility_constraints, *[str(item).strip() for item in (synthesized.get("execution_constraints") or []) if str(item).strip()]])
-    rollback_notes = synthesized.get("rollback_notes") if isinstance(synthesized.get("rollback_notes"), list) else []
+    compatibility_constraints = agent_response.get("compatibility_constraints") if isinstance(agent_response.get("compatibility_constraints"), list) else []
+    compatibility_constraints = _dedupe([*compatibility_constraints, *[str(item).strip() for item in (agent_response.get("execution_constraints") or []) if str(item).strip()]])
+    rollback_notes = agent_response.get("rollback_notes") if isinstance(agent_response.get("rollback_notes"), list) else []
     route_update_implications = (
-        synthesized.get("route_update_implications")
-        if isinstance(synthesized.get("route_update_implications"), list)
+        agent_response.get("route_update_implications")
+        if isinstance(agent_response.get("route_update_implications"), list)
         else []
     )
-    affected_routes = synthesized.get("affected_routes") if isinstance(synthesized.get("affected_routes"), list) else []
-    extraction_seams = synthesized.get("extraction_seams") if isinstance(synthesized.get("extraction_seams"), list) else []
-    proposed_moves = synthesized.get("proposed_moves") if isinstance(synthesized.get("proposed_moves"), list) else []
+    affected_routes = agent_response.get("affected_routes") if isinstance(agent_response.get("affected_routes"), list) else []
+    extraction_seams = agent_response.get("extraction_seams") if isinstance(agent_response.get("extraction_seams"), list) else []
+    proposed_moves = agent_response.get("proposed_moves") if isinstance(agent_response.get("proposed_moves"), list) else []
 
     _validate_execution_packaging(
         planning_mode=classification.planning_mode,
@@ -1134,7 +1134,7 @@ def build_solution_change_execution_plan(
 
     execution_package = _build_execution_package(
         planning_mode=classification.planning_mode,
-        source_files=synthesized.get("source_files") if isinstance(synthesized.get("source_files"), list) else [],
+        source_files=agent_response.get("source_files") if isinstance(agent_response.get("source_files"), list) else [],
         file_operations=file_operations if isinstance(file_operations, list) else [],
         test_operations=test_operations if isinstance(test_operations, list) else [],
         validation_sequence=validation_sequence,
@@ -1162,25 +1162,25 @@ def build_solution_change_execution_plan(
         for item in (test_operations if isinstance(test_operations, list) else [])
         if isinstance(item, dict) and str(item.get("target") or "").strip()
     ]
-    if isinstance(synthesized.get("affected_tests"), list):
-        for value in synthesized.get("affected_tests") or []:
+    if isinstance(agent_response.get("affected_tests"), list):
+        for value in agent_response.get("affected_tests") or []:
             token = str(value or "").strip()
             if token:
                 affected_tests.append(token)
 
     architecture = {
-        "backend_artifacts": [item.get("artifact_id") for item in ranked if any(token in str(item.get("role") or "") for token in ("api", "worker", "runtime"))],
-        "ui_artifacts": [item.get("artifact_id") for item in ranked if "ui" in str(item.get("role") or "")],
+        "backend_artifacts": [item.get("artifact_id") for item in artifact_relevance if any(token in str(item.get("role") or "") for token in ("api", "worker", "runtime"))],
+        "ui_artifacts": [item.get("artifact_id") for item in artifact_relevance if "ui" in str(item.get("role") or "")],
         "selected_surfaces": selected_ids,
         "cross_artifact": classification.planning_mode == "cross_artifact_change",
-        "source_files": synthesized.get("source_files") if isinstance(synthesized.get("source_files"), list) else [],
-        "destination_modules": synthesized.get("destination_modules") if isinstance(synthesized.get("destination_modules"), list) else [],
+        "source_files": agent_response.get("source_files") if isinstance(agent_response.get("source_files"), list) else [],
+        "destination_modules": agent_response.get("destination_modules") if isinstance(agent_response.get("destination_modules"), list) else [],
         "extraction_seams": extraction_seams if isinstance(extraction_seams, list) else [],
         "proposed_moves": proposed_moves if isinstance(proposed_moves, list) else [],
-        "compatibility_shims": synthesized.get("compatibility_shims") if isinstance(synthesized.get("compatibility_shims"), list) else [],
-        "affected_routes": synthesized.get("affected_routes") if isinstance(synthesized.get("affected_routes"), list) else [],
+        "compatibility_shims": agent_response.get("compatibility_shims") if isinstance(agent_response.get("compatibility_shims"), list) else [],
+        "affected_routes": agent_response.get("affected_routes") if isinstance(agent_response.get("affected_routes"), list) else [],
         "affected_tests": _dedupe([str(item).strip() for item in affected_tests if str(item).strip()]),
-        "ordered_extraction_sequence": synthesized.get("ordered_migration_steps") if isinstance(synthesized.get("ordered_migration_steps"), list) else [],
+        "ordered_extraction_sequence": agent_response.get("ordered_migration_steps") if isinstance(agent_response.get("ordered_migration_steps"), list) else [],
     }
 
     confidence = classification.confidence
@@ -1193,16 +1193,16 @@ def build_solution_change_execution_plan(
         "planning_mode": classification.planning_mode,
         "plan_kind": classification.plan_kind,
         "confidence": float(round(confidence, 3)),
-        "goal": str(synthesized.get("goal") or "").strip(),
+        "goal": str(agent_response.get("goal") or "").strip(),
         "assumptions": _dedupe(
             [
                 *classification.assumptions,
                 *[str(item).strip() for item in (base.get("assumptions") if isinstance(base.get("assumptions"), list) else []) if str(item).strip()],
-                *[str(item).strip() for item in (synthesized.get("assumptions") or []) if str(item).strip()],
+                *[str(item).strip() for item in (agent_response.get("assumptions") or []) if str(item).strip()],
             ]
         ),
         "selected_artifact_ids": selected_ids,
-        "artifact_relevance": ranked,
+        "artifact_relevance": artifact_relevance,
         "proposed_work": proposed_work,
         "candidate_files": candidate_files,
         "implementation_steps": implementation_steps,
@@ -1215,24 +1215,24 @@ def build_solution_change_execution_plan(
         "rollback_instructions": execution_package.get("rollback_instructions") if isinstance(execution_package.get("rollback_instructions"), list) else [],
         "risk_annotations": _dedupe(
             [
-                *[str(item).strip() for item in (synthesized.get("risk_annotations") or []) if str(item).strip()],
-                *[str(item).strip() for item in (synthesized.get("risks") or []) if str(item).strip()],
+                *[str(item).strip() for item in (agent_response.get("risk_annotations") or []) if str(item).strip()],
+                *[str(item).strip() for item in (agent_response.get("risks") or []) if str(item).strip()],
             ]
         ),
         "rollback_notes": rollback_notes if isinstance(rollback_notes, list) else [],
-        "open_questions": synthesized.get("open_questions") if isinstance(synthesized.get("open_questions"), list) else [],
+        "open_questions": agent_response.get("open_questions") if isinstance(agent_response.get("open_questions"), list) else [],
         "affected_tests": _dedupe([str(item).strip() for item in affected_tests if str(item).strip()]),
         "compatibility_constraints": compatibility_constraints if isinstance(compatibility_constraints, list) else [],
-        "source_files": synthesized.get("source_files") if isinstance(synthesized.get("source_files"), list) else [],
-        "destination_modules": synthesized.get("destination_modules") if isinstance(synthesized.get("destination_modules"), list) else [],
-        "extraction_seams": synthesized.get("extraction_seams") if isinstance(synthesized.get("extraction_seams"), list) else [],
-        "proposed_moves": synthesized.get("proposed_moves") if isinstance(synthesized.get("proposed_moves"), list) else [],
-        "compatibility_shims": synthesized.get("compatibility_shims") if isinstance(synthesized.get("compatibility_shims"), list) else [],
+        "source_files": agent_response.get("source_files") if isinstance(agent_response.get("source_files"), list) else [],
+        "destination_modules": agent_response.get("destination_modules") if isinstance(agent_response.get("destination_modules"), list) else [],
+        "extraction_seams": agent_response.get("extraction_seams") if isinstance(agent_response.get("extraction_seams"), list) else [],
+        "proposed_moves": agent_response.get("proposed_moves") if isinstance(agent_response.get("proposed_moves"), list) else [],
+        "compatibility_shims": agent_response.get("compatibility_shims") if isinstance(agent_response.get("compatibility_shims"), list) else [],
         "route_update_implications": route_update_implications if isinstance(route_update_implications, list) else [],
         "affected_routes": affected_routes if isinstance(affected_routes, list) else [],
-        "ordered_migration_steps": synthesized.get("ordered_migration_steps") if isinstance(synthesized.get("ordered_migration_steps"), list) else [],
-        "ordered_extraction_sequence": synthesized.get("ordered_migration_steps") if isinstance(synthesized.get("ordered_migration_steps"), list) else [],
-        "validation_checks": synthesized.get("validation_checks") if isinstance(synthesized.get("validation_checks"), list) else [],
+        "ordered_migration_steps": agent_response.get("ordered_migration_steps") if isinstance(agent_response.get("ordered_migration_steps"), list) else [],
+        "ordered_extraction_sequence": agent_response.get("ordered_migration_steps") if isinstance(agent_response.get("ordered_migration_steps"), list) else [],
+        "validation_checks": agent_response.get("validation_checks") if isinstance(agent_response.get("validation_checks"), list) else [],
         "execution_package": execution_package,
         "planning_checkpoints": [
             {"checkpoint_key": "scope_confirmed", "label": "Scope confirmed", "required_before": "architecture_confirmed"},
@@ -1243,7 +1243,7 @@ def build_solution_change_execution_plan(
         "planner_state": {
             "request_classification": asdict(classification),
             "artifact_targeting": {
-                "ranked": ranked,
+                "ranked": artifact_relevance,
                 "selected_artifact_ids": selected_ids,
                 "resolved_artifact": selection.get("resolved_artifact") if isinstance(selection.get("resolved_artifact"), dict) else {},
                 "scope_mode": str(selection.get("scope_mode") or "minimal"),
@@ -1253,7 +1253,7 @@ def build_solution_change_execution_plan(
             "codebase_analysis": {
                 "candidate_files": candidate_files,
                 "oversized_file_report": oversized,
-                "signals": codebase_analysis,
+                "signals": codebase_context,
             },
             "architecture_inference": architecture,
             "analysis_snapshot": analysis if isinstance(analysis, dict) else {},
@@ -1263,5 +1263,5 @@ def build_solution_change_execution_plan(
         "scope_mode": str(selection.get("scope_mode") or "minimal"),
         "scope_reason": str(selection.get("scope_reason") or ""),
         "additional_artifacts": selection.get("additional_artifacts") if isinstance(selection.get("additional_artifacts"), list) else [],
-        "scaffold_plan": synthesized.get("scaffold_plan") if isinstance(synthesized.get("scaffold_plan"), dict) else {},
+        "scaffold_plan": agent_response.get("scaffold_plan") if isinstance(agent_response.get("scaffold_plan"), dict) else {},
     }

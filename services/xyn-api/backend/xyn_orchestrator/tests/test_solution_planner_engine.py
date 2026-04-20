@@ -14,7 +14,7 @@ class SolutionPlannerEngineTests(SimpleTestCase):
     def setUp(self):
         super().setUp()
         self._planning_agent_patcher = patch(
-            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_call",
             side_effect=self._mock_planning_agent_response,
         )
         self._planning_agent_patcher.start()
@@ -534,10 +534,10 @@ class SolutionPlannerEngineTests(SimpleTestCase):
         self.assertTrue(plan.get("preview_requirements"))
         self.assertTrue(plan.get("rollback_instructions"))
 
-    def test_vague_decomposition_plan_is_rejected_by_packaging_guard(self):
+    def test_placeholder_decomposition_plan_is_rejected_by_validation_gate(self):
         request_text = "Decompose backend/xyn_orchestrator/xyn_api.py"
         with patch(
-            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_call",
             return_value={
                 "goal": "decompose",
                 "ordered_steps": ["Inspect file", "Update as needed", "Confirm behavior", "Adjust tests"],
@@ -546,7 +546,7 @@ class SolutionPlannerEngineTests(SimpleTestCase):
                 "test_operations": [],
             },
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(SolutionPlanningAgentResponseValidationError):
                 build_solution_change_execution_plan(
                     request_text=request_text,
                     base_plan={},
@@ -613,7 +613,7 @@ class SolutionPlannerEngineTests(SimpleTestCase):
     def test_decomposition_plan_without_seams_or_moves_is_rejected_by_packaging_guard(self):
         request_text = "Decompose backend/xyn_orchestrator/xyn_api.py"
         with patch(
-            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_call",
             return_value={
                 "goal": "decompose",
                 "ordered_steps": ["Extract handlers into modules with wrappers."],
@@ -642,7 +642,7 @@ class SolutionPlannerEngineTests(SimpleTestCase):
     def test_planner_calls_planning_agent_for_normal_requests(self):
         request_text = "Modify backend endpoint behavior in services/xyn-api/backend/xyn_orchestrator/xyn_api.py."
         with patch(
-            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_call",
             wraps=self._mock_planning_agent_response,
         ) as invoke_mock:
             build_solution_change_execution_plan(
@@ -656,8 +656,22 @@ class SolutionPlannerEngineTests(SimpleTestCase):
     def test_malformed_planning_agent_output_fails_validation_explicitly(self):
         request_text = "Modify backend endpoint behavior in services/xyn-api/backend/xyn_orchestrator/xyn_api.py."
         with patch(
-            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_call",
             return_value={"goal": "bad", "ordered_steps": ["one"], "validation_checks": "not-a-list"},
+        ):
+            with self.assertRaises(SolutionPlanningAgentResponseValidationError):
+                build_solution_change_execution_plan(
+                    request_text=request_text,
+                    base_plan={},
+                    artifacts=self._artifacts(),
+                    selected_artifact_ids=["api-1"],
+                )
+
+    def test_missing_ordered_steps_never_triggers_deterministic_repair(self):
+        request_text = "Modify backend endpoint behavior in services/xyn-api/backend/xyn_orchestrator/xyn_api.py."
+        with patch(
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_call",
+            return_value={"goal": "bad", "ordered_steps": [], "validation_checks": ["validate"]},
         ):
             with self.assertRaises(SolutionPlanningAgentResponseValidationError):
                 build_solution_change_execution_plan(
