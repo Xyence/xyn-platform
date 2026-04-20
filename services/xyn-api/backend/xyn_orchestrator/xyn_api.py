@@ -33035,7 +33035,12 @@ def _solution_artifact_scope_state(
         selected_ids = [primary_artifact_id] + [artifact_id for artifact_id in selected_ids if artifact_id != primary_artifact_id]
     if not dependent_artifact_ids:
         dependent_artifact_ids = [artifact_id for artifact_id in selected_ids if artifact_id != primary_artifact_id]
-    dependent_artifact_ids = [artifact_id for artifact_id in dependent_artifact_ids if artifact_id != primary_artifact_id]
+    selected_id_set = {artifact_id for artifact_id in selected_ids if artifact_id}
+    dependent_artifact_ids = [
+        artifact_id
+        for artifact_id in dependent_artifact_ids
+        if artifact_id != primary_artifact_id and artifact_id in selected_id_set
+    ]
     normalized_dependent_reasons: Dict[str, Any] = {}
     for artifact_id in dependent_artifact_ids:
         reason_payload = dependent_artifact_reasons.get(artifact_id) if isinstance(dependent_artifact_reasons, dict) else None

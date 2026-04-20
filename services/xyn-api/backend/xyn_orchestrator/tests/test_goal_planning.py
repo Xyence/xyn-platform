@@ -2502,6 +2502,31 @@ class GoalPlanningTests(TestCase):
             [str(xyn_ui_artifact.id), str(xyn_api_artifact.id)],
         )
 
+    def test_solution_artifact_scope_state_drops_stale_dependents_not_in_selected_scope(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Stale dependent cleanup",
+            request_text="Backend-only decomposition",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(xyn_api_artifact.id)],
+            metadata_json={
+                "artifact_scope": {
+                    "primary_artifact_id": str(xyn_api_artifact.id),
+                    "dependent_artifact_ids": [str(xyn_ui_artifact.id)],
+                    "dependent_artifact_reasons": {
+                        str(xyn_ui_artifact.id): {"added_reason": "stale_previous_scope"},
+                    },
+                }
+            },
+        )
+        scope = xyn_api._solution_artifact_scope_state(session)
+        self.assertEqual(str(scope.get("primary_artifact_id") or ""), str(xyn_api_artifact.id))
+        self.assertEqual(scope.get("selected_artifact_ids") or [], [str(xyn_api_artifact.id)])
+        self.assertEqual(scope.get("dependent_artifact_ids") or [], [])
+        self.assertEqual(scope.get("dependent_artifact_reasons") or {}, {})
+
     def test_solution_change_session_scope_widen_requires_recorded_reason(self):
         application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         session = SolutionChangeSession.objects.create(
