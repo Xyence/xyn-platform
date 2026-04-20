@@ -34414,6 +34414,7 @@ def _record_solution_draft_plan(
     summary: str,
     force_code_aware_planning: bool = False,
 ) -> Dict[str, Any]:
+    selected_ids_aligned = False
     try:
         plan = _solution_change_plan_generation(
             session=session,
@@ -34484,6 +34485,18 @@ def _record_solution_draft_plan(
             if isinstance(artifact_scope.get("dependent_artifact_reasons"), dict)
             else {}
         )
+        persisted_selected_ids = _persist_solution_artifact_scope(
+            session=session,
+            selected_artifact_ids=[str(item).strip() for item in (plan.get("selected_artifact_ids") or []) if str(item).strip()],
+            source="plan_finalized",
+            primary_artifact_id=str(plan.get("primary_artifact_id") or ""),
+            dependent_artifact_reason_updates=(
+                plan.get("dependent_artifact_reasons") if isinstance(plan.get("dependent_artifact_reasons"), dict) else {}
+            ),
+        )
+        if persisted_selected_ids != _solution_change_session_selected_artifact_ids(session):
+            session.selected_artifact_ids_json = list(persisted_selected_ids)
+            selected_ids_aligned = True
     try:
         validate_decomposition_plan_quality(plan if isinstance(plan, dict) else {})
     except ValueError as exc:
@@ -34515,7 +34528,10 @@ def _record_solution_draft_plan(
     )
     session.plan_json = plan
     session.status = "planned"
-    session.save(update_fields=["plan_json", "status", "metadata_json", "updated_at"])
+    update_fields = ["plan_json", "status", "metadata_json", "updated_at"]
+    if selected_ids_aligned:
+        update_fields.append("selected_artifact_ids_json")
+    session.save(update_fields=update_fields)
     _append_solution_planning_turn(
         session=session,
         actor="planner",

@@ -1735,6 +1735,75 @@ class GoalPlanningTests(TestCase):
         planning_failure = (session.metadata_json or {}).get("planning_failure") if isinstance(session.metadata_json, dict) else {}
         self.assertEqual(str((planning_failure or {}).get("classification") or ""), "planning_response_validation_failed")
 
+    def test_record_solution_draft_plan_persists_finalized_selected_artifacts_for_hard_constraints(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Backend-only decomposition",
+            request_text=(
+                "STRICT REFACTOR: Decompose services/xyn-api/backend/xyn_orchestrator/xyn_api.py into smaller backend modules "
+                "and DO NOT modify UI, styling, or layout."
+            ),
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(xyn_api_artifact.id), str(xyn_ui_artifact.id)],
+            metadata_json={
+                "planner_hints": {
+                    "required_artifacts": [str(xyn_api_artifact.id)],
+                    "forbidden_artifacts": ["xyn-ui"],
+                }
+            },
+        )
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=application).select_related("artifact", "artifact__type")
+        )
+        generated_plan = {
+            "planning_mode": "decompose_existing_system",
+            "plan_kind": "decomposition",
+            "selected_artifact_ids": [str(xyn_api_artifact.id)],
+            "primary_artifact_id": str(xyn_api_artifact.id),
+            "implementation_steps": [
+                "Extract solution_change_session handlers from services/xyn-api/backend/xyn_orchestrator/xyn_api.py into backend modules.",
+                "Replace inline handler wiring in services/xyn-api/backend/xyn_orchestrator/xyn_api.py with delegation wrappers.",
+            ],
+            "ordered_steps": [
+                "Extract solution_change_session handlers from services/xyn-api/backend/xyn_orchestrator/xyn_api.py into backend modules.",
+                "Replace inline handler wiring in services/xyn-api/backend/xyn_orchestrator/xyn_api.py with delegation wrappers.",
+            ],
+            "validation_checks": ["scope_confirmed", "validate"],
+            "source_files": ["services/xyn-api/backend/xyn_orchestrator/xyn_api.py"],
+            "destination_modules": ["backend/xyn_orchestrator/api/solutions.py"],
+            "extraction_seams": ["solution_change_session_workflow"],
+            "proposed_moves": [
+                {
+                    "seam": "solution_change_session_workflow",
+                    "from": "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                    "to_module": "backend/xyn_orchestrator/api/solutions.py",
+                }
+            ],
+            "file_operations": [
+                {
+                    "operation": "extract_module",
+                    "source": "services/xyn-api/backend/xyn_orchestrator/xyn_api.py",
+                    "destination": "backend/xyn_orchestrator/api/solutions.py",
+                }
+            ],
+            "test_operations": [{"operation": "run", "target": "xyn_orchestrator.tests.test_goal_planning"}],
+            "dependent_artifact_ids": [],
+            "dependent_artifact_reasons": {},
+        }
+        with mock.patch("xyn_orchestrator.xyn_api._solution_change_plan_generation", return_value=generated_plan):
+            plan = xyn_api._record_solution_draft_plan(
+                session=session,
+                memberships=memberships,
+                summary="Generated backend-only decomposition plan.",
+            )
+        session.refresh_from_db()
+        self.assertEqual([str(item) for item in (plan.get("selected_artifact_ids") or [])], [str(xyn_api_artifact.id)])
+        self.assertEqual([str(item) for item in (session.selected_artifact_ids_json or [])], [str(xyn_api_artifact.id)])
+        artifact_scope = (session.metadata_json or {}).get("artifact_scope") if isinstance(session.metadata_json, dict) else {}
+        self.assertEqual([str(item) for item in (artifact_scope.get("dependent_artifact_ids") or [])], [])
+
     def test_solution_change_session_plan_invalid_decomposition_value_error_returns_structured_validation_failure(self):
         application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         session = SolutionChangeSession.objects.create(
