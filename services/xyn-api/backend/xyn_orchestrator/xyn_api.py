@@ -34409,11 +34409,28 @@ def _record_solution_draft_plan(
     summary: str,
     force_code_aware_planning: bool = False,
 ) -> Dict[str, Any]:
-    plan = _solution_change_plan_generation(
-        session=session,
-        memberships=memberships,
-        force_code_aware_planning=force_code_aware_planning,
-    )
+    try:
+        plan = _solution_change_plan_generation(
+            session=session,
+            memberships=memberships,
+            force_code_aware_planning=force_code_aware_planning,
+        )
+    except ValueError as exc:
+        error_text = str(exc or "").strip()
+        if error_text.startswith("invalid_decomposition_plan:"):
+            validation_error = SolutionPlanningAgentResponseValidationError(
+                f"Planning-agent decomposition output failed validation: {error_text}"
+            )
+            setattr(
+                validation_error,
+                "diagnostics",
+                {
+                    "phase": "plan_generation",
+                    "validation_error": error_text,
+                },
+            )
+            raise validation_error from exc
+        raise
     if isinstance(plan, dict):
         scope_lock = _solution_scope_lock_state(session)
         if bool(scope_lock.get("decomposition_scope_locked")):
@@ -34462,7 +34479,24 @@ def _record_solution_draft_plan(
             if isinstance(artifact_scope.get("dependent_artifact_reasons"), dict)
             else {}
         )
-    validate_decomposition_plan_quality(plan if isinstance(plan, dict) else {})
+    try:
+        validate_decomposition_plan_quality(plan if isinstance(plan, dict) else {})
+    except ValueError as exc:
+        error_text = str(exc or "").strip()
+        if error_text.startswith("invalid_decomposition_plan:"):
+            validation_error = SolutionPlanningAgentResponseValidationError(
+                f"Planning-agent decomposition output failed validation: {error_text}"
+            )
+            setattr(
+                validation_error,
+                "diagnostics",
+                {
+                    "phase": "plan_quality_validation",
+                    "validation_error": error_text,
+                },
+            )
+            raise validation_error from exc
+        raise
     objective_summary = str(
         plan.get("planner_objective_text")
         or plan.get("request_text")

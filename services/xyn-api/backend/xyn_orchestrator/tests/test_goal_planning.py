@@ -1735,6 +1735,37 @@ class GoalPlanningTests(TestCase):
         planning_failure = (session.metadata_json or {}).get("planning_failure") if isinstance(session.metadata_json, dict) else {}
         self.assertEqual(str((planning_failure or {}).get("classification") or ""), "planning_response_validation_failed")
 
+    def test_solution_change_session_plan_invalid_decomposition_value_error_returns_structured_validation_failure(self):
+        application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Backend decomposition validation",
+            request_text=(
+                "STRICT REFACTOR: Decompose services/xyn-api/backend/xyn_orchestrator/xyn_api.py into smaller backend modules "
+                "with delegation wrappers. Preserve behavior and contracts. DO NOT modify UI, styling, or layout."
+            ),
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(xyn_api_artifact.id)],
+        )
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._solution_change_plan_generation",
+            side_effect=ValueError("invalid_decomposition_plan: empty proposed_moves"),
+        ):
+            response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 422)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("error"), "planning_agent_response_invalid")
+        self.assertEqual(payload.get("blocked_reason"), "planning_agent_response_invalid")
+        self.assertEqual(payload.get("error_classification"), "planning_response_validation_failed")
+        self.assertIn("invalid_decomposition_plan: empty proposed_moves", str(payload.get("error_summary") or ""))
+        self.assertNotEqual(response.status_code, 500)
+
     def test_solution_change_session_option_set_orders_by_impacted_artifact_ranking(self):
         application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         create_request = self._request(
