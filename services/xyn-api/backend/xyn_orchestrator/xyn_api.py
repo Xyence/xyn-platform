@@ -35183,6 +35183,70 @@ def _analyze_solution_impacted_artifacts(
     forbids_api_changes = _request_forbids_api_changes(request_text)
     explicit_ui_artifact_mention = "xyn-ui" in text
     explicit_api_artifact_mention = ("xyn-api" in text) or ("xyn_api.py" in text)
+    command_palette_request = ("command palette" in text) or ("command" in text and "palette" in text)
+    ui_copy_signal_tokens = {
+        "wording",
+        "label",
+        "copy",
+        "discoverable",
+        "discoverability",
+        "findability",
+        "searchable",
+        "phrase",
+        "text",
+    }
+    api_execution_signal_tokens = {
+        "api",
+        "endpoint",
+        "contract",
+        "schema",
+        "integration",
+        "persist",
+        "persistence",
+        "execute",
+        "execution",
+        "datasource",
+        "data source",
+    }
+    command_palette_copy_only_request = (
+        command_palette_request
+        and any(token in text for token in ui_copy_signal_tokens)
+        and not any(token in text for token in api_execution_signal_tokens)
+    )
+    command_palette_execution_request = command_palette_request and any(
+        token in text for token in api_execution_signal_tokens
+    )
+    docs_process_tokens = {
+        "documentation",
+        "docs",
+        "runbook",
+        "checklist",
+        "release notes",
+        "harness",
+        "prompt",
+        "prompts",
+    }
+    core_code_tokens = {
+        "ui",
+        "frontend",
+        "layout",
+        "styling",
+        "css",
+        "api",
+        "backend",
+        "endpoint",
+        "schema",
+        "contract",
+        "implement",
+        "wire",
+        "integrate",
+        "refactor",
+        "decompose",
+    }
+    docs_or_harness_process_request = (
+        any(token in text for token in docs_process_tokens)
+        and not any(token in text for token in core_code_tokens)
+    )
     negated_ui_tokens = {
         "ui",
         "frontend",
@@ -35261,7 +35325,6 @@ def _analyze_solution_impacted_artifacts(
         "backend",
         "payload",
         "response",
-        "request",
     }
     has_ui_context = (not forbids_ui_changes) and any(token in text for token in ui_context_tokens)
     has_ui_code_change_signal = (not forbids_ui_changes) and any(token in text for token in ui_code_change_tokens)
@@ -35345,6 +35408,27 @@ def _analyze_solution_impacted_artifacts(
             elif artifact_ui_signal:
                 score -= 4
                 reasons.append("xyn-api explicit request de-prioritizes UI artifact")
+        if command_palette_request:
+            if artifact_ui_signal:
+                score += 5
+                reasons.append("command palette request prioritizes UI-owned artifacts")
+            elif artifact_api_signal:
+                score -= 2
+                reasons.append("command palette request de-prioritizes API artifacts by default")
+        if command_palette_copy_only_request:
+            if artifact_ui_signal:
+                score += 4
+                reasons.append("copy-only command palette update strongly aligns with UI artifact")
+            elif artifact_api_signal:
+                score -= 6
+                reasons.append("copy-only command palette update excludes backend/API artifact work")
+        if command_palette_execution_request:
+            if artifact_ui_signal:
+                score += 4
+                reasons.append("command palette execution request keeps UI command surface as primary")
+            elif artifact_api_signal:
+                score += 2
+                reasons.append("command palette execution request includes API dependency support")
         if member.role in matched_roles:
             score += 4
             reasons.append(f"request mentions {member.role.replace('_', ' ')} concerns")
@@ -35397,6 +35481,9 @@ def _analyze_solution_impacted_artifacts(
         if forbids_api_changes and artifact_api_signal:
             score -= 5
             reasons.append("request explicitly forbids backend/API/persistence changes")
+        if docs_or_harness_process_request and (artifact_ui_signal or artifact_api_signal):
+            score -= 4
+            reasons.append("docs/harness process request de-prioritizes core UI/API implementation artifacts")
         if structural_backend_refactor and artifact_api_signal:
             score += 5
             reasons.append("request indicates structural backend refactor")
@@ -35434,7 +35521,11 @@ def _analyze_solution_impacted_artifacts(
     if not impacted_rows:
         fallback_used = True
         fallback_reason = "defaulted_to_primary_solution_artifacts"
-        fallback_members = [m for m in memberships if m.role in {"primary_ui", "primary_api"}] or memberships[:2]
+        if docs_or_harness_process_request:
+            fallback_reason = "defaulted_to_non_primary_artifacts_for_docs_process_request"
+            fallback_members = [m for m in memberships if m.role not in {"primary_ui", "primary_api"}] or memberships[:1]
+        else:
+            fallback_members = [m for m in memberships if m.role in {"primary_ui", "primary_api"}] or memberships[:2]
         for member in fallback_members:
             impacted_rows.append(
                 {

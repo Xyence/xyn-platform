@@ -1552,6 +1552,65 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(suggested_ids[0], str(xyn_ui_artifact.id))
         self.assertNotEqual(suggested_ids[0], str(xyn_api_artifact.id))
 
+    def test_solution_change_session_command_palette_copy_only_does_not_widen_to_api(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        request_text = (
+            "Rephrase Deal Finder command palette wording so it is more discoverable and searchable. "
+            "Keep this scoped to UI copy updates."
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "Palette copy tweak", "request_text": request_text}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_ui_artifact.id))
+        self.assertNotIn(str(xyn_api_artifact.id), suggested_ids)
+
+    def test_solution_change_session_command_palette_execute_keeps_ui_primary_with_api_dependency(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        request_text = (
+            "Add a command palette action that executes create datasource and persists through a new API endpoint, "
+            "with command success/failure feedback in the UI."
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "Palette execute action", "request_text": request_text}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_ui_artifact.id))
+        self.assertIn(str(xyn_api_artifact.id), suggested_ids)
+
+    def test_solution_change_session_docs_harness_request_avoids_primary_ui_fallback(self):
+        application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        request_text = "Update harness runbook documentation and release checklist wording for Deal Finder rollout."
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "Docs-only update", "request_text": request_text}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertNotEqual(suggested_ids[0], str(xyn_ui_artifact.id))
+
     def test_generate_solution_change_plan_raises_when_primary_violates_forbidden_artifact_constraint(self):
         application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         session = SolutionChangeSession.objects.create(
