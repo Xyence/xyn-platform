@@ -1692,6 +1692,49 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(payload.get("blocked_reason"), "planning_artifact_constraint_violation")
         self.assertEqual(payload.get("error_classification"), "planning_artifact_constraint_violation")
 
+    def test_solution_change_session_plan_backend_only_ui_forbidden_validation_error_returns_422(self):
+        application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Backend-only decomposition",
+            request_text=(
+                "STRICT REFACTOR: Decompose services/xyn-api/backend/xyn_orchestrator/xyn_api.py into smaller backend modules "
+                "with delegation wrappers. Preserve behavior and contracts. DO NOT modify UI, styling, layout, Workbench "
+                "surfaces, or command palette text."
+            ),
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(xyn_api_artifact.id)],
+            metadata_json={
+                "planner_hints": {
+                    "required_artifacts": [str(xyn_api_artifact.id)],
+                    "forbidden_artifacts": ["xyn-ui"],
+                }
+            },
+        )
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._record_solution_draft_plan",
+            side_effect=xyn_api.SolutionPlanningAgentResponseValidationError(
+                "Planning-agent response for decomposition contains placeholder-only ordered_steps."
+            ),
+        ):
+            response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 422)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("error"), "planning_agent_response_invalid")
+        self.assertEqual(payload.get("blocked_reason"), "planning_agent_response_invalid")
+        self.assertEqual(payload.get("error_classification"), "planning_response_validation_failed")
+        self.assertNotEqual(response.status_code, 500)
+
+        session.refresh_from_db()
+        planning_failure = (session.metadata_json or {}).get("planning_failure") if isinstance(session.metadata_json, dict) else {}
+        self.assertEqual(str((planning_failure or {}).get("classification") or ""), "planning_response_validation_failed")
+
     def test_solution_change_session_option_set_orders_by_impacted_artifact_ranking(self):
         application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         create_request = self._request(
@@ -8788,6 +8831,58 @@ class GoalPlanningTests(TestCase):
         field_errors = operation_result.get("field_errors") if isinstance(operation_result.get("field_errors"), dict) else {}
         self.assertIn("selected_option_id", field_errors)
         self.assertIn("selected_option_id", list(operation_result.get("required_fields") or []))
+
+    def test_solution_change_session_control_action_respond_to_planner_prompt_option_set_returns_structured_validation_failure(self):
+        application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Planner option prompt validation failure",
+            request_text=(
+                "STRICT REFACTOR: Decompose services/xyn-api/backend/xyn_orchestrator/xyn_api.py into smaller backend modules. "
+                "DO NOT modify UI or command palette text."
+            ),
+            created_by=self.identity,
+            status="planned",
+            selected_artifact_ids_json=[],
+        )
+        option_turn = xyn_api._append_solution_planning_turn(
+            session=session,
+            actor="planner",
+            kind="option_set",
+            payload={
+                "prompt": "Select initial artifact",
+                "options": [
+                    {"id": str(xyn_api_artifact.id), "label": "xyn-api", "role": "primary_api"},
+                ],
+            },
+        )
+        request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/control/actions",
+            method="post",
+            data=json.dumps(
+                {
+                    "operation": "respond_to_planner_prompt",
+                    "source_turn_id": str(option_turn.id),
+                    "selected_option_id": str(xyn_api_artifact.id),
+                }
+            ),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._record_solution_draft_plan",
+            side_effect=xyn_api.SolutionPlanningAgentResponseValidationError(
+                "Planning-agent response for decomposition contains placeholder-only ordered_steps."
+            ),
+        ):
+            response = application_solution_change_session_control_action(request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 422)
+        payload = json.loads(response.content)
+        self.assertEqual(str(payload.get("status") or ""), "blocked")
+        operation_result = payload.get("operation_result") if isinstance(payload.get("operation_result"), dict) else {}
+        self.assertEqual(str(operation_result.get("error") or ""), "planning_agent_response_invalid")
+        self.assertEqual(str(operation_result.get("blocked_reason") or ""), "planning_agent_response_invalid")
+        self.assertEqual(str(operation_result.get("error_classification") or ""), "planning_response_validation_failed")
+        self.assertNotEqual(response.status_code, 500)
 
     def test_solution_change_session_control_inspect_reports_stage_preview_progress(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")

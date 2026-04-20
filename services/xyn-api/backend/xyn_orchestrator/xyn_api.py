@@ -34775,6 +34775,155 @@ def _advance_solution_planning_after_user_response(
     )
 
 
+def _persist_solution_planning_failure(
+    *,
+    session: SolutionChangeSession,
+    classification: str,
+    summary: str,
+    blocked_reason: str,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> None:
+    metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+    failure_record: Dict[str, Any] = {
+        "classification": str(classification or "").strip(),
+        "summary": str(summary or "").strip()[:1000],
+        "blocked_reason": str(blocked_reason or "").strip(),
+        "occurred_at": timezone.now().isoformat(),
+    }
+    if isinstance(diagnostics, dict) and diagnostics:
+        failure_record["diagnostics"] = diagnostics
+    metadata["planning_failure"] = failure_record
+    session.metadata_json = metadata
+    session.save(update_fields=["metadata_json", "updated_at"])
+
+
+def _solution_planning_failure_response(
+    *,
+    session: SolutionChangeSession,
+    application_id: str,
+    session_id: str,
+    exc: Exception,
+) -> Tuple[int, Dict[str, Any]]:
+    if isinstance(exc, SolutionPlanningAgentUnavailableError):
+        _persist_solution_planning_failure(
+            session=session,
+            classification="planning_agent_unavailable",
+            summary=str(exc),
+            blocked_reason="planning_agent_unavailable",
+        )
+        return (
+            503,
+            {
+                "error": "planning_agent_unavailable",
+                "blocked_reason": "planning_agent_unavailable",
+                "error_classification": "planning_agent_unavailable",
+                "error_summary": str(exc)[:500],
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+                "safe_next_actions": [
+                    "get_application_change_session",
+                    "inspect_change_session_control",
+                ],
+            },
+        )
+    if isinstance(exc, SolutionPlanningAgentResponseValidationError):
+        _persist_solution_planning_failure(
+            session=session,
+            classification="planning_response_validation_failed",
+            summary=str(exc),
+            blocked_reason="planning_agent_response_invalid",
+            diagnostics=getattr(exc, "diagnostics", None),
+        )
+        return (
+            422,
+            {
+                "error": "planning_agent_response_invalid",
+                "blocked_reason": "planning_agent_response_invalid",
+                "error_classification": "planning_response_validation_failed",
+                "error_summary": str(exc)[:500],
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+                "safe_next_actions": [
+                    "get_application_change_session",
+                    "inspect_change_session_control",
+                ],
+            },
+        )
+    if isinstance(exc, SolutionPlanningArtifactConstraintError):
+        _persist_solution_planning_failure(
+            session=session,
+            classification="planning_artifact_constraint_violation",
+            summary=str(exc),
+            blocked_reason="planning_artifact_constraint_violation",
+            diagnostics=getattr(exc, "diagnostics", None),
+        )
+        return (
+            409,
+            {
+                "error": "planning_artifact_constraint_violation",
+                "blocked_reason": "planning_artifact_constraint_violation",
+                "error_classification": "planning_artifact_constraint_violation",
+                "error_summary": str(exc)[:500],
+                "diagnostics": getattr(exc, "diagnostics", None),
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+                "safe_next_actions": [
+                    "get_application_change_session",
+                    "inspect_change_session_control",
+                    "set_selected_artifact_ids_with_scope_widen_reason",
+                ],
+            },
+        )
+    if isinstance(exc, SolutionPlanningError):
+        _persist_solution_planning_failure(
+            session=session,
+            classification="planning_agent_call_failed",
+            summary=str(exc),
+            blocked_reason="planning_generation_failed",
+        )
+        return (
+            502,
+            {
+                "error": "planning_generation_failed",
+                "blocked_reason": "planning_generation_failed",
+                "error_classification": "planning_agent_call_failed",
+                "error_summary": str(exc)[:500],
+                "application_id": str(application_id or ""),
+                "session_id": str(session_id or ""),
+                "safe_next_actions": [
+                    "get_application_change_session",
+                    "inspect_change_session_control",
+                ],
+            },
+        )
+    _persist_solution_planning_failure(
+        session=session,
+        classification="backend_server_error",
+        summary=f"{exc.__class__.__name__}: {str(exc)}",
+        blocked_reason="planning_generation_failed",
+    )
+    logger.exception(
+        "solution_planning_failure_response_unhandled application_id=%s session_id=%s",
+        str(application_id or ""),
+        str(session_id or ""),
+    )
+    return (
+        500,
+        {
+            "error": "planning_generation_failed",
+            "blocked_reason": "planning_generation_failed",
+            "error_classification": "backend_server_error",
+            "error_summary": f"{exc.__class__.__name__}: {str(exc)[:500]}",
+            "application_id": str(application_id or ""),
+            "session_id": str(session_id or ""),
+            "safe_next_actions": [
+                "get_application_change_session",
+                "inspect_change_session_control",
+            ],
+        },
+    )
+
+
 def _solution_planning_state(session: SolutionChangeSession) -> Dict[str, Any]:
     turns = list(
         SolutionPlanningTurn.objects.filter(session=session)
@@ -43844,7 +43993,23 @@ def application_solution_change_session_control_action(
                 .select_related("artifact", "artifact__type")
                 .order_by("sort_order", "created_at")
             )
-            _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+            try:
+                _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+            except Exception as exc:
+                status_code, failure_payload = _solution_planning_failure_response(
+                    session=session,
+                    application_id=str(application.id),
+                    session_id=str(session.id),
+                    exc=exc,
+                )
+                return _solution_change_session_control_envelope(
+                    operation="respond_to_planner_prompt",
+                    session=session,
+                    application=application,
+                    operation_status="blocked" if status_code in {409, 422} else "failed",
+                    operation_payload=failure_payload,
+                    http_status=status_code,
+                )
             post_state = _solution_planning_state(session)
             response_payload: Dict[str, Any] = {
                 "recorded": True,
@@ -43865,16 +44030,32 @@ def application_solution_change_session_control_action(
                 http_status=200,
             )
         force_planner_fallback = bool(payload.get("use_planner_interpretation"))
-        response_payload = _process_solution_change_session_reply(
-            session=session,
-            application=application,
-            identity=identity,
-            reply_text=reply_text,
-            force_planner_fallback=force_planner_fallback,
-            response_kind="planner_prompt_response",
-            source_turn_id=source_turn_id,
-            prompt_response_metadata=prompt_metadata,
-        )
+        try:
+            response_payload = _process_solution_change_session_reply(
+                session=session,
+                application=application,
+                identity=identity,
+                reply_text=reply_text,
+                force_planner_fallback=force_planner_fallback,
+                response_kind="planner_prompt_response",
+                source_turn_id=source_turn_id,
+                prompt_response_metadata=prompt_metadata,
+            )
+        except Exception as exc:
+            status_code, failure_payload = _solution_planning_failure_response(
+                session=session,
+                application_id=str(application.id),
+                session_id=str(session.id),
+                exc=exc,
+            )
+            return _solution_change_session_control_envelope(
+                operation="respond_to_planner_prompt",
+                session=session,
+                application=application,
+                operation_status="blocked" if status_code in {409, 422} else "failed",
+                operation_payload=failure_payload,
+                http_status=status_code,
+            )
         post_state = _solution_planning_state(session)
         response_payload["planner_prompt_response"] = {
             "source_turn_id": source_turn_id,
@@ -43953,14 +44134,23 @@ def application_solution_change_session_reply(
         return JsonResponse({"error": "reply_text is required"}, status=400)
     force_planner_fallback = bool(payload.get("use_planner_interpretation"))
     source_turn_id = str(payload.get("source_turn_id") or "").strip()
-    response_payload = _process_solution_change_session_reply(
-        session=session,
-        application=application,
-        identity=identity,
-        reply_text=reply_text,
-        force_planner_fallback=force_planner_fallback,
-        source_turn_id=source_turn_id,
-    )
+    try:
+        response_payload = _process_solution_change_session_reply(
+            session=session,
+            application=application,
+            identity=identity,
+            reply_text=reply_text,
+            force_planner_fallback=force_planner_fallback,
+            source_turn_id=source_turn_id,
+        )
+    except Exception as exc:
+        status_code, failure_payload = _solution_planning_failure_response(
+            session=session,
+            application_id=str(application.id),
+            session_id=str(session.id),
+            exc=exc,
+        )
+        return JsonResponse(failure_payload, status=status_code)
     return JsonResponse(response_payload)
 
 
@@ -43994,16 +44184,25 @@ def application_solution_change_session_continue(
         return JsonResponse({"error": "reply_text is required"}, status=400)
     force_planner_fallback = bool(payload.get("use_planner_interpretation"))
     source_turn_id = str(payload.get("source_turn_id") or "").strip()
-    response_payload = _process_solution_change_session_reply(
-        session=session,
-        application=application,
-        identity=identity,
-        reply_text=reply_text,
-        force_planner_fallback=force_planner_fallback,
-        response_kind="continue_refinement",
-        source_turn_id=source_turn_id,
-        include_iteration_linkage=True,
-    )
+    try:
+        response_payload = _process_solution_change_session_reply(
+            session=session,
+            application=application,
+            identity=identity,
+            reply_text=reply_text,
+            force_planner_fallback=force_planner_fallback,
+            response_kind="continue_refinement",
+            source_turn_id=source_turn_id,
+            include_iteration_linkage=True,
+        )
+    except Exception as exc:
+        status_code, failure_payload = _solution_planning_failure_response(
+            session=session,
+            application_id=str(application.id),
+            session_id=str(session.id),
+            exc=exc,
+        )
+        return JsonResponse(failure_payload, status=status_code)
     _persist_solution_session_iteration_linkage(
         session=session,
         linkage_updates={
@@ -44102,7 +44301,16 @@ def application_solution_change_session_select_option(
         .select_related("artifact", "artifact__type")
         .order_by("sort_order", "created_at")
     )
-    _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+    try:
+        _advance_solution_planning_after_user_response(session=session, memberships=memberships)
+    except Exception as exc:
+        status_code, failure_payload = _solution_planning_failure_response(
+            session=session,
+            application_id=str(application.id),
+            session_id=str(session.id),
+            exc=exc,
+        )
+        return JsonResponse(failure_payload, status=status_code)
     memberships_by_artifact_id = {str(member.artifact_id): member for member in memberships}
     return JsonResponse(
         {
@@ -44260,26 +44468,6 @@ def application_solution_change_session_plan(
     force_code_aware_planning = bool(payload.get("force_code_aware_planning")) if isinstance(payload, dict) else False
     session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
 
-    def _persist_planning_failure(
-        *,
-        classification: str,
-        summary: str,
-        blocked_reason: str,
-        diagnostics: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
-        failure_record: Dict[str, Any] = {
-            "classification": str(classification or "").strip(),
-            "summary": str(summary or "").strip()[:1000],
-            "blocked_reason": str(blocked_reason or "").strip(),
-            "occurred_at": timezone.now().isoformat(),
-        }
-        if isinstance(diagnostics, dict) and diagnostics:
-            failure_record["diagnostics"] = diagnostics
-        metadata["planning_failure"] = failure_record
-        session.metadata_json = metadata
-        session.save(update_fields=["metadata_json", "updated_at"])
-
     memberships = list(
         ApplicationArtifactMembership.objects.filter(application=application)
         .select_related("artifact", "artifact__type")
@@ -44349,120 +44537,14 @@ def application_solution_change_session_plan(
             summary="Generated structured cross-artifact draft plan.",
             force_code_aware_planning=force_code_aware_planning,
         )
-    except SolutionPlanningAgentUnavailableError as exc:
-        _persist_planning_failure(
-            classification="planning_agent_unavailable",
-            summary=str(exc),
-            blocked_reason="planning_agent_unavailable",
-        )
-        return JsonResponse(
-            {
-                "error": "planning_agent_unavailable",
-                "blocked_reason": "planning_agent_unavailable",
-                "error_classification": "planning_agent_unavailable",
-                "error_summary": str(exc)[:500],
-                "application_id": str(application.id),
-                "session_id": str(session.id),
-                "safe_next_actions": [
-                    "get_application_change_session",
-                    "inspect_change_session_control",
-                ],
-            },
-            status=503,
-        )
-    except SolutionPlanningAgentResponseValidationError as exc:
-        _persist_planning_failure(
-            classification="planning_response_validation_failed",
-            summary=str(exc),
-            blocked_reason="planning_agent_response_invalid",
-            diagnostics=getattr(exc, "diagnostics", None),
-        )
-        return JsonResponse(
-            {
-                "error": "planning_agent_response_invalid",
-                "blocked_reason": "planning_agent_response_invalid",
-                "error_classification": "planning_response_validation_failed",
-                "error_summary": str(exc)[:500],
-                "application_id": str(application.id),
-                "session_id": str(session.id),
-                "safe_next_actions": [
-                    "get_application_change_session",
-                    "inspect_change_session_control",
-                ],
-            },
-            status=422,
-        )
-    except SolutionPlanningArtifactConstraintError as exc:
-        _persist_planning_failure(
-            classification="planning_artifact_constraint_violation",
-            summary=str(exc),
-            blocked_reason="planning_artifact_constraint_violation",
-            diagnostics=getattr(exc, "diagnostics", None),
-        )
-        return JsonResponse(
-            {
-                "error": "planning_artifact_constraint_violation",
-                "blocked_reason": "planning_artifact_constraint_violation",
-                "error_classification": "planning_artifact_constraint_violation",
-                "error_summary": str(exc)[:500],
-                "diagnostics": getattr(exc, "diagnostics", None),
-                "application_id": str(application.id),
-                "session_id": str(session.id),
-                "safe_next_actions": [
-                    "get_application_change_session",
-                    "inspect_change_session_control",
-                    "set_selected_artifact_ids_with_scope_widen_reason",
-                ],
-            },
-            status=409,
-        )
-    except SolutionPlanningError as exc:
-        _persist_planning_failure(
-            classification="planning_agent_call_failed",
-            summary=str(exc),
-            blocked_reason="planning_generation_failed",
-        )
-        return JsonResponse(
-            {
-                "error": "planning_generation_failed",
-                "blocked_reason": "planning_generation_failed",
-                "error_classification": "planning_agent_call_failed",
-                "error_summary": str(exc)[:500],
-                "application_id": str(application.id),
-                "session_id": str(session.id),
-                "safe_next_actions": [
-                    "get_application_change_session",
-                    "inspect_change_session_control",
-                ],
-            },
-            status=502,
-        )
     except Exception as exc:
-        _persist_planning_failure(
-            classification="backend_server_error",
-            summary=f"{exc.__class__.__name__}: {str(exc)}",
-            blocked_reason="planning_generation_failed",
+        status_code, payload = _solution_planning_failure_response(
+            session=session,
+            application_id=str(application.id),
+            session_id=str(session.id),
+            exc=exc,
         )
-        logger.exception(
-            "application_solution_change_session_plan_failed application_id=%s session_id=%s",
-            str(application_id or ""),
-            str(session_id or ""),
-        )
-        return JsonResponse(
-            {
-                "error": "planning_generation_failed",
-                "blocked_reason": "planning_generation_failed",
-                "error_classification": "backend_server_error",
-                "error_summary": f"{exc.__class__.__name__}: {str(exc)[:500]}",
-                "application_id": str(application.id),
-                "session_id": str(session.id),
-                "safe_next_actions": [
-                    "get_application_change_session",
-                    "inspect_change_session_control",
-                ],
-            },
-            status=500,
-        )
+        return JsonResponse(payload, status=status_code)
     checkpoint, reopened, reopen_reason = _refresh_solution_stage_checkpoint_for_plan_update(
         session=session,
         previous_plan=previous_plan,
