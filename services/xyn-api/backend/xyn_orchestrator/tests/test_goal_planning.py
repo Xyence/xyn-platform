@@ -1503,6 +1503,115 @@ class GoalPlanningTests(TestCase):
         self.assertTrue(suggested_ids)
         self.assertEqual(suggested_ids[0], str(xyn_ui_artifact.id))
 
+    def test_solution_change_session_backend_refactor_negated_ui_tokens_do_not_promote_ui_artifact(self):
+        application, _workbench_artifact, xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        request_text = (
+            "STRICT REFACTOR: Decompose services/xyn-api/backend/xyn_orchestrator/xyn_api.py into smaller backend modules. "
+            "DO NOT modify UI, styling, layout, Workbench surfaces, or command palette wording."
+        )
+        create_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions",
+            method="post",
+            data=json.dumps({"title": "Backend-only decomposition", "request_text": request_text}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity):
+            response = application_solution_change_sessions_collection(create_request, str(application.id))
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.content)
+        analysis = ((payload.get("session") or {}).get("analysis") or {})
+        impacted = analysis.get("impacted_artifacts") if isinstance(analysis.get("impacted_artifacts"), list) else []
+        self.assertTrue(impacted)
+        suggested_ids = [str(item) for item in (analysis.get("suggested_artifact_ids") or [])]
+        self.assertTrue(suggested_ids)
+        self.assertEqual(suggested_ids[0], str(xyn_api_artifact.id))
+        self.assertNotEqual(suggested_ids[0], str(xyn_ui_artifact.id))
+        api_row = next((row for row in impacted if str((row or {}).get("artifact_id") or "") == str(xyn_api_artifact.id)), None)
+        ui_row = next((row for row in impacted if str((row or {}).get("artifact_id") or "") == str(xyn_ui_artifact.id)), None)
+        self.assertIsNotNone(api_row)
+        if ui_row is not None:
+            self.assertLess(int((ui_row or {}).get("score") or 0), int((api_row or {}).get("score") or 0))
+
+    def test_generate_solution_change_plan_raises_when_primary_violates_forbidden_artifact_constraint(self):
+        application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Forbidden primary constraint",
+            request_text="Update backend API behavior for change sessions.",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(xyn_api_artifact.id)],
+            metadata_json={
+                "planner_hints": {
+                    "forbidden_artifacts": [str(xyn_api_artifact.id)],
+                }
+            },
+            analysis_json={
+                "suggested_artifact_ids": [str(xyn_api_artifact.id)],
+                "impacted_artifacts": [
+                    {
+                        "artifact_id": str(xyn_api_artifact.id),
+                        "score": 42,
+                        "reasons": ["api intent alignment"],
+                    }
+                ],
+            },
+        )
+        memberships = list(
+            ApplicationArtifactMembership.objects.filter(application=application)
+            .select_related("artifact", "artifact__type")
+            .order_by("sort_order", "created_at")
+        )
+        with mock.patch(
+            "xyn_orchestrator.xyn_api._maybe_apply_code_aware_solution_planning",
+            return_value={
+                "planning_mode": "modify_existing_system",
+                "plan_kind": "incremental_change",
+                "selected_artifact_ids": [str(xyn_api_artifact.id)],
+                "primary_artifact_id": str(xyn_api_artifact.id),
+                "implementation_steps": ["Update backend workflow logic."],
+                "validation_plan": ["Run targeted backend tests."],
+                "proposed_work": ["Update backend workflow logic."],
+            },
+        ), mock.patch(
+            "xyn_orchestrator.xyn_api.build_solution_change_execution_plan",
+            return_value={
+                "planning_mode": "modify_existing_system",
+                "plan_kind": "incremental_change",
+                "selected_artifact_ids": [str(xyn_api_artifact.id)],
+                "primary_artifact_id": str(xyn_api_artifact.id),
+                "ordered_steps": ["Update backend workflow logic."],
+                "validation_checks": ["Run targeted backend tests."],
+            },
+        ):
+            with self.assertRaises(xyn_api.SolutionPlanningArtifactConstraintError):
+                xyn_api._generate_solution_change_plan(session=session, memberships=memberships)
+
+    def test_solution_change_session_plan_returns_structured_block_on_artifact_constraint_violation(self):
+        application, _workbench_artifact, _xyn_ui_artifact, xyn_api_artifact = self._seed_default_xyn_solution_memberships()
+        session = SolutionChangeSession.objects.create(
+            workspace=self.workspace,
+            application=application,
+            title="Constraint violation plan response",
+            request_text="Update backend API behavior for change sessions.",
+            created_by=self.identity,
+            selected_artifact_ids_json=[str(xyn_api_artifact.id)],
+        )
+        plan_request = self._request(
+            f"/xyn/api/applications/{application.id}/change-sessions/{session.id}/plan",
+            method="post",
+            data=json.dumps({}),
+        )
+        with mock.patch("xyn_orchestrator.xyn_api._require_authenticated", return_value=self.identity), mock.patch(
+            "xyn_orchestrator.xyn_api._record_solution_draft_plan",
+            side_effect=xyn_api.SolutionPlanningArtifactConstraintError("forbidden primary artifact selected"),
+        ):
+            response = application_solution_change_session_plan(plan_request, str(application.id), str(session.id))
+        self.assertEqual(response.status_code, 409)
+        payload = json.loads(response.content)
+        self.assertEqual(payload.get("error"), "planning_artifact_constraint_violation")
+        self.assertEqual(payload.get("blocked_reason"), "planning_artifact_constraint_violation")
+        self.assertEqual(payload.get("error_classification"), "planning_artifact_constraint_violation")
+
     def test_solution_change_session_option_set_orders_by_impacted_artifact_ranking(self):
         application, _workbench_artifact, xyn_ui_artifact, _xyn_api_artifact = self._seed_default_xyn_solution_memberships()
         create_request = self._request(

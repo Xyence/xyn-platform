@@ -41,6 +41,10 @@ class SolutionPlanningAgentResponseValidationError(SolutionPlanningError):
     """Raised when planning-agent output fails canonical schema validation."""
 
 
+class SolutionPlanningArtifactConstraintError(SolutionPlanningError):
+    """Raised when finalized artifact scope violates required/forbidden planner constraints."""
+
+
 _UI_FORBIDDEN_TERMS = (
     "width",
     "min-width",

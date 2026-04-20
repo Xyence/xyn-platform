@@ -269,6 +269,7 @@ from .execution_briefs import (
 from .solution_change_session import stage_apply_workflow as _solution_stage_apply_workflow
 from .solution_change_session.planner_engine import (
     PlannerArtifactInput,
+    SolutionPlanningArtifactConstraintError,
     SolutionPlanningAgentResponseValidationError,
     SolutionPlanningAgentUnavailableError,
     SolutionPlanningError,
@@ -35177,10 +35178,34 @@ def _analyze_solution_impacted_artifacts(
     *, application: Application, request_text: str, memberships: List[ApplicationArtifactMembership]
 ) -> Dict[str, Any]:
     text = str(request_text or "").strip().lower()
-    tokens = [token for token in re.findall(r"[a-z0-9_]+", text) if len(token) >= 3]
     path_hints = _request_path_hints(request_text)
     forbids_ui_changes = _request_forbids_ui_changes(request_text)
+    negated_ui_tokens = {
+        "ui",
+        "frontend",
+        "layout",
+        "styling",
+        "style",
+        "css",
+        "screen",
+        "page",
+        "panel",
+        "component",
+        "workbench",
+        "header",
+    }
+    tokens = [token for token in re.findall(r"[a-z0-9_]+", text) if len(token) >= 3]
+    if forbids_ui_changes:
+        tokens = [token for token in tokens if token not in negated_ui_tokens]
     structural_backend_refactor = _request_signals_structural_backend_refactor(request_text)
+    exact_backend_file_hint = any(
+        (
+            "services/xyn-api/backend/xyn_orchestrator/xyn_api.py" in path_hint
+            or "backend/xyn_orchestrator/xyn_api.py" in path_hint
+            or "xyn_orchestrator/xyn_api.py" in path_hint
+        )
+        for path_hint in path_hints
+    )
     ui_context_tokens = {
         "ui",
         "ux",
@@ -35291,11 +35316,18 @@ def _analyze_solution_impacted_artifacts(
             token in path_hint for path_hint in path_hints for token in ("xyn_orchestrator", "xyn_api.py", ".py")
         )
         if matched_path_hint:
-            score += 10
+            score += 14
             reasons.append("explicit request path overlaps artifact owned source paths")
         elif path_hints and path_hint_targets_python_backend and artifact_api_signal:
-            score += 5
+            score += 8
             reasons.append("request references backend python module and artifact has API/backend intent")
+        if exact_backend_file_hint:
+            if artifact_api_signal:
+                score += 8
+                reasons.append("exact backend xyn_api.py path hint strongly aligns with API/backend artifact")
+            elif artifact_ui_signal:
+                score -= 6
+                reasons.append("exact backend xyn_api.py path hint de-prioritizes UI artifact")
         if member.role in matched_roles:
             score += 4
             reasons.append(f"request mentions {member.role.replace('_', ' ')} concerns")
@@ -35346,8 +35378,11 @@ def _analyze_solution_impacted_artifacts(
             score -= 5
             reasons.append("request explicitly forbids UI/styling/layout changes")
         if structural_backend_refactor and artifact_api_signal:
-            score += 3
+            score += 5
             reasons.append("request indicates structural backend refactor")
+        if structural_backend_refactor and artifact_ui_signal:
+            score -= 4
+            reasons.append("structural backend refactor request de-prioritizes UI artifact")
         if score <= 0:
             continue
         dependency_reason = ""
@@ -35846,7 +35881,14 @@ def _collect_decomposition_planner_hints(
     metadata_payload = session_metadata if isinstance(session_metadata, dict) else {}
     analysis_payload = analysis_metadata if isinstance(analysis_metadata, dict) else {}
     merged: Dict[str, Any] = copy.deepcopy(metadata_payload)
-    for passthrough_key in ("requires_multiple_artifacts", "cross_artifact_required", "required_artifact_ids"):
+    for passthrough_key in (
+        "requires_multiple_artifacts",
+        "cross_artifact_required",
+        "required_artifact_ids",
+        "required_artifacts",
+        "forbidden_artifact_ids",
+        "forbidden_artifacts",
+    ):
         if passthrough_key not in merged and passthrough_key in analysis_payload:
             merged[passthrough_key] = analysis_payload.get(passthrough_key)
     containers: List[Dict[str, Any]] = []
@@ -37051,6 +37093,126 @@ def _generate_solution_change_plan(
                 setattr(err, "diagnostics", diagnostics)
             return err
 
+        def _artifact_constraint_error(message: str, *, diagnostics: Optional[Dict[str, Any]] = None) -> SolutionPlanningArtifactConstraintError:
+            err = SolutionPlanningArtifactConstraintError(str(message or "").strip())
+            if isinstance(diagnostics, dict) and diagnostics:
+                setattr(err, "diagnostics", diagnostics)
+            return err
+
+        def _normalized_constraint_tokens(value: Any) -> List[str]:
+            raw_values = value if isinstance(value, list) else [value]
+            tokens: List[str] = []
+            for item in raw_values:
+                token = str(item or "").strip().lower()
+                if token and token not in tokens:
+                    tokens.append(token)
+            return tokens
+
+        def _enforce_hard_artifact_constraints(
+            *,
+            plan: Dict[str, Any],
+            planner_hints: Dict[str, Any],
+        ) -> None:
+            if not isinstance(plan, dict):
+                return
+
+            constraint_aliases_by_id: Dict[str, Set[str]] = {}
+            alias_to_ids: Dict[str, Set[str]] = {}
+            for member in memberships:
+                artifact_id = str(member.artifact_id or "").strip()
+                if not artifact_id:
+                    continue
+                artifact = member.artifact
+                aliases: Set[str] = {
+                    artifact_id.lower(),
+                    str(getattr(artifact, "slug", "") or "").strip().lower(),
+                    str(getattr(artifact, "title", "") or "").strip().lower(),
+                }
+                title = str(getattr(artifact, "title", "") or "").strip().lower()
+                if title:
+                    aliases.add(title.replace(" ", "-"))
+                    aliases.add(title.replace(" ", "_"))
+                slug = str(getattr(artifact, "slug", "") or "").strip().lower()
+                if slug:
+                    aliases.add(slug.replace(" ", "-"))
+                    aliases.add(slug.replace(" ", "_"))
+                aliases = {alias for alias in aliases if alias}
+                if not aliases:
+                    continue
+                constraint_aliases_by_id[artifact_id] = aliases
+                for alias in aliases:
+                    alias_to_ids.setdefault(alias, set()).add(artifact_id)
+
+            required_tokens = _normalized_constraint_tokens(planner_hints.get("required_artifacts")) + _normalized_constraint_tokens(
+                planner_hints.get("required_artifact_ids")
+            )
+            forbidden_tokens = _normalized_constraint_tokens(planner_hints.get("forbidden_artifacts")) + _normalized_constraint_tokens(
+                planner_hints.get("forbidden_artifact_ids")
+            )
+            required_tokens = [token for token in _dedupe(required_tokens) if token]
+            forbidden_tokens = [token for token in _dedupe(forbidden_tokens) if token]
+            if not required_tokens and not forbidden_tokens:
+                return
+
+            def _resolve_ids(tokens: List[str]) -> Set[str]:
+                resolved: Set[str] = set()
+                for token in tokens:
+                    for artifact_id in alias_to_ids.get(token, set()):
+                        resolved.add(artifact_id)
+                return resolved
+
+            required_ids = _resolve_ids(required_tokens)
+            forbidden_ids = _resolve_ids(forbidden_tokens)
+            selected_ids = [
+                str(item).strip()
+                for item in (plan.get("selected_artifact_ids") if isinstance(plan.get("selected_artifact_ids"), list) else [])
+                if str(item).strip()
+            ]
+            primary_artifact_id = str(
+                plan.get("primary_artifact_id")
+                or (selected_ids[0] if selected_ids else "")
+                or ""
+            ).strip()
+            if primary_artifact_id and primary_artifact_id not in selected_ids:
+                selected_ids = [primary_artifact_id, *selected_ids]
+            selected_set = {artifact_id for artifact_id in selected_ids if artifact_id}
+            if not primary_artifact_id and selected_ids:
+                primary_artifact_id = selected_ids[0]
+
+            missing_required = sorted(required_ids - selected_set)
+            present_forbidden = sorted(selected_set.intersection(forbidden_ids))
+            primary_forbidden = bool(primary_artifact_id and primary_artifact_id in forbidden_ids)
+            primary_required_mismatch = bool(primary_artifact_id and required_ids and primary_artifact_id not in required_ids)
+
+            if not (missing_required or present_forbidden or primary_forbidden or primary_required_mismatch):
+                return
+
+            message_parts: List[str] = []
+            if primary_forbidden:
+                message_parts.append("selected primary artifact violates forbidden_artifacts constraint")
+            if primary_required_mismatch:
+                message_parts.append("selected primary artifact is not in required_artifacts constraint set")
+            if missing_required:
+                message_parts.append("required_artifacts are missing from selected_artifact_ids")
+            if present_forbidden:
+                message_parts.append("forbidden_artifacts appear in selected_artifact_ids")
+
+            raise _artifact_constraint_error(
+                "; ".join(message_parts),
+                diagnostics={
+                    "required_tokens": required_tokens,
+                    "forbidden_tokens": forbidden_tokens,
+                    "resolved_required_artifact_ids": sorted(required_ids),
+                    "resolved_forbidden_artifact_ids": sorted(forbidden_ids),
+                    "selected_artifact_ids": selected_ids,
+                    "primary_artifact_id": primary_artifact_id,
+                    "missing_required_artifact_ids": missing_required,
+                    "present_forbidden_artifact_ids": present_forbidden,
+                    "primary_forbidden": primary_forbidden,
+                    "primary_required_mismatch": primary_required_mismatch,
+                },
+            )
+
         def _extract_openai_raw_text_candidates(raw_payload: Dict[str, Any]) -> List[str]:
             if not isinstance(raw_payload, dict):
                 return []
@@ -37427,10 +37589,12 @@ def _generate_solution_change_plan(
             directives=plan_rewrite_directives,
             request_text=original_request,
         )
-        return _apply_plan_prohibition_guardrails(
+        guarded = _apply_plan_prohibition_guardrails(
             plan=rewritten,
             request_text=original_request,
         )
+        _enforce_hard_artifact_constraints(plan=guarded, planner_hints=planner_metadata_hints)
+        return guarded
 
     def _compact_objective(text: str) -> str:
         value = str(text or "").strip()
@@ -44050,6 +44214,30 @@ def application_solution_change_session_plan(
                 ],
             },
             status=422,
+        )
+    except SolutionPlanningArtifactConstraintError as exc:
+        _persist_planning_failure(
+            classification="planning_artifact_constraint_violation",
+            summary=str(exc),
+            blocked_reason="planning_artifact_constraint_violation",
+            diagnostics=getattr(exc, "diagnostics", None),
+        )
+        return JsonResponse(
+            {
+                "error": "planning_artifact_constraint_violation",
+                "blocked_reason": "planning_artifact_constraint_violation",
+                "error_classification": "planning_artifact_constraint_violation",
+                "error_summary": str(exc)[:500],
+                "diagnostics": getattr(exc, "diagnostics", None),
+                "application_id": str(application.id),
+                "session_id": str(session.id),
+                "safe_next_actions": [
+                    "get_application_change_session",
+                    "inspect_change_session_control",
+                    "set_selected_artifact_ids_with_scope_widen_reason",
+                ],
+            },
+            status=409,
         )
     except SolutionPlanningError as exc:
         _persist_planning_failure(
