@@ -37035,6 +37035,11 @@ def _generate_solution_change_plan(
                 if str(normalized.get("type") or "").strip().lower() == "object":
                     normalized.setdefault("properties", {})
                     normalized["additionalProperties"] = False
+                    property_keys = list((normalized.get("properties") or {}).keys())
+                    if property_keys:
+                        normalized["required"] = property_keys
+                    else:
+                        normalized.setdefault("required", [])
                 return normalized
             if isinstance(node, list):
                 return [_openai_strict_schema(item) for item in node]
