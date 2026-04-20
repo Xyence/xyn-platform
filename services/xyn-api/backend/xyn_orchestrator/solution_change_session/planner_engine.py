@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import copy
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -106,6 +107,11 @@ _PLANNING_AGENT_RESPONSE_SCHEMA: Dict[str, Any] = {
     ],
     "additionalProperties": False,
 }
+
+
+def planning_agent_response_schema() -> Dict[str, Any]:
+    """Return a defensive copy of the canonical planning-agent response schema."""
+    return copy.deepcopy(_PLANNING_AGENT_RESPONSE_SCHEMA)
 
 
 def _targets_xyn_api_monolith(paths: Sequence[str]) -> bool:

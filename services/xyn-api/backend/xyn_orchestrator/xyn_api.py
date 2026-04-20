@@ -273,6 +273,7 @@ from .solution_change_session.planner_engine import (
     SolutionPlanningAgentUnavailableError,
     SolutionPlanningError,
     build_solution_change_execution_plan,
+    planning_agent_response_schema,
     validate_decomposition_plan_quality,
 )
 from .execution_queue import (
@@ -37024,6 +37025,14 @@ def _generate_solution_change_plan(
         payload: Dict[str, Any],
         selected_members_for_plan: List[ApplicationArtifactMembership],
     ) -> Dict[str, Any]:
+        planner_response_schema = planning_agent_response_schema()
+
+        def _planning_validation_error(message: str, *, diagnostics: Optional[Dict[str, Any]] = None) -> SolutionPlanningAgentResponseValidationError:
+            err = SolutionPlanningAgentResponseValidationError(str(message or "").strip())
+            if isinstance(diagnostics, dict) and diagnostics:
+                setattr(err, "diagnostics", diagnostics)
+            return err
+
         def _extract_openai_raw_text_candidates(raw_payload: Dict[str, Any]) -> List[str]:
             if not isinstance(raw_payload, dict):
                 return []
@@ -37088,18 +37097,21 @@ def _generate_solution_change_plan(
                     if repair_json:
                         break
             if not repair_json:
-                raise SolutionPlanningAgentResponseValidationError(
-                    "Planning-agent repair response did not contain a parseable JSON object."
+                raise _planning_validation_error(
+                    "Planning-agent repair response did not contain a parseable JSON object.",
+                    diagnostics={"phase": "repair", "raw_response_excerpt": str(repair_text or "")[:1600]},
                 )
             try:
                 repaired = json.loads(repair_json)
             except json.JSONDecodeError as exc:
-                raise SolutionPlanningAgentResponseValidationError(
-                    f"Planning-agent repair JSON decode failed: {exc}"
+                raise _planning_validation_error(
+                    f"Planning-agent repair JSON decode failed: {exc}",
+                    diagnostics={"phase": "repair", "raw_response_excerpt": str(repair_json or "")[:1600]},
                 ) from exc
             if not isinstance(repaired, dict):
-                raise SolutionPlanningAgentResponseValidationError(
-                    "Planning-agent repair response must decode to a JSON object."
+                raise _planning_validation_error(
+                    "Planning-agent repair response must decode to a JSON object.",
+                    diagnostics={"phase": "repair", "decoded_type": str(type(repaired).__name__)},
                 )
             return repaired
 
@@ -37112,8 +37124,14 @@ def _generate_solution_change_plan(
             model_name = str(resolved_config.get("model_name") or "").strip()
             api_key = str(resolved_config.get("api_key") or "").strip()
             if provider != "openai" or not model_name or not api_key:
-                raise SolutionPlanningAgentResponseValidationError(
-                    "OpenAI JSON fallback unavailable for current planning provider configuration."
+                raise _planning_validation_error(
+                    "OpenAI JSON fallback unavailable for current planning provider configuration.",
+                    diagnostics={
+                        "phase": "openai_fallback",
+                        "provider": provider,
+                        "model_name": model_name,
+                        "api_key_present": bool(api_key),
+                    },
                 )
             system_prompt = str(resolved_config.get("system_prompt") or "").strip()
             user_prompt = (
@@ -37144,14 +37162,28 @@ def _generate_solution_change_plan(
                 json={
                     "model": model_name,
                     "messages": messages,
-                    "response_format": {"type": "json_object"},
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "solution_change_plan",
+                            "strict": True,
+                            "schema": planner_response_schema,
+                        },
+                    },
                     "max_completion_tokens": int(resolved_config.get("max_tokens") or 1600),
                 },
                 timeout=60,
             )
             if response.status_code >= 400:
-                raise SolutionPlanningAgentResponseValidationError(
-                    f"OpenAI JSON fallback failed ({response.status_code}): {response.text[:300]}"
+                raise _planning_validation_error(
+                    f"OpenAI JSON fallback failed ({response.status_code}): {response.text[:300]}",
+                    diagnostics={
+                        "phase": "openai_fallback",
+                        "provider": provider,
+                        "model_name": model_name,
+                        "status_code": int(response.status_code),
+                        "response_excerpt": str(response.text or "")[:1600],
+                    },
                 )
             payload = response.json() if response.content else {}
             choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
@@ -37200,18 +37232,38 @@ def _generate_solution_change_plan(
             content = next((item for item in content_candidates if item), "")
             json_text = _extract_json_object_text(content)
             if not json_text:
-                raise SolutionPlanningAgentResponseValidationError(
-                    "OpenAI JSON fallback did not return parseable JSON content."
+                raise _planning_validation_error(
+                    "OpenAI JSON fallback did not return parseable JSON content.",
+                    diagnostics={
+                        "phase": "openai_fallback",
+                        "provider": provider,
+                        "model_name": model_name,
+                        "content_candidates_count": len(content_candidates),
+                        "content_excerpt": str(content or "")[:1600],
+                        "payload_excerpt": str(json.dumps(payload, ensure_ascii=True)[:2000]),
+                    },
                 )
             try:
                 parsed = json.loads(json_text)
             except json.JSONDecodeError as exc:
-                raise SolutionPlanningAgentResponseValidationError(
-                    f"OpenAI JSON fallback decode failed: {exc}"
+                raise _planning_validation_error(
+                    f"OpenAI JSON fallback decode failed: {exc}",
+                    diagnostics={
+                        "phase": "openai_fallback",
+                        "provider": provider,
+                        "model_name": model_name,
+                        "json_excerpt": str(json_text or "")[:1600],
+                    },
                 ) from exc
             if not isinstance(parsed, dict):
-                raise SolutionPlanningAgentResponseValidationError(
-                    "OpenAI JSON fallback response must decode to a JSON object."
+                raise _planning_validation_error(
+                    "OpenAI JSON fallback response must decode to a JSON object.",
+                    diagnostics={
+                        "phase": "openai_fallback",
+                        "provider": provider,
+                        "model_name": model_name,
+                        "decoded_type": str(type(parsed).__name__),
+                    },
                 )
             return parsed
 
@@ -37258,6 +37310,12 @@ def _generate_solution_change_plan(
                 "- Use empty arrays/objects where data is unknown.\n\n"
                 f"Planning input:\n{json.dumps(planning_input, ensure_ascii=True)}"
             )
+            provider = str(resolved.get("provider") or "").strip().lower()
+            if provider == "openai":
+                return _invoke_openai_planning_json_fallback(
+                    resolved_config=resolved,
+                    planning_input=planning_input,
+                )
             result = invoke_model(
                 resolved_config=resolved,
                 messages=[{"role": "user", "content": prompt}],
@@ -37288,12 +37346,22 @@ def _generate_solution_change_plan(
             try:
                 parsed = json.loads(json_text)
             except json.JSONDecodeError as exc:
-                raise SolutionPlanningAgentResponseValidationError(
-                    f"Planning-agent response JSON decode failed: {exc}"
+                raise _planning_validation_error(
+                    f"Planning-agent response JSON decode failed: {exc}",
+                    diagnostics={
+                        "phase": "invoke_model_primary",
+                        "provider": provider,
+                        "json_excerpt": str(json_text or "")[:1600],
+                    },
                 ) from exc
             if not isinstance(parsed, dict):
-                raise SolutionPlanningAgentResponseValidationError(
-                    "Planning-agent response must decode to a JSON object."
+                raise _planning_validation_error(
+                    "Planning-agent response must decode to a JSON object.",
+                    diagnostics={
+                        "phase": "invoke_model_primary",
+                        "provider": provider,
+                        "decoded_type": str(type(parsed).__name__),
+                    },
                 )
             return parsed
 
@@ -43838,14 +43906,18 @@ def application_solution_change_session_plan(
         classification: str,
         summary: str,
         blocked_reason: str,
+        diagnostics: Optional[Dict[str, Any]] = None,
     ) -> None:
         metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
-        metadata["planning_failure"] = {
+        failure_record: Dict[str, Any] = {
             "classification": str(classification or "").strip(),
             "summary": str(summary or "").strip()[:1000],
             "blocked_reason": str(blocked_reason or "").strip(),
             "occurred_at": timezone.now().isoformat(),
         }
+        if isinstance(diagnostics, dict) and diagnostics:
+            failure_record["diagnostics"] = diagnostics
+        metadata["planning_failure"] = failure_record
         session.metadata_json = metadata
         session.save(update_fields=["metadata_json", "updated_at"])
 
@@ -43944,6 +44016,7 @@ def application_solution_change_session_plan(
             classification="planning_response_validation_failed",
             summary=str(exc),
             blocked_reason="planning_agent_response_invalid",
+            diagnostics=getattr(exc, "diagnostics", None),
         )
         return JsonResponse(
             {
