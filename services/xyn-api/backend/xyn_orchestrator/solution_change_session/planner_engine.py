@@ -824,6 +824,12 @@ def _call_planning_agent(
 
     def _decomposition_missing_fields(payload: Dict[str, Any]) -> List[str]:
         missing: List[str] = []
+        ordered_steps = payload.get("ordered_steps")
+        ordered_steps_list = ordered_steps if isinstance(ordered_steps, list) else []
+        if not decomposition_implementation_steps_meaningful(
+            [str(item or "").strip() for item in ordered_steps_list if str(item or "").strip()]
+        ):
+            missing.append("ordered_steps_meaningful")
         if not _response_has_proposed_moves(payload):
             missing.append("proposed_moves")
         file_operations = payload.get("file_operations")
@@ -867,7 +873,7 @@ def _call_planning_agent(
             "reason": "missing_decomposition_contract_fields",
             "requirement": (
                 "For decomposition planning_mode, emit non-empty proposed_moves, file_operations, test_operations, "
-                "and extraction_seams aligned to backend-only refactor scope."
+                "extraction_seams, and decomposition-meaningful ordered_steps aligned to backend-only refactor scope."
             ),
             "missing_fields": list(missing_fields),
             "required_fields_per_move": ["seam", "from", "to_module"],
@@ -878,6 +884,7 @@ def _call_planning_agent(
                 "min_file_operations": 1,
                 "min_test_operations": 1,
                 "min_extraction_seams": 1,
+                "require_meaningful_ordered_steps": True,
                 "required_move_fields": ["seam", "from", "to_module"],
                 "reject_placeholder_steps": True,
             }
