@@ -35362,8 +35362,14 @@ def _analyze_solution_impacted_artifacts(
                 str(member.responsibility_summary or ""),
             ]
         ).lower()
-        artifact_ui_signal = any(token in artifact_intent_text for token in {" ui", "frontend", "workbench", "panel", "layout"})
-        artifact_api_signal = any(token in artifact_intent_text for token in {"api", "backend", "endpoint", "service"})
+        artifact_ui_signal = (
+            str(member.role or "").strip() == "primary_ui"
+            or any(token in artifact_intent_text for token in {"xyn-ui", " ui ", "frontend", "workbench", "panel", "layout"})
+        )
+        artifact_api_signal = (
+            str(member.role or "").strip() == "primary_api"
+            or any(token in artifact_intent_text for token in {"xyn-api", "api", "backend", "endpoint", "service"})
+        )
         owner_paths = [
             str(item or "").strip().lower()
             for item in (
@@ -35405,9 +35411,12 @@ def _analyze_solution_impacted_artifacts(
             if artifact_api_signal:
                 score += 6
                 reasons.append("request explicitly targets xyn-api/xyn_api.py")
-            elif artifact_ui_signal:
+            elif artifact_ui_signal and not command_palette_request:
                 score -= 4
                 reasons.append("xyn-api explicit request de-prioritizes UI artifact")
+            elif artifact_ui_signal and command_palette_request:
+                score += 2
+                reasons.append("command palette request keeps UI artifact in scope despite explicit API mention")
         if command_palette_request:
             if artifact_ui_signal:
                 score += 5
@@ -35420,11 +35429,11 @@ def _analyze_solution_impacted_artifacts(
                 score += 4
                 reasons.append("copy-only command palette update strongly aligns with UI artifact")
             elif artifact_api_signal:
-                score -= 6
+                score -= 10
                 reasons.append("copy-only command palette update excludes backend/API artifact work")
         if command_palette_execution_request:
             if artifact_ui_signal:
-                score += 4
+                score += 8
                 reasons.append("command palette execution request keeps UI command surface as primary")
             elif artifact_api_signal:
                 score += 2
@@ -35962,6 +35971,10 @@ def _request_forbids_api_changes(request_text: str) -> bool:
     patterns = (
         r"\bno\s+api\b",
         r"\bno\s+backend\b",
+        r"\bkeep\s+api\s+behavior\s+unchanged\b",
+        r"\bwithout\s+changing\s+api\b",
+        r"\bwithout\s+changing\s+backend\s+logic\b",
+        r"\bwithout\s+backend\s+logic\s+changes\b",
         r"\bdo\s+not\s+modify\s+api\b",
         r"\bdo\s+not\s+change\s+api\b",
         r"\bdo\s+not\s+modify\s+backend\b",
@@ -37722,6 +37735,41 @@ def _generate_solution_change_plan(
             plan=rewritten,
             request_text=original_request,
         )
+        if isinstance(guarded, dict):
+            artifact_label_by_id: Dict[str, str] = {}
+            for member in selected_members_for_plan:
+                artifact_id = str(member.artifact_id or "").strip()
+                if not artifact_id:
+                    continue
+                slug = str(getattr(member.artifact, "slug", "") or "").strip()
+                title = str(getattr(member.artifact, "title", "") or "").strip()
+                artifact_label_by_id[artifact_id] = slug or title or artifact_id
+            selected_ids = [
+                str(item or "").strip()
+                for item in (guarded.get("selected_artifact_ids") if isinstance(guarded.get("selected_artifact_ids"), list) else [])
+                if str(item or "").strip()
+            ]
+            primary_artifact_id = str(guarded.get("primary_artifact_id") or (selected_ids[0] if selected_ids else "")).strip()
+            primary_label = artifact_label_by_id.get(primary_artifact_id) or primary_artifact_id
+            dependency_labels = [
+                artifact_label_by_id.get(artifact_id) or artifact_id
+                for artifact_id in selected_ids
+                if artifact_id and artifact_id != primary_artifact_id
+            ]
+            summary_fragments: List[str] = []
+            if original_request:
+                summary_fragments.append(f"Request focus: {original_request}")
+            if primary_label:
+                if dependency_labels:
+                    summary_fragments.append(
+                        f"Primary artifact: {primary_label}. Dependencies: {', '.join(dependency_labels)}."
+                    )
+                else:
+                    summary_fragments.append(f"Primary artifact: {primary_label}.")
+            existing_summary = str(guarded.get("summary") or "").strip()
+            merged_summary = " ".join([item for item in [existing_summary, *summary_fragments] if item]).strip()
+            if merged_summary:
+                guarded["summary"] = merged_summary[:1800]
         _enforce_hard_artifact_constraints(plan=guarded, planner_hints=planner_metadata_hints)
         return guarded
 
