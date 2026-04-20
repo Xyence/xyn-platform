@@ -37156,11 +37156,11 @@ def _generate_solution_change_plan(
             payload = response.json() if response.content else {}
             choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
             message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
-            content = ""
+            content_candidates: List[str] = []
             if isinstance(message, dict):
                 message_content = message.get("content")
                 if isinstance(message_content, str):
-                    content = message_content.strip()
+                    content_candidates.append(message_content.strip())
                 elif isinstance(message_content, list):
                     parts: List[str] = []
                     for item in message_content:
@@ -37178,7 +37178,26 @@ def _generate_solution_change_plan(
                         alt = str(item.get("output_text") or "").strip()
                         if alt:
                             parts.append(alt)
-                    content = "\n".join(part for part in parts if part).strip()
+                    joined = "\n".join(part for part in parts if part).strip()
+                    if joined:
+                        content_candidates.append(joined)
+                function_call = message.get("function_call")
+                if isinstance(function_call, dict):
+                    arguments = str(function_call.get("arguments") or "").strip()
+                    if arguments:
+                        content_candidates.append(arguments)
+                tool_calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                    arguments = str(fn.get("arguments") or "").strip()
+                    if arguments:
+                        content_candidates.append(arguments)
+            top_level_output_text = str(payload.get("output_text") or "").strip() if isinstance(payload, dict) else ""
+            if top_level_output_text:
+                content_candidates.append(top_level_output_text)
+            content = next((item for item in content_candidates if item), "")
             json_text = _extract_json_object_text(content)
             if not json_text:
                 raise SolutionPlanningAgentResponseValidationError(
