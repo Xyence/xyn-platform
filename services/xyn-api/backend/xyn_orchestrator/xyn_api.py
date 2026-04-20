@@ -269,6 +269,9 @@ from .execution_briefs import (
 from .solution_change_session import stage_apply_workflow as _solution_stage_apply_workflow
 from .solution_change_session.planner_engine import (
     PlannerArtifactInput,
+    SolutionPlanningAgentResponseValidationError,
+    SolutionPlanningAgentUnavailableError,
+    SolutionPlanningError,
     build_solution_change_execution_plan,
     validate_decomposition_plan_quality,
 )
@@ -37021,6 +37024,71 @@ def _generate_solution_change_plan(
         payload: Dict[str, Any],
         selected_members_for_plan: List[ApplicationArtifactMembership],
     ) -> Dict[str, Any]:
+        def _invoke_solution_planning_agent(planning_input: Dict[str, Any]) -> Dict[str, Any]:
+            resolved = resolve_ai_config(purpose_slug="planning")
+            raw_context_refs: List[Any] = []
+            for key in ("purpose_default_context_pack_refs_json", "agent_context_pack_refs_json"):
+                refs = resolved.get(key)
+                if isinstance(refs, list):
+                    raw_context_refs.extend(refs)
+            resolved_packs: List[ContextPack] = []
+            seen_pack_ids: Set[str] = set()
+            for ref in raw_context_refs:
+                pack = _resolve_context_pack_ref(ref)
+                if not pack:
+                    continue
+                pack_id = str(pack.id)
+                if pack_id in seen_pack_ids:
+                    continue
+                seen_pack_ids.add(pack_id)
+                resolved_packs.append(pack)
+            if resolved_packs:
+                resolved_context = _resolve_context_pack_list(resolved_packs)
+                context_text = str(resolved_context.get("effective_context") or "").strip()
+                if context_text:
+                    base_system_prompt = str(resolved.get("system_prompt") or "").strip()
+                    resolved["system_prompt"] = (
+                        f"{base_system_prompt}\n\n{context_text}".strip()
+                        if base_system_prompt
+                        else context_text
+                    )
+            prompt = (
+                "You are the planning agent for solution change sessions.\n"
+                "Return ONLY one JSON object (no markdown, no prose) with these exact top-level keys:\n"
+                "goal, assumptions, ordered_steps, affected_files, affected_components, risks, open_questions,\n"
+                "validation_checks, execution_constraints, file_operations, test_operations, rollback_notes,\n"
+                "route_update_implications, affected_routes, source_files, destination_modules, extraction_seams,\n"
+                "proposed_moves, compatibility_shims, ordered_migration_steps, compatibility_constraints,\n"
+                "scaffold_plan, risk_annotations, affected_tests.\n"
+                "Requirements:\n"
+                "- goal must be non-empty.\n"
+                "- ordered_steps must be a non-empty ordered list.\n"
+                "- validation_checks must be present.\n"
+                "- Use empty arrays/objects where data is unknown.\n\n"
+                f"Planning input:\n{json.dumps(planning_input, ensure_ascii=True)}"
+            )
+            result = invoke_model(
+                resolved_config=resolved,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw_text = str(result.get("content") or "")
+            json_text = _extract_json_object_text(raw_text)
+            if not json_text:
+                raise SolutionPlanningAgentResponseValidationError(
+                    "Planning-agent response did not contain a parseable JSON object."
+                )
+            try:
+                parsed = json.loads(json_text)
+            except json.JSONDecodeError as exc:
+                raise SolutionPlanningAgentResponseValidationError(
+                    f"Planning-agent response JSON decode failed: {exc}"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise SolutionPlanningAgentResponseValidationError(
+                    "Planning-agent response must decode to a JSON object."
+                )
+            return parsed
+
         planner_metadata_hints = _collect_decomposition_planner_hints(
             session_metadata=session.metadata_json if isinstance(session.metadata_json, dict) else {},
             analysis_metadata=session.analysis_json if isinstance(session.analysis_json, dict) else {},
@@ -37057,6 +37125,7 @@ def _generate_solution_change_plan(
                 path,
                 candidate_members=selected_members_for_plan if selected_members_for_plan else memberships,
             ),
+            planning_agent_invoke=_invoke_solution_planning_agent,
         )
         merged = _merge_execution_plan_fields(current_plan=finalized, engine_plan=engine_enriched)
         rewritten = _apply_refinement_rewrite_to_plan_payload(
@@ -43617,12 +43686,90 @@ def application_solution_change_session_plan(
     if planning_state.get("pending_option_set"):
         return JsonResponse({"error": "planner option selection is pending; select an option before generating a draft plan"}, status=409)
     previous_plan = session.plan_json if isinstance(session.plan_json, dict) else {}
-    next_plan = _record_solution_draft_plan(
-        session=session,
-        memberships=memberships,
-        summary="Generated structured cross-artifact draft plan.",
-        force_code_aware_planning=force_code_aware_planning,
-    )
+    try:
+        next_plan = _record_solution_draft_plan(
+            session=session,
+            memberships=memberships,
+            summary="Generated structured cross-artifact draft plan.",
+            force_code_aware_planning=force_code_aware_planning,
+        )
+    except SolutionPlanningAgentUnavailableError as exc:
+        session.status = "error"
+        session.save(update_fields=["status", "updated_at"])
+        return JsonResponse(
+            {
+                "error": "planning_agent_unavailable",
+                "blocked_reason": "planning_agent_unavailable",
+                "error_classification": "planning_agent_unavailable",
+                "error_summary": str(exc)[:500],
+                "application_id": str(application.id),
+                "session_id": str(session.id),
+                "safe_next_actions": [
+                    "get_application_change_session",
+                    "inspect_change_session_control",
+                ],
+            },
+            status=503,
+        )
+    except SolutionPlanningAgentResponseValidationError as exc:
+        session.status = "error"
+        session.save(update_fields=["status", "updated_at"])
+        return JsonResponse(
+            {
+                "error": "planning_agent_response_invalid",
+                "blocked_reason": "planning_agent_response_invalid",
+                "error_classification": "planning_response_validation_failed",
+                "error_summary": str(exc)[:500],
+                "application_id": str(application.id),
+                "session_id": str(session.id),
+                "safe_next_actions": [
+                    "get_application_change_session",
+                    "inspect_change_session_control",
+                ],
+            },
+            status=422,
+        )
+    except SolutionPlanningError as exc:
+        session.status = "error"
+        session.save(update_fields=["status", "updated_at"])
+        return JsonResponse(
+            {
+                "error": "planning_generation_failed",
+                "blocked_reason": "planning_generation_failed",
+                "error_classification": "planning_agent_call_failed",
+                "error_summary": str(exc)[:500],
+                "application_id": str(application.id),
+                "session_id": str(session.id),
+                "safe_next_actions": [
+                    "get_application_change_session",
+                    "inspect_change_session_control",
+                ],
+            },
+            status=502,
+        )
+    except Exception as exc:
+        session.status = "error"
+        session.save(update_fields=["status", "updated_at"])
+        logger.exception(
+            "application_solution_change_session_plan_failed application_id=%s session_id=%s",
+            str(application_id or ""),
+            str(session_id or ""),
+        )
+        return JsonResponse(
+            {
+                "error": "planning_generation_failed",
+                "blocked_reason": "planning_generation_failed",
+                "error_classification": "backend_server_error",
+                "error_summary": f"{exc.__class__.__name__}: {str(exc)[:500]}",
+                "application_id": str(application.id),
+                "session_id": str(session.id),
+                "safe_next_actions": [
+                    "get_application_change_session",
+                    "inspect_change_session_control",
+                ],
+            },
+            status=500,
+        )
     checkpoint, reopened, reopen_reason = _refresh_solution_stage_checkpoint_for_plan_update(
         session=session,
         previous_plan=previous_plan,
