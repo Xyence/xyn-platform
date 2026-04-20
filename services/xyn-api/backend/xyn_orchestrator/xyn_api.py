@@ -43624,6 +43624,23 @@ def application_solution_change_session_plan(
     payload = _parse_json(request)
     force_code_aware_planning = bool(payload.get("force_code_aware_planning")) if isinstance(payload, dict) else False
     session = get_object_or_404(SolutionChangeSession, id=session_id, application=application)
+
+    def _persist_planning_failure(
+        *,
+        classification: str,
+        summary: str,
+        blocked_reason: str,
+    ) -> None:
+        metadata = session.metadata_json if isinstance(session.metadata_json, dict) else {}
+        metadata["planning_failure"] = {
+            "classification": str(classification or "").strip(),
+            "summary": str(summary or "").strip()[:1000],
+            "blocked_reason": str(blocked_reason or "").strip(),
+            "occurred_at": timezone.now().isoformat(),
+        }
+        session.metadata_json = metadata
+        session.save(update_fields=["metadata_json", "updated_at"])
+
     memberships = list(
         ApplicationArtifactMembership.objects.filter(application=application)
         .select_related("artifact", "artifact__type")
@@ -43694,8 +43711,11 @@ def application_solution_change_session_plan(
             force_code_aware_planning=force_code_aware_planning,
         )
     except SolutionPlanningAgentUnavailableError as exc:
-        session.status = "error"
-        session.save(update_fields=["status", "updated_at"])
+        _persist_planning_failure(
+            classification="planning_agent_unavailable",
+            summary=str(exc),
+            blocked_reason="planning_agent_unavailable",
+        )
         return JsonResponse(
             {
                 "error": "planning_agent_unavailable",
@@ -43712,8 +43732,11 @@ def application_solution_change_session_plan(
             status=503,
         )
     except SolutionPlanningAgentResponseValidationError as exc:
-        session.status = "error"
-        session.save(update_fields=["status", "updated_at"])
+        _persist_planning_failure(
+            classification="planning_response_validation_failed",
+            summary=str(exc),
+            blocked_reason="planning_agent_response_invalid",
+        )
         return JsonResponse(
             {
                 "error": "planning_agent_response_invalid",
@@ -43730,8 +43753,11 @@ def application_solution_change_session_plan(
             status=422,
         )
     except SolutionPlanningError as exc:
-        session.status = "error"
-        session.save(update_fields=["status", "updated_at"])
+        _persist_planning_failure(
+            classification="planning_agent_call_failed",
+            summary=str(exc),
+            blocked_reason="planning_generation_failed",
+        )
         return JsonResponse(
             {
                 "error": "planning_generation_failed",
@@ -43748,8 +43774,11 @@ def application_solution_change_session_plan(
             status=502,
         )
     except Exception as exc:
-        session.status = "error"
-        session.save(update_fields=["status", "updated_at"])
+        _persist_planning_failure(
+            classification="backend_server_error",
+            summary=f"{exc.__class__.__name__}: {str(exc)}",
+            blocked_reason="planning_generation_failed",
+        )
         logger.exception(
             "application_solution_change_session_plan_failed application_id=%s session_id=%s",
             str(application_id or ""),
