@@ -37850,6 +37850,7 @@ def _generate_solution_change_plan(
                     "\nDecomposition contract (required for planning_mode=decompose_existing_system):\n"
                     "- proposed_moves must contain at least one concrete move object.\n"
                     "- each proposed_moves object must include seam, from, to_module, and should include import_rewrite_target when possible.\n"
+                    "- file_operations and test_operations must each contain at least one concrete operation object.\n"
                     "- ordered_steps must be implementation-ready backend extraction/move steps, not generic placeholders.\n"
                     "- source_files and destination_modules must align with backend decomposition scope.\n"
                     f"- {target_scope_hint}\n"

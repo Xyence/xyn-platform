@@ -822,6 +822,21 @@ def _call_planning_agent(
             return False
         return bool([item for item in proposed_moves if isinstance(item, dict)])
 
+    def _decomposition_missing_fields(payload: Dict[str, Any]) -> List[str]:
+        missing: List[str] = []
+        if not _response_has_proposed_moves(payload):
+            missing.append("proposed_moves")
+        file_operations = payload.get("file_operations")
+        if not isinstance(file_operations, list) or not [item for item in file_operations if isinstance(item, dict)]:
+            missing.append("file_operations")
+        test_operations = payload.get("test_operations")
+        if not isinstance(test_operations, list) or not [item for item in test_operations if isinstance(item, dict)]:
+            missing.append("test_operations")
+        extraction_seams = payload.get("extraction_seams")
+        if not isinstance(extraction_seams, list) or not [str(item).strip() for item in extraction_seams if str(item).strip()]:
+            missing.append("extraction_seams")
+        return missing
+
     def _invoke_once(payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
             response = invoke(payload)
@@ -843,24 +858,36 @@ def _call_planning_agent(
         return normalized
 
     normalized = _invoke_once(planning_input_payload)
-    if _is_decomposition_mode(planning_input_payload) and not _response_has_proposed_moves(normalized):
+    if _is_decomposition_mode(planning_input_payload):
+        missing_fields = _decomposition_missing_fields(normalized)
+        if not missing_fields:
+            return normalized
         retry_input = copy.deepcopy(planning_input_payload)
         retry_input["agent_retry_directive"] = {
-            "reason": "missing_proposed_moves",
-            "requirement": "For decomposition planning_mode, proposed_moves must contain at least one concrete move object.",
+            "reason": "missing_decomposition_contract_fields",
+            "requirement": (
+                "For decomposition planning_mode, emit non-empty proposed_moves, file_operations, test_operations, "
+                "and extraction_seams aligned to backend-only refactor scope."
+            ),
+            "missing_fields": list(missing_fields),
             "required_fields_per_move": ["seam", "from", "to_module"],
         }
         retry_input["response_contract_overrides"] = {
             "decomposition_required": {
                 "min_proposed_moves": 1,
+                "min_file_operations": 1,
+                "min_test_operations": 1,
+                "min_extraction_seams": 1,
                 "required_move_fields": ["seam", "from", "to_module"],
                 "reject_placeholder_steps": True,
             }
         }
         normalized = _invoke_once(retry_input)
-        if not _response_has_proposed_moves(normalized):
+        retry_missing_fields = _decomposition_missing_fields(normalized)
+        if retry_missing_fields:
             raise SolutionPlanningAgentResponseValidationError(
-                "Planning-agent decomposition response missing required proposed_moves after single retry."
+                "Planning-agent decomposition response missing required fields after single retry: "
+                + ", ".join(retry_missing_fields)
             )
     return normalized
 

@@ -783,7 +783,71 @@ class SolutionPlannerEngineTests(SimpleTestCase):
                 planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
                 planning_agent_invoke=_invoke,
             )
-        self.assertIn("missing required proposed_moves", str(exc.exception))
+        self.assertIn("missing required fields", str(exc.exception))
+        self.assertIn("proposed_moves", str(exc.exception))
+
+    def test_decomposition_missing_file_operations_triggers_single_retry(self):
+        request_text = "STRICT REFACTOR: Decompose services/xyn-api/backend/xyn_orchestrator/xyn_api.py into backend modules."
+        calls = {"count": 0}
+
+        def _invoke(_payload):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return {
+                    "goal": "Decompose xyn_api.py while preserving behavior.",
+                    "ordered_steps": [
+                        "Extract solution_change_session handlers from backend/xyn_orchestrator/xyn_api.py into backend/xyn_orchestrator/api/solutions.py."
+                    ],
+                    "validation_checks": ["scope_confirmed", "validate"],
+                    "source_files": ["backend/xyn_orchestrator/xyn_api.py"],
+                    "destination_modules": ["backend/xyn_orchestrator/api/solutions.py"],
+                    "extraction_seams": ["solution_change_session_workflow"],
+                    "proposed_moves": [
+                        {
+                            "seam": "solution_change_session_workflow",
+                            "from": "backend/xyn_orchestrator/xyn_api.py",
+                            "to_module": "backend/xyn_orchestrator/api/solutions.py",
+                        }
+                    ],
+                    "file_operations": [],
+                    "test_operations": [{"operation": "run", "target": "xyn_orchestrator.tests.test_goal_planning"}],
+                }
+            return {
+                "goal": "Decompose xyn_api.py while preserving behavior.",
+                "ordered_steps": [
+                    "Extract solution_change_session handlers from backend/xyn_orchestrator/xyn_api.py into backend/xyn_orchestrator/api/solutions.py."
+                ],
+                "validation_checks": ["scope_confirmed", "validate"],
+                "source_files": ["backend/xyn_orchestrator/xyn_api.py"],
+                "destination_modules": ["backend/xyn_orchestrator/api/solutions.py"],
+                "extraction_seams": ["solution_change_session_workflow"],
+                "proposed_moves": [
+                    {
+                        "seam": "solution_change_session_workflow",
+                        "from": "backend/xyn_orchestrator/xyn_api.py",
+                        "to_module": "backend/xyn_orchestrator/api/solutions.py",
+                    }
+                ],
+                "file_operations": [
+                    {
+                        "operation": "extract_module",
+                        "source": "backend/xyn_orchestrator/xyn_api.py",
+                        "destination": "backend/xyn_orchestrator/api/solutions.py",
+                    }
+                ],
+                "test_operations": [{"operation": "run", "target": "xyn_orchestrator.tests.test_goal_planning"}],
+            }
+
+        plan = build_solution_change_execution_plan(
+            request_text=request_text,
+            base_plan={},
+            artifacts=self._artifacts(),
+            selected_artifact_ids=["api-1"],
+            planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
+            planning_agent_invoke=_invoke,
+        )
+        self.assertEqual(calls["count"], 2)
+        self.assertTrue(plan.get("file_operations"))
 
     def test_route_preserving_decomposition_plan_packages_successfully(self):
         request_text = "Decompose backend/xyn_orchestrator/xyn_api.py while preserving existing routes."
