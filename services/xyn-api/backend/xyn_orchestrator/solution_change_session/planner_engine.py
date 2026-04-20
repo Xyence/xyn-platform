@@ -4,6 +4,8 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from jsonschema import ValidationError, validate
+
 
 @dataclass(frozen=True)
 class PlannerArtifactInput:
@@ -24,6 +26,18 @@ class PlannerClassification:
     intents: List[str]
     confidence: float
     assumptions: List[str]
+
+
+class SolutionPlanningError(RuntimeError):
+    """Base class for solution planning orchestration failures."""
+
+
+class SolutionPlanningAgentUnavailableError(SolutionPlanningError):
+    """Raised when no planning-agent response is available to orchestrate."""
+
+
+class SolutionPlanningAgentResponseValidationError(SolutionPlanningError):
+    """Raised when planning-agent output fails canonical schema validation."""
 
 
 _UI_FORBIDDEN_TERMS = (
@@ -56,6 +70,42 @@ _XYN_API_PREFERRED_DESTINATION_MODULES: List[str] = [
     "backend/xyn_orchestrator/solution_change_session/stage_apply_scoping.py",
     "backend/xyn_orchestrator/solution_change_session/stage_apply_git.py",
 ]
+
+_PLANNING_AGENT_RESPONSE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "goal": {"type": "string", "minLength": 1},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "ordered_steps": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "affected_files": {"type": "array", "items": {"type": "string"}},
+        "affected_components": {"type": "array", "items": {"type": "string"}},
+        "risks": {"type": "array", "items": {"type": "string"}},
+        "open_questions": {"type": "array", "items": {"type": "string"}},
+        "validation_checks": {"type": "array", "items": {"type": "string"}},
+        "execution_constraints": {"type": "array", "items": {"type": "string"}},
+        "file_operations": {"type": "array", "items": {"type": "object"}},
+        "test_operations": {"type": "array", "items": {"type": "object"}},
+        "rollback_notes": {"type": "array", "items": {"type": "string"}},
+        "route_update_implications": {"type": "array", "items": {"type": "string"}},
+        "affected_routes": {"type": "array", "items": {"type": "string"}},
+        "source_files": {"type": "array", "items": {"type": "string"}},
+        "destination_modules": {"type": "array", "items": {"type": "string"}},
+        "extraction_seams": {"type": "array", "items": {"type": "string"}},
+        "proposed_moves": {"type": "array", "items": {"type": "object"}},
+        "compatibility_shims": {"type": "array", "items": {"type": "object"}},
+        "ordered_migration_steps": {"type": "array", "items": {"type": "string"}},
+        "compatibility_constraints": {"type": "array", "items": {"type": "string"}},
+        "scaffold_plan": {"type": "object"},
+        "risk_annotations": {"type": "array", "items": {"type": "string"}},
+        "affected_tests": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "goal",
+        "ordered_steps",
+        "validation_checks",
+    ],
+    "additionalProperties": False,
+}
 
 
 def _targets_xyn_api_monolith(paths: Sequence[str]) -> bool:
@@ -417,20 +467,6 @@ def _dedupe(values: Sequence[str]) -> List[str]:
     return out
 
 
-def _build_decomposition_steps(candidate_files: Sequence[str]) -> List[str]:
-    primary = str(candidate_files[0] if candidate_files else "target module").strip()
-    secondary = str(candidate_files[1] if len(candidate_files) > 1 else "").strip()
-    steps = [
-        f"Freeze `{primary}` as a compatibility wrapper and map workflow entrypoints.",
-        f"Extract cohesive workflow segments from `{primary}` into focused backend modules.",
-        "Replace extracted sections with delegation wrappers while preserving request/response behavior.",
-        "Run targeted regression checks for changed workflow paths and imports.",
-    ]
-    if secondary:
-        steps.insert(2, f"Audit `{secondary}` for shared imports/constants that should move with extraction boundaries.")
-    return steps
-
-
 def _contains_placeholder_steps(steps: Sequence[str]) -> bool:
     lowered = "\n".join(str(step or "").lower() for step in steps)
     return any(token in lowered for token in _DECOMPOSITION_PLACEHOLDER_PATTERNS)
@@ -597,12 +633,6 @@ def _build_execution_package(
     }
 
 
-def _normalized_module_name(path: str) -> str:
-    token = str(path or "").strip().replace("\\", "/")
-    token = token.rsplit(".", 1)[0]
-    return token.replace("/", ".").strip(".")
-
-
 def _extract_planner_hints(base_plan: Dict[str, Any], planner_hints: Optional[Dict[str, Any]]) -> Dict[str, List[str]]:
     merged = planner_hints if isinstance(planner_hints, dict) else {}
     base = base_plan if isinstance(base_plan, dict) else {}
@@ -661,340 +691,133 @@ def _requires_multiple_artifacts(
     return False
 
 
-def _build_modify_steps(candidate_files: Sequence[str], *, full_stack: bool) -> List[str]:
-    primary = str(candidate_files[0] if candidate_files else "target module").strip()
-    if full_stack:
-        return [
-            f"Update backend contracts and API handlers in `{primary}` (or equivalent backend module).",
-            "Align UI integration points with updated API contracts and preserve compatibility.",
-            "Validate end-to-end flow in preview with staged backend and UI artifacts.",
-        ]
-    return [
-        f"Inspect `{primary}` and implement the requested behavior change with minimal scope.",
-        "Update tests and validation checks covering impacted API/workflow behavior.",
-        "Confirm no regressions in adjacent workflows before stage apply.",
-    ]
+def _planning_agent_payload_types_valid(payload: Dict[str, Any]) -> bool:
+    list_fields = (
+        "assumptions",
+        "ordered_steps",
+        "affected_files",
+        "affected_components",
+        "risks",
+        "open_questions",
+        "validation_checks",
+        "execution_constraints",
+        "file_operations",
+        "test_operations",
+        "rollback_notes",
+        "route_update_implications",
+        "affected_routes",
+        "source_files",
+        "destination_modules",
+        "extraction_seams",
+        "proposed_moves",
+        "compatibility_shims",
+        "ordered_migration_steps",
+        "compatibility_constraints",
+        "risk_annotations",
+        "affected_tests",
+    )
+    if not isinstance(payload.get("goal"), str):
+        return False
+    for field in list_fields:
+        if field in payload and not isinstance(payload.get(field), list):
+            return False
+    if "scaffold_plan" in payload and not isinstance(payload.get("scaffold_plan"), dict):
+        return False
+    return True
 
 
-def _build_create_app_steps() -> List[str]:
-    return [
-        "Create Python backend scaffold (app package, routing module, settings/env wiring).",
-        "Define initial domain modules and API contract boundaries.",
-        "Add baseline test scaffold (unit + API smoke) and validation harness.",
-        "Prepare preview/deployment wiring for first vertical slice validation.",
-    ]
+def _normalize_planning_agent_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {
+        "goal": str(payload.get("goal") or "").strip(),
+        "assumptions": _dedupe([str(item).strip() for item in (payload.get("assumptions") or []) if str(item).strip()]),
+        "ordered_steps": _dedupe([str(item).strip() for item in (payload.get("ordered_steps") or []) if str(item).strip()]),
+        "affected_files": _dedupe([str(item).strip() for item in (payload.get("affected_files") or []) if str(item).strip()]),
+        "affected_components": _dedupe([str(item).strip() for item in (payload.get("affected_components") or []) if str(item).strip()]),
+        "risks": _dedupe([str(item).strip() for item in (payload.get("risks") or []) if str(item).strip()]),
+        "open_questions": _dedupe([str(item).strip() for item in (payload.get("open_questions") or []) if str(item).strip()]),
+        "validation_checks": _dedupe([str(item).strip() for item in (payload.get("validation_checks") or []) if str(item).strip()]),
+        "execution_constraints": _dedupe([str(item).strip() for item in (payload.get("execution_constraints") or []) if str(item).strip()]),
+        "file_operations": [dict(item) for item in (payload.get("file_operations") or []) if isinstance(item, dict)],
+        "test_operations": [dict(item) for item in (payload.get("test_operations") or []) if isinstance(item, dict)],
+        "rollback_notes": _dedupe([str(item).strip() for item in (payload.get("rollback_notes") or []) if str(item).strip()]),
+        "route_update_implications": _dedupe([str(item).strip() for item in (payload.get("route_update_implications") or []) if str(item).strip()]),
+        "affected_routes": _dedupe([str(item).strip() for item in (payload.get("affected_routes") or []) if str(item).strip()]),
+        "source_files": _dedupe([str(item).strip() for item in (payload.get("source_files") or []) if str(item).strip()]),
+        "destination_modules": _dedupe([str(item).strip() for item in (payload.get("destination_modules") or []) if str(item).strip()]),
+        "extraction_seams": _dedupe([str(item).strip() for item in (payload.get("extraction_seams") or []) if str(item).strip()]),
+        "proposed_moves": [dict(item) for item in (payload.get("proposed_moves") or []) if isinstance(item, dict)],
+        "compatibility_shims": [dict(item) for item in (payload.get("compatibility_shims") or []) if isinstance(item, dict)],
+        "ordered_migration_steps": _dedupe([str(item).strip() for item in (payload.get("ordered_migration_steps") or []) if str(item).strip()]),
+        "compatibility_constraints": _dedupe([str(item).strip() for item in (payload.get("compatibility_constraints") or []) if str(item).strip()]),
+        "scaffold_plan": dict(payload.get("scaffold_plan") or {}) if isinstance(payload.get("scaffold_plan"), dict) else {},
+        "risk_annotations": _dedupe([str(item).strip() for item in (payload.get("risk_annotations") or []) if str(item).strip()]),
+        "affected_tests": _dedupe([str(item).strip() for item in (payload.get("affected_tests") or []) if str(item).strip()]),
+    }
+    return normalized
 
 
-def _synthesize_decomposition_plan(
+def _planning_input_payload(
     *,
-    candidate_files: Sequence[str],
+    request_text: str,
+    base_plan: Dict[str, Any],
+    classification: PlannerClassification,
     hints: Dict[str, List[str]],
-    analysis: Dict[str, Any],
+    codebase_analysis: Dict[str, Any],
+    ranked: Sequence[Dict[str, Any]],
+    selected_ids: Sequence[str],
+    candidate_files: Sequence[str],
 ) -> Dict[str, Any]:
-    hinted_sources = [str(item).strip() for item in (hints.get("target_source_files") or []) if str(item).strip()]
-    source_files = _dedupe([*hinted_sources, *[str(item).strip() for item in candidate_files if str(item).strip()]])
-    if not source_files:
-        source_files = [str(candidate_files[0] if candidate_files else "services/xyn-api/backend/xyn_orchestrator/xyn_api.py").strip()]
-    extraction_seams = _dedupe([str(item).strip() for item in (hints.get("extraction_seams") or []) if str(item).strip()])
-    detected_seams = [str(item).strip() for item in (analysis.get("detected_extraction_seams") or []) if str(item).strip()]
-    if detected_seams:
-        extraction_seams = _dedupe([*extraction_seams, *detected_seams])
-    if not extraction_seams:
-        extraction_seams = [
-            "solution_change_session_workflow",
-            "runtime_run_handlers",
-            "release_target_handlers",
-        ]
-    destination_modules = _dedupe([str(item).strip() for item in (hints.get("moved_handlers_modules") or []) if str(item).strip()])
-    existing_destination_modules = [
-        str(item).strip()
-        for item in (analysis.get("candidate_destination_modules") or [])
-        if str(item).strip()
-    ]
-    destination_modules = _dedupe([*destination_modules, *existing_destination_modules])
-    if not destination_modules:
-        destination_modules = [*list(_XYN_API_PREFERRED_DESTINATION_MODULES), "backend/xyn_orchestrator/planning/plan_service.py"]
-    if _targets_xyn_api_monolith(source_files):
-        destination_modules = _dedupe([*destination_modules, *list(_XYN_API_PREFERRED_DESTINATION_MODULES)])
-    required_tests = _dedupe([str(item).strip() for item in (hints.get("required_test_suites") or []) if str(item).strip()])
-    analysis_tests = [str(item).strip() for item in (analysis.get("affected_tests") or []) if str(item).strip()]
-    required_tests = _dedupe([*required_tests, *analysis_tests])
-    if not required_tests:
-        required_tests = [
-            "xyn_orchestrator.tests.test_goal_planning",
-            "xyn_orchestrator.tests.test_bearer_workflow_auth",
-        ]
-    affected_routes = [str(item).strip() for item in (analysis.get("affected_routes") or []) if str(item).strip()]
-    import_rewrite_surface = [str(item).strip() for item in (analysis.get("import_rewrite_surface") or []) if str(item).strip()]
-    proposed_moves = []
-    sequence: List[str] = []
-    concrete_steps: List[str] = [
-        f"Freeze `{source_files[0]}` as orchestration entrypoint and map current handler clusters.",
-    ]
-    for index, seam in enumerate(extraction_seams):
-        destination = destination_modules[index] if index < len(destination_modules) else destination_modules[-1]
-        import_rewrite_target = import_rewrite_surface[index] if index < len(import_rewrite_surface) else source_files[0]
-        proposed_moves.append(
-            {
-                "seam": seam,
-                "from": source_files[0],
-                "to_module": destination,
-                "import_rewrite_target": import_rewrite_target,
-            }
-        )
-        sequence.extend(
-            [
-                f"extract_{seam}",
-                f"rewrite_imports_for_{seam}",
-                f"route_delegation_for_{seam}",
-            ]
-        )
-        concrete_steps.append(
-            f"Extract `{seam}` handlers from `{source_files[0]}` into `{destination}` and keep delegation wrappers in place."
-        )
-        concrete_steps.append(
-            f"Rewrite imports in `{import_rewrite_target}` to consume `{destination}` without changing request/response contracts."
-        )
-    if affected_routes:
-        concrete_steps.append(f"Update route delegation for: {', '.join(affected_routes[:6])}.")
-    concrete_steps.append("Run targeted regression and planner/session workflow tests before stage_apply.")
-    steps = _dedupe([*concrete_steps, *_build_decomposition_steps(source_files)])
-
-    risk_annotations: List[str] = [
-        "Import-cycle risk while extracting shared helpers.",
-        "Compatibility wrapper drift if call sites are partially moved.",
-    ]
-    if not detected_seams and not hints.get("extraction_seams"):
-        risk_annotations.append(
-            "Decomposition evidence is limited; seam boundaries are heuristic and should be confirmed before stage_apply."
-        )
-
     return {
-        "implementation_steps": steps,
-        "file_operations": [
-            {
-                "operation": "extract_module",
-                "source": move.get("from"),
-                "destination": move.get("to_module"),
-                "seam": move.get("seam"),
-                "notes": "move cohesive workflow logic into existing module home when available",
-            }
-            for move in proposed_moves
-        ] + [
-            {
-                "operation": "rewrite_imports",
-                "source": str(move.get("import_rewrite_target") or source_files[0]),
-                "destination": str(move.get("to_module") or ""),
-                "seam": str(move.get("seam") or ""),
-            }
-            for move in proposed_moves
-        ] + [
-            {
-                "operation": "delegate_wrapper",
-                "source": str(source_files[0] if source_files else ""),
-                "notes": "preserve compatibility entrypoint",
-            }
-        ],
-        "test_operations": [
-            *[
-                {"operation": "run", "target": suite, "scope": "decomposition-regression"}
-                for suite in required_tests
-            ],
-        ],
-        "compatibility_constraints": [
-            "Maintain identical request/response behavior.",
-            "Do not introduce new features during decomposition pass.",
-        ],
-        "risk_annotations": risk_annotations,
-        "rollback_notes": [
-            "Rollback by restoring wrapper-only commit and reverting extracted module import wiring.",
-        ],
-        "source_files": source_files,
-        "destination_modules": destination_modules,
-        "extraction_seams": extraction_seams,
-        "proposed_moves": proposed_moves,
-        "compatibility_shims": [
-            {
-                "source_module": _normalized_module_name(source_files[0]),
-                "shim_type": "delegation_wrapper",
-                "reason": "preserve import and route compatibility during incremental extraction",
-            }
-        ],
-        "affected_routes": affected_routes,
-        "route_update_implications": [
-            f"Route `{route}` delegates to extracted seam modules."
-            for route in affected_routes[:6]
-        ] or [
-            "Update xyn_api routing handlers to delegate into extracted modules.",
-            "Preserve endpoint paths and response envelopes while extraction is in progress.",
-        ],
-        "ordered_migration_steps": _dedupe(
-            [
-                "identify_domain_clusters",
-                *sequence,
-                "run_required_test_suites",
-                "verify_preview_and_commit_readiness",
-            ]
-        ),
-        "affected_tests": required_tests,
+        "request_text": str(request_text or ""),
+        "classification": asdict(classification),
+        "hints": hints,
+        "context": {
+            "candidate_files": [str(item).strip() for item in candidate_files if str(item).strip()],
+            "artifact_relevance": [dict(item) for item in ranked if isinstance(item, dict)],
+            "selected_artifact_ids": [str(item).strip() for item in selected_ids if str(item).strip()],
+            "codebase_analysis": codebase_analysis if isinstance(codebase_analysis, dict) else {},
+        },
+        "base_plan": base_plan if isinstance(base_plan, dict) else {},
     }
 
 
-class _BasePlanner:
-    mode = "modify_existing_system"
-
-    def synthesize(
-        self,
-        *,
-        candidate_files: Sequence[str],
-        classification: PlannerClassification,
-        request_text: str,
-        planner_hints: Optional[Dict[str, List[str]]] = None,
-        codebase_analysis: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        raise NotImplementedError
+def _default_planning_agent_invoke(planning_input: Dict[str, Any]) -> Dict[str, Any]:
+    payload = planning_input if isinstance(planning_input, dict) else {}
+    base_plan = payload.get("base_plan") if isinstance(payload.get("base_plan"), dict) else {}
+    explicit = base_plan.get("planning_agent_response")
+    if isinstance(explicit, dict):
+        return explicit
+    if "goal" in base_plan and "ordered_steps" in base_plan:
+        return base_plan
+    raise SolutionPlanningAgentUnavailableError(
+        "Planning-agent response is unavailable. No deterministic fallback planning is permitted."
+    )
 
 
-class PythonMonolithDecompositionPlanner(_BasePlanner):
-    mode = "decompose_existing_system"
-
-    def synthesize(
-        self,
-        *,
-        candidate_files: Sequence[str],
-        classification: PlannerClassification,
-        request_text: str,
-        planner_hints: Optional[Dict[str, List[str]]] = None,
-        codebase_analysis: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        hints = planner_hints if isinstance(planner_hints, dict) else {}
-        analysis = codebase_analysis if isinstance(codebase_analysis, dict) else {}
-        return _synthesize_decomposition_plan(
-            candidate_files=candidate_files,
-            hints=hints,
-            analysis=analysis,
-        )
-
-
-class PythonFeatureModificationPlanner(_BasePlanner):
-    mode = "modify_existing_system"
-
-    def synthesize(
-        self,
-        *,
-        candidate_files: Sequence[str],
-        classification: PlannerClassification,
-        request_text: str,
-        planner_hints: Optional[Dict[str, List[str]]] = None,
-        codebase_analysis: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        full_stack = "ui_change" in classification.intents and "api_change" in classification.intents
-        steps = _build_modify_steps(candidate_files, full_stack=full_stack)
-        return {
-            "implementation_steps": steps,
-            "file_operations": [
-                {"operation": "edit", "target": str(candidate_files[0] if candidate_files else "<target_file>")},
-            ],
-            "test_operations": [
-                {"operation": "run", "target": "targeted tests"},
-                {"operation": "run", "target": "smoke/preview checks"},
-            ],
-            "compatibility_constraints": [
-                "Preserve existing contracts unless explicitly requested.",
-            ],
-            "risk_annotations": [
-                "Behavior drift across adjacent handlers/components.",
-            ],
-            "rollback_notes": [
-                "Revert scoped file edits and re-run validation sequence.",
-            ],
-        }
-
-
-class PythonAppCreationPlanner(_BasePlanner):
-    mode = "create_new_application"
-
-    def synthesize(
-        self,
-        *,
-        candidate_files: Sequence[str],
-        classification: PlannerClassification,
-        request_text: str,
-        planner_hints: Optional[Dict[str, List[str]]] = None,
-        codebase_analysis: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        steps = _build_create_app_steps()
-        return {
-            "implementation_steps": steps,
-            "file_operations": [
-                {"operation": "create", "target": "app/__init__.py"},
-                {"operation": "create", "target": "app/api/routes.py"},
-                {"operation": "create", "target": "app/domain/models.py"},
-                {"operation": "create", "target": "tests/test_api_smoke.py"},
-            ],
-            "test_operations": [
-                {"operation": "run", "target": "new app smoke tests"},
-                {"operation": "run", "target": "lint/static checks"},
-            ],
-            "compatibility_constraints": [
-                "Define explicit API/UI contracts before broadening scope.",
-            ],
-            "risk_annotations": [
-                "Over-scaffolding risk; keep first slice minimal and runnable.",
-            ],
-            "rollback_notes": [
-                "Rollback by removing scaffold commit if first slice is not viable.",
-            ],
-            "scaffold_plan": {
-                "project_layout": ["app/api", "app/domain", "app/services", "tests"],
-                "initial_boundaries": ["API handlers", "domain services", "integration seams"],
-            },
-        }
-
-
-class FullStackCoordinationPlanner(_BasePlanner):
-    mode = "cross_artifact_change"
-
-    def synthesize(
-        self,
-        *,
-        candidate_files: Sequence[str],
-        classification: PlannerClassification,
-        request_text: str,
-        planner_hints: Optional[Dict[str, List[str]]] = None,
-        codebase_analysis: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        steps = _build_modify_steps(candidate_files, full_stack=True)
-        return {
-            "implementation_steps": steps,
-            "file_operations": [
-                {"operation": "edit", "target": str(candidate_files[0] if candidate_files else "<backend_or_ui_target>")},
-                {"operation": "edit", "target": str(candidate_files[1] if len(candidate_files) > 1 else "<paired_surface_target>")},
-            ],
-            "test_operations": [
-                {"operation": "run", "target": "API contract tests"},
-                {"operation": "run", "target": "UI integration tests"},
-            ],
-            "compatibility_constraints": [
-                "Backend response contracts and UI assumptions must stay synchronized.",
-            ],
-            "risk_annotations": [
-                "Cross-artifact release coupling can break preview validation if staged unevenly.",
-            ],
-            "rollback_notes": [
-                "Rollback paired backend/UI commits together to avoid contract skew.",
-            ],
-        }
-
-
-def _planner_for_mode(mode: str) -> _BasePlanner:
-    if mode == "decompose_existing_system":
-        return PythonMonolithDecompositionPlanner()
-    if mode == "create_new_application":
-        return PythonAppCreationPlanner()
-    if mode == "cross_artifact_change":
-        return FullStackCoordinationPlanner()
-    return PythonFeatureModificationPlanner()
+def _invoke_planning_agent(
+    *,
+    planning_input: Dict[str, Any],
+    planning_agent_invoke: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]],
+) -> Dict[str, Any]:
+    invoke = planning_agent_invoke or _default_planning_agent_invoke
+    try:
+        response = invoke(planning_input)
+    except SolutionPlanningError:
+        raise
+    except Exception as exc:
+        raise SolutionPlanningError(f"Planning-agent call failed: {exc}") from exc
+    if not isinstance(response, dict):
+        raise SolutionPlanningAgentResponseValidationError("Planning-agent response must be a JSON object.")
+    if not _planning_agent_payload_types_valid(response):
+        raise SolutionPlanningAgentResponseValidationError("Planning-agent response has invalid top-level field types.")
+    normalized = _normalize_planning_agent_response(response)
+    try:
+        validate(instance=normalized, schema=_PLANNING_AGENT_RESPONSE_SCHEMA)
+    except ValidationError as exc:
+        raise SolutionPlanningAgentResponseValidationError(
+            f"Planning-agent response failed schema validation: {exc.message}"
+        ) from exc
+    return normalized
 
 
 def _resolve_artifact_scope(
@@ -1201,6 +1024,7 @@ def build_solution_change_execution_plan(
     analysis: Optional[Dict[str, Any]] = None,
     planner_hints: Optional[Dict[str, Any]] = None,
     line_count_lookup: Optional[Callable[[str], Optional[int]]] = None,
+    planning_agent_invoke: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     base = dict(base_plan or {})
     hints = _extract_planner_hints(base, planner_hints)
@@ -1238,7 +1062,6 @@ def build_solution_change_execution_plan(
     )
     selected_ids: List[str] = [str(item).strip() for item in (selection.get("selected_artifact_ids") or []) if str(item).strip()]
 
-    planner = _planner_for_mode(classification.planning_mode)
     if hints.get("target_source_files"):
         candidate_files = _dedupe([*hints.get("target_source_files", []), *candidate_files])
     codebase_analysis = _build_codebase_analysis(
@@ -1247,26 +1070,29 @@ def build_solution_change_execution_plan(
         oversized=oversized,
         analysis=analysis,
     )
-    synthesized = planner.synthesize(
-        candidate_files=candidate_files,
-        classification=classification,
+    planning_input = _planning_input_payload(
         request_text=request_text,
-        planner_hints=hints,
+        base_plan=base,
+        classification=classification,
+        hints=hints,
         codebase_analysis=codebase_analysis,
+        ranked=ranked,
+        selected_ids=selected_ids,
+        candidate_files=candidate_files,
+    )
+    synthesized = _invoke_planning_agent(
+        planning_input=planning_input,
+        planning_agent_invoke=planning_agent_invoke,
     )
 
-    implementation_steps = _dedupe([str(item or "").strip() for item in (synthesized.get("implementation_steps") or []) if str(item or "").strip()])
+    implementation_steps = _dedupe([str(item or "").strip() for item in (synthesized.get("ordered_steps") or []) if str(item or "").strip()])
     implementation_steps = [step for step in implementation_steps if not _prohibited_ui_step(step, request_text=request_text)]
     if not implementation_steps:
-        if classification.planning_mode == "decompose_existing_system":
-            implementation_steps = _build_decomposition_steps(candidate_files)
-        else:
-            implementation_steps = [
-                "Inspect the primary target module and define minimal scoped edits.",
-                "Apply implementation changes and run targeted validation before stage apply.",
-            ]
+        raise SolutionPlanningAgentResponseValidationError("Planning-agent response returned no usable ordered_steps.")
     if classification.planning_mode == "decompose_existing_system" and _contains_placeholder_steps(implementation_steps):
-        implementation_steps = _build_decomposition_steps(candidate_files)
+        raise SolutionPlanningAgentResponseValidationError(
+            "Planning-agent response for decomposition contains placeholder-only ordered_steps."
+        )
 
     proposed_work = _dedupe([*implementation_steps])
     file_operations = synthesized.get("file_operations") if isinstance(synthesized.get("file_operations"), list) else []
@@ -1286,6 +1112,7 @@ def build_solution_change_execution_plan(
         "Run validation sequence before commit/promotion.",
     ]
     compatibility_constraints = synthesized.get("compatibility_constraints") if isinstance(synthesized.get("compatibility_constraints"), list) else []
+    compatibility_constraints = _dedupe([*compatibility_constraints, *[str(item).strip() for item in (synthesized.get("execution_constraints") or []) if str(item).strip()]])
     rollback_notes = synthesized.get("rollback_notes") if isinstance(synthesized.get("rollback_notes"), list) else []
     route_update_implications = (
         synthesized.get("route_update_implications")
@@ -1366,7 +1193,14 @@ def build_solution_change_execution_plan(
         "planning_mode": classification.planning_mode,
         "plan_kind": classification.plan_kind,
         "confidence": float(round(confidence, 3)),
-        "assumptions": _dedupe([*classification.assumptions, *[str(item).strip() for item in (base.get("assumptions") if isinstance(base.get("assumptions"), list) else []) if str(item).strip()]]),
+        "goal": str(synthesized.get("goal") or "").strip(),
+        "assumptions": _dedupe(
+            [
+                *classification.assumptions,
+                *[str(item).strip() for item in (base.get("assumptions") if isinstance(base.get("assumptions"), list) else []) if str(item).strip()],
+                *[str(item).strip() for item in (synthesized.get("assumptions") or []) if str(item).strip()],
+            ]
+        ),
         "selected_artifact_ids": selected_ids,
         "artifact_relevance": ranked,
         "proposed_work": proposed_work,
@@ -1379,8 +1213,14 @@ def build_solution_change_execution_plan(
         "validation_sequence": validation_sequence,
         "preview_requirements": preview_requirements,
         "rollback_instructions": execution_package.get("rollback_instructions") if isinstance(execution_package.get("rollback_instructions"), list) else [],
-        "risk_annotations": synthesized.get("risk_annotations") if isinstance(synthesized.get("risk_annotations"), list) else [],
+        "risk_annotations": _dedupe(
+            [
+                *[str(item).strip() for item in (synthesized.get("risk_annotations") or []) if str(item).strip()],
+                *[str(item).strip() for item in (synthesized.get("risks") or []) if str(item).strip()],
+            ]
+        ),
         "rollback_notes": rollback_notes if isinstance(rollback_notes, list) else [],
+        "open_questions": synthesized.get("open_questions") if isinstance(synthesized.get("open_questions"), list) else [],
         "affected_tests": _dedupe([str(item).strip() for item in affected_tests if str(item).strip()]),
         "compatibility_constraints": compatibility_constraints if isinstance(compatibility_constraints, list) else [],
         "source_files": synthesized.get("source_files") if isinstance(synthesized.get("source_files"), list) else [],
@@ -1392,6 +1232,7 @@ def build_solution_change_execution_plan(
         "affected_routes": affected_routes if isinstance(affected_routes, list) else [],
         "ordered_migration_steps": synthesized.get("ordered_migration_steps") if isinstance(synthesized.get("ordered_migration_steps"), list) else [],
         "ordered_extraction_sequence": synthesized.get("ordered_migration_steps") if isinstance(synthesized.get("ordered_migration_steps"), list) else [],
+        "validation_checks": synthesized.get("validation_checks") if isinstance(synthesized.get("validation_checks"), list) else [],
         "execution_package": execution_package,
         "planning_checkpoints": [
             {"checkpoint_key": "scope_confirmed", "label": "Scope confirmed", "required_before": "architecture_confirmed"},
@@ -1416,6 +1257,7 @@ def build_solution_change_execution_plan(
             },
             "architecture_inference": architecture,
             "analysis_snapshot": analysis if isinstance(analysis, dict) else {},
+            "planning_agent_input": planning_input,
         },
         "resolved_artifact": selection.get("resolved_artifact") if isinstance(selection.get("resolved_artifact"), dict) else {},
         "scope_mode": str(selection.get("scope_mode") or "minimal"),

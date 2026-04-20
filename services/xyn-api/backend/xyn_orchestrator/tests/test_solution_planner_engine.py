@@ -4,12 +4,214 @@ from django.test import SimpleTestCase
 
 from xyn_orchestrator.solution_change_session.planner_engine import (
     PlannerArtifactInput,
+    SolutionPlanningAgentResponseValidationError,
     build_solution_change_execution_plan,
     validate_decomposition_plan_quality,
 )
 
 
 class SolutionPlannerEngineTests(SimpleTestCase):
+    def setUp(self):
+        super().setUp()
+        self._planning_agent_patcher = patch(
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
+            side_effect=self._mock_planning_agent_response,
+        )
+        self._planning_agent_patcher.start()
+
+    def tearDown(self):
+        self._planning_agent_patcher.stop()
+        super().tearDown()
+
+    def _mock_planning_agent_response(self, planning_input):
+        payload = planning_input if isinstance(planning_input, dict) else {}
+        classification = payload.get("classification") if isinstance(payload.get("classification"), dict) else {}
+        hints = payload.get("hints") if isinstance(payload.get("hints"), dict) else {}
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        codebase = context.get("codebase_analysis") if isinstance(context.get("codebase_analysis"), dict) else {}
+        mode = str(classification.get("planning_mode") or "modify_existing_system")
+        candidate_files = [str(item).strip() for item in (context.get("candidate_files") or []) if str(item).strip()]
+        primary = str(candidate_files[0] if candidate_files else "services/xyn-api/backend/xyn_orchestrator/xyn_api.py")
+        affected_routes = [str(item).strip() for item in (codebase.get("affected_routes") or []) if str(item).strip()]
+
+        if mode == "decompose_existing_system":
+            source_files = [str(item).strip() for item in (hints.get("target_source_files") or []) if str(item).strip()]
+            if not source_files:
+                source_files = [primary]
+            extraction_seams = [str(item).strip() for item in (hints.get("extraction_seams") or []) if str(item).strip()]
+            if not extraction_seams:
+                extraction_seams = ["solution_change_session_workflow", "runtime_run_handlers", "release_target_handlers"]
+            destination_modules = [str(item).strip() for item in (hints.get("moved_handlers_modules") or []) if str(item).strip()]
+            for module in (codebase.get("candidate_destination_modules") or []):
+                token = str(module or "").strip()
+                if token and token not in destination_modules:
+                    destination_modules.append(token)
+            for module in (
+                "backend/xyn_orchestrator/api/solutions.py",
+                "backend/xyn_orchestrator/api/runtime.py",
+                "backend/xyn_orchestrator/solution_change_session/stage_apply_workflow.py",
+                "backend/xyn_orchestrator/solution_change_session/stage_apply_dispatch.py",
+                "backend/xyn_orchestrator/solution_change_session/stage_apply_scoping.py",
+                "backend/xyn_orchestrator/solution_change_session/stage_apply_git.py",
+                "backend/xyn_orchestrator/planning/plan_service.py",
+            ):
+                if module not in destination_modules:
+                    destination_modules.append(module)
+            test_targets = [str(item).strip() for item in (hints.get("required_test_suites") or []) if str(item).strip()]
+            if not test_targets:
+                test_targets = ["xyn_orchestrator.tests.test_goal_planning", "xyn_orchestrator.tests.test_bearer_workflow_auth"]
+            proposed_moves = []
+            ordered_sequence = ["identify_domain_clusters"]
+            for index, seam in enumerate(extraction_seams):
+                destination = destination_modules[index] if index < len(destination_modules) else destination_modules[-1]
+                proposed_moves.append(
+                    {
+                        "seam": seam,
+                        "from": source_files[0],
+                        "to_module": destination,
+                        "import_rewrite_target": source_files[0],
+                    }
+                )
+                ordered_sequence.extend([f"extract_{seam}", f"rewrite_imports_for_{seam}", f"route_delegation_for_{seam}"])
+            ordered_sequence.extend(["run_required_test_suites", "verify_preview_and_commit_readiness"])
+            ordered_steps = [
+                f"Extract `{extraction_seams[0]}` handlers from `{source_files[0]}` into `{destination_modules[0]}` and preserve delegation wrappers.",
+                f"Rewrite imports in `{source_files[0]}` to reference extracted modules without changing request/response behavior.",
+                "Run targeted regression and planner/session workflow tests before stage_apply.",
+            ]
+            if affected_routes:
+                ordered_steps.append(f"Preserve route delegation for: {', '.join(affected_routes[:6])}.")
+            return {
+                "goal": f"Decompose {source_files[0]} while preserving runtime behavior.",
+                "assumptions": ["No net-new feature additions.", "Compatibility wrappers stay in place during extraction."],
+                "ordered_steps": ordered_steps,
+                "affected_files": source_files + destination_modules,
+                "affected_components": ["xyn-api"],
+                "risks": [
+                    "Import-cycle risk while extracting shared helpers.",
+                    "Compatibility wrapper drift if call sites are partially moved.",
+                ],
+                "open_questions": [],
+                "validation_checks": ["scope_confirmed", "architecture_confirmed", "execution_plan_confirmed", "preview_ready", "validate"],
+                "execution_constraints": [
+                    "Maintain identical request/response behavior.",
+                    "Do not introduce new features during decomposition pass.",
+                ],
+                "file_operations": [
+                    {
+                        "operation": "extract_module",
+                        "source": move.get("from"),
+                        "destination": move.get("to_module"),
+                        "seam": move.get("seam"),
+                    }
+                    for move in proposed_moves
+                ]
+                + [
+                    {
+                        "operation": "rewrite_imports",
+                        "source": str(move.get("import_rewrite_target") or source_files[0]),
+                        "destination": str(move.get("to_module") or ""),
+                        "seam": str(move.get("seam") or ""),
+                    }
+                    for move in proposed_moves
+                ]
+                + [{"operation": "delegate_wrapper", "source": source_files[0], "notes": "preserve compatibility entrypoint"}],
+                "test_operations": [{"operation": "run", "target": suite, "scope": "decomposition-regression"} for suite in test_targets],
+                "rollback_notes": ["Rollback by reverting extracted module import wiring and wrapper delegation."],
+                "route_update_implications": [f"Route `{route}` delegates to extracted seam modules." for route in affected_routes],
+                "affected_routes": affected_routes,
+                "source_files": source_files,
+                "destination_modules": destination_modules,
+                "extraction_seams": extraction_seams,
+                "proposed_moves": proposed_moves,
+                "compatibility_shims": [
+                    {
+                        "source_module": "backend.xyn_orchestrator.xyn_api",
+                        "shim_type": "delegation_wrapper",
+                        "reason": "preserve import and route compatibility during incremental extraction",
+                    }
+                ],
+                "ordered_migration_steps": ordered_sequence,
+                "compatibility_constraints": [
+                    "Maintain identical request/response behavior.",
+                    "Do not introduce new features during decomposition pass.",
+                ],
+                "risk_annotations": [
+                    "Import-cycle risk while extracting shared helpers.",
+                    "Compatibility wrapper drift if call sites are partially moved.",
+                ],
+                "affected_tests": test_targets,
+            }
+
+        if mode == "create_new_application":
+            return {
+                "goal": "Create a new runnable application scaffold.",
+                "assumptions": ["Initial scope is a minimal vertical slice."],
+                "ordered_steps": [
+                    "Create Python backend scaffold and routing entrypoints.",
+                    "Define initial domain boundaries and contracts.",
+                    "Add baseline smoke tests for first slice.",
+                ],
+                "affected_files": ["app/__init__.py", "app/api/routes.py", "app/domain/models.py", "tests/test_api_smoke.py"],
+                "affected_components": ["backend", "api"],
+                "risks": ["Over-scaffolding risk; keep first slice minimal and runnable."],
+                "open_questions": [],
+                "validation_checks": ["scope_confirmed", "execution_plan_confirmed", "validate"],
+                "execution_constraints": ["Define explicit API/UI contracts before broadening scope."],
+                "file_operations": [
+                    {"operation": "create", "target": "app/__init__.py"},
+                    {"operation": "create", "target": "app/api/routes.py"},
+                    {"operation": "create", "target": "app/domain/models.py"},
+                    {"operation": "create", "target": "tests/test_api_smoke.py"},
+                ],
+                "test_operations": [
+                    {"operation": "run", "target": "new app smoke tests"},
+                    {"operation": "run", "target": "lint/static checks"},
+                ],
+                "rollback_notes": ["Rollback by removing scaffold commit if first slice is not viable."],
+                "scaffold_plan": {"project_layout": ["app/api", "app/domain", "app/services", "tests"]},
+            }
+
+        if mode == "cross_artifact_change":
+            secondary = str(candidate_files[1] if len(candidate_files) > 1 else "apps/xyn-ui/src/app/App.tsx")
+            return {
+                "goal": "Coordinate backend and UI contract changes across artifacts.",
+                "assumptions": ["Backend and UI are deployed together for preview validation."],
+                "ordered_steps": [
+                    f"Update backend behavior in `{primary}` while preserving compatibility constraints.",
+                    f"Align paired UI integration in `{secondary}` with backend contract updates.",
+                    "Validate end-to-end flow in preview with staged backend and UI artifacts.",
+                ],
+                "affected_files": [primary, secondary],
+                "affected_components": ["xyn-api", "xyn-ui"],
+                "risks": ["Cross-artifact release coupling can break preview validation if staged unevenly."],
+                "open_questions": [],
+                "validation_checks": ["scope_confirmed", "execution_plan_confirmed", "preview_ready", "validate"],
+                "execution_constraints": ["Backend response contracts and UI assumptions must stay synchronized."],
+                "file_operations": [{"operation": "edit", "target": primary}, {"operation": "edit", "target": secondary}],
+                "test_operations": [{"operation": "run", "target": "API contract tests"}, {"operation": "run", "target": "UI integration tests"}],
+                "rollback_notes": ["Rollback paired backend/UI commits together to avoid contract skew."],
+            }
+
+        return {
+            "goal": "Deliver requested behavior change with minimal scope.",
+            "assumptions": ["Behavior compatibility remains mandatory unless explicitly changed."],
+            "ordered_steps": [
+                f"Inspect `{primary}` and implement scoped behavior changes.",
+                "Update targeted tests and validation checks for impacted workflows.",
+                "Confirm no regressions in adjacent workflows before stage apply.",
+            ],
+            "affected_files": [primary],
+            "affected_components": ["xyn-api"],
+            "risks": ["Behavior drift across adjacent handlers/components."],
+            "open_questions": [],
+            "validation_checks": ["scope_confirmed", "execution_plan_confirmed", "validate"],
+            "execution_constraints": ["Preserve existing contracts unless explicitly requested."],
+            "file_operations": [{"operation": "edit", "target": primary}],
+            "test_operations": [{"operation": "run", "target": "targeted tests"}, {"operation": "run", "target": "smoke/preview checks"}],
+            "rollback_notes": ["Revert scoped file edits and re-run validation sequence."],
+        }
+
     def _artifacts(self):
         return [
             PlannerArtifactInput(
@@ -335,9 +537,11 @@ class SolutionPlannerEngineTests(SimpleTestCase):
     def test_vague_decomposition_plan_is_rejected_by_packaging_guard(self):
         request_text = "Decompose backend/xyn_orchestrator/xyn_api.py"
         with patch(
-            "xyn_orchestrator.solution_change_session.planner_engine.PythonMonolithDecompositionPlanner.synthesize",
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
             return_value={
-                "implementation_steps": ["Inspect file", "Update as needed", "Confirm behavior", "Adjust tests"],
+                "goal": "decompose",
+                "ordered_steps": ["Inspect file", "Update as needed", "Confirm behavior", "Adjust tests"],
+                "validation_checks": ["validate"],
                 "file_operations": [],
                 "test_operations": [],
             },
@@ -409,9 +613,11 @@ class SolutionPlannerEngineTests(SimpleTestCase):
     def test_decomposition_plan_without_seams_or_moves_is_rejected_by_packaging_guard(self):
         request_text = "Decompose backend/xyn_orchestrator/xyn_api.py"
         with patch(
-            "xyn_orchestrator.solution_change_session.planner_engine.PythonMonolithDecompositionPlanner.synthesize",
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
             return_value={
-                "implementation_steps": ["Extract handlers into modules with wrappers."],
+                "goal": "decompose",
+                "ordered_steps": ["Extract handlers into modules with wrappers."],
+                "validation_checks": ["validate"],
                 "file_operations": [
                     {
                         "operation": "extract_module",
@@ -431,6 +637,34 @@ class SolutionPlannerEngineTests(SimpleTestCase):
                     artifacts=self._artifacts(),
                     selected_artifact_ids=["api-1"],
                     planner_hints={"target_source_files": ["backend/xyn_orchestrator/xyn_api.py"]},
+                )
+
+    def test_planner_calls_planning_agent_for_normal_requests(self):
+        request_text = "Modify backend endpoint behavior in services/xyn-api/backend/xyn_orchestrator/xyn_api.py."
+        with patch(
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
+            wraps=self._mock_planning_agent_response,
+        ) as invoke_mock:
+            build_solution_change_execution_plan(
+                request_text=request_text,
+                base_plan={},
+                artifacts=self._artifacts(),
+                selected_artifact_ids=["api-1"],
+            )
+        invoke_mock.assert_called_once()
+
+    def test_malformed_planning_agent_output_fails_validation_explicitly(self):
+        request_text = "Modify backend endpoint behavior in services/xyn-api/backend/xyn_orchestrator/xyn_api.py."
+        with patch(
+            "xyn_orchestrator.solution_change_session.planner_engine._default_planning_agent_invoke",
+            return_value={"goal": "bad", "ordered_steps": ["one"], "validation_checks": "not-a-list"},
+        ):
+            with self.assertRaises(SolutionPlanningAgentResponseValidationError):
+                build_solution_change_execution_plan(
+                    request_text=request_text,
+                    base_plan={},
+                    artifacts=self._artifacts(),
+                    selected_artifact_ids=["api-1"],
                 )
 
     def test_route_preserving_decomposition_plan_packages_successfully(self):
