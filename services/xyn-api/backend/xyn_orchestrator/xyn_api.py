@@ -37569,7 +37569,17 @@ def _generate_solution_change_plan(
             resolved_config: Dict[str, Any],
             planning_input: Dict[str, Any],
             raw_response_text: str,
+            response_schema: Dict[str, Any],
         ) -> Dict[str, Any]:
+            classification = planning_input.get("classification") if isinstance(planning_input.get("classification"), dict) else {}
+            planning_mode = str(classification.get("planning_mode") or "").strip()
+            decomposition_contract = ""
+            if planning_mode == "decompose_existing_system":
+                decomposition_contract = (
+                    "\nDecomposition required fields:\n"
+                    "- proposed_moves must contain at least one object with seam, from, to_module\n"
+                    "- extraction_seams, source_files, and destination_modules must be non-empty\n"
+                )
             repair_prompt = (
                 "You are a JSON repair assistant for a planning agent.\n"
                 "Return ONLY one JSON object and no prose.\n"
@@ -37584,6 +37594,8 @@ def _generate_solution_change_plan(
                 "- ordered_steps must contain at least one step\n"
                 "- validation_checks must be present\n"
                 "- arrays/objects may be empty when unknown\n\n"
+                f"{decomposition_contract}"
+                f"\nResponse schema:\n{json.dumps(response_schema, ensure_ascii=True)}\n\n"
                 f"Planning input:\n{json.dumps(planning_input, ensure_ascii=True)}\n\n"
                 f"Malformed planning response to repair:\n{str(raw_response_text or '').strip()}"
             )
@@ -37624,6 +37636,7 @@ def _generate_solution_change_plan(
             *,
             resolved_config: Dict[str, Any],
             planning_input: Dict[str, Any],
+            response_schema: Dict[str, Any],
         ) -> Dict[str, Any]:
             provider = str(resolved_config.get("provider") or "").strip().lower()
             model_name = str(resolved_config.get("model_name") or "").strip()
@@ -37652,6 +37665,7 @@ def _generate_solution_change_plan(
                 "- ordered_steps must be a non-empty array\n"
                 "- validation_checks must be present\n"
                 "- arrays/objects can be empty when unknown\n\n"
+                f"Response schema:\n{json.dumps(response_schema, ensure_ascii=True)}\n\n"
                 f"Planning input:\n{json.dumps(planning_input, ensure_ascii=True)}"
             )
             messages: List[Dict[str, str]] = []
@@ -37672,7 +37686,7 @@ def _generate_solution_change_plan(
                         "json_schema": {
                             "name": "solution_change_plan",
                             "strict": True,
-                            "schema": _openai_strict_schema(planner_response_schema),
+                            "schema": _openai_strict_schema(response_schema),
                         },
                     },
                     "max_completion_tokens": int(resolved_config.get("max_tokens") or 1600),
@@ -37802,6 +37816,15 @@ def _generate_solution_change_plan(
                     )
             classification = planning_input.get("classification") if isinstance(planning_input.get("classification"), dict) else {}
             planning_mode = str(classification.get("planning_mode") or "").strip()
+            response_schema = copy.deepcopy(planner_response_schema)
+            if planning_mode == "decompose_existing_system":
+                schema_props = response_schema.get("properties") if isinstance(response_schema.get("properties"), dict) else {}
+                for key in ("proposed_moves", "extraction_seams", "source_files", "destination_modules"):
+                    node = schema_props.get(key) if isinstance(schema_props.get(key), dict) else {}
+                    if node:
+                        node["minItems"] = 1
+                        schema_props[key] = node
+                response_schema["properties"] = schema_props
             hints_payload = planning_input.get("hints") if isinstance(planning_input.get("hints"), dict) else {}
             target_source_files = [
                 str(item).strip()
@@ -37862,6 +37885,7 @@ def _generate_solution_change_plan(
                 return _invoke_openai_planning_json_fallback(
                     resolved_config=resolved,
                     planning_input=planning_input,
+                    response_schema=response_schema,
                 )
             result = invoke_model(
                 resolved_config=resolved,
@@ -37883,12 +37907,14 @@ def _generate_solution_change_plan(
                         resolved_config=resolved,
                         planning_input=planning_input,
                         raw_response_text=raw_text,
+                        response_schema=response_schema,
                     )
                     return repaired
                 except SolutionPlanningAgentResponseValidationError:
                     return _invoke_openai_planning_json_fallback(
                         resolved_config=resolved,
                         planning_input=planning_input,
+                        response_schema=response_schema,
                     )
             try:
                 parsed = json.loads(json_text)
