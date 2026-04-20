@@ -37027,6 +37027,19 @@ def _generate_solution_change_plan(
     ) -> Dict[str, Any]:
         planner_response_schema = planning_agent_response_schema()
 
+        def _openai_strict_schema(node: Any) -> Any:
+            if isinstance(node, dict):
+                normalized: Dict[str, Any] = {}
+                for key, value in node.items():
+                    normalized[str(key)] = _openai_strict_schema(value)
+                if str(normalized.get("type") or "").strip().lower() == "object":
+                    normalized.setdefault("properties", {})
+                    normalized["additionalProperties"] = False
+                return normalized
+            if isinstance(node, list):
+                return [_openai_strict_schema(item) for item in node]
+            return node
+
         def _planning_validation_error(message: str, *, diagnostics: Optional[Dict[str, Any]] = None) -> SolutionPlanningAgentResponseValidationError:
             err = SolutionPlanningAgentResponseValidationError(str(message or "").strip())
             if isinstance(diagnostics, dict) and diagnostics:
@@ -37167,7 +37180,7 @@ def _generate_solution_change_plan(
                         "json_schema": {
                             "name": "solution_change_plan",
                             "strict": True,
-                            "schema": planner_response_schema,
+                            "schema": _openai_strict_schema(planner_response_schema),
                         },
                     },
                     "max_completion_tokens": int(resolved_config.get("max_tokens") or 1600),
