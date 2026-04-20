@@ -37103,6 +37103,78 @@ def _generate_solution_change_plan(
                 )
             return repaired
 
+        def _invoke_openai_planning_json_fallback(
+            *,
+            resolved_config: Dict[str, Any],
+            planning_input: Dict[str, Any],
+        ) -> Dict[str, Any]:
+            provider = str(resolved_config.get("provider") or "").strip().lower()
+            model_name = str(resolved_config.get("model_name") or "").strip()
+            api_key = str(resolved_config.get("api_key") or "").strip()
+            if provider != "openai" or not model_name or not api_key:
+                raise SolutionPlanningAgentResponseValidationError(
+                    "OpenAI JSON fallback unavailable for current planning provider configuration."
+                )
+            system_prompt = str(resolved_config.get("system_prompt") or "").strip()
+            user_prompt = (
+                "Return ONLY one valid JSON object for planning.\n"
+                "Top-level keys required exactly:\n"
+                "goal, assumptions, ordered_steps, affected_files, affected_components, risks, open_questions,\n"
+                "validation_checks, execution_constraints, file_operations, test_operations, rollback_notes,\n"
+                "route_update_implications, affected_routes, source_files, destination_modules, extraction_seams,\n"
+                "proposed_moves, compatibility_shims, ordered_migration_steps, compatibility_constraints,\n"
+                "scaffold_plan, risk_annotations, affected_tests.\n"
+                "Required constraints:\n"
+                "- goal must be non-empty\n"
+                "- ordered_steps must be a non-empty array\n"
+                "- validation_checks must be present\n"
+                "- arrays/objects can be empty when unknown\n\n"
+                f"Planning input:\n{json.dumps(planning_input, ensure_ascii=True)}"
+            )
+            messages: List[Dict[str, str]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": user_prompt})
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_name,
+                    "messages": messages,
+                    "response_format": {"type": "json_object"},
+                    "temperature": float(resolved_config.get("temperature") or 0.0),
+                    "max_tokens": int(resolved_config.get("max_tokens") or 1600),
+                },
+                timeout=60,
+            )
+            if response.status_code >= 400:
+                raise SolutionPlanningAgentResponseValidationError(
+                    f"OpenAI JSON fallback failed ({response.status_code}): {response.text[:300]}"
+                )
+            payload = response.json() if response.content else {}
+            choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
+            message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+            content = str(message.get("content") or "").strip() if isinstance(message, dict) else ""
+            json_text = _extract_json_object_text(content)
+            if not json_text:
+                raise SolutionPlanningAgentResponseValidationError(
+                    "OpenAI JSON fallback did not return parseable JSON content."
+                )
+            try:
+                parsed = json.loads(json_text)
+            except json.JSONDecodeError as exc:
+                raise SolutionPlanningAgentResponseValidationError(
+                    f"OpenAI JSON fallback decode failed: {exc}"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise SolutionPlanningAgentResponseValidationError(
+                    "OpenAI JSON fallback response must decode to a JSON object."
+                )
+            return parsed
+
         def _invoke_solution_planning_agent(planning_input: Dict[str, Any]) -> Dict[str, Any]:
             resolved = resolve_ai_config(purpose_slug="planning")
             raw_context_refs: List[Any] = []
@@ -37161,12 +37233,18 @@ def _generate_solution_change_plan(
                     if json_text:
                         break
             if not json_text:
-                repaired = _invoke_planning_json_repair_agent(
-                    resolved_config=resolved,
-                    planning_input=planning_input,
-                    raw_response_text=raw_text,
-                )
-                return repaired
+                try:
+                    repaired = _invoke_planning_json_repair_agent(
+                        resolved_config=resolved,
+                        planning_input=planning_input,
+                        raw_response_text=raw_text,
+                    )
+                    return repaired
+                except SolutionPlanningAgentResponseValidationError:
+                    return _invoke_openai_planning_json_fallback(
+                        resolved_config=resolved,
+                        planning_input=planning_input,
+                    )
             try:
                 parsed = json.loads(json_text)
             except json.JSONDecodeError as exc:
