@@ -810,23 +810,58 @@ def _call_planning_agent(
     planning_agent_invoke: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]],
 ) -> Dict[str, Any]:
     invoke = planning_agent_invoke or _default_planning_agent_call
-    try:
-        response = invoke(planning_input)
-    except SolutionPlanningError:
-        raise
-    except Exception as exc:
-        raise SolutionPlanningError(f"Planning-agent call failed: {exc}") from exc
-    if not isinstance(response, dict):
-        raise SolutionPlanningAgentResponseValidationError("Planning-agent response must be a JSON object.")
-    if not _planning_agent_payload_types_valid(response):
-        raise SolutionPlanningAgentResponseValidationError("Planning-agent response has invalid top-level field types.")
-    normalized = _normalize_planning_agent_response(response)
-    try:
-        validate(instance=normalized, schema=_PLANNING_AGENT_RESPONSE_SCHEMA)
-    except ValidationError as exc:
-        raise SolutionPlanningAgentResponseValidationError(
-            f"Planning-agent response failed schema validation: {exc.message}"
-        ) from exc
+    planning_input_payload = planning_input if isinstance(planning_input, dict) else {}
+
+    def _is_decomposition_mode(payload: Dict[str, Any]) -> bool:
+        classification = payload.get("classification") if isinstance(payload.get("classification"), dict) else {}
+        return str(classification.get("planning_mode") or "").strip() == "decompose_existing_system"
+
+    def _response_has_proposed_moves(payload: Dict[str, Any]) -> bool:
+        proposed_moves = payload.get("proposed_moves")
+        if not isinstance(proposed_moves, list):
+            return False
+        return bool([item for item in proposed_moves if isinstance(item, dict)])
+
+    def _invoke_once(payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            response = invoke(payload)
+        except SolutionPlanningError:
+            raise
+        except Exception as exc:
+            raise SolutionPlanningError(f"Planning-agent call failed: {exc}") from exc
+        if not isinstance(response, dict):
+            raise SolutionPlanningAgentResponseValidationError("Planning-agent response must be a JSON object.")
+        if not _planning_agent_payload_types_valid(response):
+            raise SolutionPlanningAgentResponseValidationError("Planning-agent response has invalid top-level field types.")
+        normalized = _normalize_planning_agent_response(response)
+        try:
+            validate(instance=normalized, schema=_PLANNING_AGENT_RESPONSE_SCHEMA)
+        except ValidationError as exc:
+            raise SolutionPlanningAgentResponseValidationError(
+                f"Planning-agent response failed schema validation: {exc.message}"
+            ) from exc
+        return normalized
+
+    normalized = _invoke_once(planning_input_payload)
+    if _is_decomposition_mode(planning_input_payload) and not _response_has_proposed_moves(normalized):
+        retry_input = copy.deepcopy(planning_input_payload)
+        retry_input["agent_retry_directive"] = {
+            "reason": "missing_proposed_moves",
+            "requirement": "For decomposition planning_mode, proposed_moves must contain at least one concrete move object.",
+            "required_fields_per_move": ["seam", "from", "to_module"],
+        }
+        retry_input["response_contract_overrides"] = {
+            "decomposition_required": {
+                "min_proposed_moves": 1,
+                "required_move_fields": ["seam", "from", "to_module"],
+                "reject_placeholder_steps": True,
+            }
+        }
+        normalized = _invoke_once(retry_input)
+        if not _response_has_proposed_moves(normalized):
+            raise SolutionPlanningAgentResponseValidationError(
+                "Planning-agent decomposition response missing required proposed_moves after single retry."
+            )
     return normalized
 
 

@@ -37800,6 +37800,46 @@ def _generate_solution_change_plan(
                         if base_system_prompt
                         else context_text
                     )
+            classification = planning_input.get("classification") if isinstance(planning_input.get("classification"), dict) else {}
+            planning_mode = str(classification.get("planning_mode") or "").strip()
+            hints_payload = planning_input.get("hints") if isinstance(planning_input.get("hints"), dict) else {}
+            target_source_files = [
+                str(item).strip()
+                for item in (hints_payload.get("target_source_files") if isinstance(hints_payload.get("target_source_files"), list) else [])
+                if str(item).strip()
+            ]
+            retry_directive = (
+                planning_input.get("agent_retry_directive")
+                if isinstance(planning_input.get("agent_retry_directive"), dict)
+                else {}
+            )
+            decomposition_contract = ""
+            if planning_mode == "decompose_existing_system":
+                no_ui_constraints = (
+                    "No UI/styling/layout work is allowed when request text contains explicit negations."
+                )
+                target_scope_hint = (
+                    f"Primary source scope: {', '.join(target_source_files[:5])}."
+                    if target_source_files
+                    else "Primary source scope: use backend source files from context.candidate_files."
+                )
+                decomposition_contract = (
+                    "\nDecomposition contract (required for planning_mode=decompose_existing_system):\n"
+                    "- proposed_moves must contain at least one concrete move object.\n"
+                    "- each proposed_moves object must include seam, from, to_module, and should include import_rewrite_target when possible.\n"
+                    "- ordered_steps must be implementation-ready backend extraction/move steps, not generic placeholders.\n"
+                    "- source_files and destination_modules must align with backend decomposition scope.\n"
+                    f"- {target_scope_hint}\n"
+                    f"- {no_ui_constraints}\n"
+                )
+            retry_contract = ""
+            if retry_directive:
+                retry_contract = (
+                    "\nRetry directive:\n"
+                    f"- reason: {str(retry_directive.get('reason') or '').strip()}\n"
+                    f"- requirement: {str(retry_directive.get('requirement') or '').strip()}\n"
+                    f"- required_fields_per_move: {json.dumps(retry_directive.get('required_fields_per_move') or [], ensure_ascii=True)}\n"
+                )
             prompt = (
                 "You are the planning agent for solution change sessions.\n"
                 "Return ONLY one JSON object (no markdown, no prose) with these exact top-level keys:\n"
@@ -37813,6 +37853,8 @@ def _generate_solution_change_plan(
                 "- ordered_steps must be a non-empty ordered list.\n"
                 "- validation_checks must be present.\n"
                 "- Use empty arrays/objects where data is unknown.\n\n"
+                f"{decomposition_contract}"
+                f"{retry_contract}\n"
                 f"Planning input:\n{json.dumps(planning_input, ensure_ascii=True)}"
             )
             provider = str(resolved.get("provider") or "").strip().lower()
