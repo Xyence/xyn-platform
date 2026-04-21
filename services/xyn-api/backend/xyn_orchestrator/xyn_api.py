@@ -8730,6 +8730,62 @@ DEFAULT_RUNTIME_ARTIFACT_OWNERSHIP: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _remote_artifact_ownership_overrides() -> Dict[str, Dict[str, Any]]:
+    raw = str(os.environ.get("XYN_REMOTE_ARTIFACT_OWNERSHIP_OVERRIDES", "") or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    overrides: Dict[str, Dict[str, Any]] = {}
+    for key, value in parsed.items():
+        token = str(key or "").strip().lower()
+        if not token or not isinstance(value, dict):
+            continue
+        repo_slug = str(value.get("owner_repo_slug") or value.get("repo_slug") or "").strip()
+        raw_paths = value.get("owner_path_prefixes")
+        if not isinstance(raw_paths, list):
+            raw_paths = value.get("allowed_paths")
+        allowed_paths = [str(item).strip() for item in (raw_paths if isinstance(raw_paths, list) else []) if str(item).strip()]
+        if repo_slug and allowed_paths:
+            overrides[token] = {"repo_slug": repo_slug, "allowed_paths": allowed_paths}
+    return overrides
+
+
+def _remote_artifact_ownership_override_for_artifact(artifact: Artifact) -> Dict[str, Any]:
+    overrides = _remote_artifact_ownership_overrides()
+    if not overrides:
+        return {}
+    slug = str(getattr(artifact, "slug", "") or "").strip().lower()
+    provenance = artifact.provenance_json if isinstance(getattr(artifact, "provenance_json", None), dict) else {}
+    remote_source = provenance.get("remote_source") if isinstance(provenance.get("remote_source"), dict) else {}
+    solution_slug = str(remote_source.get("solution_slug") or "").strip().lower()
+    candidate_keys = [
+        f"artifact:{slug}" if slug else "",
+        slug,
+        f"solution:{solution_slug}" if solution_slug else "",
+        solution_slug,
+    ]
+    for candidate_key in candidate_keys:
+        token = str(candidate_key or "").strip().lower()
+        if not token:
+            continue
+        override = overrides.get(token)
+        if isinstance(override, dict):
+            repo_slug = str(override.get("repo_slug") or "").strip()
+            allowed_paths = [
+                str(item).strip()
+                for item in (override.get("allowed_paths") if isinstance(override.get("allowed_paths"), list) else [])
+                if str(item).strip()
+            ]
+            if repo_slug and allowed_paths:
+                return {"repo_slug": repo_slug, "allowed_paths": allowed_paths}
+    return {}
+
+
 def _runtime_artifact_ownership_for_slug(slug: str) -> Dict[str, Any]:
     token = str(slug or "").strip().lower()
     ownership = DEFAULT_RUNTIME_ARTIFACT_OWNERSHIP.get(token)
@@ -8751,11 +8807,36 @@ def resolve_artifact_ownership(artifact: Artifact) -> Dict[str, Any]:
         else []
     )
     normalized_paths = [str(item).strip() for item in allowed_paths if str(item).strip()]
+    repo_slug = str(getattr(artifact, "owner_repo_slug", "") or "").strip()
     edit_mode = str(getattr(artifact, "edit_mode", "") or "").strip().lower() or "generated"
     if edit_mode not in {"repo_backed", "generated", "read_only"}:
         edit_mode = "generated"
+    if not repo_slug or not normalized_paths:
+        provenance = artifact.provenance_json if isinstance(getattr(artifact, "provenance_json", None), dict) else {}
+        remote_source = provenance.get("remote_source") if isinstance(provenance.get("remote_source"), dict) else {}
+        if not repo_slug:
+            repo_slug = str(remote_source.get("owner_repo_slug") or remote_source.get("repo_slug") or "").strip()
+        if not normalized_paths:
+            source_paths = remote_source.get("owner_path_prefixes")
+            if not isinstance(source_paths, list):
+                source_paths = remote_source.get("allowed_paths")
+            normalized_paths = [
+                str(item).strip() for item in (source_paths if isinstance(source_paths, list) else []) if str(item).strip()
+            ]
+    if not repo_slug or not normalized_paths:
+        override = _remote_artifact_ownership_override_for_artifact(artifact)
+        if not repo_slug:
+            repo_slug = str(override.get("repo_slug") or "").strip()
+        if not normalized_paths:
+            normalized_paths = [
+                str(item).strip()
+                for item in (override.get("allowed_paths") if isinstance(override.get("allowed_paths"), list) else [])
+                if str(item).strip()
+            ]
+    if repo_slug and normalized_paths:
+        edit_mode = "repo_backed"
     return {
-        "repo_slug": str(getattr(artifact, "owner_repo_slug", "") or "").strip() or None,
+        "repo_slug": repo_slug or None,
         "allowed_paths": normalized_paths,
         "edit_mode": edit_mode,
     }

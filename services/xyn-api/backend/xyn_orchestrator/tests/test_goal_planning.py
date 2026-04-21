@@ -6680,6 +6680,46 @@ class GoalPlanningTests(TestCase):
         self.assertEqual(plan.get("planning_mode"), "deterministic")
         self.assertIn("no repository ownership metadata", str(plan.get("code_context_summary") or "").lower())
 
+    def test_resolve_artifact_ownership_uses_remote_override_when_manifest_ownership_missing(self):
+        artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
+        artifact = Artifact.objects.create(
+            workspace=self.workspace,
+            type=artifact_type,
+            title="app.real-estate-deal-finder",
+            slug="app.real-estate-deal-finder",
+            status="active",
+            artifact_state="canonical",
+            author=self.identity,
+            owner_repo_slug="",
+            owner_path_prefixes_json=[],
+            edit_mode="read_only",
+            provenance_json={
+                "artifact_origin": "remote_catalog",
+                "remote_source": {
+                    "solution_slug": "real-estate-deal-finder",
+                    "manifest_source": "s3://bucket/solutions/real-estate-deal-finder/v1/manifest.json",
+                },
+            },
+        )
+        override_payload = {
+            "artifact:app.real-estate-deal-finder": {
+                "owner_repo_slug": "xyn-platform",
+                "owner_path_prefixes": ["services/xyn-api/backend/xyn_orchestrator/"],
+            }
+        }
+        with mock.patch.dict(
+            os.environ,
+            {"XYN_REMOTE_ARTIFACT_OWNERSHIP_OVERRIDES": json.dumps(override_payload)},
+            clear=False,
+        ):
+            ownership = xyn_api.resolve_artifact_ownership(artifact)
+        self.assertEqual(str(ownership.get("repo_slug") or ""), "xyn-platform")
+        self.assertEqual(
+            ownership.get("allowed_paths"),
+            ["services/xyn-api/backend/xyn_orchestrator/"],
+        )
+        self.assertEqual(str(ownership.get("edit_mode") or ""), "repo_backed")
+
     def test_solution_change_session_code_context_respects_allowed_paths_for_selected_artifact(self):
         artifact_type = ArtifactType.objects.create(slug=f"generated-app-{uuid.uuid4().hex[:6]}", name="Generated App")
         ui_artifact = Artifact.objects.create(
