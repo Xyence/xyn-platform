@@ -7723,6 +7723,12 @@ class GoalPlanningTests(TestCase):
         planned_work_by_artifact = {"artifact-1": ["step 1"]}
         plan = {"proposed_work": ["step 1"]}
         dispatch_user = mock.sentinel.user
+        remote_catalog_materialization_by_artifact_id = {
+            "artifact-1": {
+                "mode": "lazy_materialize_in_runtime_context",
+                "manifest_source": "s3://bucket/manifest.json",
+            }
+        }
         expected_payload = {"execution_runs": [], "per_repo_results": []}
 
         with mock.patch(
@@ -7736,6 +7742,7 @@ class GoalPlanningTests(TestCase):
                 planned_work_by_artifact=planned_work_by_artifact,
                 plan=plan,
                 dispatch_user=dispatch_user,
+                remote_catalog_materialization_by_artifact_id=remote_catalog_materialization_by_artifact_id,
             )
 
         self.assertIs(payload, expected_payload)
@@ -7745,6 +7752,10 @@ class GoalPlanningTests(TestCase):
         self.assertIs(kwargs.get("resolve_stage_apply_target_branch"), xyn_api._resolve_stage_apply_target_branch)
         self.assertIs(kwargs.get("git_repo_dirty_files"), xyn_api._git_repo_dirty_files)
         self.assertIs(kwargs.get("submit_dev_task_runtime_run"), xyn_api._submit_dev_task_runtime_run)
+        self.assertEqual(
+            kwargs.get("remote_catalog_materialization_by_artifact_id"),
+            remote_catalog_materialization_by_artifact_id,
+        )
 
     def test_stage_apply_session_wrapper_delegates_to_solution_workflow_module(self):
         session = mock.sentinel.session

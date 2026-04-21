@@ -38948,6 +38948,7 @@ def _stage_solution_change_dispatch_dev_tasks(
     planned_work_by_artifact: Dict[str, List[str]],
     plan: Dict[str, Any],
     dispatch_user,
+    remote_catalog_materialization_by_artifact_id: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     return _solution_stage_apply_workflow.stage_solution_change_dispatch_dev_tasks(
         session=session,
@@ -38956,6 +38957,11 @@ def _stage_solution_change_dispatch_dev_tasks(
         planned_work_by_artifact=planned_work_by_artifact,
         plan=plan,
         dispatch_user=dispatch_user,
+        remote_catalog_materialization_by_artifact_id=(
+            remote_catalog_materialization_by_artifact_id
+            if isinstance(remote_catalog_materialization_by_artifact_id, dict)
+            else {}
+        ),
         resolve_artifact_ownership=resolve_artifact_ownership,
         artifact_slug=_artifact_slug,
         solution_change_stage_artifact_plan_steps=_solution_change_stage_artifact_plan_steps,
