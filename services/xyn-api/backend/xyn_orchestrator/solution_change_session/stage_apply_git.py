@@ -1,6 +1,18 @@
+import os
 import subprocess
 from pathlib import Path
 from typing import Callable, List, Tuple
+
+
+def _git_identity_env() -> dict:
+    env = dict(os.environ)
+    author_name = str(env.get("XYN_STAGE_APPLY_GIT_AUTHOR_NAME") or "").strip() or "Xyn Stage Apply Bot"
+    author_email = str(env.get("XYN_STAGE_APPLY_GIT_AUTHOR_EMAIL") or "").strip() or "xyn-stage-apply@local.invalid"
+    env.setdefault("GIT_AUTHOR_NAME", author_name)
+    env.setdefault("GIT_AUTHOR_EMAIL", author_email)
+    env.setdefault("GIT_COMMITTER_NAME", author_name)
+    env.setdefault("GIT_COMMITTER_EMAIL", author_email)
+    return env
 
 
 def git_repo_command(
@@ -18,6 +30,7 @@ def git_repo_command(
             capture_output=True,
             check=False,
             timeout=timeout_seconds,
+            env=_git_identity_env(),
         )
     except subprocess.TimeoutExpired as exc:
         stdout = str(exc.stdout or "").strip()
