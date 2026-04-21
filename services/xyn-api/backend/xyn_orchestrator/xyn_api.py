@@ -34485,6 +34485,16 @@ def _record_solution_draft_plan(
             if isinstance(artifact_scope.get("dependent_artifact_reasons"), dict)
             else {}
         )
+        if _request_forbids_api_changes(str(session.request_text or "")):
+            shared_contracts = [
+                str(item).strip()
+                for item in (plan.get("shared_contracts") if isinstance(plan.get("shared_contracts"), list) else [])
+                if str(item).strip()
+            ]
+            ui_only_contract = "UI only scope: keep backend/API behavior unchanged."
+            if all(ui_only_contract.lower() != item.lower() for item in shared_contracts):
+                shared_contracts.append(ui_only_contract)
+            plan["shared_contracts"] = shared_contracts
         persisted_selected_ids = _persist_solution_artifact_scope(
             session=session,
             selected_artifact_ids=[str(item).strip() for item in (plan.get("selected_artifact_ids") or []) if str(item).strip()],
