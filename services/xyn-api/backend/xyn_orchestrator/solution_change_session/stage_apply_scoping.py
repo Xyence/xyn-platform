@@ -137,7 +137,8 @@ def _ensure_session_isolated_branch(
     current_branch: str,
 ) -> Tuple[str, str, str]:
     branch_name = _session_isolated_branch_name(session=session, repo_slug=repo_slug)
-    base_branch = str(current_branch or "").strip() or str(fallback_branch or "").strip() or "develop"
+    normalized_current_branch = str(current_branch or "").strip()
+    base_branch = normalized_current_branch or str(fallback_branch or "").strip() or "develop"
 
     def _git(args: List[str], timeout_seconds: int = 10) -> Tuple[int, str, str]:
         try:
@@ -159,6 +160,13 @@ def _ensure_session_isolated_branch(
             return "", "session_isolated_branch", (
                 f"failed to allocate isolated branch '{branch_name}' from '{base_branch}' for repo '{repo_slug}': "
                 f"{create_err or 'git branch failed'}"
+            )
+    if normalized_current_branch != branch_name:
+        checkout_code, _checkout_out, checkout_err = _git(["checkout", branch_name], timeout_seconds=20)
+        if checkout_code != 0:
+            return "", "session_isolated_branch", (
+                f"failed to check out isolated branch '{branch_name}' for repo '{repo_slug}': "
+                f"{checkout_err or 'git checkout failed'}"
             )
     return branch_name, "session_isolated_branch", ""
 

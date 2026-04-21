@@ -133,6 +133,7 @@ class SolutionChangeSessionStageApplyWorkflowTests(SimpleTestCase):
             mock.Mock(returncode=0, stdout="develop\n", stderr=""),
             mock.Mock(returncode=1, stdout="", stderr=""),
             mock.Mock(returncode=0, stdout="", stderr=""),
+            mock.Mock(returncode=0, stdout="", stderr=""),
         ]
 
         with mock.patch("xyn_orchestrator.solution_change_session.stage_apply_scoping.subprocess.run", side_effect=run_results) as run_mock:
@@ -150,6 +151,9 @@ class SolutionChangeSessionStageApplyWorkflowTests(SimpleTestCase):
         self.assertEqual(create_call[-3], "branch")
         self.assertEqual(create_call[-2], branch)
         self.assertEqual(create_call[-1], "develop")
+        checkout_call = run_mock.call_args_list[3][0][0]
+        self.assertEqual(checkout_call[-2], "checkout")
+        self.assertEqual(checkout_call[-1], branch)
 
     def test_resolve_stage_apply_target_branch_reuses_existing_session_branch(self):
         repo_root = "/tmp/xyn-platform"
@@ -157,6 +161,7 @@ class SolutionChangeSessionStageApplyWorkflowTests(SimpleTestCase):
         run_results = [
             mock.Mock(returncode=0, stdout="develop\n", stderr=""),
             mock.Mock(returncode=0, stdout="xyn/session/xyn-platform-61028b1934df\n", stderr=""),
+            mock.Mock(returncode=0, stdout="", stderr=""),
         ]
 
         with mock.patch("xyn_orchestrator.solution_change_session.stage_apply_scoping.subprocess.run", side_effect=run_results) as run_mock:
@@ -170,7 +175,7 @@ class SolutionChangeSessionStageApplyWorkflowTests(SimpleTestCase):
         self.assertEqual(source, "session_isolated_branch")
         self.assertEqual(error, "")
         self.assertTrue(branch.startswith("xyn/session/xyn-platform-61028b1934df"))
-        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(run_mock.call_count, 3)
 
     def test_stage_apply_includes_lazy_materialization_metadata_for_remote_catalog_artifacts(self):
         artifact = SimpleNamespace(
