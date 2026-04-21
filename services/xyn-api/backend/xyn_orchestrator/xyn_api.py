@@ -35353,6 +35353,7 @@ def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
     if not lowered:
         return []
     forbids_ui_changes = _request_forbids_ui_changes(request_text)
+    forbids_api_changes = _request_forbids_api_changes(request_text)
     workstreams: List[str] = []
 
     def _append_once(token: str) -> None:
@@ -35367,7 +35368,7 @@ def _infer_solution_workstreams_from_request(request_text: str) -> List[str]:
 
     if (not forbids_ui_changes) and any(token in lowered for token in ui_tokens):
         _append_once("ui")
-    if any(token in lowered for token in api_tokens):
+    if (not forbids_api_changes) and any(token in lowered for token in api_tokens):
         _append_once("api")
     if any(token in lowered for token in data_tokens):
         _append_once("data")
@@ -35533,7 +35534,12 @@ def _analyze_solution_impacted_artifacts(
     has_ui_context = (not forbids_ui_changes) and any(token in text for token in ui_context_tokens)
     has_ui_code_change_signal = (not forbids_ui_changes) and any(token in text for token in ui_code_change_tokens)
     is_ui_code_change_request = has_ui_context and has_ui_code_change_signal
-    is_api_change_request = any(token in text for token in api_change_tokens) and not is_ui_code_change_request
+    is_api_change_request = (
+        any(token in text for token in api_change_tokens)
+        and not is_ui_code_change_request
+        and not forbids_api_changes
+        and not docs_or_harness_process_request
+    )
     role_signals: Dict[str, List[str]] = {
         "primary_ui": ["ui", "ux", "frontend", "view", "screen", "page", "shell", "workbench"],
         "primary_api": ["api", "endpoint", "contract", "schema", "backend", "service", "orchestrator"],
@@ -35736,10 +35742,36 @@ def _analyze_solution_impacted_artifacts(
         fallback_reason = "defaulted_to_primary_solution_artifacts"
         if docs_or_harness_process_request:
             fallback_reason = "defaulted_to_non_primary_artifacts_for_docs_process_request"
-            fallback_members = [m for m in memberships if m.role not in {"primary_ui", "primary_api"}] or memberships[:1]
+            fallback_members = [
+                m
+                for m in memberships
+                if m.role not in {"primary_ui", "primary_api"}
+                and not (
+                    str(m.role or "").strip() == "runtime_service"
+                    and any(
+                        token in " ".join(
+                            [
+                                str(getattr(m.artifact, "title", "") or ""),
+                                str(getattr(m.artifact, "slug", "") or ""),
+                                str(getattr(m.artifact, "summary", "") or ""),
+                                str(m.responsibility_summary or ""),
+                            ]
+                        ).lower()
+                        for token in {"xyn-api", "api", "backend", "endpoint", "service"}
+                    )
+                )
+            ]
+            if not fallback_members:
+                fallback_members = [m for m in memberships if m.role in {"primary_ui"}] or memberships[:1]
+            fallback_members = fallback_members[:1]
         else:
             fallback_members = [m for m in memberships if m.role in {"primary_ui", "primary_api"}] or memberships[:2]
         for member in fallback_members:
+            fallback_signal = (
+                "defaulted to non-primary artifacts for docs/process request"
+                if docs_or_harness_process_request
+                else "defaulted to primary solution artifacts"
+            )
             impacted_rows.append(
                 {
                     "membership_id": str(member.id),
@@ -35748,10 +35780,18 @@ def _analyze_solution_impacted_artifacts(
                     "artifact_type": member.artifact.type.slug if member.artifact.type_id else "",
                     "role": member.role,
                     "score": 1,
-                    "reasons": ["defaulted to primary solution artifacts"],
-                    "matched_signals": ["defaulted to primary solution artifacts"],
-                    "dependency_reason": "fallback_primary_solution_artifacts",
-                    "fallback_reason": "defaulted_to_primary_solution_artifacts",
+                    "reasons": [fallback_signal],
+                    "matched_signals": [fallback_signal],
+                    "dependency_reason": (
+                        "fallback_non_primary_docs_process_artifacts"
+                        if docs_or_harness_process_request
+                        else "fallback_primary_solution_artifacts"
+                    ),
+                    "fallback_reason": (
+                        "defaulted_to_non_primary_artifacts_for_docs_process_request"
+                        if docs_or_harness_process_request
+                        else "defaulted_to_primary_solution_artifacts"
+                    ),
                 }
             )
     suggested_artifact_ids = [str(row.get("artifact_id") or "") for row in impacted_rows if str(row.get("artifact_id") or "").strip()]
